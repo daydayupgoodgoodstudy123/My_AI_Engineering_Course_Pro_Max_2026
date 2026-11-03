@@ -1,0 +1,2080 @@
+{
+  "package": "contractkit",
+  "tests": [
+    "test_discover_and_call",
+    "test_content_container_roundtrip",
+    "test_parameter_headers",
+    "test_completion_debounce",
+    "test_annotation_audit"
+  ],
+  "layers": [
+    {
+      "test": "test_discover_and_call",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "tool is not admitted: tag_catalog"
+        },
+        {
+          "name": "stop only at a null or missing nextCursor",
+          "edits": [
+            {
+              "file": "client.py",
+              "old": "            if not cursor:\n",
+              "new": "            if cursor is None:\n"
+            }
+          ],
+          "expect": "structuredContent must be a JSON object"
+        },
+        {
+          "name": "+ structuredContent is any JSON value, but it must be there",
+          "edits": [
+            {
+              "file": "contract.py",
+              "old": "    structured = result.get(\"structuredContent\")\n    if not isinstance(structured, dict):\n        raise ContractViolation(\"structuredContent must be a JSON object\")\n",
+              "new": "    if \"structuredContent\" not in result:\n        raise ContractViolation(\"outputSchema requires structuredContent\")\n    structured = result[\"structuredContent\"]\n"
+            }
+          ],
+          "expect": "isError does not waive outputSchema: structuredContent is still required"
+        },
+        {
+          "name": "+ isError results keep the schema",
+          "edits": [
+            {
+              "file": "contract.py",
+              "old": "    if schema is None or result.get(\"isError\"):\n",
+              "new": "    if schema is None:\n"
+            }
+          ],
+          "expect": "calls should not slow down as the catalog grows"
+        },
+        {
+          "name": "+ admit once, at discovery",
+          "edits": [
+            {
+              "file": "client.py",
+              "old": "        self.rejections: list[dict[str, str]] = []\n",
+              "new": "        self.rejections: list[dict[str, str]] = []\n        self.tools: dict[str, dict[str, Any]] = {}\n"
+            },
+            {
+              "file": "client.py",
+              "old": "        self.catalog = catalog\n        return self.admitted()\n",
+              "new": "        self.catalog = catalog\n        self.tools = self.admitted()\n        return self.tools\n"
+            },
+            {
+              "file": "client.py",
+              "old": "        tool = self.admitted().get(name)\n",
+              "new": "        tool = self.tools.get(name)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_discover_and_call",
+      "name": "stops only when nextCursor is missing, so null is sent on",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            cursor = result.get(\"nextCursor\")\n            if cursor is None:\n                break\n",
+          "new": "            if \"nextCursor\" not in result:\n                break\n            cursor = result[\"nextCursor\"]\n"
+        }
+      ],
+      "expect": "nextCursor must be a string or null"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "an empty cursor sent as no cursor",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "{} if cursor is None else {\"cursor\": cursor}",
+          "new": "{\"cursor\": cursor} if cursor else {}"
+        }
+      ],
+      "expect": "repeated the cursor"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "every request carries a cursor, null on the first",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "{} if cursor is None else {\"cursor\": cursor}",
+          "new": "{\"cursor\": cursor}"
+        }
+      ],
+      "expect": "invalid cursor"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "repeated cursors not checked",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            if cursor in seen:\n                raise ContractViolation(f\"tools/list repeated the cursor {cursor!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a repeated cursor ends discovery before it is sent again"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "structuredContent must be an object or an array",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "    if \"structuredContent\" not in result:\n        raise ContractViolation(\"outputSchema requires structuredContent\")\n    structured = result[\"structuredContent\"]\n",
+          "new": "    structured = result.get(\"structuredContent\")\n    if not isinstance(structured, (dict, list)):\n        raise ContractViolation(\"structuredContent must be an object or an array\")\n"
+        }
+      ],
+      "expect": "structuredContent must be an object or an array"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "a null structuredContent taken as missing",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "    if \"structuredContent\" not in result:\n",
+          "new": "    if result.get(\"structuredContent\") is None:\n"
+        }
+      ],
+      "expect": "outputSchema requires structuredContent"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "a falsy structuredContent taken as missing",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "    if \"structuredContent\" not in result:\n",
+          "new": "    if not result.get(\"structuredContent\"):\n"
+        }
+      ],
+      "expect": "outputSchema requires structuredContent"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "a missing structuredContent read as null",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "    if \"structuredContent\" not in result:\n        raise ContractViolation(\"outputSchema requires structuredContent\")\n    structured = result[\"structuredContent\"]\n",
+          "new": "    structured = result.get(\"structuredContent\")\n"
+        }
+      ],
+      "expect": "a result without structuredContent is not a null result"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "presence checked, schema skipped",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "    validate_json_schema(structured, schema, \"$.structuredContent\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "an object does not pass an array outputSchema"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "the compatibility text validated instead of structuredContent",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "import base64\n",
+          "new": "import base64\nimport json\n"
+        },
+        {
+          "file": "contract.py",
+          "old": "    structured = result[\"structuredContent\"]\n",
+          "new": "    structured = json.loads(next(block[\"text\"] for block in content if block[\"type\"] == \"text\"))\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "an error result may leave structuredContent out",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "    if \"structuredContent\" not in result:\n        raise ContractViolation(\"outputSchema requires structuredContent\")\n",
+          "new": "    if \"structuredContent\" not in result:\n        if result.get(\"isError\"):\n            return\n        raise ContractViolation(\"outputSchema requires structuredContent\")\n"
+        }
+      ],
+      "expect": "isError does not waive outputSchema: structuredContent is still required"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "an error result checked for presence only",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "    validate_json_schema(structured, schema, \"$.structuredContent\")\n",
+          "new": "    if not result.get(\"isError\"):\n        validate_json_schema(structured, schema, \"$.structuredContent\")\n"
+        }
+      ],
+      "expect": "isError does not waive outputSchema: structuredContent must still conform"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "call looks tools up in the raw catalog",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        tool = self.tools.get(name)\n",
+          "new": "        tool = next((item for item in self.catalog if isinstance(item, dict) and item.get(\"name\") == name), None)\n"
+        }
+      ],
+      "expect": "a rejected descriptor stays uncallable"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "arguments no longer checked before the call",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        validate_json_schema(arguments, tool[\"inputSchema\"], \"$.arguments\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "arguments are checked against inputSchema before the call"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "results no longer checked",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        validate_tool_result(tool, result)\n        return result\n",
+          "new": "        return result\n"
+        }
+      ],
+      "expect": "a result without structuredContent is not a null result"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "the first admission kept for good",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        self.tools = self.admitted()\n",
+          "new": "        self.tools = self.tools or self.admitted()\n"
+        }
+      ],
+      "expect": "discovering again replaces the admitted catalog"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "call caches its own copy of the admitted tools",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        tool = self.tools.get(name)\n",
+          "new": "        if not hasattr(self, \"_admitted\"):\n            self._admitted = self.admitted()\n        tool = self._admitted.get(name)\n"
+        }
+      ],
+      "expect": "a tool that left the catalog can no longer be called"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "rejections not recorded",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "                self.rejections.append({\"tool\": label, \"reason\": str(exc)})\n",
+          "new": "                pass\n"
+        }
+      ],
+      "expect": "a broken descriptor is rejected on its own"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "one bad descriptor aborts discovery",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            try:\n                validate_tool_descriptor(tool)\n            except ContractViolation as exc:\n                name = tool.get(\"name\") if isinstance(tool, dict) else None\n                label = name if isinstance(name, str) and name else \"<unnamed>\"\n                self.rejections.append({\"tool\": label, \"reason\": str(exc)})\n            else:\n                tools[tool[\"name\"]] = tool\n",
+          "new": "            validate_tool_descriptor(tool)\n            tools[tool[\"name\"]] = tool\n"
+        }
+      ],
+      "expect": "inputSchema must be an object schema"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "base64.encodebytes on the way out (line breaks)",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        return {**meta, \"type\": kind, \"data\": base64.b64encode(body).decode(\"ascii\")}\n",
+          "new": "        return {**meta, \"type\": kind, \"data\": base64.encodebytes(body).decode(\"ascii\")}\n"
+        }
+      ],
+      "expect": "not standard base64"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "base64.encodebytes with the last newline stripped",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        return {**meta, \"type\": kind, \"data\": base64.b64encode(body).decode(\"ascii\")}\n",
+          "new": "        return {**meta, \"type\": kind, \"data\": base64.encodebytes(body).decode(\"ascii\").strip()}\n"
+        }
+      ],
+      "expect": "not standard base64"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "the URL-safe alphabet on the way out",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        return {**meta, \"type\": kind, \"data\": base64.b64encode(body).decode(\"ascii\")}\n",
+          "new": "        return {**meta, \"type\": kind, \"data\": base64.urlsafe_b64encode(body).decode(\"ascii\")}\n"
+        }
+      ],
+      "expect": "not standard base64"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "padding stripped on the way out",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        return {**meta, \"type\": kind, \"data\": base64.b64encode(body).decode(\"ascii\")}\n",
+          "new": "        return {**meta, \"type\": kind, \"data\": base64.b64encode(body).decode(\"ascii\").rstrip(\"=\")}\n"
+        }
+      ],
+      "expect": "not standard base64"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "an embedded blob re-encoded with line breaks",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            resource = {**resource, \"blob\": base64.b64encode(body).decode(\"ascii\")}\n",
+          "new": "            resource = {**resource, \"blob\": base64.encodebytes(body).decode(\"ascii\")}\n"
+        }
+      ],
+      "expect": "not standard base64"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "text length taken before encoding",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            tag, body = TEXT, meta.pop(\"text\").encode(\"utf-8\")\n",
+          "new": "            tag, body = TEXT, meta.pop(\"text\")\n"
+        },
+        {
+          "file": "archive.py",
+          "old": "        parts += [bytes([tag]), _LENGTH.pack(len(head)), head, _LENGTH.pack(len(body)), body]\n",
+          "new": "        size = len(body)\n        if isinstance(body, str):\n            body = body.encode(\"utf-8\")\n        parts += [bytes([tag]), _LENGTH.pack(len(head)), head, _LENGTH.pack(size), body]\n"
+        }
+      ],
+      "expect": "each after its length in bytes"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "meta written without ASCII escapes, its length counted in characters",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        head = json.dumps(meta).encode(\"utf-8\")\n        parts += [bytes([tag]), _LENGTH.pack(len(head)), head, _LENGTH.pack(len(body)), body]\n",
+          "new": "        meta_text = json.dumps(meta, ensure_ascii=False)\n        head = meta_text.encode(\"utf-8\")\n        parts += [bytes([tag]), _LENGTH.pack(len(meta_text)), head, _LENGTH.pack(len(body)), body]\n"
+        }
+      ],
+      "expect": "one record per block: meta holds its other fields, body its payload"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "little-endian lengths",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "_LENGTH = struct.Struct(\">I\")\n",
+          "new": "_LENGTH = struct.Struct(\"<I\")\n"
+        }
+      ],
+      "expect": "each after its length in bytes"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "two-byte lengths",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "_LENGTH = struct.Struct(\">I\")\n",
+          "new": "_LENGTH = struct.Struct(\">H\")\n"
+        }
+      ],
+      "expect": "each after its length in bytes"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "image and audio kept as base64 text",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            tag, body = (IMAGE if kind == \"image\" else AUDIO), _decoded(meta.pop(\"data\"))\n",
+          "new": "            tag, body = (IMAGE if kind == \"image\" else AUDIO), meta.pop(\"data\").encode(\"ascii\")\n"
+        },
+        {
+          "file": "archive.py",
+          "old": "        return {**meta, \"type\": kind, \"data\": base64.b64encode(body).decode(\"ascii\")}\n",
+          "new": "        return {**meta, \"type\": kind, \"data\": body.decode(\"ascii\")}\n"
+        }
+      ],
+      "expect": "one record per block: meta holds its other fields, body its payload"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "an embedded blob kept as base64 text",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "                tag, body = RESOURCE_BLOB, _decoded(resource.pop(\"blob\"))\n",
+          "new": "                tag, body = RESOURCE_BLOB, resource.pop(\"blob\").encode(\"ascii\")\n"
+        },
+        {
+          "file": "archive.py",
+          "old": "            resource = {**resource, \"blob\": base64.b64encode(body).decode(\"ascii\")}\n",
+          "new": "            resource = {**resource, \"blob\": body.decode(\"ascii\")}\n"
+        }
+      ],
+      "expect": "one record per block: meta holds its other fields, body its payload"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "the canonical check skipped for blobs",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "                tag, body = RESOURCE_BLOB, _decoded(resource.pop(\"blob\"))\n",
+          "new": "                tag, body = RESOURCE_BLOB, base64.b64decode(resource.pop(\"blob\"), validate=True)\n"
+        }
+      ],
+      "expect": "a block the archive could not give back exactly is refused: {'type': 'resource', 'resource': {'uri': 'evidence://x', 'blob': 'QR=='}}"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "the text kept in meta as well",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            tag, body = TEXT, meta.pop(\"text\").encode(\"utf-8\")\n",
+          "new": "            tag, body = TEXT, meta[\"text\"].encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "each after its length in bytes"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "non-canonical base64 accepted",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    if base64.b64encode(raw).decode(\"ascii\") != value:\n        raise ContractViolation(\"base64 is not canonical; the archive could not give it back unchanged\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a block the archive could not give back exactly is refused"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "the caller's embedded resource emptied",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            resource = dict(meta[\"resource\"])\n",
+          "new": "            resource = meta[\"resource\"]\n"
+        }
+      ],
+      "expect": "pack_content leaves the blocks it is given unchanged"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "a resource_link cut down to uri and name",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            tag, body = RESOURCE_LINK, b\"\"\n",
+          "new": "            tag, body = RESOURCE_LINK, b\"\"\n            meta = {\"uri\": block[\"uri\"], \"name\": block[\"name\"]}\n"
+        }
+      ],
+      "expect": "one record per block: meta holds its other fields, body its payload"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "a resource_link given a null mimeType",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            tag, body = RESOURCE_LINK, b\"\"\n",
+          "new": "            tag, body = RESOURCE_LINK, b\"\"\n            meta = {\"uri\": block[\"uri\"], \"name\": block[\"name\"], \"mimeType\": block.get(\"mimeType\")}\n"
+        }
+      ],
+      "expect": "one record per block: meta holds its other fields, body its payload"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "no MAGIC written",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    parts = [MAGIC]\n",
+          "new": "    parts = []\n"
+        }
+      ],
+      "expect": "a container starts with MAGIC, even an empty one"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "pack does not validate the blocks",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        validate_content_block(block, f\"$.content[{index}]\")\n        meta = ",
+          "new": "        meta = "
+        }
+      ],
+      "expect": "binascii.Error"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "wrong magic accepted",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    if data[: len(MAGIC)] != MAGIC:\n        raise ContractViolation(\"not a content container\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a damaged container raises ContractViolation: wrong magic"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "a short last field read as it is",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    if end > len(data):\n        raise ContractViolation(\"container is truncated\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a damaged container raises ContractViolation: cut short"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "a stray byte after the last record ignored",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    while pos < len(data):\n",
+          "new": "    while pos + 1 + 2 * _LENGTH.size <= len(data):\n"
+        }
+      ],
+      "expect": "a damaged container raises ContractViolation: a stray byte after the last record"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "struct.error escapes when fewer than four bytes are left",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    if start > len(data):\n        raise ContractViolation(\"container is truncated\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "struct.error"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "unknown tags skipped",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    raise ContractViolation(f\"unknown record tag {tag}\")\n",
+          "new": "    return None\n"
+        },
+        {
+          "file": "archive.py",
+          "old": "        block = _block(tag, meta, body)\n",
+          "new": "        block = _block(tag, meta, body)\n        if block is None:\n            continue\n"
+        }
+      ],
+      "expect": "a damaged container raises ContractViolation: unknown tag"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "text decoded with errors='replace'",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        return body.decode(\"utf-8\")\n",
+          "new": "        return body.decode(\"utf-8\", \"replace\")\n"
+        }
+      ],
+      "expect": "a damaged container raises ContractViolation: text that is not UTF-8"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "UnicodeDecodeError escapes",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    try:\n        return body.decode(\"utf-8\")\n    except UnicodeDecodeError as exc:\n        raise ContractViolation(\"text is not UTF-8\") from exc\n",
+          "new": "    return body.decode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "meta not checked to be an object",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if not isinstance(meta, dict):\n            raise ContractViolation(\"record metadata must be a JSON object\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "blocks read back without validation",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        validate_content_block(block, f\"$.content[{len(blocks)}]\")\n        blocks.append(block)\n",
+          "new": "        blocks.append(block)\n"
+        }
+      ],
+      "expect": "a damaged container raises ContractViolation: an image without a mimeType"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "printable ASCII instead of visible ASCII",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    return bool(text) and all(\"!\" <= character <= \"~\" for character in text)\n",
+          "new": "    return text.isascii() and text.isprintable()\n"
+        }
+      ],
+      "expect": "the header form of ''"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "non-empty printable ASCII instead of visible ASCII",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    return bool(text) and all(\"!\" <= character <= \"~\" for character in text)\n",
+          "new": "    return bool(text) and text.isascii() and text.isprintable()\n"
+        }
+      ],
+      "expect": "the header form of ' eu-west '"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "printable text, ASCII or not",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    return bool(text) and all(\"!\" <= character <= \"~\" for character in text)\n",
+          "new": "    return bool(text) and text.isprintable()\n"
+        }
+      ],
+      "expect": "the header form of 'münchen'"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "space counted as visible",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    return bool(text) and all(\"!\" <= character <= \"~\" for character in text)\n",
+          "new": "    return bool(text) and all(\" \" <= character <= \"~\" for character in text)\n"
+        }
+      ],
+      "expect": "the header form of ' eu-west '"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "DEL counted as visible",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    return bool(text) and all(\"!\" <= character <= \"~\" for character in text)\n",
+          "new": "    return bool(text) and all(\"!\" <= character <= \"\\x7f\" for character in text)\n"
+        }
+      ],
+      "expect": "the header form of '\\x7f'"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "the empty string sent plain",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    return bool(text) and all(\"!\" <= character <= \"~\" for character in text)\n",
+          "new": "    return all(\"!\" <= character <= \"~\" for character in text)\n"
+        }
+      ],
+      "expect": "the header form of ''"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "sentinel-looking text sent plain",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    if _visible_ascii(text) and not text.startswith(SENTINEL_PREFIX):\n",
+          "new": "    if _visible_ascii(text):\n"
+        }
+      ],
+      "expect": "the header form of '=?base64?SGVsbG8=?='"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "text trimmed before encoding",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    if _visible_ascii(text) and not text.startswith(SENTINEL_PREFIX):\n",
+          "new": "    text = text.strip()\n    if _visible_ascii(text) and not text.startswith(SENTINEL_PREFIX):\n"
+        }
+      ],
+      "expect": "the header form of ' eu-west '"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "text normalized to NFC before encoding",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "import binascii\n",
+          "new": "import binascii\nimport unicodedata\n"
+        },
+        {
+          "file": "headers.py",
+          "old": "    if _visible_ascii(text) and not text.startswith(SENTINEL_PREFIX):\n",
+          "new": "    text = unicodedata.normalize(\"NFC\", text)\n    if _visible_ascii(text) and not text.startswith(SENTINEL_PREFIX):\n"
+        }
+      ],
+      "expect": "the header form of 'Å'"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "the sentinel's prefix and suffix may overlap",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        if len(value) < len(SENTINEL_PREFIX) + len(SENTINEL_SUFFIX) or not value.endswith(\n            SENTINEL_SUFFIX\n        ):\n",
+          "new": "        if not value.endswith(SENTINEL_SUFFIX):\n"
+        }
+      ],
+      "expect": "before dispatch: [('Mcp-Param-Region', '=?base64?=')]"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "non-canonical base64 accepted",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        if base64.b64encode(raw).decode(\"ascii\") != payload:\n            raise ContractViolation(\"the sentinel base64 is not canonical\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "before dispatch: [('Mcp-Param-Region', '=?base64?QR==?=')]"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "the sentinel decoded as Latin-1",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "            text = raw.decode(\"utf-8\")\n",
+          "new": "            text = raw.decode(\"latin-1\")\n"
+        }
+      ],
+      "expect": "decodes back to 'münchen'"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "UnicodeDecodeError escapes",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        except (binascii.Error, UnicodeDecodeError) as exc:\n",
+          "new": "        except binascii.Error as exc:\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "decoded until no sentinel is left",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        return text\n    if not _visible_ascii(value):\n",
+          "new": "        return decode_header_value(text) if text.startswith(SENTINEL_PREFIX) else text\n    if not _visible_ascii(value):\n"
+        }
+      ],
+      "expect": "decodes back to '=?base64?SGVsbG8=?='"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "plain values taken as they come",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    if not _visible_ascii(value):\n        raise ContractViolation(\"a plain header value must be visible ASCII\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "before dispatch: [('Mcp-Param-Region', 'eu west')]"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "booleans written the way Python prints them",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        return \"true\" if value else \"false\"\n",
+          "new": "        return str(value)\n"
+        }
+      ],
+      "expect": "booleans in lowercase"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "any value turned into a string",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    if declared == \"string\" and isinstance(value, str):\n        return value\n",
+          "new": "    if declared == \"string\":\n        return str(value)\n"
+        }
+      ],
+      "expect": "a header carries a value of its declared type and nothing else: {'region': 7, 'report': 'q3'}"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "booleans read from truthiness",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    if declared == \"boolean\" and isinstance(value, bool):\n",
+          "new": "    if declared == \"boolean\":\n"
+        }
+      ],
+      "expect": "a header carries a value of its declared type and nothing else: {'region': 'eu-west', 'report': 'q3', 'dry_run': 'false'}"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "a bool accepted as an integer",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    if declared == \"integer\" and isinstance(value, int) and not isinstance(value, bool):\n",
+          "new": "    if declared == \"integer\" and isinstance(value, int):\n"
+        }
+      ],
+      "expect": "an integer header carries a safe integer and nothing else: True"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "a float accepted as an integer",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    if declared == \"integer\" and isinstance(value, int) and not isinstance(value, bool):\n",
+          "new": "    if declared == \"integer\" and isinstance(value, (int, float)) and not isinstance(value, bool):\n"
+        }
+      ],
+      "expect": "an integer header carries a safe integer and nothing else: 7.0"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "the safe bounds themselves refused",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        if not JS_SAFE_INTEGER_MIN <= value <= JS_SAFE_INTEGER_MAX:\n",
+          "new": "        if not JS_SAFE_INTEGER_MIN < value < JS_SAFE_INTEGER_MAX:\n"
+        }
+      ],
+      "expect": "integer is outside the JavaScript safe range"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "-2**53 taken as the lower bound",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "JS_SAFE_INTEGER_MIN = -JS_SAFE_INTEGER_MAX\n",
+          "new": "JS_SAFE_INTEGER_MIN = -(2**53)\n"
+        }
+      ],
+      "expect": "an integer header carries a safe integer and nothing else: -9007199254740992"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "no range check",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        if not JS_SAFE_INTEGER_MIN <= value <= JS_SAFE_INTEGER_MAX:\n            raise ContractViolation(\"integer is outside the JavaScript safe range\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "an integer header carries a safe integer and nothing else: 9007199254740992"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "the client audit records header lines",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "            \"headers\": [name for name, _ in headers],\n",
+          "new": "            \"headers\": [f\"{name}: {value}\" for name, value in headers],\n"
+        }
+      ],
+      "expect": "the client audit lists the headers and which of them needed the sentinel"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "header names compared exactly",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        received.setdefault(name.lower(), []).append(value)\n",
+          "new": "        received.setdefault(name, []).append(value)\n"
+        },
+        {
+          "file": "headers.py",
+          "old": "        copies = received.get(binding.header.lower(), [])\n",
+          "new": "        copies = received.get(binding.header, [])\n"
+        }
+      ],
+      "expect": "headers that mirror the body pass, whatever the value and the case of their names"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "the last copy of a header wins",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        received.setdefault(name.lower(), []).append(value)\n",
+          "new": "        received[name.lower()] = [value]\n"
+        }
+      ],
+      "expect": "before dispatch: [('Mcp-Param-Region', 'eu-west'), ('mcp-param-region', 'eu-west')]"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "copies counted per spelling",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        received.setdefault(name.lower(), []).append(value)\n",
+          "new": "        received.setdefault(name, []).append(value)\n"
+        },
+        {
+          "file": "headers.py",
+          "old": "        copies = received.get(binding.header.lower(), [])\n",
+          "new": "        copies = next((found for spelled, found in received.items() if spelled.lower() == binding.header.lower()), [])\n"
+        }
+      ],
+      "expect": "before dispatch: [('Mcp-Param-Region', 'eu-west'), ('mcp-param-region', 'eu-west')]"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "a missing header let through",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        if present and not copies:\n            reason = \"missing\"\n        elif len(copies) > 1:\n",
+          "new": "        if len(copies) > 1:\n"
+        }
+      ],
+      "expect": "missing headers are refused with HTTP 400 and -32020 before dispatch"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "a header without a body argument ignored",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        present = binding.argument in arguments\n",
+          "new": "        present = binding.argument in arguments\n        if not present:\n            continue\n"
+        }
+      ],
+      "expect": "unexpected headers are refused with HTTP 400 and -32020 before dispatch"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "values compared without regard to case",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "                if text != expected:\n",
+          "new": "                if expected is None or text.lower() != expected.lower():\n"
+        }
+      ],
+      "expect": "before dispatch: [('Mcp-Param-Region', 'EU-WEST')]"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "integers compared as numbers",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "                if text != expected:\n                    reason = \"mismatched\"\n",
+          "new": "                if binding.type == \"integer\" and text.lstrip(\"-\").isdigit():\n                    if int(text) != arguments[binding.argument]:\n                        reason = \"mismatched\"\n                elif text != expected:\n                    reason = \"mismatched\"\n"
+        }
+      ],
+      "expect": "('Mcp-Param-Shard', '07')]"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "booleans compared without regard to case",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "                if text != expected:\n",
+          "new": "                if (text.lower() if binding.type == \"boolean\" else text) != expected:\n"
+        }
+      ],
+      "expect": "('Mcp-Param-Dry-Run', 'False')]"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "the raw header compared with the body",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "                text = decode_header_value(copies[0])\n",
+          "new": "                text = copies[0]\n"
+        }
+      ],
+      "expect": "whatever the value and the case of their names: 'münchen'"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "encoded forms compared instead of decoded text",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "                text = decode_header_value(copies[0])\n",
+          "new": "                text = copies[0]\n"
+        },
+        {
+          "file": "headers.py",
+          "old": "                    expected = argument_text(arguments[binding.argument], binding.type)\n",
+          "new": "                    expected = encode_header_value(argument_text(arguments[binding.argument], binding.type))\n"
+        }
+      ],
+      "expect": "the refusal names the reason"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "a body value with no header form escapes the check",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "                try:\n                    expected = argument_text(arguments[binding.argument], binding.type)\n                except ContractViolation:\n                    expected = None\n",
+          "new": "                expected = argument_text(arguments[binding.argument], binding.type)\n"
+        }
+      ],
+      "expect": "integer is outside the JavaScript safe range"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "a malformed header reported as mismatched",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "                reason = \"malformed\"\n",
+          "new": "                reason = \"mismatched\"\n"
+        }
+      ],
+      "expect": "the refusal names the reason"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "the refused value written to the audit",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "                {\"event\": \"parameter_headers_rejected\", \"header\": binding.header, \"reason\": reason}\n",
+          "new": "                {\"event\": \"parameter_headers_rejected\", \"header\": binding.header, \"reason\": reason, \"value\": copies[0] if copies else None}\n"
+        }
+      ],
+      "expect": "the server audit records the header name and the reason, never a value"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "the checked event records values",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "            checked.append(binding.header)\n",
+          "new": "            checked.append(f\"{binding.header}: {copies[0]}\")\n"
+        }
+      ],
+      "expect": "the server audit lists the headers it checked"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "a request on every keystroke",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        self._pending = (value, self._clock())\n",
+          "new": "        self._pending = (value, self._clock() - self.idle_ms)\n"
+        }
+      ],
+      "expect": "nothing is sent while the user is still typing"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "the timer is not restarted by later keystrokes",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        self._pending = (value, self._clock())\n",
+          "new": "        self._pending = (value, self._pending[1] if self._pending else self._clock())\n"
+        }
+      ],
+      "expect": "nothing is sent while the user is still typing"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "strictly longer than idle_ms",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        if self._clock() - typed_at < self.idle_ms:\n",
+          "new": "        if self._clock() - typed_at <= self.idle_ms:\n"
+        }
+      ],
+      "expect": "after idle_ms one request goes out"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "the box counts its own ids",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        self._ids = ids\n",
+          "new": "        self._ids = iter(range(1, 1_000_000))\n"
+        }
+      ],
+      "expect": "with the next id and the full _meta"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "one id for every request",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        request_id = next(self._ids)\n",
+          "new": "        request_id = self._latest[0] if self._latest else next(self._ids)\n"
+        }
+      ],
+      "expect": "an answer to an older request is dropped, even when it comes first"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "a request without _meta",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        self._send(json.dumps(make_request(request_id, \"completion/complete\", params)))\n",
+          "new": "        self._send(json.dumps({\"jsonrpc\": \"2.0\", \"id\": request_id, \"method\": \"completion/complete\", \"params\": params}))\n"
+        }
+      ],
+      "expect": "with the next id and the full _meta"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "only the protocol version in _meta",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        self._send(json.dumps(make_request(request_id, \"completion/complete\", params)))\n",
+          "new": "        meta = {\"io.modelcontextprotocol/protocolVersion\": \"2026-07-28\"}\n        self._send(json.dumps({\"jsonrpc\": \"2.0\", \"id\": request_id, \"method\": \"completion/complete\", \"params\": {**params, \"_meta\": meta}}))\n"
+        }
+      ],
+      "expect": "with the next id and the full _meta"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "frames sent as dicts",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        self._send(json.dumps(make_request(request_id, \"completion/complete\", params)))\n",
+          "new": "        self._send(make_request(request_id, \"completion/complete\", params))\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "the last answer to arrive wins",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        if self._latest is None or message.get(\"id\") != self._latest[0]:\n",
+          "new": "        if self._latest is None:\n"
+        }
+      ],
+      "expect": "an answer to an older request is dropped, even when it comes first"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "any answer newer than the one shown is taken",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        self._latest: tuple[int, str] | None = None  # (id, value) of the newest request sent\n",
+          "new": "        self._latest: tuple[int, str] | None = None  # (id, value) of the newest request sent\n        self._asked: dict[int, str] = {}\n        self._shown_id = 0\n"
+        },
+        {
+          "file": "completion.py",
+          "old": "        self._latest = (request_id, value)\n",
+          "new": "        self._latest = (request_id, value)\n        self._asked[request_id] = value\n"
+        },
+        {
+          "file": "completion.py",
+          "old": "        if self._latest is None or message.get(\"id\") != self._latest[0]:\n            return\n        value = self._latest[1]\n",
+          "new": "        if message.get(\"id\") not in self._asked or message[\"id\"] <= self._shown_id:\n            return\n        self._shown_id = message[\"id\"]\n        value = self._asked[message[\"id\"]]\n"
+        }
+      ],
+      "expect": "an answer to an older request is dropped, even when it comes first"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "answers popped from a table of open requests",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        self._latest: tuple[int, str] | None = None  # (id, value) of the newest request sent\n",
+          "new": "        self._latest: tuple[int, str] | None = None  # (id, value) of the newest request sent\n        self._asked: dict[int, str] = {}\n"
+        },
+        {
+          "file": "completion.py",
+          "old": "        self._latest = (request_id, value)\n",
+          "new": "        self._latest = (request_id, value)\n        self._asked[request_id] = value\n"
+        },
+        {
+          "file": "completion.py",
+          "old": "        if self._latest is None or message.get(\"id\") != self._latest[0]:\n            return\n        value = self._latest[1]\n",
+          "new": "        value = self._asked.pop(message[\"id\"])\n        if message[\"id\"] != self._latest[0]:\n            return\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "error answers ignored",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        if \"error\" in message:\n            self._shown = {\"value\": value, \"values\": [], \"total\": None, \"hasMore\": False}\n            return\n",
+          "new": "        if \"error\" in message:\n            return\n"
+        }
+      ],
+      "expect": "an error answer to the newest request clears the suggestions"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "any error answer clears the box",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        message = json.loads(frame)\n",
+          "new": "        message = json.loads(frame)\n        if \"error\" in message and self._latest is not None:\n            self._shown = {\"value\": self._latest[1], \"values\": [], \"total\": None, \"hasMore\": False}\n            return\n"
+        }
+      ],
+      "expect": "an error answer to an older request is dropped too"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "no cap on the values shown",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "            \"values\": values[:MAX_VALUES],\n",
+          "new": "            \"values\": values,\n"
+        }
+      ],
+      "expect": "at most 100 values are shown"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "hasMore taken from the server alone",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "            \"hasMore\": completion.get(\"hasMore\") is True or len(values) > MAX_VALUES,\n",
+          "new": "            \"hasMore\": completion.get(\"hasMore\") is True,\n"
+        }
+      ],
+      "expect": "cutting them means there is more"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "hasMore only when the box cut the values",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "            \"hasMore\": completion.get(\"hasMore\") is True or len(values) > MAX_VALUES,\n",
+          "new": "            \"hasMore\": len(values) > MAX_VALUES,\n"
+        }
+      ],
+      "expect": "the server's total and hasMore are shown as reported"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "total counted from the values received",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "            \"total\": completion.get(\"total\"),\n",
+          "new": "            \"total\": len(values),\n"
+        }
+      ],
+      "expect": "with no total unless the server gives one"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "values sorted",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "            \"values\": values[:MAX_VALUES],\n",
+          "new": "            \"values\": sorted(values)[:MAX_VALUES],\n"
+        }
+      ],
+      "expect": "in the server's order"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "the pending value kept after it is sent",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        self._latest = (request_id, value)\n        self._pending = None\n",
+          "new": "        self._latest = (request_id, value)\n"
+        }
+      ],
+      "expect": "a pause sends one request"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "only the keywords a validator knows are walked",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "        for key, child in node.items():\n            yield from _annotated(child, (*parts, key))\n    elif isinstance(node, list):\n        for index, child in enumerate(node):\n            yield from _annotated(child, (*parts, index))\n",
+          "new": "        for key in (\"properties\", \"$defs\", \"definitions\"):\n            for name, child in node.get(key, {}).items():\n                yield from _annotated(child, (*parts, key, name))\n        if isinstance(node.get(\"items\"), dict):\n            yield from _annotated(node[\"items\"], (*parts, \"items\"))\n        for key in (\"oneOf\", \"anyOf\", \"allOf\"):\n            for index, child in enumerate(node.get(key, [])):\n                yield from _annotated(child, (*parts, key, index))\n"
+        }
+      ],
+      "expect": "under any keyword"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "$ref followed, with no guard against cycles",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "def _annotated(node: Any, parts: tuple) -> Iterator[tuple[tuple, dict[str, Any]]]:\n    if isinstance(node, dict):\n        if ANNOTATION in node:\n            yield parts, node\n        for key, child in node.items():\n            yield from _annotated(child, (*parts, key))\n    elif isinstance(node, list):\n        for index, child in enumerate(node):\n            yield from _annotated(child, (*parts, index))\n",
+          "new": "def _annotated(node: Any, parts: tuple, root: Any = None, seen: set | None = None) -> Iterator[tuple[tuple, dict[str, Any]]]:\n    root = node if root is None else root\n    if isinstance(node, dict):\n        reference = node.get(\"$ref\")\n        if isinstance(reference, str) and reference.startswith(\"#/\"):\n            target = root\n            for key in reference[2:].split(\"/\"):\n                target = target[key]\n            yield from _annotated(target, parts, root, seen)\n            return\n        if ANNOTATION in node:\n            yield parts, node\n        for key, child in node.items():\n            if key not in (\"$defs\", \"definitions\"):\n                yield from _annotated(child, (*parts, key), root, seen)\n    elif isinstance(node, list):\n        for index, child in enumerate(node):\n            yield from _annotated(child, (*parts, index), root, seen)\n"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "$ref followed once per definition instead of walking the definitions",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "def _annotated(node: Any, parts: tuple) -> Iterator[tuple[tuple, dict[str, Any]]]:\n    if isinstance(node, dict):\n        if ANNOTATION in node:\n            yield parts, node\n        for key, child in node.items():\n            yield from _annotated(child, (*parts, key))\n    elif isinstance(node, list):\n        for index, child in enumerate(node):\n            yield from _annotated(child, (*parts, index))\n",
+          "new": "def _annotated(node: Any, parts: tuple, root: Any = None, seen: set | None = None) -> Iterator[tuple[tuple, dict[str, Any]]]:\n    root = node if root is None else root\n    if isinstance(node, dict):\n        reference = node.get(\"$ref\")\n        if isinstance(reference, str) and reference.startswith(\"#/\"):\n            seen = set() if seen is None else seen\n            if reference in seen:\n                return\n            seen.add(reference)\n            target = root\n            for key in reference[2:].split(\"/\"):\n                target = target[key]\n            yield from _annotated(target, parts, root, seen)\n            return\n        if ANNOTATION in node:\n            yield parts, node\n        for key, child in node.items():\n            if key not in (\"$defs\", \"definitions\"):\n                yield from _annotated(child, (*parts, key), root, seen)\n    elif isinstance(node, list):\n        for index, child in enumerate(node):\n            yield from _annotated(child, (*parts, index), root, seen)\n"
+        }
+      ],
+      "expect": "a definition is judged once, where it is written, whether or not a $ref uses it"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "definitions skipped unless something references them",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "        for key, child in node.items():\n            yield from _annotated(child, (*parts, key))\n",
+          "new": "        for key, child in node.items():\n            if key in (\"$defs\", \"definitions\"):\n                continue\n            yield from _annotated(child, (*parts, key))\n"
+        }
+      ],
+      "expect": "a definition is judged once, where it is written, whether or not a $ref uses it"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "only $defs walked, the older definitions keyword skipped",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "        for key, child in node.items():\n            yield from _annotated(child, (*parts, key))\n",
+          "new": "        for key, child in node.items():\n            if key == \"definitions\":\n                continue\n            yield from _annotated(child, (*parts, key))\n"
+        }
+      ],
+      "expect": "a definition is judged once, where it is written, whether or not a $ref uses it"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "arrays not walked",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    elif isinstance(node, list):\n        for index, child in enumerate(node):\n            yield from _annotated(child, (*parts, index))\n",
+          "new": ""
+        }
+      ],
+      "expect": "under any keyword"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "the schema root itself not checked",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "        if ANNOTATION in node:\n            yield parts, node\n",
+          "new": "        if ANNOTATION in node and len(parts) > 1:\n            yield parts, node\n"
+        }
+      ],
+      "expect": "under any keyword"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "nested properties counted as direct",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    if len(parts) != 3 or parts[1] != \"properties\" or not isinstance(parts[2], str):\n",
+          "new": "    if len(parts) < 3 or parts[-2] != \"properties\" or not isinstance(parts[-1], str):\n"
+        }
+      ],
+      "expect": "under any keyword"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "outputSchema judged like inputSchema",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    if parts[0] == \"outputSchema\":\n        return \"output\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "no annotation belongs in outputSchema, not even on one of its direct properties"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "outputSchema not walked",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    for root in (\"inputSchema\", \"outputSchema\"):\n",
+          "new": "    for root in (\"inputSchema\",):\n"
+        }
+      ],
+      "expect": "no annotation belongs in outputSchema, not even on one of its direct properties"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "a type list looked up in the set of types",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    if not isinstance(kind, str) or kind not in MIRRORABLE_TYPES:\n",
+          "new": "    if kind not in MIRRORABLE_TYPES:\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "number allowed",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    if not isinstance(kind, str) or kind not in MIRRORABLE_TYPES:\n",
+          "new": "    if not isinstance(kind, str) or kind not in MIRRORABLE_TYPES | {\"number\"}:\n"
+        }
+      ],
+      "expect": "number is not one of them"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "a nullable type list taken as its first non-null type",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    kind = node.get(\"type\")\n",
+          "new": "    kind = node.get(\"type\")\n    if isinstance(kind, list):\n        kind = next((name for name in kind if name != \"null\"), None)\n"
+        }
+      ],
+      "expect": "only a single string, integer or boolean type may be mirrored"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "an untyped property accepted",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    if not isinstance(kind, str) or kind not in MIRRORABLE_TYPES:\n",
+          "new": "    if kind is not None and (not isinstance(kind, str) or kind not in MIRRORABLE_TYPES):\n"
+        }
+      ],
+      "expect": "only a single string, integer or boolean type may be mirrored"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "the header name matched as a prefix",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    if not isinstance(header, str) or not HEADER_TOKEN.fullmatch(header):\n",
+          "new": "    if not isinstance(header, str) or not HEADER_TOKEN.match(header):\n"
+        }
+      ],
+      "expect": "a header name is one whole HTTP token"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "the header name matched with $",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "from collections.abc import Iterator\n",
+          "new": "import re\nfrom collections.abc import Iterator\n"
+        },
+        {
+          "file": "annotations.py",
+          "old": "    if not isinstance(header, str) or not HEADER_TOKEN.fullmatch(header):\n",
+          "new": "    if not isinstance(header, str) or not re.match(HEADER_TOKEN.pattern + \"$\", header):\n"
+        }
+      ],
+      "expect": "a header name is one whole HTTP token"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "a header name that is not a string crashes the audit",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    if not isinstance(header, str) or not HEADER_TOKEN.fullmatch(header):\n",
+          "new": "    if not HEADER_TOKEN.fullmatch(header):\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "duplicates compared with case",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    if header.lower() in taken:\n        return \"duplicate\"\n    taken.add(header.lower())\n",
+          "new": "    if header in taken:\n        return \"duplicate\"\n    taken.add(header)\n"
+        }
+      ],
+      "expect": "header names are unique without regard to case"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "sensitive names checked on the property only",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    if parts[2].lower() in SENSITIVE_NAMES or header.lower() in SENSITIVE_NAMES:\n",
+          "new": "    if parts[2].lower() in SENSITIVE_NAMES:\n"
+        }
+      ],
+      "expect": "whether the property or the header has the name"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "sensitive names checked on the header only",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    if parts[2].lower() in SENSITIVE_NAMES or header.lower() in SENSITIVE_NAMES:\n",
+          "new": "    if header.lower() in SENSITIVE_NAMES:\n"
+        }
+      ],
+      "expect": "whether the property or the header has the name"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "sensitive names matched with case",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    if parts[2].lower() in SENSITIVE_NAMES or header.lower() in SENSITIVE_NAMES:\n",
+          "new": "    if parts[2] in SENSITIVE_NAMES or header in SENSITIVE_NAMES:\n"
+        }
+      ],
+      "expect": "whether the property or the header has the name"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "names written into the pointer unescaped",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    return \"\".join(\"/\" + str(part).replace(\"~\", \"~0\").replace(\"/\", \"~1\") for part in parts)\n",
+          "new": "    return \"\".join(\"/\" + str(part) for part in parts)\n"
+        }
+      ],
+      "expect": "paths are JSON Pointers"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "the two escapes applied in the wrong order",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    return \"\".join(\"/\" + str(part).replace(\"~\", \"~0\").replace(\"/\", \"~1\") for part in parts)\n",
+          "new": "    return \"\".join(\"/\" + str(part).replace(\"/\", \"~1\").replace(\"~\", \"~0\") for part in parts)\n"
+        }
+      ],
+      "expect": "paths are JSON Pointers"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "only / escaped",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    return \"\".join(\"/\" + str(part).replace(\"~\", \"~0\").replace(\"/\", \"~1\") for part in parts)\n",
+          "new": "    return \"\".join(\"/\" + str(part).replace(\"/\", \"~1\") for part in parts)\n"
+        }
+      ],
+      "expect": "paths are JSON Pointers"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "array items written as [n]",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    return \"\".join(\"/\" + str(part).replace(\"~\", \"~0\").replace(\"/\", \"~1\") for part in parts)\n",
+          "new": "    return \"\".join(f\"[{part}]\" if isinstance(part, int) else \"/\" + str(part).replace(\"~\", \"~0\").replace(\"/\", \"~1\") for part in parts)\n"
+        }
+      ],
+      "expect": "under any keyword"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "findings left in walk order",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    return sorted(findings)\n",
+          "new": "    return findings\n"
+        }
+      ],
+      "expect": "under any keyword"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "a cursor that is not a string sent on",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            if not isinstance(cursor, str):\n                raise ContractViolation(\"nextCursor must be a string or null\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a cursor that is not a string is refused"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "no page limit",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        for _ in range(self.max_pages):\n",
+          "new": "        while True:\n"
+        }
+      ],
+      "expect": "discovery keeps paging past max_pages"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "one page past max_pages",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        for _ in range(self.max_pages):\n",
+          "new": "        for _ in range(self.max_pages + 1):\n"
+        }
+      ],
+      "expect": "discovery stops after max_pages pages"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "arguments checked after the call is sent",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        validate_json_schema(arguments, tool[\"inputSchema\"], \"$.arguments\")\n        result = self.request(\"tools/call\", {\"name\": name, \"arguments\": arguments})\n",
+          "new": "        result = self.request(\"tools/call\", {\"name\": name, \"arguments\": arguments})\n        validate_json_schema(arguments, tool[\"inputSchema\"], \"$.arguments\")\n"
+        }
+      ],
+      "expect": "nothing is sent for a call the client refuses"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "call skips the result check for error results",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        validate_tool_result(tool, result)\n        return result\n",
+          "new": "        if not result.get(\"isError\"):\n            validate_tool_result(tool, result)\n        return result\n"
+        }
+      ],
+      "expect": "isError does not waive outputSchema: structuredContent is still required"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "a rejected descriptor admitted anyway",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            else:\n                tools[tool[\"name\"]] = tool\n",
+          "new": "            if isinstance(tool, dict) and \"name\" in tool:\n                tools[tool[\"name\"]] = tool\n"
+        }
+      ],
+      "expect": "every valid descriptor on every page is admitted"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "the catalog grows across discoveries",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        self.catalog = catalog\n",
+          "new": "        self.catalog = self.catalog + catalog\n"
+        }
+      ],
+      "expect": "discovering again replaces the admitted catalog"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "the tag written as a digit",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        parts += [bytes([tag]), _LENGTH.pack(len(head)), head, _LENGTH.pack(len(body)), body]\n",
+          "new": "        parts += [str(tag).encode(\"ascii\"), _LENGTH.pack(len(head)), head, _LENGTH.pack(len(body)), body]\n"
+        }
+      ],
+      "expect": "each after its length in bytes"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "the canonical check only for images",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            tag, body = (IMAGE if kind == \"image\" else AUDIO), _decoded(meta.pop(\"data\"))\n",
+          "new": "            data = meta.pop(\"data\")\n            tag, body = (IMAGE, _decoded(data)) if kind == \"image\" else (AUDIO, base64.b64decode(data))\n"
+        }
+      ],
+      "expect": "{'type': 'audio', 'data': 'AAB=', 'mimeType': 'audio/wav'}"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "invalid UTF-8 replaced instead of refused",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "            text = raw.decode(\"utf-8\")\n",
+          "new": "            text = raw.decode(\"utf-8\", \"replace\")\n"
+        }
+      ],
+      "expect": "the refusal names the reason: [('Mcp-Param-Region', '=?base64?/w==?=')]"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "the sentinel suffix not checked",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        if len(value) < len(SENTINEL_PREFIX) + len(SENTINEL_SUFFIX) or not value.endswith(\n            SENTINEL_SUFFIX\n        ):\n",
+          "new": "        if len(value) < len(SENTINEL_PREFIX) + len(SENTINEL_SUFFIX):\n"
+        }
+      ],
+      "expect": "before dispatch: [('Mcp-Param-Region', '=?base64?ZXUtd2VzdA==x?')]"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "header names matched by prefix",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        copies = received.get(binding.header.lower(), [])\n",
+          "new": "        copies = [value for spelled, found in received.items() if spelled.startswith(binding.header.lower()) for value in found]\n"
+        }
+      ],
+      "expect": "headers that mirror the body pass, whatever the value and the case of their names"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "the checked event lists every binding",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        if copies:\n            checked.append(binding.header)\n",
+          "new": "        checked.append(binding.header)\n"
+        }
+      ],
+      "expect": "the server audit lists the headers it checked"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "every built header listed as encoded",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        if value != text:\n            encoded.append(binding.header)\n",
+          "new": "        encoded.append(binding.header)\n"
+        }
+      ],
+      "expect": "the client audit lists the headers and which of them needed the sentinel"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "sentinel matched with a regex ending in $",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    if value.startswith(SENTINEL_PREFIX):\n        if len(value) < len(SENTINEL_PREFIX) + len(SENTINEL_SUFFIX) or not value.endswith(\n            SENTINEL_SUFFIX\n        ):\n            raise ContractViolation(\"malformed base64 sentinel\")\n        payload = value[len(SENTINEL_PREFIX) : -len(SENTINEL_SUFFIX)]\n",
+          "new": "    if value.startswith(SENTINEL_PREFIX):\n        import re\n        m = re.match(r\"=\\?base64\\?(.*)\\?=$\", value)\n        if not m:\n            raise ContractViolation(\"malformed base64 sentinel\")\n        payload = m.group(1)\n"
+        }
+      ],
+      "expect": "ZXUtd2VzdA==?=\\n'"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "the server renders the body value by its own type",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "expected = argument_text(arguments[binding.argument], binding.type)",
+          "new": "expected = argument_text(arguments[binding.argument], {bool: 'boolean', int: 'integer', str: 'string'}.get(type(arguments[binding.argument]), binding.type))"
+        }
+      ],
+      "expect": "('Mcp-Param-Region', '7')"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "checked headers listed in the order received",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    audit.append({\"event\": \"parameter_headers_checked\", \"headers\": checked})",
+          "new": "    order = [n.lower() for n, _ in headers]\n    checked.sort(key=lambda h: order.index(h.lower()))\n    audit.append({\"event\": \"parameter_headers_checked\", \"headers\": checked})"
+        }
+      ],
+      "expect": "in bindings order"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "the server's hasMore wins even when the box cut the values",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "            \"hasMore\": completion.get(\"hasMore\") is True or len(values) > MAX_VALUES,\n",
+          "new": "            \"hasMore\": completion.get(\"hasMore\", len(values) > MAX_VALUES),\n"
+        }
+      ],
+      "expect": "cutting them means there is more"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "a value equal to the newest request's is not asked again",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "        request_id = next(self._ids)\n",
+          "new": "        if self._latest is not None and self._latest[1] == value:\n            self._pending = None\n            return\n        request_id = next(self._ids)\n"
+        }
+      ],
+      "expect": "every pause sends a request, even for the value the newest request already asked"
+    },
+    {
+      "test": "test_completion_debounce",
+      "name": "hasMore once 100 values arrive",
+      "edits": [
+        {
+          "file": "completion.py",
+          "old": "len(values) > MAX_VALUES,",
+          "new": "len(values) >= MAX_VALUES,"
+        }
+      ],
+      "expect": "exactly 100 values is not a cut"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "direct taken as anywhere under inputSchema.properties",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    if len(parts) != 3 or parts[1] != \"properties\" or not isinstance(parts[2], str):\n",
+          "new": "    if len(parts) < 3 or parts[1] != \"properties\" or not isinstance(parts[2], str):\n"
+        }
+      ],
+      "expect": "under any keyword"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "findings sorted by reason",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    return sorted(findings)\n",
+          "new": "    return sorted(findings, key=lambda finding: (finding.reason, finding.path))\n"
+        }
+      ],
+      "expect": "findings are sorted by path"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "sensitive names matched as substrings",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    if parts[2].lower() in SENSITIVE_NAMES or header.lower() in SENSITIVE_NAMES:\n",
+          "new": "    if any(s in parts[2].lower() or s in header.lower() for s in SENSITIVE_NAMES):\n"
+        }
+      ],
+      "expect": "whole names are matched"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "sensitive names judged before the header name and type",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    header = node[ANNOTATION]\n    if not isinstance(header, str)",
+          "new": "    header = node[ANNOTATION]\n    if parts[2].lower() in SENSITIVE_NAMES or (isinstance(header, str) and header.lower() in SENSITIVE_NAMES):\n        return \"sensitive\"\n    if not isinstance(header, str)"
+        }
+      ],
+      "expect": "gets only the first finding in the documented order"
+    },
+    {
+      "test": "test_annotation_audit",
+      "name": "type judged before the header name",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    header = node[ANNOTATION]\n    if not isinstance(header, str)",
+          "new": "    header = node[ANNOTATION]\n    kind0 = node.get(\"type\")\n    if not isinstance(kind0, str) or kind0 not in MIRRORABLE_TYPES:\n        return \"type\"\n    if not isinstance(header, str)"
+        }
+      ],
+      "expect": "gets only the first finding in the documented order"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "content blocks no longer checked",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "    for index, block in enumerate(content):\n        validate_content_block(block, f\"$.content[{index}]\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "every content block is checked"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "rejections kept across discoveries",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        tools: dict[str, dict[str, Any]] = {}\n        self.rejections = []\n",
+          "new": "        tools: dict[str, dict[str, Any]] = {}\n"
+        }
+      ],
+      "expect": "rejections describe the latest discovery"
+    },
+    {
+      "test": "test_discover_and_call",
+      "name": "a structured result accepted without its compatibility text",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "    if not any(block[\"type\"] == \"text\" for block in content):\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "a structured result also carries a text block for older clients"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "embedded text told apart from blobs by truthiness",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            if \"text\" in resource:\n",
+          "new": "            if resource.get(\"text\"):\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "meta parsed with json.loads on the raw bytes (UTF-16 accepted)",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "json.loads(head.decode(\"utf-8\"))",
+          "new": "json.loads(head)"
+        }
+      ],
+      "expect": "meta that is not UTF-8"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "only JSONDecodeError caught when reading meta",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors\n",
+          "new": "        except json.JSONDecodeError as exc:\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    }
+  ]
+}

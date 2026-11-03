@@ -1,0 +1,157 @@
+{
+  "lesson": "phases/13-tools-and-protocols/28-mcp-tool-contracts-and-content",
+  "title": "MCP Tool Contracts and Content",
+  "format": "staged-brownfield",
+  "service": "contractkit: the host side of MCP 2026-07-28 tool contracts, with paginated discovery and admission, result validation, a binary content-block container, x-mcp-header parameter headers with a server-side parity gate, debounced completion/complete, and an annotation placement audit",
+  "sources": {
+    "docs/en.md": "713a0c2c7a28774c61b59756221528c57dbae1361521967d95ac7647a98f7864",
+    "code/main.py": "c9645b0bd400a392b8028b118358ad0e5d7fb04cb2403ce136bbcc79aa8a2844",
+    "code/tests/test_main.py": "d7e220dd4c54c751b25bbf22a6b0943b5cb6ef0c7709b6b832d08b31ce46e1bf"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_discover_and_call",
+      "kind": "debug",
+      "lesson_anchor": "Structured content is any JSON value; JSON Schema Is a Runtime Boundary (an outputSchema binds results with isError true); Pagination Cursors Are Opaque (an empty string is a cursor); A small validator still teaches the boundary (descriptors after discovery, arguments before execution, results before consumption); code/main.py validate_tool_result and ContractClient.discover_tools / call",
+      "planted_bugs": [
+        "discover_tools ends the listing on a falsy nextCursor, so the empty-string cursor after the first page stops discovery; the failure surfaces one call later, in call(), as 'tool is not admitted: tag_catalog'",
+        "validate_tool_result requires structuredContent to be a dict, so array, string and null results are refused",
+        "validate_tool_result returns early when isError is true, so error results skip the published outputSchema",
+        "call() recomputes admitted() on every call, validating the whole discovered catalog again"
+      ],
+      "timing_assert": "2000 admitted tools, 167 calls spread over the catalog (every 12th tool) under 0.1 s after gc.collect(): the re-validating version took 1.09 to 1.60 s in repeated runs on this machine under the load of other jobs (at least 10.9 times the limit), the fix 0.74 to 0.93 ms with one 1.96 ms outlier (at least 51 times under it)",
+      "overfix_guard": "a rejected descriptor stays uncallable and nothing is sent for it; arguments are still checked against inputSchema before sending (missing, minLength, wrong type, extra property) and nothing is sent; results are still checked before they are returned; a second discovery replaces the admitted catalog, so a cached admission that is never refreshed is caught; nextCursor null ends the listing, a repeated cursor is refused before it is sent again, a non-string cursor is refused, max_pages bounds an endless listing; a structured result without a text block for older clients is still refused",
+      "deviation": "The suggested size was 2000 tools x 2000 calls. At about 7 ms per call for the re-validation that would take 14 s, so the test keeps 2000 tools and makes 167 calls. The limit sits between the planted bug (about 7 ms per call) and O(catalog) lookups that do not re-validate (a linear scan by name measured 5 to 8 ms, a loop over cached validity 30 to 35 ms for all 167 calls), so only re-validating the catalog fails the timing and a lookup style never makes it flaky. The JSON Schema subset accepts a list of type names, so a nullable outputSchema ['string', 'null'] can tell a null result from a missing one; check_schema makes admission check that a schema uses the enforced keywords correctly. The x-mcp-header policy is not part of Part 1's admission; it is Part 5's audit, kept separate so Part 1 does not depend on Part 5."
+    },
+    {
+      "part": 2,
+      "test": "test_content_container_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Content Blocks Carry Different Costs: text, image and audio as base64, resource_link as a reference the client reauthorizes later, resource embedded now; code/main.py validate_content_block",
+      "storage": "binary container: MAGIC b'MCB1', then one record per block: 1-byte tag, 4-byte big-endian length and UTF-8 JSON meta, 4-byte big-endian length and body; image, audio and blob stored as their decoded bytes",
+      "exactness": "a content array of text (CRLF, U+2028, NUL, emoji, and an empty text), a 514-byte image whose base64 has + and / and == padding and runs past 76 characters, a 101-byte audio clip, two resource_links (one without mimeType, one with non-ASCII fields), an embedded text resource and a 70,000-byte embedded blob is written to a file and read back equal; the test also reads every record with its own parser",
+      "traps": [
+        "base64.encodebytes adds line breaks, with or without strip()",
+        "urlsafe_b64encode",
+        "padding stripped",
+        "lengths counted in characters, for text or for meta written with ensure_ascii=False",
+        "little-endian or two-byte lengths",
+        "the tag written as a digit",
+        "base64 text stored instead of decoded bytes, for media or blobs",
+        "non-canonical base64 (QR==, AAB=) accepted, for data or for blobs",
+        "the caller's nested resource mutated",
+        "resource_link cut down to uri and name, or given a null mimeType",
+        "text kept in meta as well",
+        "no MAGIC",
+        "pack skips validate_content_block, so binascii.Error escapes",
+        "wrong magic, a short last field, a stray trailing byte, an unknown tag, invalid UTF-8, a non-object meta or a block that fails validation read without ContractViolation (struct.error, UnicodeDecodeError, TypeError or silently)",
+        "meta parsed from the raw bytes with json.loads, which accepts UTF-16 with a BOM, or only JSONDecodeError caught, so UnicodeDecodeError escapes"
+      ],
+      "clarifying_questions": [
+        "storing the base64 text",
+        "meta JSON formatting",
+        "following a resource_link",
+        "non-canonical padding bits",
+        "extra block fields"
+      ],
+      "deviation": "The suggested trap 'resource_link saved as given, not dereferenced' has no API that could dereference, so the test checks that the link's fields come back exactly and dereferencing is a follow-up. Non-canonical base64 is refused when packing because stored bytes cannot reproduce it."
+    },
+    {
+      "part": 3,
+      "test": "test_parameter_headers",
+      "kind": "core algorithm",
+      "lesson_anchor": "x-mcp-header Is Routing Metadata; Encode values before building HTTP headers (plain only for non-empty visible ASCII ! through ~ that does not start with =?base64?, otherwise =?base64?{Base64UTF8}?=; booleans lowercase; integers base 10 within the JavaScript safe range); The server checks the mirrored copy (case-insensitive names, exact sentinel decoding, exact comparison, missing, duplicated, unexpected, malformed or mismatched is HTTP 400 with -32020, the audit records the name and the category only)",
+      "traps": [
+        "isprintable() or isascii() plus isprintable() instead of visible ASCII, which lets spaces, the empty string or non-ASCII through",
+        "space or DEL counted as visible",
+        "sentinel-looking text sent plain",
+        "text stripped or NFC-normalized first",
+        "str(True) for booleans; bool accepted as an integer; floats, numeric strings or truthiness accepted",
+        "safe bounds exclusive, -2**53 as the lower bound, or no range check",
+        "the sentinel's prefix and suffix allowed to overlap (=?base64?=), the suffix not checked, non-canonical base64 accepted",
+        "Latin-1 or errors='replace' decoding, UnicodeDecodeError escaping, decoding more than once",
+        "plain values accepted without the visible-ASCII check",
+        "header names compared exactly or matched by prefix; the last copy winning or copies counted per spelling",
+        "missing headers or headers without a body argument let through",
+        "values compared case-insensitively; integers compared as numbers (07); booleans compared case-insensitively",
+        "the raw header or the encoded forms compared",
+        "a body integer without a header form escaping as ContractViolation",
+        "malformed reported as mismatched",
+        "values written to the client or server audit, every binding listed as checked, every header listed as encoded",
+        "the sentinel matched with a regex ending in $, which accepts a trailing newline",
+        "the body value rendered by its own type instead of the declared one, so region 7 matches a header 7",
+        "the checked event listed in the order the headers arrived instead of bindings order"
+      ],
+      "clarifying_questions": [
+        "undeclared Mcp-Param headers",
+        "an unnecessary sentinel",
+        "several bad headers",
+        "Unicode case folding",
+        "an out-of-range body integer"
+      ],
+      "deviation": "http_tool_call, the boundary that turns a rejection into HTTP 400 with -32020, is provided; the candidate writes the encoder, decoder, argument_text, build and check. Headers are (name, value) pairs so repeated and case-variant names can be expressed. The error's data carries the header and the reason category. Headers that match no binding are left alone, since the lesson checks recognized names only."
+    },
+    {
+      "part": 4,
+      "test": "test_completion_debounce",
+      "kind": "streaming",
+      "lesson_anchor": "Completion Is an Authorization Surface: completion/complete with ref and argument, at most 100 values with total and hasMore, request debouncing in the client; per-request _meta",
+      "wire_format": "JSON-RPC request frames: each frame passed to send is the JSON text of one completion/complete request with a fresh id from the connection's counter and the full request _meta, decided by the test's json.loads per frame and exact comparison",
+      "traps": [
+        "a request on every keystroke or on the first keystroke",
+        "throttle instead of debounce",
+        "> instead of >= at idle_ms",
+        "the pending value kept after it is sent",
+        "the box's own id counter, one id for every request",
+        "a request without _meta or with the protocol version only",
+        "frames sent as dicts",
+        "the last answer to arrive wins, or any answer newer than the one shown is taken",
+        "answers popped from a table of open requests (KeyError on a repeated stale answer)",
+        "error answers ignored, or any error answer clearing the box",
+        "no 100-value cap, hasMore from the server alone or from the cut alone, total counted from the values, values sorted",
+        "a pause that repeats the newest request's value sends nothing",
+        "hasMore set on exactly 100 values (>= instead of >)"
+      ],
+      "clarifying_questions": [
+        "the same value typed twice",
+        "what to show while a request is in flight",
+        "rate-limit errors",
+        "a total smaller than the values"
+      ],
+      "deviation": "The box is driven by type(), poll() and receive() with an injected millisecond clock instead of real timers, which keeps the timeline deterministic. The lesson lists debouncing without defining a wire format, so the frames are the JSON-RPC requests themselves, as the chapter plan assigns."
+    },
+    {
+      "part": 5,
+      "test": "test_annotation_audit",
+      "kind": "recursive structure",
+      "lesson_anchor": "x-mcp-header Is Routing Metadata: only a direct member of inputSchema.properties, string, integer or boolean (number not allowed), HTTP field-name token, unique without regard to case; walk the entire schema tree; reject annotations under nested properties, oneOf, items, a $ref definition or any output schema; resolving a reference does not make a direct property; the deployment policy for sensitive names",
+      "traps": [
+        "only the keywords a validator knows walked (prefixItems, additionalProperties, not, definitions, the schema root missed)",
+        "arrays not walked",
+        "$ref followed without a cycle guard (RecursionError) or once per definition (a resolved node taken as a direct property, unreferenced definitions missed)",
+        "definitions skipped unless referenced, or the older definitions keyword skipped",
+        "nested properties counted as direct",
+        "outputSchema judged like inputSchema or not walked",
+        "a type list looked up in a frozenset (TypeError), number allowed, a nullable list or an untyped property accepted",
+        "the header name matched as a prefix or with $, a non-string name crashing re",
+        "duplicates compared with case",
+        "sensitive names checked on one side only or with case",
+        "JSON Pointer unescaped, escaped in the wrong order, only / escaped, array items written as [n]",
+        "findings left in walk order or sorted by reason",
+        "sensitive names matched as substrings (tokenizer refused)",
+        "the finding precedence changed: sensitive before duplicate or type, or type before name"
+      ],
+      "clarifying_questions": [
+        "resolving $ref",
+        "annotations inside data keywords",
+        "access_token",
+        "a type reached through $ref",
+        "which duplicate is reported",
+        "whether a refused annotation takes its header name"
+      ],
+      "deviation": "Findings are (JSON Pointer from the descriptor root, reason) sorted by path, one per annotation with a fixed precedence. The audit does not follow $ref: walking the whole tree finds every annotation where it is written, which is what makes a $ref definition never count as a direct property and a definition used twice one finding. The sensitive-name set is the lesson code's exact set, apikey included."
+    }
+  ]
+}
