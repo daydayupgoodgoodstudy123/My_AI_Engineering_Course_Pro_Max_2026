@@ -1,0 +1,1482 @@
+{
+  "package": "sandboxpol",
+  "tests": [
+    "test_review_gate",
+    "test_install_store",
+    "test_launch_plan",
+    "test_output_relay",
+    "test_archive_check"
+  ],
+  "layers": [
+    {
+      "test": "test_review_gate",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a non-default port is a different origin"
+        },
+        {
+          "name": "fix origin_allowed",
+          "edits": [
+            {
+              "file": "policy.py",
+              "old": "    host = urlsplit(origin).hostname\n    return any(urlsplit(entry).hostname == host for entry in allowed)\n",
+              "new": "    return origin in set(allowed)\n"
+            }
+          ],
+          "expect": "the default port is the same origin"
+        },
+        {
+          "name": "+ effective port written out",
+          "edits": [
+            {
+              "file": "policy.py",
+              "old": "    return f\"https://{origin_host}:{port}\" if port else f\"https://{origin_host}\"\n",
+              "new": "    if port is None:\n        port = 443\n    elif not 1 <= port <= 65535:\n        raise ValueError(\"HTTPS origin contains an invalid port\")\n    return f\"https://{origin_host}:{port}\"\n"
+            }
+          ],
+          "expect": "is not an approved argv prefix"
+        },
+        {
+          "name": "+ argv prefix matching",
+          "edits": [
+            {
+              "file": "policy.py",
+              "old": "    allowed_executables = {prefix[0] for prefix in allowlist if prefix}\n    if executable not in allowed_executables:\n",
+              "new": "    allowed_prefixes = tuple(tuple(prefix) for prefix in allowlist)\n    if not any(\n        prefix and tuple(command[: len(prefix)]) == prefix for prefix in allowed_prefixes\n    ):\n"
+            }
+          ],
+          "expect": "an action that needs approval does not run"
+        },
+        {
+          "name": "+ gate runs allow only",
+          "edits": [
+            {
+              "file": "gate.py",
+              "old": "        if decision.verdict is Verdict.DENY:\n",
+              "new": "        if decision.verdict is not Verdict.ALLOW:\n"
+            }
+          ],
+          "expect": "reviewing a long payload should be fast"
+        },
+        {
+          "name": "+ linear key=value pattern",
+          "edits": [
+            {
+              "file": "policy.py",
+              "old": "    re.compile(r\"(?i)[\\w.-]*(?:api[_-]?key",
+              "new": "    re.compile(r\"(?i)(?:api[_-]?key"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_review_gate",
+      "name": "port 0 read as the default port (the lesson's parsed.port or 443)",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    if port is None:\n        port = 443\n    elif not 1 <= port <= 65535:\n        raise ValueError(\"HTTPS origin contains an invalid port\")\n",
+          "new": "    port = port or 443\n"
+        }
+      ],
+      "expect": "port 0 is not a valid port"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "default port dropped from the canonical form",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    return f\"https://{origin_host}:{port}\"\n",
+          "new": "    return f\"https://{origin_host}\" if port == 443 else f\"https://{origin_host}:{port}\"\n"
+        }
+      ],
+      "expect": "decisions carry the origin with its effective port"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "port range not checked once the default is filled in",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    if port is None:\n        port = 443\n    elif not 1 <= port <= 65535:\n        raise ValueError(\"HTTPS origin contains an invalid port\")\n",
+          "new": "    if port is None:\n        port = 443\n"
+        }
+      ],
+      "expect": "port 0 is not a valid port"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "argv must equal an allowlist entry exactly",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        prefix and tuple(command[: len(prefix)]) == prefix for prefix in allowed_prefixes\n",
+          "new": "        prefix and tuple(command) == prefix for prefix in allowed_prefixes\n"
+        }
+      ],
+      "expect": "arguments after an approved prefix are free"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "prefix matched on the joined command string",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        prefix and tuple(command[: len(prefix)]) == prefix for prefix in allowed_prefixes\n",
+          "new": "        \" \".join(command).startswith(\" \".join(prefix)) for prefix in allowed_prefixes\n"
+        }
+      ],
+      "expect": "is not an approved argv prefix"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "gate runs any approved request",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if decision.verdict is not Verdict.ALLOW:\n",
+          "new": "        if decision.verdict is not Verdict.ALLOW and not request.approved:\n"
+        }
+      ],
+      "expect": "approval does not override a deny"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "gate runs approved requests only",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if decision.verdict is not Verdict.ALLOW:\n",
+          "new": "        if decision.verdict is not Verdict.ALLOW or not request.approved:\n"
+        }
+      ],
+      "expect": "an action the policy allows runs"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "gate hands the runner the request's own target",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            request.kind, decision.normalized_target, decision.normalized_origin, request.command\n",
+          "new": "            request.kind, request.target, request.url, request.command\n"
+        }
+      ],
+      "expect": "the runner gets the reviewed targets"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "the lesson's \\b-anchored key pattern",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    re.compile(r\"(?i)(?:api[_-]?key|access[_-]?token|secret|password)\\s*[:=]\\s*\\S+\"),\n",
+          "new": "    re.compile(r\"(?i)\\b(?:api[_-]?key|access[_-]?token|secret|password)\\s*[:=]\\s*\\S+\"),\n"
+        }
+      ],
+      "expect": "DB_PASSWORD=hunter2-plac... carries a credential"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "\\b kept in front of the greedy key prefix",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    re.compile(r\"(?i)(?:api[_-]?key|access[_-]?token|secret|password)\\s*[:=]\\s*\\S+\"),\n",
+          "new": "    re.compile(r\"(?i)\\b[\\w.-]*(?:api[_-]?key|access[_-]?token|secret|password)\\s*[:=]\\s*\\S+\"),\n"
+        }
+      ],
+      "expect": "reviewing a long payload should be fast"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "lazy key prefix",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    re.compile(r\"(?i)(?:api[_-]?key|access[_-]?token|secret|password)\\s*[:=]\\s*\\S+\"),\n",
+          "new": "    re.compile(r\"(?i)[\\w.-]*?(?:api[_-]?key|access[_-]?token|secret|password)\\s*[:=]\\s*\\S+\"),\n"
+        }
+      ],
+      "expect": "reviewing a long payload should be fast"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "key=value pattern removed",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    re.compile(r\"(?i)(?:api[_-]?key|access[_-]?token|secret|password)\\s*[:=]\\s*\\S+\"),\n",
+          "new": ""
+        }
+      ],
+      "expect": "DB_PASSWORD=hunter2-plac... carries a credential"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "only the first 4 KB of a payload scanned",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    return any(pattern.search(value) for pattern in SECRET_PATTERNS)\n",
+          "new": "    return any(pattern.search(value[:4096]) for pattern in SECRET_PATTERNS)\n"
+        }
+      ],
+      "expect": "carries a credential"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "any long token-like run treated as a secret",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    re.compile(r\"(?i)(?:api[_-]?key|access[_-]?token|secret|password)\\s*[:=]\\s*\\S+\"),\n",
+          "new": "    re.compile(r\"(?i)(?:api[_-]?key|access[_-]?token|secret|password)\\s*[:=]\\s*\\S+\"),\n    re.compile(r\"[A-Za-z0-9_-]{40,}\"),\n"
+        }
+      ],
+      "expect": "a cache key and a hex dump are not secrets"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "hex digests treated as secrets",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    re.compile(r\"(?i)(?:api[_-]?key|access[_-]?token|secret|password)\\s*[:=]\\s*\\S+\"),\n",
+          "new": "    re.compile(r\"(?i)(?:api[_-]?key|access[_-]?token|secret|password)\\s*[:=]\\s*\\S+\"),\n    re.compile(r\"\\b[0-9a-f]{40,}\\b\"),\n"
+        }
+      ],
+      "expect": "a cache key and a hex dump are not secrets"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "PEM rule widened to any BEGIN line",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    re.compile(r\"-----BEGIN [A-Z ]*PRIVATE KEY-----\"),\n",
+          "new": "    re.compile(r\"-----BEGIN [A-Z ]*-----\"),\n"
+        }
+      ],
+      "expect": "-----BEGIN CERTIFICATE--... is not a secret"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "Bearer rule dropped",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    re.compile(r\"(?i)\\bauthorization\\s*:\\s*bearer\\s+\\S+\"),\n",
+          "new": ""
+        }
+      ],
+      "expect": "Authorization: Bearer pl... carries a credential"
+    },
+    {
+      "test": "test_review_gate",
+      "name": "key prefix narrowed to \\w*",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "r\"(?i)(?:api[_-]?key",
+          "new": "r\"(?i)\\w*(?:api[_-]?key"
+        }
+      ],
+      "expect": "reviewing a long payload should be fast"
+    },
+    {
+      "test": "test_install_store",
+      "name": "every executable source file keeps its bit",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            executable = rel in reviewed and bool(path.stat().st_mode & 0o111)\n",
+          "new": "            executable = bool(path.stat().st_mode & 0o111)\n"
+        }
+      ],
+      "expect": "only reviewed scripts keep an executable bit"
+    },
+    {
+      "test": "test_install_store",
+      "name": "every reviewed script made executable",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            executable = rel in reviewed and bool(path.stat().st_mode & 0o111)\n",
+          "new": "            executable = rel in reviewed\n"
+        }
+      ],
+      "expect": "a reviewed script without an executable bit stays without one"
+    },
+    {
+      "test": "test_install_store",
+      "name": "absolute paths in the manifest",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            rel = path.relative_to(source).as_posix()\n",
+          "new": "            rel = str(path)\n"
+        },
+        {
+          "file": "store.py",
+          "old": "            executable = rel in reviewed and",
+          "new": "            executable = path.relative_to(source).as_posix() in reviewed and"
+        }
+      ],
+      "expect": "files are recorded by their POSIX path inside the package"
+    },
+    {
+      "test": "test_install_store",
+      "name": "paths cut out of the source string",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            rel = path.relative_to(source).as_posix()\n",
+          "new": "            rel = str(path)[len(str(source)):]\n"
+        }
+      ],
+      "expect": "files are recorded by their POSIX path inside the package"
+    },
+    {
+      "test": "test_install_store",
+      "name": "digest over the bytes and the source mode",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            digest = hashlib.sha256(data).hexdigest()\n",
+          "new": "            digest = hashlib.sha256(data + oct(path.stat().st_mode).encode()).hexdigest()\n"
+        }
+      ],
+      "expect": "the manifest records the revision and each file by POSIX path"
+    },
+    {
+      "test": "test_install_store",
+      "name": "one blob per file instead of per content",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            blob = self._blobs / digest\n",
+          "new": "            blob = self._blobs / f\"{digest}.{rel.replace('/', '_')}\"\n"
+        },
+        {
+          "file": "store.py",
+          "old": "            data = (self._blobs / entry.sha256).read_bytes()\n",
+          "new": "            data = (self._blobs / f\"{entry.sha256}.{rel.replace('/', '_')}\").read_bytes()\n"
+        }
+      ],
+      "expect": "identical contents are stored once"
+    },
+    {
+      "test": "test_install_store",
+      "name": "reinstall overwrites the installed package",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if self._manifest_path(name).exists():\n            raise FileExistsError(f\"{name} is already installed\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "installing over an installed package needs an upgrade plan"
+    },
+    {
+      "test": "test_install_store",
+      "name": "unknown package raises FileNotFoundError",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            raise KeyError(name) from None\n",
+          "new": "            raise\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_install_store",
+      "name": "manifest read back without the executable bits",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            path: FileEntry(entry[\"sha256\"], entry[\"executable\"])\n",
+          "new": "            path: FileEntry(entry[\"sha256\"], False)\n"
+        }
+      ],
+      "expect": "the manifest survives a reopen"
+    },
+    {
+      "test": "test_install_store",
+      "name": "restored files written as text",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            path.write_bytes(data)\n            path.chmod(",
+          "new": "            path.write_text(data.decode(\"utf-8\", \"replace\"), encoding=\"utf-8\")\n            path.chmod("
+        }
+      ],
+      "expect": "a restored package matches byte for byte"
+    },
+    {
+      "test": "test_install_store",
+      "name": "restored files get full permission bits",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            path.chmod(0o755 if entry.executable else 0o644)\n",
+          "new": "            path.chmod(0o777 if entry.executable else 0o666)\n"
+        }
+      ],
+      "expect": "with modes 0o755 and 0o644"
+    },
+    {
+      "test": "test_install_store",
+      "name": "only the owner's executable bit added on restore",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            path.chmod(0o755 if entry.executable else 0o644)\n",
+          "new": "            path.chmod(stat.S_IMODE(path.stat().st_mode) | stat.S_IXUSR if entry.executable else 0o644)\n"
+        }
+      ],
+      "expect": "with modes 0o755 and 0o644"
+    },
+    {
+      "test": "test_install_store",
+      "name": "plan compares digests only",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            changed=sorted(path for path in set(old) & set(new) if old[path] != new[path]),\n",
+          "new": "            changed=sorted(path for path in set(old) & set(new) if old[path].sha256 != new[path].sha256),\n"
+        }
+      ],
+      "expect": "a new executable bit included"
+    },
+    {
+      "test": "test_install_store",
+      "name": "plan leaves out removed files",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            removed=sorted(set(old) - set(new)),\n",
+          "new": "            removed=[],\n"
+        }
+      ],
+      "expect": "the plan lists what the upgrade adds, overwrites and removes"
+    },
+    {
+      "test": "test_install_store",
+      "name": "plan lists every new path as changed",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            changed=sorted(path for path in set(old) & set(new) if old[path] != new[path]),\n",
+          "new": "            changed=sorted(path for path in new if old.get(path) != new[path]),\n"
+        }
+      ],
+      "expect": "the plan lists what the upgrade adds, overwrites and removes"
+    },
+    {
+      "test": "test_install_store",
+      "name": "planning an upgrade installs it",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        old, new = base.files, target.files\n",
+          "new": "        self._save(target)\n        old, new = base.files, target.files\n"
+        }
+      ],
+      "expect": "planning an upgrade installs nothing"
+    },
+    {
+      "test": "test_install_store",
+      "name": "upgrade reads the source again",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        base = self.manifest(name)\n        target = self._capture(",
+          "new": "        self._source = (Path(source), revision, list(reviewed_scripts))\n        base = self.manifest(name)\n        target = self._capture("
+        },
+        {
+          "file": "store.py",
+          "old": "        self._save(plan.target)\n        return plan.target\n",
+          "new": "        self._save(self._capture(name, *self._source))\n        return plan.target\n"
+        }
+      ],
+      "expect": "an upgrade installs the bytes that were reviewed"
+    },
+    {
+      "test": "test_install_store",
+      "name": "a plan made against another version is applied",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if plan.name != name or plan.base != self.manifest(name):\n",
+          "new": "        if plan.name != name:\n"
+        }
+      ],
+      "expect": "a plan made against another installed version is refused"
+    },
+    {
+      "test": "test_install_store",
+      "name": "upgrade keeps files the new version removed",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        self._save(plan.target)\n        return plan.target\n",
+          "new": "        self._save(Manifest(name, plan.target.revision, {**plan.base.files, **plan.target.files}))\n        return plan.target\n"
+        }
+      ],
+      "expect": "the upgrade adds, removes and changes modes as planned"
+    },
+    {
+      "test": "test_install_store",
+      "name": "only executables chmodded on restore, the rest left to the umask",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            path.chmod(0o755 if entry.executable else 0o644)\n",
+          "new": "            if entry.executable:\n                path.chmod(0o755)\n"
+        }
+      ],
+      "expect": "with modes 0o755 and 0o644"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "a write is always a create",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "            operation = OVERWRITE if target.exists() else CREATE\n",
+          "new": "            operation = CREATE\n"
+        }
+      ],
+      "expect": "creating a file is allowed where overwriting one is not"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "existence checked on the path as written",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "            operation = OVERWRITE if target.exists() else CREATE\n",
+          "new": "            operation = OVERWRITE if (root / use.path).exists() else CREATE\n"
+        }
+      ],
+      "expect": "an overwrite waits for approval and names its real target"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "read roots also grant writes",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "        if not _granted(root, policy.grants.get(operation, ()), target):\n",
+          "new": "        if not _granted(root, tuple(policy.grants.get(operation, ())) + tuple(policy.grants.get(READ, ())), target):\n"
+        }
+      ],
+      "expect": "read permission does not include write"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "create roots also grant overwrites",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "        if not _granted(root, policy.grants.get(operation, ()), target):\n",
+          "new": "        extra = policy.grants.get(CREATE, ()) if operation == OVERWRITE else ()\n        if not _granted(root, tuple(policy.grants.get(operation, ())) + tuple(extra), target):\n"
+        }
+      ],
+      "expect": "creating a file is allowed where overwriting one is not"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "grants matched on the path as written",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "        if not _granted(root, policy.grants.get(operation, ()), target):\n",
+          "new": "        if not _granted(root, policy.grants.get(operation, ()), root / use.path):\n"
+        }
+      ],
+      "expect": "an overwrite waits for approval and names its real target"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "consequence names the path as requested",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "            consequences.append(f\"{operation} {target.relative_to(root).as_posix()}\")\n",
+          "new": "            consequences.append(f\"{operation} {use.path}\")\n"
+        }
+      ],
+      "expect": "an overwrite waits for approval and names its real target"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "consequence names the absolute path",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "            consequences.append(f\"{operation} {target.relative_to(root).as_posix()}\")\n",
+          "new": "            consequences.append(f\"{operation} {target}\")\n"
+        }
+      ],
+      "expect": "an overwrite waits for approval and names its real target"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "a read_only side_effect skips approval",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "    waiting = [line for line in consequences if line not in request.approved]\n",
+          "new": "    waiting = [] if request.side_effect == \"read_only\" else [line for line in consequences if line not in request.approved]\n"
+        }
+      ],
+      "expect": "an overwrite waits for approval and names its real target"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "any approval covers every consequence",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "    waiting = [line for line in consequences if line not in request.approved]\n",
+          "new": "    waiting = [] if request.approved else consequences\n"
+        }
+      ],
+      "expect": "approval for one target does not cover another"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "approved consequences dropped from the plan",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "        tuple(consequences),\n        env,\n",
+          "new": "        tuple(waiting),\n        env,\n"
+        }
+      ],
+      "expect": "an approved plan runs and still lists its consequences"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "credential consequences listed before path consequences",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "    for name in request.credentials:\n        scope = policy.credentials.get(name)\n",
+          "new": "    paths_first = list(consequences)\n    consequences.clear()\n    for name in request.credentials:\n        scope = policy.credentials.get(name)\n"
+        },
+        {
+          "file": "launch.py",
+          "old": "    env = {name: host_env[name] for name in policy.pass_env if name in host_env}\n",
+          "new": "    consequences.extend(paths_first)\n    env = {name: host_env[name] for name in policy.pass_env if name in host_env}\n"
+        }
+      ],
+      "expect": "consequences come in request order: paths first, then credentials"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "credential attached for every origin of the request",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "        inject.setdefault(origin, []).append(name)\n",
+          "new": "        for each in origins:\n            inject.setdefault(each, []).append(name)\n"
+        }
+      ],
+      "expect": "a credential is attached for its own origin only, after approval"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "credential scope not checked against the request's origins",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "        if origin is None or origin not in origins:\n",
+          "new": "        if origin is None:\n"
+        }
+      ],
+      "expect": "a credential needs its own origin among the request's"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "unknown credential looked up with []",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "        scope = policy.credentials.get(name)\n",
+          "new": "        scope = policy.credentials[name]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "sending a credential needs no approval",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "        if SEND in policy.approval:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "a credential is attached for its own origin only, after approval"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "host environment copied minus secret-looking names",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "    env = {name: host_env[name] for name in policy.pass_env if name in host_env}\n",
+          "new": "    env = {k: v for k, v in host_env.items() if \"TOKEN\" not in k and \"SECRET\" not in k}\n"
+        }
+      ],
+      "expect": "runs with the allowlisted environment only"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "host values win over policy.env",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "    env.update(policy.env)\n",
+          "new": "    env = {**policy.env, **env}\n"
+        }
+      ],
+      "expect": "runs with the allowlisted environment only"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "pass_env name missing from the host raises KeyError",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "    env = {name: host_env[name] for name in policy.pass_env if name in host_env}\n",
+          "new": "    env = {name: host_env[name] for name in policy.pass_env}\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "denied plans carry the environment",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "            return LaunchPlan(Verdict.DENY, f\"path-{operation}\")\n",
+          "new": "            return LaunchPlan(Verdict.DENY, f\"path-{operation}\", env=dict(policy.env))\n"
+        }
+      ],
+      "expect": "a denied plan carries nothing"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "credentials checked before URLs",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "    allowlist = {normalize_https_origin(origin, origin_only=True) for origin in policy.origins}\n",
+          "new": "    for name in request.credentials:\n        if name not in policy.credentials:\n            return LaunchPlan(Verdict.DENY, \"credential-scope\")\n    allowlist = {normalize_https_origin(origin, origin_only=True) for origin in policy.origins}\n"
+        }
+      ],
+      "expect": "URLs are checked before credentials"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "URLs checked before paths",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "    root = policy.workspace.resolve()\n",
+          "new": "    for url in request.network:\n        try:\n            if not origin_allowed(normalize_https_origin(url), {normalize_https_origin(o, origin_only=True) for o in policy.origins}):\n                return LaunchPlan(Verdict.DENY, \"network-allowlist\")\n        except ValueError:\n            return LaunchPlan(Verdict.DENY, \"network-shape\")\n    root = policy.workspace.resolve()\n"
+        }
+      ],
+      "expect": "paths are checked before URLs"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "redirect keeps every credential of the plan",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "    return Hop(Verdict.ALLOW, \"redirect-allow\", target, origin, tuple(plan.inject.get(origin, ())))\n",
+          "new": "    return Hop(Verdict.ALLOW, \"redirect-allow\", target, origin, tuple(n for names in plan.inject.values() for n in names))\n"
+        }
+      ],
+      "expect": "a redirect to another origin does not carry the credential"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "relative Location checked as written",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "    target = urljoin(url, location)\n",
+          "new": "    target = location\n"
+        }
+      ],
+      "expect": "a redirect within the origin keeps its credential"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "a Location starting with / taken as same-origin",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "    target = urljoin(url, location)\n",
+          "new": "    target = \"/\".join(url.split(\"/\")[:3]) + location if location.startswith(\"/\") else location\n"
+        }
+      ],
+      "expect": "a redirect to another origin does not carry the credential"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "redirect target not checked",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "    if not origin_allowed(origin, allowlist):\n        return Hop(",
+          "new": "    if False:\n        return Hop("
+        }
+      ],
+      "expect": "a redirect is checked like a new request"
+    },
+    {
+      "test": "test_launch_plan",
+      "name": "read roots never checked",
+      "edits": [
+        {
+          "file": "launch.py",
+          "old": "        if not _granted(root, policy.grants.get(operation, ()), target):\n",
+          "new": "        if operation != READ and not _granted(root, policy.grants.get(operation, ()), target):\n"
+        }
+      ],
+      "expect": "reads stay under the read roots"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "each chunk redacted on its own",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        self._hold = max(map(len, ordered), default=1) - 1\n",
+          "new": "        self._hold = 0\n"
+        }
+      ],
+      "expect": "secrets are redacted however the output is chunked"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "window one byte short",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        self._hold = max(map(len, ordered), default=1) - 1\n",
+          "new": "        self._hold = max(max(map(len, ordered), default=1) - 2, 0)\n"
+        }
+      ],
+      "expect": "secrets are redacted however the output is chunked"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "window sized by the shortest secret",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        self._hold = max(map(len, ordered), default=1) - 1\n",
+          "new": "        self._hold = min(map(len, ordered), default=1) - 1\n"
+        }
+      ],
+      "expect": "secrets are redacted however the output is chunked"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "secrets replaced chunk by chunk with bytes.replace",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        self._pending += chunk\n        return self._release(len(self._pending) - self._hold, final=False)\n",
+          "new": "        for secret in self._secrets:\n            chunk = chunk.replace(secret, PLACEHOLDER)\n        return chunk\n"
+        },
+        {
+          "file": "relay.py",
+          "old": "        self._pending = b\"\"\n",
+          "new": "        self._pending = b\"\"\n        self._secrets = ordered\n"
+        }
+      ],
+      "expect": "secrets are redacted however the output is chunked"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "everything held until the process exits",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        self._pending += chunk\n        return self._release(len(self._pending) - self._hold, final=False)\n",
+          "new": "        self._pending += chunk\n        return b\"\"\n"
+        }
+      ],
+      "expect": "output is forwarded while the process runs"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "held-back tail never flushed",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "            piece = limiter.take(redactor.flush())\n",
+          "new": "            piece = b\"\"\n"
+        }
+      ],
+      "expect": "secrets are redacted however the output is chunked"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "cut at the limit, inside a character",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        while cut > 0 and data[cut] & 0xC0 == 0x80:\n            cut -= 1\n",
+          "new": ""
+        }
+      ],
+      "expect": "output stops at the limit without splitting a character"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "partial characters released before the rest arrives",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        if not final:\n            end -= _partial_character(data[pos:end])\n",
+          "new": ""
+        }
+      ],
+      "expect": "output stops at the limit without splitting a character"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "marker counted toward the limit",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        self._room = limit\n",
+          "new": "        self._room = limit - len(TRUNCATED)\n"
+        }
+      ],
+      "expect": "output stops at the limit without splitting a character"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "no truncation marker",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        return data[:cut] + TRUNCATED\n",
+          "new": "        return data[:cut]\n"
+        }
+      ],
+      "expect": "output stops at the limit without splitting a character"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "output that reaches the limit counted as truncated",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "            self._room -= len(data)\n            return data\n",
+          "new": "            self._room -= len(data)\n            if self._room == 0:\n                self.truncated = True\n                return data + TRUNCATED\n            return data\n"
+        }
+      ],
+      "expect": "output of exactly limit bytes is not truncated"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "marker sent again for every later chunk",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        if self.truncated or not data:\n            return b\"\"\n",
+          "new": "        if self.truncated and data:\n            return TRUNCATED\n        if not data:\n            return b\"\"\n"
+        }
+      ],
+      "expect": "output stops at the limit without splitting a character"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "process killed once the output is truncated",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                piece = limiter.take(redactor.feed(chunk))\n                if piece:\n                    yield piece\n",
+          "new": "                piece = limiter.take(redactor.feed(chunk))\n                if piece:\n                    yield piece\n                if limiter.truncated:\n                    process.kill()\n                    break\n"
+        }
+      ],
+      "expect": "a truncated run still ends with its own exit code"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "reading stops at the limit",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                piece = limiter.take(redactor.feed(chunk))\n                if piece:\n                    yield piece\n",
+          "new": "                piece = limiter.take(redactor.feed(chunk))\n                if piece:\n                    yield piece\n                if limiter.truncated:\n                    break\n"
+        }
+      ],
+      "expect": "the relay keeps reading until the process exits"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "truncation not reported",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        self.report = RelayReport(status, exit_code, limiter.truncated)\n",
+          "new": "        self.report = RelayReport(status, exit_code, False)\n"
+        }
+      ],
+      "expect": "a truncated run still ends with its own exit code"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "timeout applied to each chunk",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                remaining = deadline - loop.time()\n",
+          "new": "                remaining = self.timeout\n"
+        }
+      ],
+      "expect": "the timeout covers the whole run, not each chunk"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "deadline checked only when a chunk arrives",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                    chunk = await asyncio.wait_for(chunks.__anext__(), remaining)\n",
+          "new": "                    chunk = await chunks.__anext__()\n"
+        }
+      ],
+      "expect": "what the process wrote before the deadline is relayed, and nothing after"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "late chunk dropped but waited for",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                    chunk = await asyncio.wait_for(chunks.__anext__(), remaining)\n",
+          "new": "                    chunk = await chunks.__anext__()\n                    if deadline - loop.time() <= 0:\n                        raise asyncio.TimeoutError\n"
+        }
+      ],
+      "expect": "the relay stops at the deadline"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "held bytes dropped at the deadline",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "            piece = limiter.take(redactor.flush())\n",
+          "new": "            piece = b\"\" if timed_out else limiter.take(redactor.flush())\n"
+        }
+      ],
+      "expect": "what the process wrote before the deadline is relayed, and nothing after"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "timed-out run reported by its exit code",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        if timed_out:\n            status = \"timed-out\"\n        elif exit_code == 0:\n",
+          "new": "        if exit_code == 0:\n"
+        }
+      ],
+      "expect": "a run that hits the timeout is killed"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "process left running after the timeout",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                    timed_out = True\n                    process.kill()\n",
+          "new": "                    timed_out = True\n"
+        }
+      ],
+      "expect": "a run that hits the timeout is killed"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "exit code 1 read as invalid input",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        elif exit_code == EXIT_INVALID_INPUT:\n",
+          "new": "        elif exit_code in (1, EXIT_INVALID_INPUT):\n"
+        }
+      ],
+      "expect": "exit code 1 is execution-failed"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "exit code 3 read as an execution failure",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        elif exit_code == EXIT_POLICY_DENIED:\n            status = \"policy-denied\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "exit code 3 is policy-denied"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "no secrets crashes the relay",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        self._hold = max(map(len, ordered), default=1) - 1\n",
+          "new": "        self._hold = max(map(len, ordered)) - 1\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "output held back until a newline",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        return self._release(len(self._pending) - self._hold, final=False)\n",
+          "new": "        newline = self._pending.rfind(b\"\\n\")\n        return self._release(newline + 1, final=False)\n"
+        }
+      ],
+      "expect": "output is forwarded while the process runs"
+    },
+    {
+      "test": "test_output_relay",
+      "name": "shorter secrets tried first",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "sorted(set(secrets), key=len, reverse=True)",
+          "new": "sorted(set(secrets), key=len)"
+        }
+      ],
+      "expect": "secrets are redacted however the output is chunked"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "stops at the first problem",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    for member in members:\n        is_dir = member.kind == \"dir\"\n",
+          "new": "    for member in members:\n        if problems:\n            break\n        is_dir = member.kind == \"dir\"\n"
+        }
+      ],
+      "expect": "every problem, member by member in archive order"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "escape checked on the raw path",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if path == \"..\" or path.startswith(\"../\"):\n",
+          "new": "        if raw == \"..\" or raw.startswith(\"../\"):\n"
+        }
+      ],
+      "expect": "every problem, member by member in archive order"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "every .. rejected, even one that stays inside",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if path == \"..\" or path.startswith(\"../\"):\n",
+          "new": "        if \"..\" in raw.split(\"/\"):\n"
+        }
+      ],
+      "expect": "a clean package has no problems"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "hard links allowed",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "LINKS = {\"symlink\", \"hardlink\"}\n",
+          "new": "LINKS = {\"symlink\"}\n"
+        }
+      ],
+      "expect": "every problem, member by member in archive order"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "only fifos and sockets are special",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "SPECIAL = {\"fifo\", \"chardev\", \"blockdev\", \"socket\"}\n",
+          "new": "SPECIAL = {\"fifo\", \"socket\"}\n"
+        }
+      ],
+      "expect": "every problem, member by member in archive order"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "directories counted toward max_files",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if not is_dir:\n            count += 1\n",
+          "new": "        count += 1\n"
+        }
+      ],
+      "expect": "a clean package has no problems"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "file size limit checked with >=",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "member.size > limits.max_file_bytes",
+          "new": "member.size >= limits.max_file_bytes"
+        }
+      ],
+      "expect": "a clean package has no problems"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "total size limit checked with >=",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    if total > limits.max_total_bytes:\n",
+          "new": "    if total >= limits.max_total_bytes:\n"
+        }
+      ],
+      "expect": "a clean package has no problems"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "file count limit checked with >=",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    if count > limits.max_files:\n",
+          "new": "    if count >= limits.max_files:\n"
+        }
+      ],
+      "expect": "a clean package has no problems"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "members with a path problem not counted",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if not is_dir:\n            count += 1\n        if member.kind == \"file\":\n            total += member.size\n",
+          "new": ""
+        },
+        {
+          "file": "archive.py",
+          "old": "        if member.kind in LINKS:\n",
+          "new": "        if not is_dir:\n            count += 1\n        if member.kind == \"file\":\n            total += member.size\n        if member.kind in LINKS:\n"
+        }
+      ],
+      "expect": "every member counts toward the limits"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "duplicates compared on raw paths",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if not is_dir and path in seen and seen[path] != \"dir\":\n",
+          "new": "        if not is_dir and raw in seen and seen[raw] != \"dir\":\n"
+        }
+      ],
+      "expect": "every problem, member by member in archive order"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "a directory listed twice reported as a duplicate",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if not is_dir and path in seen and seen[path] != \"dir\":\n",
+          "new": "        if path in seen and seen[path] == (\"dir\" if is_dir else \"other\"):\n"
+        }
+      ],
+      "expect": "a clean package has no problems"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "not-a-directory only below an earlier non-directory",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if any(seen.get(parent) == \"other\" for parent in ancestors) or (\n            seen.get(path) == (\"other\" if is_dir else \"dir\")\n        ):\n",
+          "new": "        if any(seen.get(parent) == \"other\" for parent in ancestors):\n"
+        }
+      ],
+      "expect": "a path is a file or a directory, whichever comes first"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "ancestors not checked",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if any(seen.get(parent) == \"other\" for parent in ancestors) or (\n",
+          "new": "        if False or (\n"
+        }
+      ],
+      "expect": "every problem, member by member in archive order"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "any SKILL.md counts as the entry point",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if member.kind == \"file\" and path == entry_point:\n",
+          "new": "        if member.kind == \"file\" and posixpath.basename(path) == \"SKILL.md\":\n"
+        }
+      ],
+      "expect": "the entry point is a real file"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "a linked SKILL.md counts as the entry point",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if member.kind == \"file\" and path == entry_point:\n",
+          "new": "        if path == entry_point:\n"
+        }
+      ],
+      "expect": "the entry point is a real file"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "problems sorted by path",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    return problems\n",
+          "new": "    return sorted(problems, key=lambda problem: (problem.path, problem.code))\n"
+        }
+      ],
+      "expect": "every problem, member by member in archive order"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "a member outside the package still gets its other problems",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            problems.append(Problem(\"outside-package\", raw))\n            continue\n",
+          "new": "            problems.append(Problem(\"outside-package\", raw))\n"
+        }
+      ],
+      "expect": "every problem, member by member in archive order"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "the archive root reported as outside the package",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if path == \".\" and is_dir:\n            continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "a clean package has no problems"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "the package directory itself reported as outside",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if path != name and not path.startswith(name + \"/\"):\n",
+          "new": "        if not path.startswith(name + \"/\"):\n"
+        }
+      ],
+      "expect": "a clean package has no problems"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "missing entry point reported without its path",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        problems.append(Problem(\"missing-entry-point\", entry_point))\n",
+          "new": "        problems.append(Problem(\"missing-entry-point\", \"\"))\n"
+        }
+      ],
+      "expect": "the entry point is a real file"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "archive problems before member problems",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    if count > limits.max_files:\n        problems.append(Problem(\"too-many-files\", \"\"))\n",
+          "new": ""
+        },
+        {
+          "file": "archive.py",
+          "old": "    problems: list[Problem] = []\n",
+          "new": "    problems: list[Problem] = []\n    if sum(m.kind != \"dir\" for m in members) > limits.max_files:\n        problems.append(Problem(\"too-many-files\", \"\"))\n"
+        }
+      ],
+      "expect": "every problem, member by member in archive order"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "only the direct parent checked for a non-directory",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "any(seen.get(parent) == \"other\" for parent in ancestors)",
+          "new": "(bool(ancestors) and seen.get(ancestors[-1]) == \"other\")"
+        }
+      ],
+      "expect": "every problem, member by member in archive order"
+    },
+    {
+      "test": "test_archive_check",
+      "name": "only regular files counted toward max_files",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if not is_dir:\n            count += 1\n",
+          "new": "        if member.kind == \"file\":\n            count += 1\n"
+        }
+      ],
+      "expect": "links count toward max_files like files do"
+    }
+  ]
+}

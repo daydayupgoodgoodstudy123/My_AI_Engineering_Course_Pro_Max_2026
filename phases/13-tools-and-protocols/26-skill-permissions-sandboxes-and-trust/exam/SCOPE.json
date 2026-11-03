@@ -1,0 +1,148 @@
+{
+  "lesson": "phases/13-tools-and-protocols/26-skill-permissions-sandboxes-and-trust",
+  "title": "Skill Permissions, Sandboxes, and Trust",
+  "format": "staged-brownfield",
+  "service": "SandboxPol: the lesson's non-executing reviewer and an execution gate, a content-addressed install store with reviewed upgrade plans, a structured launch planner with scoped credentials, a streaming output relay, and an archive tree check before extraction",
+  "sources": {
+    "docs/en.md": "6acf4d2930900f2c820ee96d445365a21e5bf62fead6006e6fd1638d2339d4f1",
+    "code/main.py": "5a3a950e99fe8ff94daccb88596577f7bc991b5bffa9694d451c7c342a7ff5f1",
+    "quiz/quiz.md": "3563f8afcb1b27698dcd8a3d00cab844b12a1285bff0f854bdf7a770e1dd55b8"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_review_gate",
+      "kind": "debug",
+      "lesson_anchor": "Network is an independent permission (an origin is scheme, host and effective port; :443 is the default, :8443 needs its own entry); Command policy needs structure (allowing python3 means allowing arbitrary Python); Why ask is not allow; Secret handling (pattern matching catches obvious shapes); production executor paragraph (immutable, normalized action record); code/main.py normalize_https_origin, inspect_command, contains_secret, review_action; quiz Q9 (parsed.port or 443)",
+      "planted_bugs": [
+        "origin_allowed compares urlsplit(...).hostname only, so https://api.example.test:8443 passes as https://api.example.test",
+        "normalize_https_origin writes the port only when the URL has one (and drops a falsy port 0); once origin_allowed compares whole origins, the explicit :443 request is denied in review_action, one call above the root cause, which the host-only comparison had masked",
+        "inspect_command matches the executable name only, so python3 -c and python3 -m pass an allowlist of python3 scripts/inspect_release.py",
+        "ActionGate.submit stops only deny, so a require-approval action reaches the runner",
+        "contains_secret's key=value pattern starts with an unanchored [\\w.-]* key-name prefix; on a long run of word characters, dots and dashes every start position consumes the run and backtracks, O(n^2)"
+      ],
+      "timing_assert": "review_action on a write whose payload is a 10,804-character cache key (1,200 eight-hex groups joined by dashes) plus a 4,096-character hex dump with no separators, under 0.05 s. At load average about 7, in separate processes: planted pattern 1.13-1.17 s (1.35 s inside check_traps), about 23x the limit; reference 0.39-0.59 ms, about 100x under it. Half-fixes: \\b in front of the prefix 0.24-0.34 s, a lazy prefix 1.2-1.5 s and a prefix narrowed to \\w* 0.14 s (quadratic on the hex dump) are caught; a bounded {0,64} prefix (17-22 ms) and a (?<![\\w.-]) lookbehind (0.55 ms) pass",
+      "overfix_guard": "port 0 must be invalid (the lesson's parsed.port or 443, and a default without the 1-65535 check, are caught); the canonical form keeps :443; arguments after an approved prefix are free (exact argv equality is caught) and scripts/inspect_release.py.bak is not the prefix (joined-string startswith is caught); an approved deny never runs, a plain allowed read runs, the runner gets normalized targets; DB_PASSWORD=, x-api-key:, Authorization: Bearer, OPENSSH and plain PRIVATE KEY blocks and a secret at the end of the long cache key are still found, while a sha256 digest, a certificate header and 'password reset link sent' are not (the lesson's \\b revert, removing the rule, scanning the first 4 KB, entropy and hex rules, a widened PEM rule and a dropped Bearer rule are caught)"
+    },
+    {
+      "part": 2,
+      "test": "test_install_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "Package trust begins before activation, checks 7-10: executable bits only for reviewed scripts that need them, source revision and file hashes in an installation manifest, collisions shown before overwriting, changes reviewed before upgrading; 'A hash proves bytes match a manifest. It does not prove the bytes are safe'",
+      "storage": "content-addressed files: blobs/<sha256 hex of the file's bytes> plus packages/<name>.json, a manifest of POSIX paths to sha256 and executable flag with the source revision",
+      "exactness": "the manifest reads back equal after a reopen, and a restored package matches the source byte for byte (a CRLF script without a final newline, bytes 0x00-0xFF, an empty file, the same LICENSE twice) with modes normalized to 0o755 for reviewed scripts that had an executable bit and 0o644 for everything else, from source modes 0o600, 0o640, 0o666, 0o700 and 0o775",
+      "traps": [
+        "executable bit kept for an unreviewed 0o775 script, or added to a reviewed script without one",
+        "source modes copied, full rwx/rw bits, or only the owner's x bit on restore",
+        "non-executable files left at the umask default (the restore runs under umask 0o077)",
+        "text-mode restore (bytes above 0x7f and CRLF)",
+        "absolute paths, or paths cut out of the source string with a leading slash",
+        "a blob per file, or a digest over bytes plus mode, so identical contents are stored twice",
+        "reinstalling over an installed package; FileNotFoundError instead of KeyError for an unknown one",
+        "executable bits lost when the manifest is read back",
+        "upgrade plan comparing digests only (a new executable bit is a change), leaving out removals, or listing new files as changed",
+        "planning an upgrade that installs it",
+        "upgrade reading the source again, so bytes changed after the review get installed",
+        "a plan made against another installed version applied",
+        "upgrade merging old and new manifests, so removed files come back"
+      ],
+      "clarifying_questions": [
+        "empty directories",
+        "symlinks in the source",
+        "verifying blobs on restore",
+        "the source changing between plan and upgrade",
+        "restoring into an existing directory"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_launch_plan",
+      "kind": "core algorithm",
+      "lesson_anchor": "Review actions as structured requests (actor, argv, paths, network, credentials, side_effect); Path policy must resolve reality ('Read permission does not imply write permission. Writing a new file is different from overwriting an existing one'); Secret handling is capability design (environment allowlist; inject a credential only for the intended destination); Network is an independent permission (redirects checked again before following); Approval should follow consequence (show the actual target; approval for one target is not permission for later targets); Exercises 1 and 2",
+      "traps": [
+        "every write treated as a create, or existence checked on the path as written (./out/tmp/../cache/index.json, where out/tmp does not exist)",
+        "read roots granting writes, or create roots granting overwrites; read roots not checked (.env at the workspace root is outside them)",
+        "grants matched on the unresolved path",
+        "consequences naming the requested string or the absolute path instead of the resolved workspace-relative POSIX path",
+        "side_effect read_only skipping approval",
+        "one approval covering every consequence; approved consequences dropped from the plan",
+        "consequence order (paths before credentials)",
+        "credential attached for every origin of the request, scope not checked against the request's origins, an unknown credential looked up with [], sending a credential without approval",
+        "host environment copied minus secret-looking names, host values winning over policy.env, a missing pass_env variable raising KeyError",
+        "check order (paths, then URLs, then credentials) and a denied plan carrying an environment",
+        "redirects: relative Location checked as written, a //host Location taken as same-origin, the plan's credentials carried to another origin, the target not checked against the allowlist"
+      ],
+      "integration": "inspect_command, normalize_https_origin, origin_allowed and normalize_workspace_path come from Part 1's policy.py",
+      "clarifying_questions": [
+        "overwrite implying create",
+        "a read_only side_effect that writes",
+        "listing approved consequences",
+        "credentials on redirects",
+        "directories and deletes"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_output_relay",
+      "kind": "streaming",
+      "lesson_anchor": "Scripts should be boring (bounded time and output; distinct exit codes for invalid input, policy denial and execution failure); Secret handling (redact secrets from command output); Choose the isolation boundary (restricted subprocess: environment, cwd, timeout, output)",
+      "wire_format": "raw byte stream: an async generator of the process's redacted stdout bytes, decided by the test's b''.join and exact comparison, with PLACEHOLDER for each secret and TRUNCATED once at the cut; a probe counts how many chunks the process had produced when the first piece came out",
+      "traps": [
+        "a secret split across chunks: each chunk redacted on its own, a window one byte short, a window sized by the shortest secret",
+        "a secret that is a prefix of another (pypi-placeholder, pypi-placeholder-token) tried first",
+        "output held back until a newline (the probe's output has none)",
+        "the held-back tail never flushed",
+        "a cut inside a UTF-8 character, or partial characters released before the rest arrives (1-byte chunks)",
+        "the marker counted toward the limit, missing, sent more than once, or added when the output exactly fills the limit",
+        "the process killed at the limit, or the truncation not reported",
+        "the timeout applied per chunk, the deadline checked only when a chunk arrives, held bytes dropped at the deadline",
+        "a timed-out run reported by its exit code, or left running",
+        "exit codes 1 and 3 mapped wrong",
+        "no secrets crashing max()"
+      ],
+      "clarifying_questions": [
+        "the marker and the limit",
+        "killing at the limit",
+        "held bytes at the deadline",
+        "overlapping secrets",
+        "invalid UTF-8",
+        "the exit code of a killed process"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_archive_check",
+      "kind": "tree",
+      "lesson_anchor": "Package trust begins before activation, checks 1-6: exactly one entry point at the expected location, package name and destination, absolute paths and .. traversal, symlinks forbidden (this host's choice), special files, file count and sizes; 'An installer should inspect the complete directory tree before copying it'",
+      "traps": [
+        "stopping at the first problem, sorting problems, or putting archive problems first",
+        "escape checked on the raw path (release-readiness/../../home/...), or every .. rejected (scripts/../README.md stays inside)",
+        "the archive root ./ or the package directory itself reported as outside the package",
+        "a member with a path problem given other problems too",
+        "hard links allowed; character devices not special",
+        "directories counted toward max_files; >= instead of > at the three limits; members with problems not counted",
+        "duplicates compared on raw paths, or a directory listed twice reported as a duplicate",
+        "not-a-directory checked in one direction only, or ancestors not checked, or only the direct parent (lib/ssl/libssl.so below the symlink lib)",
+        "only regular files counted toward max_files (one file plus five symlinks)",
+        "any SKILL.md, or a symlinked SKILL.md, taken as the entry point; the missing entry point reported without its path"
+      ],
+      "clarifying_questions": [
+        "stopping at the first problem",
+        ".. that stays inside the package",
+        "directories and the file count",
+        "symlinks pointing inside the package",
+        "a directory listed twice",
+        "rejected members and the limits"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1 has five planted defects instead of four. The suggested origin defect is split into two that mask each other: origin_allowed compares hosts only (so :8443 passes), and once it compares whole origins, normalize_https_origin's missing default port denies the explicit :443 request one call above the bug. The gate is a small module of its own (gate.py), because the lesson's code has no executor; it follows the lesson's 'immutable action record' paragraph. The backtracking is quadratic rather than exponential: an unanchored [\\w.-]* key-name prefix that a boolean search does not need. That keeps the slow version near one second on a 10.8 KB line, with about 23x and 100x margins; an exponential pattern would go from milliseconds to minutes within a few characters. A 4 KB hex dump with no separators follows the cache key, so narrowing the prefix to \\w* (dashes taken for the culprit) is still quadratic and caught. Port 0 is added to the guards from quiz Q9.",
+    "Part 2: 'restore verifies digests and refuses a modified blob' is not featured. Lessons 05 and 14 of this chapter already test that trap ('no digest check on load', 'blob served without checking its digest'), and a trap kind may appear at most twice per chapter; the reference still verifies on restore, and the interviewer asks about it. 'Kept in memory only' is not featured either (05 and 15); the reopen is still part of the round trip. In their place come checks 9 and 10 as an upgrade plan: a mode-only change shown as a collision, the upgrade installing the reviewed bytes although the source changed after review, and a plan made against another installed version refused. 'Paths without . and ..' becomes the key-set check, because the store walks a real directory where . and .. cannot appear; lexical normalization is Part 5's.",
+    "Part 3: no symlinks and no string-prefix sibling case. The chapter plan keeps symlinks to Part 5 in this lesson, and string-prefix containment is already used twice in lesson 12; it stays an interviewer follow-up. 'Resolve reality' is tested through ./out/tmp/../cache/index.json: existence, grants and the displayed target all come from the resolved path. Operations are read, create and overwrite (no delete). Credentials are attached per origin by an egress proxy, from the lesson's proxy-mediated network policy, so the process never sees them. Redirects are a single-hop check, follow_redirect, not a redirect chain, which is lesson 16's Part 5. side_effect is added as a self-description that never lowers the review, the launch-side counterpart of claimed_permissions.",
+    "Part 4: the secrets are the exact values the host injected, not patterns, so the cross-chunk window has a bound (longest secret minus one byte). The output limit counts redacted bytes; after the cut the relay keeps reading so that the exit code still means something; at the deadline it flushes what arrived before it. The probe that the first piece comes out before the process ends is the chapter's usual streaming check, not counted as a trap of its own.",
+    "Part 5 adds tree checks to the suggested ones: duplicates after normalization, file/directory conflicts in both orders (including a file below a symlink), and a second SKILL.md. Every member counts toward the limits, rejected or not. Member modes are carried but not checked here; they are Part 2's concern.",
+    "Facts used beyond docs/en.md: exit codes 2 (invalid input) and 3 (policy denial), the [REDACTED] placeholder and the truncation marker text, the egress-proxy injection model, the archive member kinds (tar's file, dir, symlink, hardlink, fifo, chardev, blockdev, plus socket from directory scans) and the problem codes are this exam's own; the port-0 case comes from the lesson's quiz Q9 and the read/create/overwrite split from quiz Q12 and Exercise 1."
+  ]
+}
