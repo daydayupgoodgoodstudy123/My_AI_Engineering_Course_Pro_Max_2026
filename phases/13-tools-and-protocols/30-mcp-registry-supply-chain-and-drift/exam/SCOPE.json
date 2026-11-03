@@ -1,0 +1,146 @@
+{
+  "lesson": "phases/13-tools-and-protocols/30-mcp-registry-supply-chain-and-drift",
+  "title": "MCP Registry Supply Chain: Admission, Drift, and Rollback",
+  "format": "staged-brownfield",
+  "service": "regadmit: the admission controller between an MCP Registry sync and the route table, with the lesson's evidence helpers and hash-chained admission ledger, the ledger kept as a JSON-lines file and checked against a head anchored in a separate trust domain, the seven-control admission decision with a layered pin, a reconciler that judges Registry, artifact and live observations as they arrive and streams NDJSON verdicts, and rollback decided from a fold of the ledger",
+  "sources": {
+    "docs/en.md": "734698d661d450db141c54509144cf914443f3b335e4b18a14d175bad520d60b",
+    "code/main.py": "e9c29231178868e137019a8c4221110484b858096557a965fd425b37fd86d782",
+    "code/tests/test_main.py": "87cc692eefeec2d2c9e701523dfc21ce0dde5da8e5334a3c977806c86d1314d8",
+    "quiz/quiz.md": "14e3d2b92160064be385003fbea2c28a7860cb43c58d548118b50ecda109b1f2"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_evidence_and_ledger",
+      "kind": "debug",
+      "lesson_anchor": "Registry status is live state (the response-level _meta['io.modelcontextprotocol.registry/official'].status; a direct _meta.status is not the official wire shape; do not let a publisher set its own official status); Namespace verification (pass the verified namespace from the authentication result, do not derive trust from the record; split at /, non-empty slug, exact comparison); Live drift detection (normalize only fields whose order has no meaning, do not discard descriptor fields, new annotations change the pin); Append an admission ledger; code/main.py registry_status, namespace_matches, normalized_tools and AdmissionLedger",
+      "planted_bugs": [
+        "registry_status returns api_meta.get('status', 'active'): it reads a plain _meta.status instead of the official block and defaults to active, so deprecated and deleted versions read as active and a spoofed plain status is believed; the test sees it one call up, as listed_version's Listing.status",
+        "listed_version passes its local namespace (the part of the record's own name before /) to namespace_matches instead of verified_namespace, so every record vouches for itself and org.attacker/inventory sits inside com.example",
+        "normalized_tools indexes the descriptors by name to sort them, so of two descriptors under one name only the last one sent is hashed: a shadowing descriptor sent ahead of the pinned one leaves the digest unchanged; it shows through toolset_digest",
+        "AdmissionLedger.head returns the newest entry's previousHash instead of its entryHash, and append takes its link from head(), so the second entry links to GENESIS; the failure surfaces one append later, as head() raising LedgerError: ledger does not verify, while verify() itself is right",
+        "append takes its sequence and link from head(), which verifies the whole chain from the genesis entry, so every append is O(n) and filling the ledger is quadratic"
+      ],
+      "timing_assert": "1,000 appends under 0.1 s. Measured on this machine at load average 5 to 7: the head()-per-append version 1.26-1.63 s (12.6x the limit or more; 2.35 s once inside a checker run at a busier moment), the fixed version a median of 7.0-8.4 ms (11.9x under the limit or more); single fixed runs reach 10-20 ms under load, about one run in ten above 1/8 of the limit, still 5x under it",
+      "overfix_guard": "entry 401 of the 1,000-entry ledger is changed: verify() must be False and head() must raise LedgerError, which rules out verifying only the newest link, a head() that skips verification and a head() that caches the length it last verified; no official status, a plain _meta.status and an official status written into the record's own _meta all stay out, which rules out a default of active, a plain-status fallback and merging the record's _meta over the response metadata; Listing.namespace stays the namespace the record claims, which rules out fixing the namespace by overwriting it with the verified one; new annotations, a new title field, a shadowing descriptor, two descriptors with one name in either order, a tool without a name and a golden toolsetDigest pin the normalization to the lesson's (sort by name, then canonical JSON, every descriptor and every field kept, nested lists untouched), which rules out cutting descriptors to a field list, sorting by name only, tool['name'], sorting by canonical JSON alone and sorting the lists inside descriptors"
+    },
+    {
+      "part": 2,
+      "test": "test_ledger_file",
+      "kind": "model and persistence",
+      "lesson_anchor": "Append an admission ledger (sequence, time, event, server, version, outcome, reasons, evidence, previous entry hash and its own hash; changing an older outcome breaks that entry and every later link; tamper-evident, not tamper-proof; anchor periodic ledger heads in a separate trust domain); Production Failure Modes ('Ledger verifies locally after an attacker rewrites all entries: publish signed ledger heads to a separate trust domain'); quiz Q17 (a cut-off tail still verifies)",
+      "storage": "an append-only JSON-lines file, one entry per line, written as each entry is made; the head (sequence, entryHash) is kept outside the file and passed back in as anchor",
+      "exactness": "entries read back field for field after a reopen (a whole pin as evidence, a None, a reason with ü and German quotes, reasons passed in as a tuple), every line's entryHash reproduces as digest() of its other nine fields, and appends after the reopen continue the same chain (sequence 6, previousHash equal to the anchored hash); the anchored (sequence, entryHash) still names the same entry after the ledger grows",
+      "traps": [
+        "the anchor ignored, so a chain with its newest entries cut off opens",
+        "the anchor compared with the current head, so a ledger that grew after the anchor was taken is refused",
+        "the anchor checked by length only, so a chain rewritten after a change (every later hash recomputed) opens",
+        "the anchored entry looked up without a bounds check (IndexError instead of LedgerError on a cut-off file)",
+        "a missing file opened as empty before the anchor is checked",
+        "the file trusted on reopen, or a ledger that does not verify opened as empty",
+        "the chain verified only when no anchor is given, so an anchored file with a changed middle line opens",
+        "sequence numbers counted per open, so a reopened ledger starts a new chain"
+      ],
+      "clarifying_questions": [
+        "where the anchor is kept",
+        "a torn last line",
+        "two writers",
+        "an anchor after the ledger grows"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_admission_controls",
+      "kind": "core algorithm",
+      "lesson_anchor": "Seven Controls in One Admission Decision: 1 namespace verification; 2 provenance join (package registry type, identifier, version, verified ownership result and downloaded digest; the declared transport; a record with only a remote is valid; a remote joins on URL and transport; never accept a digest supplied only by the artifact, calculate it at a trusted fetch boundary or receive it from a package service whose verification result you validate); 3 pin the decision (^1.4 is not a pin, neither is latest; recordDigest, sourceDigest, toolsetDigest, provenanceDigest and status; semver recommended but not required); 4 live checks at admission (2026-07-28 in supportedVersions, required capabilities present, descriptor identity and schema surface; serverInfo is diagnostic only, a direct serverInfo alias is not promoted); 5 Registry status; the Registry schema version and the MCP protocol version are independent",
+      "traps": [
+        "a range resolved against the record (^1.0 admitting 1.0.0)",
+        "requested compared with the record and nothing more, so a record whose own version is latest, ^1.4 or >=1.4.0 pins itself; range syntax spotted by ^ alone",
+        "semantic versions required (2026-11-01 is an exact version)",
+        "requested compared with the package version, or the evidence's version joined against the record's (a 1.0.1 record around the 1.0.0 package)",
+        "the package found by identifier first, as code/main.py does, so a record that lists the npm package first never joins the PyPI evidence",
+        "record['packages'] read before the source kind is known, or a record without packages refused",
+        "remote URLs compared as written (https://MCP.Example.COM:443/mcp), or only the record's URL normalized",
+        "two unusable remote URLs joining because both normalize to None (a plain http remote)",
+        "ownership checked for packages only, or verified checked by truthiness (\"false\" is a string)",
+        "any digest accepted, a digest refused only when the artifact supplied it, or only fetched digests trusted",
+        "the namespace checked on serverInfo, or the pin named after it",
+        "capabilities checked by truthiness ({} declares a capability), read without a default, or a list of names accepted",
+        "only the first supported version read, supportedVersions read without a default, or a string holding 2026-07-28 accepted",
+        "a whitespace description or name accepted",
+        "reasons sorted by name instead of CONTROLS order, or the digest skipped once the source fails",
+        "toolsetDigest of the list as sent, provenance without the Registry source, or the verifier's fields copied into the pinned source"
+      ],
+      "integration": "the given AdmissionController records both decisions in Part 1's AdmissionLedger (the pin as the approval's evidence, ['version'] for a requested ^1.1) and routes new work to the admitted version",
+      "clarifying_questions": [
+        "admitting a version twice",
+        "a record with a package and a remote",
+        "several failed controls",
+        "a floating package version",
+        "serverInfo that disagrees with the record"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_reconcile_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Pin the decision, not only the version (a record digest change under the same Registry version is a Registry integrity failure, a source digest change under the same package coordinate or remote deployment is an execution-source integrity failure, a toolset digest change is runtime drift); Live drift detection (malformed descriptors and any digest change are drift: quarantine, remove the active route, block the pin as a rollback target; a list-order change is not drift); Registry status is live state (sync after admission; deprecated or deleted quarantines and stops new work; keep the evidence); Production Failure Modes (deleted record disappears from default sync; evidence contains bearer tokens or tool arguments: redact at collection time and store only the minimum proof)",
+      "wire_format": "NDJSON: the yielded chunks joined end with a newline and split on \\n into one JSON object per observation, {seq, server, version, check, layers, verdict, active}, decided by the test's endswith, split and json.loads",
+      "traps": [
+        "the tool list hashed in arrival order, so a reordered list reads as drift",
+        "a quarantine that drops the server's route whatever version is active",
+        "only deleted quarantining (deprecated keeps taking new work)",
+        "a clean observation lifting the quarantine",
+        "pins looked up without a default (KeyError for a version never admitted)",
+        "a deleted version's pin thrown away",
+        "drift judged by the toolset digest alone, so a server that dropped 2026-07-28 passes",
+        "a malformed tool list hashed anyway (AttributeError on None)",
+        "the observation, with its probe's Authorization header and tools/call arguments, kept as evidence",
+        "every observation read before the first verdict",
+        "a verdict yielded before its ledger entry is written",
+        "the active version read before the quarantine is applied",
+        "the quarantine written into the pin, which is evidence",
+        "the live checks run with the default capabilities instead of the required ones given"
+      ],
+      "clarifying_questions": [
+        "observations of versions never admitted",
+        "a deprecated version that turns active again",
+        "two layers in one observation",
+        "health checks",
+        "probe request data"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_rollback_from_history",
+      "kind": "history fold (replaces the nested-structure part)",
+      "lesson_anchor": "Rollback means route restoration (select a previously admitted, currently eligible pin and change the active route; a completed admission record, an active Registry status, not quarantined, current health checks; an immutable publication is not edited); Use It (make rollout state explicit: approved, active, quarantined, superseded); Operational Rule (make rollback choose evidence rather than memory); Production Failure Modes ('Rollback target was never admitted: refuse rollback')",
+      "traps": [
+        "rollback entries ignored by fold, so a rollback after a rollback starts from the wrong route",
+        "a rollback entry moving the route whatever its outcome (a rejected rollback to 0.9.0 in the history)",
+        "a rejected admission still taking the route (1.3.0 in the history)",
+        "a quarantine that keeps the route, or one that clears every server's route on the same version string",
+        "only registry-sync quarantining (a live-check quarantine is missed)",
+        "the target's admission found by version alone, so another server's admission of the same number counts",
+        "the health check asked before the ledger rules, or for every target",
+        "rejected rollbacks not recorded"
+      ],
+      "clarifying_questions": [
+        "rolling back to the active version",
+        "rolling forward to a newer admitted version",
+        "from when nothing is active",
+        "recording rejected rollbacks"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the suggested defects are here (status key, namespace from the record, append verifying from genesis), plus head() returning previousHash, which makes the error surface one append away from its cause as LedgerError from a correct verify(). The suggested 'normalized_tools drops fields' defect is a wrong fix here instead (new annotations and a new title catch it), because lesson 15's Part 1 already plants a digest over a subset of descriptor fields; the planted normalization defect is descriptors keyed by name, which drops a shadowing descriptor under a pinned name (the lesson: a new tool changes the pin; only the order of the list is normalized). The suggested 5,000 appends would take about 35 s quadratic on this machine, so the timing case is 1,000 appends (1.3-1.6 s against about 7 ms). The namespace defect is listed_version passing the record's own namespace to namespace_matches; namespace_matches stays as in the lesson, and no lookalike prefix such as com.exampleevil is tested (that trap belongs to lessons 12 and 24), only the subdomain case com.example.docs and the empty slug.",
+    "Part 2: 'no tokens or tool arguments in evidence' moved to Part 4, where evidence is collected (the lesson: redact at collection time and store only the minimum proof); a key-name filter inside the ledger would repeat lesson 17's scrubbing traps. 'entryHash covers every other field' is checked on every line, but a digest over a subset of fields is not a separate wrong fix, because lesson 15 and this pack's Part 1 already use that trap class. No multi-writer or torn-tail traps: chapter 13 already has them twice each.",
+    "Part 3: 'latest and ^1.4 are not pins' is the requested version, which must be exact and equal the record's version character for character; a record whose own version floats is refused as well. 'A digest supplied only by the artifact' is modeled as evidence['digestFrom'] in fetch, package-service or artifact, the lesson's two acceptable sources and the one it rejects. The live checks are live_failures(), shared with Part 4. The ledger append for a decision happens in the given AdmissionController, so decide() stays a pure function.",
+    "Part 4: health checks moved to Part 5, where rollback asks for the current health of a target; an artifact re-fetch observation was added so the execution-source layer has its own evidence. Quarantine is a set of (server, version) pairs in RouteState; the layers that caused it stay in the ledger.",
+    "Part 5: the lesson has no tree, so as planned rollback is decided from a fold of the ledger. The explicit rollout states from Use It are given in RouteState.state_of and checked on the fold. Re-admitting a quarantined version is not covered (the lesson says a changed record needs a new version); the interviewer asks about it.",
+    "Facts used beyond docs/en.md: the listing item shape {server, _meta} (the lesson: a response-level _meta object beside each server record); remote header declarations with isSecret and the HTTPS URL normalization come from this lesson's code/main.py and its tests. digestFrom, RANGE_CHARACTERS, the control and rule codes, the ledger event and outcome names and the verdict fields are this pack's own vocabulary, stated in docstrings."
+  ]
+}

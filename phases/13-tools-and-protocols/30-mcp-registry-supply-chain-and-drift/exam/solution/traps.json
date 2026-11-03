@@ -1,0 +1,1054 @@
+{
+  "package": "regadmit",
+  "tests": [
+    "test_evidence_and_ledger",
+    "test_ledger_file",
+    "test_admission_controls",
+    "test_reconcile_stream",
+    "test_rollback_from_history"
+  ],
+  "layers": [
+    {
+      "test": "test_evidence_and_ledger",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "the status is the one the Registry manages"
+        },
+        {
+          "name": "read the official status",
+          "edits": [
+            {
+              "file": "evidence.py",
+              "old": "    return str(api_meta.get(\"status\", \"active\"))\n",
+              "new": "    official = api_meta.get(OFFICIAL_META_KEY) if isinstance(api_meta, dict) else None\n    status = official.get(\"status\") if isinstance(official, dict) else None\n    return status if isinstance(status, str) else \"\"\n"
+            }
+          ],
+          "expect": "the namespace comes from the publisher's authentication"
+        },
+        {
+          "name": "+ check the verified namespace",
+          "edits": [
+            {
+              "file": "evidence.py",
+              "old": "in_namespace=namespace_matches(name, namespace),",
+              "new": "in_namespace=namespace_matches(name, verified_namespace),"
+            }
+          ],
+          "expect": "a second descriptor under a pinned name is a change"
+        },
+        {
+          "name": "+ keep every descriptor, same-named ones too",
+          "edits": [
+            {
+              "file": "evidence.py",
+              "old": "    by_name = {str(tool.get(\"name\", \"\")): tool for tool in tools}\n    return [by_name[name] for name in sorted(by_name)]\n",
+              "new": "    return sorted(tools, key=lambda tool: (str(tool.get(\"name\", \"\")), canonical_json(tool)))\n"
+            }
+          ],
+          "expect": "LedgerError"
+        },
+        {
+          "name": "+ head is the newest entryHash",
+          "edits": [
+            {
+              "file": "ledger.py",
+              "old": "return newest[\"sequence\"], newest[\"previousHash\"]",
+              "new": "return newest[\"sequence\"], newest[\"entryHash\"]"
+            }
+          ],
+          "expect": "append should stay fast on a long ledger"
+        },
+        {
+          "name": "+ append links to the newest entry without verifying the chain",
+          "edits": [
+            {
+              "file": "ledger.py",
+              "old": "        sequence, previous = self.head()\n",
+              "new": "        sequence = len(self.entries)\n        previous = self.entries[-1][\"entryHash\"] if self.entries else GENESIS\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_evidence_and_ledger",
+      "name": "verify checks only the newest link",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        previous = GENESIS\n        for expected, entry in enumerate(self.entries, start=1):\n",
+          "new": "        previous = self.entries[-2][\"entryHash\"] if len(self.entries) > 1 else GENESIS\n        for expected, entry in list(enumerate(self.entries, start=1))[-1:]:\n"
+        }
+      ],
+      "expect": "changing an old entry breaks verification"
+    },
+    {
+      "test": "test_evidence_and_ledger",
+      "name": "head() without verifying, to keep append fast",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        if not self.verify():\n            raise LedgerError(\"ledger does not verify\")\n        if not self.entries:\n            return 0, GENESIS\n",
+          "new": "        if not self.entries:\n            return 0, GENESIS\n"
+        }
+      ],
+      "expect": "a broken chain has no head to anchor"
+    },
+    {
+      "test": "test_evidence_and_ledger",
+      "name": "a missing official status read as active",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "    return status if isinstance(status, str) else \"\"\n",
+          "new": "    return status if isinstance(status, str) else \"active\"\n"
+        }
+      ],
+      "expect": "a version the Registry gives no status has none"
+    },
+    {
+      "test": "test_evidence_and_ledger",
+      "name": "plain _meta.status as a fallback",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "    status = official.get(\"status\") if isinstance(official, dict) else None\n",
+          "new": "    status = official.get(\"status\") if isinstance(official, dict) else api_meta.get(\"status\")\n"
+        }
+      ],
+      "expect": "a plain _meta.status is not the Registry's"
+    },
+    {
+      "test": "test_evidence_and_ledger",
+      "name": "the record's own _meta merged over the response metadata",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "status=registry_status(item.get(\"_meta\", {})),",
+          "new": "status=registry_status({**item.get(\"_meta\", {}), **record.get(\"_meta\", {})}),"
+        }
+      ],
+      "expect": "a publisher cannot set its own status"
+    },
+    {
+      "test": "test_evidence_and_ledger",
+      "name": "descriptors cut to name, description, inputSchema and annotations",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "    return sorted(tools, key=lambda tool: (str(tool.get(\"name\", \"\")), canonical_json(tool)))\n",
+          "new": "    kept = [{k: t[k] for k in (\"name\", \"description\", \"inputSchema\", \"annotations\") if k in t} for t in tools]\n    return sorted(kept, key=lambda tool: (str(tool.get(\"name\", \"\")), canonical_json(tool)))\n"
+        }
+      ],
+      "expect": "every descriptor field counts"
+    },
+    {
+      "test": "test_evidence_and_ledger",
+      "name": "tools sorted by name only",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "key=lambda tool: (str(tool.get(\"name\", \"\")), canonical_json(tool))",
+          "new": "key=lambda tool: str(tool.get(\"name\", \"\"))"
+        }
+      ],
+      "expect": "any order of the same descriptors gives one digest"
+    },
+    {
+      "test": "test_evidence_and_ledger",
+      "name": "tools sorted by tool['name']",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "key=lambda tool: (str(tool.get(\"name\", \"\")), canonical_json(tool))",
+          "new": "key=lambda tool: (tool[\"name\"], canonical_json(tool))"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_evidence_and_ledger",
+      "name": "tool list hashed as it arrives",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "    return digest(normalized_tools(tools))\n",
+          "new": "    return digest(list(tools))\n"
+        }
+      ],
+      "expect": "the order of the tool list is not a change"
+    },
+    {
+      "test": "test_evidence_and_ledger",
+      "name": "tools sorted by canonical JSON alone",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "key=lambda tool: (str(tool.get(\"name\", \"\")), canonical_json(tool))",
+          "new": "key=canonical_json"
+        }
+      ],
+      "expect": "the digest matches the toolsetDigest already pinned for this tool set"
+    },
+    {
+      "test": "test_evidence_and_ledger",
+      "name": "lists inside descriptors sorted too",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "    return sorted(tools, key=lambda tool: (str(tool.get(\"name\", \"\")), canonical_json(tool)))\n",
+          "new": "    def settle(value):\n        if isinstance(value, dict):\n            return {key: settle(item) for key, item in value.items()}\n        if isinstance(value, list):\n            return sorted((settle(item) for item in value), key=canonical_json)\n        return value\n    return sorted((settle(tool) for tool in tools), key=lambda tool: (str(tool.get(\"name\", \"\")), canonical_json(tool)))\n"
+        }
+      ],
+      "expect": "the digest matches the toolsetDigest already pinned for this tool set"
+    },
+    {
+      "test": "test_evidence_and_ledger",
+      "name": "descriptors cut to name, description and inputSchema",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "    return sorted(tools, key=lambda tool: (str(tool.get(\"name\", \"\")), canonical_json(tool)))\n",
+          "new": "    kept = [{k: t.get(k) for k in (\"name\", \"description\", \"inputSchema\")} for t in tools]\n    return sorted(kept, key=lambda tool: (str(tool[\"name\"]), canonical_json(tool)))\n"
+        }
+      ],
+      "expect": "new annotations change the toolset digest"
+    },
+    {
+      "test": "test_evidence_and_ledger",
+      "name": "head() caches the verified length, to keep append fast",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        if not self.verify():\n            raise LedgerError(\"ledger does not verify\")\n",
+          "new": "        if len(self.entries) != getattr(self, \"_verified\", -1) and not self.verify():\n            raise LedgerError(\"ledger does not verify\")\n        self._verified = len(self.entries)\n"
+        }
+      ],
+      "expect": "a broken chain has no head to anchor"
+    },
+    {
+      "test": "test_evidence_and_ledger",
+      "name": "the claimed namespace replaced by the verified one",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "    namespace = name.partition(\"/\")[0]\n",
+          "new": "    namespace = verified_namespace\n"
+        }
+      ],
+      "expect": "the namespace the record claims is still what the record says"
+    },
+    {
+      "test": "test_ledger_file",
+      "name": "anchor ignored",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        if anchor is not None:\n            self._check_anchor(anchor)\n",
+          "new": ""
+        }
+      ],
+      "expect": "an anchored head catches a cut-off tail"
+    },
+    {
+      "test": "test_ledger_file",
+      "name": "anchor compared with the current head",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "            held = 0 < sequence <= len(self.entries) and self.entries[sequence - 1][\"entryHash\"] == entry_hash\n",
+          "new": "            held = bool(self.entries) and (sequence, entry_hash) == (len(self.entries), self.entries[-1][\"entryHash\"])\n"
+        }
+      ],
+      "expect": "an anchor still holds after the ledger grows"
+    },
+    {
+      "test": "test_ledger_file",
+      "name": "anchor checked by length only",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "            held = 0 < sequence <= len(self.entries) and self.entries[sequence - 1][\"entryHash\"] == entry_hash\n",
+          "new": "            held = sequence <= len(self.entries)\n"
+        }
+      ],
+      "expect": "an anchored head catches a rewritten chain"
+    },
+    {
+      "test": "test_ledger_file",
+      "name": "anchored entry looked up without a bounds check",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "            held = 0 < sequence <= len(self.entries) and self.entries[sequence - 1][\"entryHash\"] == entry_hash\n",
+          "new": "            held = self.entries[sequence - 1][\"entryHash\"] == entry_hash\n"
+        }
+      ],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_ledger_file",
+      "name": "a missing file opens as empty before the anchor is checked",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        if self.path.exists():\n            self.entries = _read_entries(self.path)\n",
+          "new": "        if not self.path.exists():\n            return\n        self.entries = _read_entries(self.path)\n"
+        }
+      ],
+      "expect": "a missing ledger cannot hold its anchor"
+    },
+    {
+      "test": "test_ledger_file",
+      "name": "the file trusted on reopen",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        if not self.verify():\n            raise LedgerError(f\"{self.path} does not verify\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a changed field breaks the chain"
+    },
+    {
+      "test": "test_ledger_file",
+      "name": "sequence numbers counted per open",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        entry = super().append(event, server, version, outcome, reasons, evidence)\n",
+          "new": "        self.written = getattr(self, \"written\", 0) + 1\n        body = {\n            \"sequence\": self.written,\n            \"time\": self.clock(),\n            \"event\": event,\n            \"server\": server,\n            \"version\": version,\n            \"outcome\": outcome,\n            \"reasons\": list(reasons),\n            \"evidence\": deepcopy(evidence),\n            \"previousHash\": self.entries[-1][\"entryHash\"] if self.entries else GENESIS,\n        }\n        entry = {**body, \"entryHash\": digest(body)}\n        self.entries.append(entry)\n"
+        }
+      ],
+      "expect": "a reopened ledger continues its chain"
+    },
+    {
+      "test": "test_ledger_file",
+      "name": "a ledger that does not verify opened as empty",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        if not self.verify():\n            raise LedgerError(f\"{self.path} does not verify\")\n",
+          "new": "        if not self.verify():\n            self.entries = []\n"
+        }
+      ],
+      "expect": "a changed field breaks the chain"
+    },
+    {
+      "test": "test_ledger_file",
+      "name": "the chain verified only when no anchor is given",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        if not self.verify():\n            raise LedgerError(f\"{self.path} does not verify\")\n",
+          "new": "        if anchor is None and not self.verify():\n            raise LedgerError(f\"{self.path} does not verify\")\n"
+        }
+      ],
+      "expect": "an anchor does not replace verifying the chain"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "a range resolved against the record",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "    if not _exact(requested) or requested != listing.version:\n",
+          "new": "    if not listing.version.startswith(requested.lstrip(\"^~\")):\n"
+        }
+      ],
+      "expect": "a range selects a version, it does not pin one"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "requested compared with the record, nothing more",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "    if not _exact(requested) or requested != listing.version:\n",
+          "new": "    if requested != listing.version:\n"
+        }
+      ],
+      "expect": "latest is never a pin, even when the record says so"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "only latest refused",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "        and not any(character in RANGE_CHARACTERS for character in version)\n",
+          "new": ""
+        }
+      ],
+      "expect": "^1.4 is never a pin, even when the record says so"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "range syntax spotted by ^ alone",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "        and not any(character in RANGE_CHARACTERS for character in version)\n",
+          "new": "        and \"^\" not in version\n"
+        }
+      ],
+      "expect": ">=1.4.0 is never a pin, even when the record says so"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "semantic versions required",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "        and not any(character in RANGE_CHARACTERS for character in version)\n",
+          "new": "        and not any(character in RANGE_CHARACTERS for character in version)\n        and version.count(\".\") == 2\n        and all(part.isdigit() for part in version.split(\".\"))\n"
+        }
+      ],
+      "expect": "the Registry does not require semantic versions"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "a digest refused only when the artifact supplied it",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": " or evidence.get(\"digestFrom\") not in TRUSTED_DIGEST_SOURCES:",
+          "new": " or evidence.get(\"digestFrom\") == \"artifact\":"
+        }
+      ],
+      "expect": "a digest of unknown origin proves nothing"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "supportedVersions read without a default",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "    supported = live.get(\"supportedVersions\")\n",
+          "new": "    supported = live[\"supportedVersions\"]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "requested compared with the package version",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "    if not _exact(requested) or requested != listing.version:\n",
+          "new": "    if not _exact(requested) or requested != evidence.get(\"version\"):\n"
+        }
+      ],
+      "expect": "the Registry version and the package version are separate"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "the evidence's version joined against the record's version",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "            declared = (package.get(\"registryType\"), package.get(\"identifier\"), package.get(\"version\"))\n",
+          "new": "            declared = (package.get(\"registryType\"), package.get(\"identifier\"), record.get(\"version\"))\n"
+        }
+      ],
+      "expect": "the Registry version and the package version are separate"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "capabilities read without a default",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "    capabilities = live.get(\"capabilities\")\n",
+          "new": "    capabilities = live[\"capabilities\"]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "package found by identifier first, as in the lesson code",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "        for package in record.get(\"packages\") or []:\n            transport = package.get(\"transport\") or {}\n            declared = (package.get(\"registryType\"), package.get(\"identifier\"), package.get(\"version\"))\n            if declared == wanted and transport.get(\"type\") == evidence.get(\"transportType\"):\n                return {\"kind\": \"package\", **deepcopy(package)}\n",
+          "new": "        package = next((p for p in record.get(\"packages\") or [] if p.get(\"identifier\") == wanted[1]), None)\n        if package is not None:\n            transport = package.get(\"transport\") or {}\n            declared = (package.get(\"registryType\"), package.get(\"identifier\"), package.get(\"version\"))\n            if declared == wanted and transport.get(\"type\") == evidence.get(\"transportType\"):\n                return {\"kind\": \"package\", **deepcopy(package)}\n"
+        }
+      ],
+      "expect": "a package joins on registryType, identifier and version together"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "packages read before the source kind is known",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "    kind = evidence.get(\"kind\")\n    if kind == \"package\":\n",
+          "new": "    kind = evidence.get(\"kind\")\n    packages = record[\"packages\"]\n    if kind == \"package\":\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "a record without packages refused",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "    if source is None or evidence.get(\"verified\") is not True:\n",
+          "new": "    if source is None or evidence.get(\"verified\") is not True or not record.get(\"packages\"):\n"
+        }
+      ],
+      "expect": "a record with only a remote is complete"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "ownership checked for packages only",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "    if source is None or evidence.get(\"verified\") is not True:\n",
+          "new": "    if source is None or (source[\"kind\"] == \"package\" and evidence.get(\"verified\") is not True):\n"
+        }
+      ],
+      "expect": "the evidence must join a declared remote whose ownership was verified"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "remote URLs compared as written",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "and normalize_https_remote_url(remote.get(\"url\")) == url",
+          "new": "and remote.get(\"url\") == evidence.get(\"url\")"
+        }
+      ],
+      "expect": "a record with only a remote is complete"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "any digest accepted",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": " or evidence.get(\"digestFrom\") not in TRUSTED_DIGEST_SOURCES:",
+          "new": ":"
+        }
+      ],
+      "expect": "a digest the artifact gives about itself proves nothing"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "only fetched digests trusted",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "TRUSTED_DIGEST_SOURCES = (\"fetch\", \"package-service\")",
+          "new": "TRUSTED_DIGEST_SOURCES = (\"fetch\",)"
+        }
+      ],
+      "expect": "a validated package service's digest counts"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "namespace checked on serverInfo",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "    if not listing.in_namespace:\n",
+          "new": "    if not str((reported_server_info(live) or {}).get(\"name\", \"\")).startswith(verified_namespace + \"/\"):\n"
+        }
+      ],
+      "expect": "identity comes from the record and the verified namespace, never from serverInfo"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "pin named after serverInfo",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "    pin = {\n        \"server\": listing.name,\n        \"version\": listing.version,\n",
+          "new": "    reported = reported_server_info(live) or {}\n    pin = {\n        \"server\": reported.get(\"name\", listing.name),\n        \"version\": reported.get(\"version\", listing.version),\n"
+        }
+      ],
+      "expect": "serverInfo is diagnostic and names nothing"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "capabilities checked by truthiness",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "any(name not in capabilities for name in required_capabilities)",
+          "new": "not all(capabilities.get(name) for name in required_capabilities)"
+        }
+      ],
+      "expect": "an empty capability object still declares it"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "only the first supported version read",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "or PROTOCOL_VERSION not in supported:",
+          "new": "or supported[:1] != [PROTOCOL_VERSION]:"
+        }
+      ],
+      "expect": "2026-07-28 can be any of the supported versions"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "a whitespace description accepted",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "    return isinstance(value, str) and bool(value.strip())\n",
+          "new": "    return isinstance(value, str) and bool(value)\n"
+        }
+      ],
+      "expect": "every tool needs a name, a description and an inputSchema object"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "reasons sorted by name",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "tuple(control for control in CONTROLS if control in failed)",
+          "new": "tuple(sorted(failed))"
+        }
+      ],
+      "expect": "every failed control is listed once, in CONTROLS order"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "toolsetDigest of the list as sent",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "        \"toolsetDigest\": toolset_digest(live[\"tools\"]),\n",
+          "new": "        \"toolsetDigest\": digest(live[\"tools\"]),\n"
+        }
+      ],
+      "expect": "an admitted version is pinned on every layer"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "provenance without the Registry source",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "        \"registrySource\": registry_source,\n",
+          "new": ""
+        }
+      ],
+      "expect": "an admitted version is pinned on every layer"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "verifier fields copied into the pinned source",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "                return {\"kind\": \"package\", **deepcopy(package)}\n",
+          "new": "                return {**deepcopy(package), **evidence}\n"
+        }
+      ],
+      "expect": "an admitted version is pinned on every layer"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "supportedVersions not checked to be a list",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "    if not isinstance(supported, list) or PROTOCOL_VERSION not in supported:",
+          "new": "    if not supported or PROTOCOL_VERSION not in supported:"
+        }
+      ],
+      "expect": "the live server must support 2026-07-28"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "capabilities as a list of names accepted",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "    if not isinstance(capabilities, dict) or any(",
+          "new": "    if not isinstance(capabilities, (dict, list)) or any("
+        }
+      ],
+      "expect": "capabilities is an object"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "two unusable remote URLs join on None",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "                url is not None\n                and normalize",
+          "new": "                normalize"
+        }
+      ],
+      "expect": "only an HTTPS remote can join"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "verified checked by truthiness",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "evidence.get(\"verified\") is not True:",
+          "new": "not evidence.get(\"verified\"):"
+        }
+      ],
+      "expect": "{'verified': 'false'}"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "a whitespace tool name accepted",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "        and _text(tool.get(\"name\"))",
+          "new": "        and isinstance(tool.get(\"name\"), str) and bool(tool.get(\"name\"))"
+        }
+      ],
+      "expect": "every tool needs a name, a description and an inputSchema object"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "only the record's remote URL normalized",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "        url = normalize_https_remote_url(evidence.get(\"url\"))\n",
+          "new": "        url = evidence.get(\"url\")\n"
+        }
+      ],
+      "expect": "both URLs are normalized before they are compared"
+    },
+    {
+      "test": "test_admission_controls",
+      "name": "the digest skipped once the source fails",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "    if not is_sha256_digest(evidence.get(\"digest\")) or",
+          "new": "    elif not is_sha256_digest(evidence.get(\"digest\")) or"
+        }
+      ],
+      "expect": "every failed control is listed once, in CONTROLS order"
+    },
+    {
+      "test": "test_reconcile_stream",
+      "name": "tool list hashed in arrival order",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "        observed = toolset_digest(tools) if listed else None\n",
+          "new": "        observed = digest(tools) if listed else None\n"
+        }
+      ],
+      "expect": "the order of the tool list is not drift"
+    },
+    {
+      "test": "test_reconcile_stream",
+      "name": "quarantine drops the server's route whatever is active",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "                if state.active.get(server) == version:\n                    del state.active[server]\n",
+          "new": "                state.active.pop(server, None)\n"
+        }
+      ],
+      "expect": "quarantining a version that takes no new work leaves the route alone"
+    },
+    {
+      "test": "test_reconcile_stream",
+      "name": "only deleted quarantines",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "        if pin is not None and status != \"active\":\n",
+          "new": "        if pin is not None and status == \"deleted\":\n"
+        }
+      ],
+      "expect": "deprecated stops new work too"
+    },
+    {
+      "test": "test_reconcile_stream",
+      "name": "a clean observation lifts the quarantine",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "            outcome = \"quarantined\" if key in state.quarantined else \"ok\"\n",
+          "new": "            if not layers:\n                state.quarantined.discard(key)\n            outcome = \"quarantined\" if key in state.quarantined else \"ok\"\n"
+        }
+      ],
+      "expect": "a quarantine sticks"
+    },
+    {
+      "test": "test_reconcile_stream",
+      "name": "pins looked up without a default",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "        pin = state.pins.get(key)\n",
+          "new": "        pin = state.pins[key]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_reconcile_stream",
+      "name": "a deleted version's pin thrown away",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "            outcome = \"quarantined\" if key in state.quarantined else \"ok\"\n",
+          "new": "            outcome = \"quarantined\" if key in state.quarantined else \"ok\"\n            if evidence.get(\"status\") == \"deleted\":\n                del state.pins[key]\n"
+        }
+      ],
+      "expect": "a quarantined pin stays as evidence"
+    },
+    {
+      "test": "test_reconcile_stream",
+      "name": "drift judged by the toolset digest alone",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "        if pin is not None and (live_failures(live, required_capabilities) or observed != pin[\"toolsetDigest\"]):\n",
+          "new": "        if pin is not None and observed != pin[\"toolsetDigest\"]:\n"
+        }
+      ],
+      "expect": "failing the live checks is drift, even with the same tools"
+    },
+    {
+      "test": "test_reconcile_stream",
+      "name": "a malformed tool list hashed anyway",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "        observed = toolset_digest(tools) if listed else None\n",
+          "new": "        observed = toolset_digest(tools) if isinstance(tools, list) else None\n"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_reconcile_stream",
+      "name": "the observation kept as evidence",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "        entry = ledger.append(EVENTS[check], server, version, outcome, layers, evidence)\n",
+          "new": "        entry = ledger.append(EVENTS[check], server, version, outcome, layers, {**evidence, \"observed\": observation})\n"
+        }
+      ],
+      "expect": "no credential or tool argument reaches the ledger"
+    },
+    {
+      "test": "test_reconcile_stream",
+      "name": "every observation read before the first verdict",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "    async for observation in observations:\n",
+          "new": "    arrived = [observation async for observation in observations]\n    for observation in arrived:\n"
+        }
+      ],
+      "expect": "each verdict goes out as soon as its observation is judged"
+    },
+    {
+      "test": "test_reconcile_stream",
+      "name": "verdict yielded before the ledger entry is written",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "        entry = ledger.append(EVENTS[check], server, version, outcome, layers, evidence)\n        verdict = {\n            \"seq\": entry[\"sequence\"],\n",
+          "new": "        verdict = {\n            \"seq\": len(ledger.entries) + 1,\n"
+        },
+        {
+          "file": "reconcile.py",
+          "old": "        yield json.dumps(verdict) + \"\\n\"\n",
+          "new": "        yield json.dumps(verdict) + \"\\n\"\n        ledger.append(EVENTS[check], server, version, outcome, layers, evidence)\n"
+        }
+      ],
+      "expect": "a verdict goes out only once the ledger holds it"
+    },
+    {
+      "test": "test_reconcile_stream",
+      "name": "the active version read before the quarantine",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "        layers, evidence = _judge(check, observation, pin, required_capabilities)\n",
+          "new": "        layers, evidence = _judge(check, observation, pin, required_capabilities)\n        active_before = state.active.get(server)\n"
+        },
+        {
+          "file": "reconcile.py",
+          "old": "            \"active\": state.active.get(server),",
+          "new": "            \"active\": active_before,"
+        }
+      ],
+      "expect": "deprecated stops new work too"
+    },
+    {
+      "test": "test_reconcile_stream",
+      "name": "the quarantine written into the pin",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "                state.quarantined.add(key)\n",
+          "new": "                state.quarantined.add(key)\n                pin[\"quarantined\"] = True\n"
+        }
+      ],
+      "expect": "a quarantined pin stays as evidence"
+    },
+    {
+      "test": "test_reconcile_stream",
+      "name": "the live checks run with the default capabilities",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "(live_failures(live, required_capabilities) or",
+          "new": "(live_failures(live) or"
+        }
+      ],
+      "expect": "the live checks use the required capabilities given"
+    },
+    {
+      "test": "test_rollback_from_history",
+      "name": "rollback entries ignored by fold",
+      "edits": [
+        {
+          "file": "rollback.py",
+          "old": "        elif event == \"rollback\" and outcome == \"activated\":\n            state.active[server] = entry[\"evidence\"][\"to\"]\n",
+          "new": ""
+        }
+      ],
+      "expect": "each one starts from the route the ledger shows"
+    },
+    {
+      "test": "test_rollback_from_history",
+      "name": "a rollback entry moves the route whatever its outcome",
+      "edits": [
+        {
+          "file": "rollback.py",
+          "old": "        elif event == \"rollback\" and outcome == \"activated\":\n",
+          "new": "        elif event == \"rollback\":\n"
+        }
+      ],
+      "expect": "rejected decisions move no route"
+    },
+    {
+      "test": "test_rollback_from_history",
+      "name": "a rejected admission still takes the route",
+      "edits": [
+        {
+          "file": "rollback.py",
+          "old": "        if event == \"admission\" and outcome == \"approved\":\n            state.pins[(server, version)] = deepcopy(entry[\"evidence\"][\"pin\"])\n            state.active[server] = version\n",
+          "new": "        if event == \"admission\":\n            if outcome == \"approved\":\n                state.pins[(server, version)] = deepcopy(entry[\"evidence\"][\"pin\"])\n            state.active[server] = version\n"
+        }
+      ],
+      "expect": "rejected decisions move no route"
+    },
+    {
+      "test": "test_rollback_from_history",
+      "name": "a quarantine keeps the route",
+      "edits": [
+        {
+          "file": "rollback.py",
+          "old": "            state.quarantined.add((server, version))\n            if state.active.get(server) == version:\n                del state.active[server]\n",
+          "new": "            state.quarantined.add((server, version))\n"
+        }
+      ],
+      "expect": "a quarantined active version leaves its route"
+    },
+    {
+      "test": "test_rollback_from_history",
+      "name": "a quarantine clears every route on that version string",
+      "edits": [
+        {
+          "file": "rollback.py",
+          "old": "            if state.active.get(server) == version:\n                del state.active[server]\n",
+          "new": "            for routed in [s for s, v in state.active.items() if v == version]:\n                del state.active[routed]\n"
+        }
+      ],
+      "expect": "one server's quarantine is not another's"
+    },
+    {
+      "test": "test_rollback_from_history",
+      "name": "only registry-sync quarantines",
+      "edits": [
+        {
+          "file": "rollback.py",
+          "old": "CHECK_EVENTS = (\"registry-sync\", \"artifact-check\", \"live-check\")",
+          "new": "CHECK_EVENTS = (\"registry-sync\",)"
+        }
+      ],
+      "expect": "any check can quarantine one"
+    },
+    {
+      "test": "test_rollback_from_history",
+      "name": "health checked before the ledger rules",
+      "edits": [
+        {
+          "file": "rollback.py",
+          "old": "    if key not in state.pins:\n        reasons: tuple[str, ...] = (\"unknown\",)\n",
+          "new": "    if not healthy(server, target):\n        reasons: tuple[str, ...] = (\"unhealthy\",)\n    elif key not in state.pins:\n        reasons = (\"unknown\",)\n"
+        }
+      ],
+      "expect": "a target needs an approved admission, no quarantine and a passing health check, in that order"
+    },
+    {
+      "test": "test_rollback_from_history",
+      "name": "health asked for every target",
+      "edits": [
+        {
+          "file": "rollback.py",
+          "old": "    key = (server, target)\n    if key not in state.pins:\n",
+          "new": "    key = (server, target)\n    alive = healthy(server, target)\n    if key not in state.pins:\n"
+        },
+        {
+          "file": "rollback.py",
+          "old": "    elif not healthy(server, target):\n",
+          "new": "    elif not alive:\n"
+        }
+      ],
+      "expect": "the health check runs only for a target the ledger allows"
+    },
+    {
+      "test": "test_rollback_from_history",
+      "name": "rejected rollbacks not recorded",
+      "edits": [
+        {
+          "file": "rollback.py",
+          "old": "    ledger.append(\"rollback\", server, target, \"rejected\" if reasons else \"activated\", reasons, evidence)\n    if reasons:\n        return Decision(False, reasons)\n",
+          "new": "    if reasons:\n        return Decision(False, reasons)\n    ledger.append(\"rollback\", server, target, \"activated\", reasons, evidence)\n"
+        }
+      ],
+      "expect": "every rollback decision is recorded"
+    },
+    {
+      "test": "test_rollback_from_history",
+      "name": "the admission found by version alone",
+      "edits": [
+        {
+          "file": "rollback.py",
+          "old": "    key = (server, target)\n",
+          "new": "    key = next((k for k in fold(ledger.entries).pins if k[1] == target), (server, target))\n"
+        }
+      ],
+      "expect": "a target needs an approved admission, no quarantine and a passing health check, in that order"
+    }
+  ]
+}
