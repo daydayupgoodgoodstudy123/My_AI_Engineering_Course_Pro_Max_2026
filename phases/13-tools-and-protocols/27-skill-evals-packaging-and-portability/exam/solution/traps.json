@@ -1,0 +1,1747 @@
+{
+  "package": "skilleval",
+  "tests": [
+    "test_trigger_report_and_install_check",
+    "test_observation_log_roundtrip",
+    "test_release_gate",
+    "test_junit_stream",
+    "test_portability_matrix"
+  ],
+  "layers": [
+    {
+      "test": "test_trigger_report_and_install_check",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a case passes only when every one of its runs matched"
+        },
+        {
+          "name": "fix passed: every run, not run 0",
+          "edits": [
+            {
+              "file": "metrics.py",
+              "old": "\"passed\": matched[0],",
+              "new": "\"passed\": all(matched),"
+            }
+          ],
+          "expect": "false positives are counted by the category of the case they happened on"
+        },
+        {
+          "name": "+ false positives by case category",
+          "edits": [
+            {
+              "file": "metrics.py",
+              "old": "false_positives[\"competing\" if case.expected_skill else \"clear_negative\"] += sum(fired)",
+              "new": "false_positives[case.category] += sum(fired)"
+            }
+          ],
+          "expect": "ZeroDivisionError"
+        },
+        {
+          "name": "+ F1 is 0.0 when precision and recall are 0",
+          "edits": [
+            {
+              "file": "metrics.py",
+              "old": "    f1 = 2 * precision * recall / (precision + recall)\n",
+              "new": "    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0\n"
+            }
+          ],
+          "expect": "an untouched install matches the manifest built from its source"
+        },
+        {
+          "name": "+ canonical keys in build_manifest (no ./ prefix)",
+          "edits": [
+            {
+              "file": "manifest.py",
+              "old": "            relative = os.path.join(folder, name)\n",
+              "new": "            relative = path.relative_to(root).as_posix()\n"
+            }
+          ],
+          "expect": "verify_manifest should not slow down as the bundle grows"
+        },
+        {
+          "name": "+ build the tree's manifest once per check",
+          "edits": [
+            {
+              "file": "manifest.py",
+              "old": "    missing: list[str] = []\n    mismatched: list[str] = []\n    for key, digest in listed.items():\n        current = _current_digest(root, key)\n        if current is None:\n            missing.append(key)\n        elif current != digest:\n            mismatched.append(key)\n    try:\n        present = set(build_manifest(root))\n    except ValueError as error:\n        issues.append(str(error))\n        present = set()\n",
+              "new": "    try:\n        actual = build_manifest(root)\n    except ValueError as error:\n        issues.append(str(error))\n        actual = {}\n    missing: list[str] = []\n    mismatched: list[str] = []\n    for key, digest in listed.items():\n        current = actual.get(key)\n        if current is None:\n            missing.append(key)\n        elif current != digest:\n            mismatched.append(key)\n    present = set(actual)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "a case passes when any run matched",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "\"passed\": all(matched),",
+          "new": "\"passed\": any(matched),"
+        }
+      ],
+      "expect": "a case passes only when every one of its runs matched"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "a case passes when most runs matched",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "\"passed\": all(matched),",
+          "new": "\"passed\": sum(matched) * 2 > len(matched),"
+        }
+      ],
+      "expect": "a case passes only when every one of its runs matched"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "every negative false positive counted as a near miss",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "false_positives[case.category] += sum(fired)",
+          "new": "false_positives[\"near_miss\"] += sum(fired)"
+        }
+      ],
+      "expect": "false positives are counted by the category of the case they happened on"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "competing whenever another skill is expected, category otherwise",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "false_positives[case.category] += sum(fired)",
+          "new": "false_positives[\"competing\" if case.expected_skill else case.category] += sum(fired)"
+        }
+      ],
+      "expect": "false positives are counted by the category of the case they happened on"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "F1 is NaN when precision and recall are 0",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "if precision + recall else 0.0",
+          "new": "if precision + recall else float(\"nan\")"
+        }
+      ],
+      "expect": "a description that never fires scores 0, it does not crash the report"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "./ keys normalized in verify_manifest instead of fixed in build_manifest",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "        or any(part in {\"\", \".\", \"..\"} for part in key.split(\"/\"))\n        or key != relative.as_posix()\n",
+          "new": "        or \"..\" in relative.parts\n"
+        },
+        {
+          "file": "manifest.py",
+          "old": "            listed[key] = digest\n",
+          "new": "            listed[PurePosixPath(key).as_posix()] = digest\n"
+        }
+      ],
+      "expect": "manifest keys must already be canonical: they are rejected, not normalized"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "backslashes turned into slashes before the check",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "    for key, digest in expected.items():\n        problem = _entry_problem(key, digest)\n",
+          "new": "    for key, digest in expected.items():\n        key = key.replace(\"\\\\\", \"/\") if isinstance(key, str) else key\n        problem = _entry_problem(key, digest)\n"
+        }
+      ],
+      "expect": "manifest keys must already be canonical: they are rejected, not normalized"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "the ./ prefix stripped with lstrip('./'), which also eats a leading dot",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "            relative = path.relative_to(root).as_posix()\n",
+          "new": "            relative = os.path.join(os.path.relpath(dirpath, root), name).lstrip(\"./\")\n"
+        }
+      ],
+      "expect": "an edited file, a lost file and a stale file left by an older install each show up"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "build_manifest cached per root to make verify fast",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "def build_manifest(root: Path) -> dict[str, str]:\n",
+          "new": "@__import__(\"functools\").lru_cache(maxsize=None)\ndef build_manifest(root: Path) -> dict[str, str]:\n"
+        }
+      ],
+      "expect": "an edited file, a lost file and a stale file left by an older install each show up"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "only the listed files hashed, without walking the tree",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "    try:\n        actual = build_manifest(root)\n    except ValueError as error:\n        issues.append(str(error))\n        actual = {}\n",
+          "new": "    actual = {key: bytes_digest((root / key).read_bytes()) for key in listed if (root / key).is_file()}\n"
+        }
+      ],
+      "expect": "an edited file, a lost file and a stale file left by an older install each show up"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "symlinks followed when hashing",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "            if path.is_symlink():\n                raise ValueError(f\"manifest tree contains a symlink: {relative}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a symlink in the install is refused, even when its target has the right bytes"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "the reserved manifest hashed with the rest",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "            if relative == RESERVED_MANIFEST_PATH:\n                continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "an untouched install matches the manifest built from its source"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "a manifest that lists the reserved path accepted",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "    if key == RESERVED_MANIFEST_PATH:\n        return f\"reserved manifest path must not be listed: {key!r}\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "a manifest that lists itself is refused"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "parent segments accepted",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "        or any(part in {\"\", \".\", \"..\"} for part in key.split(\"/\"))\n",
+          "new": ""
+        }
+      ],
+      "expect": "absolute paths and parent segments are rejected"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "an abstention written as the text None",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "\"\" if observation.predicted_skill is None else observation.predicted_skill,",
+          "new": "str(observation.predicted_skill),"
+        }
+      ],
+      "expect": "is not a skill name"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "an empty cell read back as an empty string",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "predicted or None",
+          "new": "predicted"
+        }
+      ],
+      "expect": "is not a skill name"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "an empty predicted_skill accepted as an abstention",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "if observation.predicted_skill is not None and not is_skill_name(observation.predicted_skill):",
+          "new": "if observation.predicted_skill and not is_skill_name(observation.predicted_skill):"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "latency written with three decimals",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "repr(observation.latency_ms),",
+          "new": "f\"{observation.latency_ms:.3f}\","
+        }
+      ],
+      "expect": "every run reads back exactly, in run order"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "latency written with %g",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "repr(observation.latency_ms),",
+          "new": "\"%g\" % observation.latency_ms,"
+        }
+      ],
+      "expect": "every run reads back exactly, in run order"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "latency rounded to the microsecond",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "repr(observation.latency_ms),",
+          "new": "repr(round(observation.latency_ms, 3)),"
+        }
+      ],
+      "expect": "every run reads back exactly, in run order"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "latency read back as a Decimal",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "float(latency_ms)",
+          "new": "__import__(\"decimal\").Decimal(latency_ms)"
+        }
+      ],
+      "expect": "latency_ms must be a finite, non-negative float"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "integral latencies written without .0 and read back as int",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "repr(observation.latency_ms),",
+          "new": "str(int(observation.latency_ms)) if observation.latency_ms.is_integer() else repr(observation.latency_ms),"
+        },
+        {
+          "file": "runlog.py",
+          "old": "float(latency_ms)",
+          "new": "int(latency_ms) if latency_ms.isdigit() else float(latency_ms)"
+        },
+        {
+          "file": "runlog.py",
+          "old": "    if type(latency) is not float or not math.isfinite(latency) or latency < 0:",
+          "new": "    if not isinstance(latency, (int, float)) or not math.isfinite(latency) or latency < 0:"
+        }
+      ],
+      "expect": "the digest recomputed from the log is the digest taken in memory"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "read without newline=''",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "with open(self.path, newline=\"\", encoding=\"utf-8\") as f:",
+          "new": "with open(self.path, encoding=\"utf-8\") as f:"
+        }
+      ],
+      "expect": "every run reads back exactly, in run order"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "cells stripped on read",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "                case_id, run, category, predicted, latency_ms, trace = row\n",
+          "new": "                case_id, run, category, predicted, latency_ms, trace = [cell.strip() for cell in row]\n"
+        }
+      ],
+      "expect": "every run reads back exactly, in run order"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "every empty cell read as None, the trace too",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "                case_id, run, category, predicted, latency_ms, trace = row\n",
+          "new": "                case_id, run, category, predicted, latency_ms, trace = [cell or None for cell in row]\n"
+        }
+      ],
+      "expect": "trace must be text"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "runs returned in file order",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "loaded[case_id] = [runs[index] for index in range(len(runs))]",
+          "new": "loaded[case_id] = list(runs.values())"
+        }
+      ],
+      "expect": "every run reads back exactly, in run order"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "runs returned as tuples",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "loaded[case_id] = [runs[index] for index in range(len(runs))]",
+          "new": "loaded[case_id] = tuple(runs[index] for index in range(len(runs)))"
+        }
+      ],
+      "expect": "every run reads back exactly, in run order"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "a run logged twice silently replaced",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "                if observation.run in runs:\n                    raise ValueError(f\"run {observation.run} of {case_id!r} is logged twice\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "missing runs not checked",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "            if sorted(runs) != list(range(len(runs))):\n",
+          "new": "            if False:\n"
+        },
+        {
+          "file": "runlog.py",
+          "old": "            loaded[case_id] = [runs[index] for index in range(len(runs))]\n",
+          "new": "            loaded[case_id] = [runs[index] for index in sorted(runs)]\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "the header written on every append",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "            if f.tell() == 0:\n",
+          "new": "            if True:\n"
+        }
+      ],
+      "expect": "invalid literal for int()"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "the header decided when the log object is created",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "        self.path = Path(path)\n",
+          "new": "        self.path = Path(path)\n        self._new = not self.path.exists()\n"
+        },
+        {
+          "file": "runlog.py",
+          "old": "            if f.tell() == 0:\n                writer.writerow(COLUMNS)\n",
+          "new": "            if self._new:\n                writer.writerow(COLUMNS)\n                self._new = False\n"
+        }
+      ],
+      "expect": "invalid literal for int()"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "every append opens the file with w",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "with open(self.path, \"a\", newline=\"\", encoding=\"utf-8\") as f:",
+          "new": "with open(self.path, \"w\", newline=\"\", encoding=\"utf-8\") as f:"
+        }
+      ],
+      "expect": "has runs [1], not 0..0"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "the observation checked after it is written",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "        _check(observation)\n        with open(self.path, \"a\"",
+          "new": "        with open(self.path, \"a\""
+        },
+        {
+          "file": "runlog.py",
+          "old": "                    observation.trace,\n                ]\n            )\n",
+          "new": "                    observation.trace,\n                ]\n            )\n        _check(observation)\n"
+        }
+      ],
+      "expect": "a refused observation leaves the log as it was"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "NaN latency accepted",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "if type(latency) is not float or not math.isfinite(latency) or latency < 0:",
+          "new": "if type(latency) is not float or latency < 0:"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "unknown categories accepted",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "    if observation.category not in CATEGORIES:\n        raise ValueError(f\"{case_id!r}: unknown category {observation.category!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "rows joined by hand, without quoting",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "            writer.writerow(\n                [\n",
+          "new": "            f.write(\",\".join(map(str, [\n"
+        },
+        {
+          "file": "runlog.py",
+          "old": "                    observation.trace,\n                ]\n            )\n",
+          "new": "                    observation.trace,\n                ])) + \"\\r\\n\")\n"
+        }
+      ],
+      "expect": "cells, not 6"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "structure counts only E_ codes",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "sum(not code.startswith(\"W_\") for code in evidence.lint_issues)",
+          "new": "sum(code.startswith(\"E_\") for code in evidence.lint_issues)"
+        }
+      ],
+      "expect": "every lint issue that is not a reviewed W_ warning is a structure error"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "structure counts every issue, warnings too",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "sum(not code.startswith(\"W_\") for code in evidence.lint_issues)",
+          "new": "len(evidence.lint_issues)"
+        }
+      ],
+      "expect": "every layer passes"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "recall compared with the rounded report value",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "\"recall\": recall >= policy.min_recall,",
+          "new": "\"recall\": counts[\"recall\"] >= policy.min_recall,"
+        }
+      ],
+      "expect": "thresholds are compared with the raw counts"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "precision must beat the threshold",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "\"precision\": precision >= policy.min_precision,",
+          "new": "\"precision\": precision > policy.min_precision,"
+        }
+      ],
+      "expect": "every layer passes"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "near misses limited by every false positive",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "report[\"false_positives\"][\"near_miss\"] <= policy.max_near_miss_false_positives",
+          "new": "counts[\"false_positive\"] <= policy.max_near_miss_false_positives"
+        }
+      ],
+      "expect": "every layer passes"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "near-miss limit checked with <",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "report[\"false_positives\"][\"near_miss\"] <= policy.max_near_miss_false_positives",
+          "new": "report[\"false_positives\"][\"near_miss\"] < policy.max_near_miss_false_positives"
+        }
+      ],
+      "expect": "every layer passes"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "near misses pass when there are none",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "\"near_miss\": has_near_misses\n        and report",
+          "new": "\"near_miss\": report"
+        }
+      ],
+      "expect": "a boundary with no near-miss cases has not been tested"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "artifact pass rate must beat the threshold",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "sum(with_skill) / len(with_skill) >= policy.min_artifact_pass_rate",
+          "new": "sum(with_skill) / len(with_skill) > policy.min_artifact_pass_rate"
+        }
+      ],
+      "expect": "every layer passes"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "artifact pass rate pooled over both conditions",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "with_skill = [ok for task in evidence.tasks for ok in task.with_skill]",
+          "new": "with_skill = [ok for task in evidence.tasks for ok in (*task.baseline, *task.with_skill)]"
+        }
+      ],
+      "expect": "every layer passes"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "artifact pass rate as the mean of per-task rates over the baseline",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "sum(with_skill) / len(with_skill) >= policy.min_artifact_pass_rate",
+          "new": "sum(_rate(t.with_skill) - _rate(t.baseline) for t in evidence.tasks) / len(evidence.tasks) >= policy.min_artifact_pass_rate"
+        }
+      ],
+      "expect": "every layer passes"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "regression judged on pooled averages",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "regressions = [task.task_id for task in evidence.tasks if _rate(task.with_skill) < _rate(task.baseline)]",
+          "new": "regressions = [] if sum(sum(t.with_skill) for t in evidence.tasks) >= sum(sum(t.baseline) for t in evidence.tasks) else [\"average\"]"
+        }
+      ],
+      "expect": "a task that got worse blocks the release even though the average went up"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "an equal pass rate counted as a regression",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "if _rate(task.with_skill) < _rate(task.baseline)]",
+          "new": "if _rate(task.with_skill) <= _rate(task.baseline)]"
+        }
+      ],
+      "expect": "every layer passes"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "a script layer with no checks passes",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "\"scripts\": bool(evidence.script_checks) and all(",
+          "new": "\"scripts\": all("
+        }
+      ],
+      "expect": "a layer with no evidence has not passed"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "safety judged by its pass rate against the artifact threshold",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "\"safety\": bool(evidence.safety_checks) and all(check.passed for check in evidence.safety_checks),",
+          "new": "\"safety\": bool(evidence.safety_checks) and sum(c.passed for c in evidence.safety_checks) / len(evidence.safety_checks) >= policy.min_artifact_pass_rate,"
+        }
+      ],
+      "expect": "9 of 10 safety cases is a failed safety layer"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "portability checked only for hosts that have a verdict",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "all(evidence.host_verdicts.get(host) in INSTALLABLE_VERDICTS for host in policy.required_hosts)",
+          "new": "all(evidence.host_verdicts[host] in INSTALLABLE_VERDICTS for host in policy.required_hosts if host in evidence.host_verdicts)"
+        }
+      ],
+      "expect": "a required host with no verdict fails portability"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "portability requires every required host to be native",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "all(evidence.host_verdicts.get(host) in INSTALLABLE_VERDICTS for host in policy.required_hosts)",
+          "new": "all(evidence.host_verdicts.get(host) == \"native\" for host in policy.required_hosts)"
+        }
+      ],
+      "expect": "every layer passes"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "portability over every evaluated host, required or not",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "all(evidence.host_verdicts.get(host) in INSTALLABLE_VERDICTS for host in policy.required_hosts)",
+          "new": "all(verdict in INSTALLABLE_VERDICTS for verdict in evidence.host_verdicts.values())"
+        }
+      ],
+      "expect": "every layer passes"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "portability accepts anything but blocked",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "all(evidence.host_verdicts.get(host) in INSTALLABLE_VERDICTS for host in policy.required_hosts)",
+          "new": "all(evidence.host_verdicts.get(host) != \"blocked\" for host in policy.required_hosts)"
+        }
+      ],
+      "expect": "a required host with no verdict fails portability"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "the installed tree taken on trust",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "\"installed_tree\": installed[\"passed\"] is True,",
+          "new": "\"installed_tree\": True,"
+        }
+      ],
+      "expect": "the installed copy is checked against the manifest"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "the evidence root leaves out the policy",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "canonical_digest({\"policy\": asdict(policy), \"evidence\": asdict(evidence)})",
+          "new": "canonical_digest({\"evidence\": asdict(evidence)})"
+        }
+      ],
+      "expect": "the evidence root binds the thresholds"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "the evidence root over the policy and the checks",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    root = evidence_root(policy, evidence)\n",
+          "new": "    root = canonical_digest({\"policy\": asdict(policy), \"checks\": checks, \"mode\": evidence.mode})\n"
+        }
+      ],
+      "expect": "the evidence root binds every raw run, not just the first run and the pass rate"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "the evidence root over each case's first run and pass rate",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "canonical_digest({\"policy\": asdict(policy), \"evidence\": asdict(evidence)})",
+          "new": "canonical_digest({\"policy\": asdict(policy), \"evidence\": {**asdict(evidence), \"predictions\": {k: [v[0], sum(p == evidence.skill for p in v) / len(v)] for k, v in evidence.predictions.items()}}})"
+        }
+      ],
+      "expect": "the evidence root binds every raw run, not just the first run and the pass rate"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "the evidence root hashed from json.dumps without sorted keys",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "canonical_digest({\"policy\": asdict(policy), \"evidence\": asdict(evidence)})",
+          "new": "bytes_digest(json.dumps({\"policy\": asdict(policy), \"evidence\": asdict(evidence)}).encode(\"utf-8\"))"
+        }
+      ],
+      "expect": "the evidence root does not depend on the order a mapping was built in"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "attestationVersion compared with ==",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        and type(decoded.get(\"attestationVersion\")) is int\n        and decoded[\"attestationVersion\"] == ATTESTATION_VERSION\n",
+          "new": "        and decoded.get(\"attestationVersion\") == ATTESTATION_VERSION\n"
+        }
+      ],
+      "expect": "an attestation is a JSON object with the integer attestationVersion 1"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "the attestation re-serialized before its digest is compared",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "bytes_digest(attestation) != trusted_digest",
+          "new": "canonical_digest(json.loads(attestation)) != trusted_digest"
+        }
+      ],
+      "expect": "an attestation of the evidence root, trusted by the digest of its exact bytes, makes it a release"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "the trusted digest not checked",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": " or bytes_digest(attestation) != trusted_digest",
+          "new": ""
+        }
+      ],
+      "expect": "the trusted digest is of the exact attestation bytes"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "a malformed attestation raises",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    try:\n        decoded = json.loads(attestation.decode(\"utf-8\"))\n    except ValueError:\n        return False\n",
+          "new": "    decoded = json.loads(attestation.decode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "an attestation that is not an object",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        isinstance(decoded, dict)\n        and type(",
+          "new": "        type("
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "production ready without local evidence",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "production_ready = checks_passed and local_ready and anchored",
+          "new": "production_ready = checks_passed and anchored"
+        }
+      ],
+      "expect": "a fixture run is never a release"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "passed follows checks_passed",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "\"passed\": production_ready,",
+          "new": "\"passed\": checks_passed,"
+        }
+      ],
+      "expect": "a fixture pass shows the gate works; it is not a release"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "fixture_passed in any mode",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "\"fixture_passed\": checks_passed and evidence.mode == \"fixture\",",
+          "new": "\"fixture_passed\": checks_passed,"
+        }
+      ],
+      "expect": "relabeled evidence with sources is consistent locally, and still not a release"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "local evidence ready with any source",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "all(\n        str(evidence.sources.get(layer, \"\")).strip() for layer in EVIDENCE_LAYERS\n    )",
+          "new": "bool(evidence.sources)"
+        }
+      ],
+      "expect": "captured evidence needs a source for every layer"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "blank sources accepted",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "str(evidence.sources.get(layer, \"\")).strip() for layer in EVIDENCE_LAYERS",
+          "new": "evidence.sources.get(layer) for layer in EVIDENCE_LAYERS"
+        }
+      ],
+      "expect": "captured evidence needs a source for every layer"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "failed layers sorted by name",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "\"failed\": [layer for layer in LAYERS if not checks[layer]],",
+          "new": "\"failed\": sorted(layer for layer in LAYERS if not checks[layer]),"
+        }
+      ],
+      "expect": "a second near-miss false positive is over the limit"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "attributes escaped with xml.sax.saxutils.escape",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "    return ET.tostring(element, encoding=\"unicode\")\n",
+          "new": "    from xml.sax.saxutils import escape as ESC\n    attrs = ''.join(f' {k}=\"{ESC(v)}\"' for k, v in element.attrib.items())\n    inner = ''\n    for child in element:\n        child_attrs = ''.join(f' {k}=\"{ESC(v)}\"' for k, v in child.attrib.items())\n        inner += f'<{child.tag}{child_attrs}>{ESC(child.text or \"\")}</{child.tag}>'\n    return f'<testcase{attrs}>{inner}</testcase>'\n"
+        }
+      ],
+      "expect": "ParseError"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "attributes escaped with html.escape",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "    return ET.tostring(element, encoding=\"unicode\")\n",
+          "new": "    from html import escape as ESC\n    attrs = ''.join(f' {k}=\"{ESC(v)}\"' for k, v in element.attrib.items())\n    inner = ''\n    for child in element:\n        child_attrs = ''.join(f' {k}=\"{ESC(v)}\"' for k, v in child.attrib.items())\n        inner += f'<{child.tag}{child_attrs}>{ESC(child.text or \"\")}</{child.tag}>'\n    return f'<testcase{attrs}>{inner}</testcase>'\n"
+        }
+      ],
+      "expect": "a failure says how many runs matched, and attribute values reach the parser unchanged"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "nothing escaped",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "    return ET.tostring(element, encoding=\"unicode\")\n",
+          "new": "    ESC = str\n    attrs = ''.join(f' {k}=\"{ESC(v)}\"' for k, v in element.attrib.items())\n    inner = ''\n    for child in element:\n        child_attrs = ''.join(f' {k}=\"{ESC(v)}\"' for k, v in child.attrib.items())\n        inner += f'<{child.tag}{child_attrs}>{ESC(child.text or \"\")}</{child.tag}>'\n    return f'<testcase{attrs}>{inner}</testcase>'\n"
+        }
+      ],
+      "expect": "ParseError"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "& escaped after <",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "    return ET.tostring(element, encoding=\"unicode\")\n",
+          "new": "    ESC = lambda s: s.replace('<', '&lt;').replace('&', '&amp;').replace('\"', '&quot;').replace('\\n', '&#10;')\n    attrs = ''.join(f' {k}=\"{ESC(v)}\"' for k, v in element.attrib.items())\n    inner = ''\n    for child in element:\n        child_attrs = ''.join(f' {k}=\"{ESC(v)}\"' for k, v in child.attrib.items())\n        inner += f'<{child.tag}{child_attrs}>{ESC(child.text or \"\")}</{child.tag}>'\n    return f'<testcase{attrs}>{inner}</testcase>'\n"
+        }
+      ],
+      "expect": "a failure says how many runs matched, and attribute values reach the parser unchanged"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "every case gathered before the first testcase",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "        failures = matched_runs = 0\n",
+          "new": "        await asyncio.gather(*pending)\n        failures = matched_runs = 0\n"
+        }
+      ],
+      "expect": "a case goes out as soon as it and every case before it are done"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "testcases in completion order",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "        return list(await asyncio.gather(*(one(case, run) for run in range(runs))))\n",
+          "new": "        return case, list(await asyncio.gather(*(one(case, run) for run in range(runs))))\n"
+        },
+        {
+          "file": "junit.py",
+          "old": "        for case, task in zip(cases, pending):\n            replies = await task\n",
+          "new": "        for next_done in asyncio.as_completed(pending):\n            case, replies = await next_done\n"
+        }
+      ],
+      "expect": "one testcase per case, in declared order"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "cases run one after another",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "    pending = [asyncio.ensure_future(every_run(case)) for case in cases]\n",
+          "new": "    pending = []\n"
+        },
+        {
+          "file": "junit.py",
+          "old": "        for case, task in zip(cases, pending):\n            replies = await task\n",
+          "new": "        for case in cases:\n            replies = await every_run(case)\n"
+        }
+      ],
+      "expect": "runs of every case share the concurrency limit, and use all of it"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "the limit counts cases, not calls",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "        async with limit:\n            return await router(case.prompt, run)\n",
+          "new": "        return await router(case.prompt, run)\n"
+        },
+        {
+          "file": "junit.py",
+          "old": "        return list(await asyncio.gather(*(one(case, run) for run in range(runs))))\n",
+          "new": "        async with limit:\n            return list(await asyncio.gather(*(one(case, run) for run in range(runs))))\n"
+        }
+      ],
+      "expect": "runs of every case share the concurrency limit, and use all of it"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "no concurrency limit",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "        async with limit:\n            return await router(case.prompt, run)\n",
+          "new": "        return await router(case.prompt, run)\n"
+        }
+      ],
+      "expect": "runs of every case share the concurrency limit, and use all of it"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "time in milliseconds",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "    seconds = sum(reply.latency_ms for reply in replies) / 1000\n",
+          "new": "    seconds = sum(reply.latency_ms for reply in replies)\n"
+        }
+      ],
+      "expect": "time is the case's total router latency, in seconds"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "time from the slowest run",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "    seconds = sum(reply.latency_ms for reply in replies) / 1000\n",
+          "new": "    seconds = max(reply.latency_ms for reply in replies) / 1000\n"
+        }
+      ],
+      "expect": "time is the case's total router latency, in seconds"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "the message counts the runs that failed",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "message=f\"{matched}/{len(replies)} runs matched: {case.prompt}\",",
+          "new": "message=f\"{len(replies) - matched}/{len(replies)} runs matched: {case.prompt}\","
+        }
+      ],
+      "expect": "a failure says how many runs matched"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "a failure on every testcase",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "    if matched < len(replies):\n",
+          "new": "    if True:\n"
+        }
+      ],
+      "expect": "a failure says how many runs matched"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "the traces joined on one line",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "failure.text = \"\\n\".join(",
+          "new": "failure.text = \"; \".join("
+        }
+      ],
+      "expect": "a failure lists every run's trace"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "the suite opened once the first case is done",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "    try:\n        yield f'<testsuite",
+          "new": "    try:\n        await pending[0]\n        yield f'<testsuite"
+        }
+      ],
+      "expect": "the suite opens before any run has finished"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "matched counts the runs that did not match",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "(\"matched\", matched_runs)",
+          "new": "(\"matched\", runs * len(cases) - matched_runs)"
+        }
+      ],
+      "expect": "the suite ends with its counts"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "tests counts runs",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "tests=\"{len(cases)}\">",
+          "new": "tests=\"{len(cases) * runs}\">"
+        }
+      ],
+      "expect": "the suite is named after the skill and counts its cases"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "runs and concurrency not checked",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "    if runs < 1 or concurrency < 1:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "concurrency not checked",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "    if runs < 1 or concurrency < 1:\n",
+          "new": "    if runs < 1:\n"
+        }
+      ],
+      "expect": "TimeoutError"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "only the capability's own claim counts",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "                for dependency in catalog[name]:\n                    level, source = resolve(dependency)\n",
+          "new": "                for dependency in ():\n                    level, source = resolve(dependency)\n"
+        }
+      ],
+      "expect": "each host's verdict and what blocks it"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "dependencies looked at one level deep",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "                    level, source = resolve(dependency)\n",
+          "new": "                    level, source = own(dependency)[0], dependency\n"
+        }
+      ],
+      "expect": "each host's verdict and what blocks it"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "a missing claim counts as supported",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "            if claim is None or not claim.evidence.strip():\n",
+          "new": "            if claim is None:\n                return rank[\"supported\"], UNCLAIMED\n            if not claim.evidence.strip():\n"
+        }
+      ],
+      "expect": "each host's verdict and what blocks it"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "a missing claim raises KeyError",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "            claim = claims.get(name)\n",
+          "new": "            claim = claims[name]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "blank evidence accepted",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "            if claim is None or not claim.evidence.strip():\n",
+          "new": "            if claim is None:\n"
+        }
+      ],
+      "expect": "a claim without evidence is no claim"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "degraded without a fallback counted as degraded",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "            elif status == \"degraded\":\n                outcome = \"silent-degradation\"\n",
+          "new": "            elif status == \"degraded\":\n                outcome = \"degraded\"\n"
+        }
+      ],
+      "expect": "each host's verdict and what blocks it"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "a fallback only for degraded, not unsupported",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "            elif fallbacks.get(name):\n",
+          "new": "            elif fallbacks.get(name) and status == \"degraded\":\n"
+        }
+      ],
+      "expect": "each host's verdict and what blocks it"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "optional capabilities block too",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "blocking = [name for name in required if rows[name][\"outcome\"]",
+          "new": "blocking = [name for name in declared if rows[name][\"outcome\"]"
+        }
+      ],
+      "expect": "each host's verdict and what blocks it"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "one memo shared by every host",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "        memo: dict[str, tuple[int, str]] = {}\n",
+          "new": ""
+        },
+        {
+          "file": "portability.py",
+          "old": "    matrix: dict[str, dict[str, object]] = {}\n",
+          "new": "    matrix: dict[str, dict[str, object]] = {}\n    memo: dict[str, tuple[int, str]] = {}\n"
+        }
+      ],
+      "expect": "each host's verdict and what blocks it"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "ties go to the dependency",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "                    if level > worst:\n",
+          "new": "                    if level >= worst:\n"
+        }
+      ],
+      "expect": "a capability's own claim is the cause when nothing below it is worse"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "the last equally bad dependency is the cause",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "                for dependency in catalog[name]:\n                    level, source = resolve(dependency)\n",
+          "new": "                for dependency in reversed(catalog[name]):\n                    level, source = resolve(dependency)\n"
+        }
+      ],
+      "expect": "between equally bad dependencies, the first one declared is the cause"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "the evidence of the capability itself, not of its cause",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "\"evidence\": own(cause)[1],",
+          "new": "\"evidence\": own(name)[1],"
+        }
+      ],
+      "expect": "a dependency's adapter carries over to what depends on it"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "the cause is always the capability itself",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "\"cause\": cause,",
+          "new": "\"cause\": name,"
+        }
+      ],
+      "expect": "a dependency's adapter carries over to what depends on it"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "verdict checks adapter before degraded",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "        elif \"degraded\" in outcomes:\n            verdict = \"degraded\"\n        elif \"adapter\" in outcomes:\n            verdict = \"adapter\"\n",
+          "new": "        elif \"adapter\" in outcomes:\n            verdict = \"adapter\"\n        elif \"degraded\" in outcomes:\n            verdict = \"degraded\"\n"
+        }
+      ],
+      "expect": "each host's verdict and what blocks it"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "capabilities listed by name",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "        for name in declared:\n            level, cause = resolve(name)\n",
+          "new": "        for name in sorted(declared):\n            level, cause = resolve(name)\n"
+        }
+      ],
+      "expect": "required capabilities first, then optional ones"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "a shared dependency taken for a cycle",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "        if name in done:\n            return\n        if name in path:\n            raise ValueError(\"capability dependency cycle: \" + \" -> \".join([*path[path.index(name):], name]))\n",
+          "new": "        if name in done or name in path:\n            raise ValueError(f\"capability dependency cycle at {name}\")\n"
+        }
+      ],
+      "expect": "capability dependency cycle at catalog-entry"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "no cycle check",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "        if name in path:\n            raise ValueError(",
+          "new": "        if False:\n            raise ValueError("
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "unknown dependencies ignored",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "            if dependency not in catalog:\n                raise ValueError(f\"{name!r} depends on unknown capability {dependency!r}\")\n            visit(dependency)\n",
+          "new": "            if dependency not in catalog:\n                continue\n            visit(dependency)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "unknown statuses accepted",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "            if claim.status not in rank:\n                raise ValueError(f\"{host}: {name} has unknown status {claim.status!r}\")\n",
+          "new": "            pass\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "declared names not checked against the catalog",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "    for name in [*declared, *fallbacks]:\n        if name not in catalog:\n            raise ValueError(f\"unknown capability {name!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "a false positive counted once per case, not per run",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "false_positives[case.category] += sum(fired)",
+          "new": "false_positives[case.category] += any(fired)"
+        }
+      ],
+      "expect": "false positives are counted by the category of the case they happened on"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "infinite latency accepted",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "or not math.isfinite(latency) or latency < 0:",
+          "new": "or latency != latency or latency < 0:"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "only NaN caught, by comparing with 0",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "if type(latency) is not float or not math.isfinite(latency) or latency < 0:",
+          "new": "if type(latency) is not float or not latency >= 0:"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "negative latency accepted",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "or not math.isfinite(latency) or latency < 0:",
+          "new": "or not math.isfinite(latency):"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "runs compared one by one across the two conditions",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "regressions = [task.task_id for task in evidence.tasks if _rate(task.with_skill) < _rate(task.baseline)]",
+          "new": "regressions = [task.task_id for task in evidence.tasks if any(b and not w for b, w in zip(task.baseline, task.with_skill))]"
+        }
+      ],
+      "expect": "every layer passes"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "near-miss false positives counted per case",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "report[\"false_positives\"][\"near_miss\"] <= policy.max_near_miss_false_positives",
+          "new": "sum(not c[\"passed\"] for c in report[\"cases\"] if c[\"category\"] == \"near_miss\") <= policy.max_near_miss_false_positives"
+        }
+      ],
+      "expect": "a second near-miss false positive is over the limit, even in the same case"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "production ready without the checks",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "production_ready = checks_passed and local_ready and anchored",
+          "new": "production_ready = local_ready and anchored"
+        }
+      ],
+      "expect": "an attestation does not make up for a failed layer"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "only JSON syntax errors caught when reading the attestation",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    except ValueError:\n        return False\n",
+          "new": "    except json.JSONDecodeError:\n        return False\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "a case's runs listed in the order they finished",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "        return list(await asyncio.gather(*(one(case, run) for run in range(runs))))\n",
+          "new": "        return [await done for done in asyncio.as_completed([one(case, run) for run in range(runs)])]\n"
+        }
+      ],
+      "expect": "a failure lists every run's trace, in run order"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "time rounded to whole seconds",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "time=repr(seconds)",
+          "new": "time=str(round(seconds))"
+        }
+      ],
+      "expect": "time is the case's total router latency, in seconds"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "the documented fallback reported whether or not it is used",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "            fallback = None\n",
+          "new": "            fallback = fallbacks.get(name)\n"
+        }
+      ],
+      "expect": "a documented fallback shows only when it is in use"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "digest format not checked",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "    if not SHA256.fullmatch(digest):\n        return f\"invalid manifest digest: {key!r}\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "a digest is sha256: and lowercase hex, as written; it is not normalized either"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "digests lowercased before they are checked",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "    if not SHA256.fullmatch(digest):\n",
+          "new": "    if not SHA256.fullmatch(digest.lower()):\n"
+        },
+        {
+          "file": "manifest.py",
+          "old": "            listed[key] = digest\n",
+          "new": "            listed[key] = digest.lower()\n"
+        }
+      ],
+      "expect": "a digest is sha256: and lowercase hex, as written; it is not normalized either"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "scripts pass when any check passed",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "\"scripts\": bool(evidence.script_checks) and all(check.passed for check in evidence.script_checks),",
+          "new": "\"scripts\": bool(evidence.script_checks) and any(check.passed for check in evidence.script_checks),"
+        }
+      ],
+      "expect": "every script check must pass"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "a safety layer with no checks passes",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "\"safety\": bool(evidence.safety_checks) and all(",
+          "new": "\"safety\": all("
+        }
+      ],
+      "expect": "a layer with no evidence has not passed"
+    },
+    {
+      "test": "test_trigger_report_and_install_check",
+      "name": "every file named manifest.json skipped, not just the reserved path",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "            if relative == RESERVED_MANIFEST_PATH:\n",
+          "new": "            if name == \"manifest.json\":\n"
+        }
+      ],
+      "expect": "only the exact path assets/manifest.json is reserved"
+    },
+    {
+      "test": "test_observation_log_roundtrip",
+      "name": "an integer latency accepted",
+      "edits": [
+        {
+          "file": "runlog.py",
+          "old": "type(latency) is not float or",
+          "new": "isinstance(latency, bool) or not isinstance(latency, (int, float)) or"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "artifact pass rate as the mean of per-task with-skill rates",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "sum(with_skill) / len(with_skill) >= policy.min_artifact_pass_rate",
+          "new": "sum(_rate(t.with_skill) for t in evidence.tasks) / len(evidence.tasks) >= policy.min_artifact_pass_rate"
+        }
+      ],
+      "expect": "not an average of task rates"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "local evidence ready in fixture mode",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "local_ready = evidence.mode == \"captured\" and all(",
+          "new": "local_ready = all("
+        }
+      ],
+      "expect": "never a release, even with sources and an attestation"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "regressions sorted by task id",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "\"regressions\": regressions,",
+          "new": "\"regressions\": sorted(regressions),"
+        }
+      ],
+      "expect": "regressions are in task order"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "failures counts the runs that did not match",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "failures += matched < runs",
+          "new": "failures += runs - matched"
+        }
+      ],
+      "expect": "failed cases, then runs and matched runs"
+    },
+    {
+      "test": "test_junit_stream",
+      "name": "a failure without its type",
+      "edits": [
+        {
+          "file": "junit.py",
+          "old": "            type=\"trigger-mismatch\",\n",
+          "new": ""
+        }
+      ],
+      "expect": "every failure has the type trigger-mismatch"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "fallback names not checked against the catalog",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "for name in [*declared, *fallbacks]:",
+          "new": "for name in declared:"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "a capability both required and optional accepted",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "    if len(set(declared)) != len(declared):\n        raise ValueError(\"each capability is required or optional, once\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_portability_matrix",
+      "name": "cycles looked for only from the declared capabilities",
+      "edits": [
+        {
+          "file": "portability.py",
+          "old": "    for name in catalog:\n        visit(name)\n",
+          "new": "    for name in catalog:\n        for d in catalog[name]:\n            if d not in catalog:\n                raise ValueError('unknown')\n    for name in ('catalog-entry','body-activation','companion-files','script-execution','explicit-invocation','implicit-invocation','invocation-policy','argument-binding'):\n        visit(name)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    }
+  ]
+}

@@ -1,0 +1,156 @@
+{
+  "lesson": "phases/13-tools-and-protocols/27-skill-evals-packaging-and-portability",
+  "title": "Skill Evals, Packaging, and Portability",
+  "format": "staged-brownfield",
+  "service": "SkillEval: a release harness for one Agent Skill bundle with scripted routers and hosts; a repeated-run trigger report and a SHA-256 install check, a CSV log of raw per-run observations, a layer-by-layer release gate bound to an external attestation, a JUnit XML stream of repeated runs, and a per-host capability matrix with dependencies",
+  "sources": {
+    "docs/en.md": "789e3988293fc077fc9ddb8511779f1f7b345a89406ec03589c2b4b8745c3ce3",
+    "code/main.py": "0e4966b1a49655a9383e6cf3537f146f7d5219319fba1045deaf7f77ffa15c18",
+    "quiz/quiz.md": "87fd67c9274f78cfc9cea00a57453c87ee261ff4a70bfcc6a9833dbf024a1b02"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_trigger_report_and_install_check",
+      "kind": "debug",
+      "lesson_anchor": "Layer 2: Trigger Routing (case table, precision/recall/f1, raw counts); Repeated Runs and Uncertainty (keep every run, not run zero); Install the directory as one unit (manifest keys are canonical relative POSIX paths, rejected not normalized; assets/manifest.json excluded from its own map); code/main.py classification_metrics, trigger_report_from_observations, build_manifest, verify_manifest",
+      "planted_bugs": [
+        "trigger_report sets passed from run 0 only (matched[0]); audit-tag (skill, None, skill) passes",
+        "trigger_report buckets false positives by 'competing if expected_skill else clear_negative' instead of the case category: the near miss owned by ci-triage lands in competing, the adversarial case in clear_negative, and the near_miss bucket the release gate reads stays 0",
+        "classification_metrics divides by precision + recall for F1, so a description that never fires raises ZeroDivisionError",
+        "build_manifest keys root-level files os.path.join(os.path.relpath(dirpath, root), name) = './SKILL.md'; the failure surfaces one call later, in verify_manifest, which rightly rejects the key (issues: invalid manifest path './SKILL.md', unexpected: ['./SKILL.md'])",
+        "verify_manifest looks every entry up through _current_digest, which rebuilds the whole tree's manifest each time: O(n^2) hashing"
+      ],
+      "timing_assert": "verify_manifest on a 206-file install under 0.15 s; the per-entry rebuild takes 1.4-2.6 s on this machine under load (at least 9x the limit), a single build 7-16 ms (at least 9x below it)",
+      "overfix_guard": "'./SKILL.md', 'references\\release-policy.md' and 'references//release-policy.md' swapped into the manifest must each be rejected with invalid manifest path (normalizing in verify_manifest is caught); lstrip('./') eats the dot of a stale '.install-state'; caching build_manifest across calls misses edits made after install; hashing only listed files misses stale files and follows symlinks; the reserved path must stay out of the manifest and be refused when listed, while evals/manifest.json, a file with the same name elsewhere, stays in; uppercase digests are refused, not lowercased",
+      "deviation": "A fifth defect was added in build_manifest: it gives the error that surfaces one call away, and it is what tempts the normalization the overfix guard catches. The wrong near-miss bucket is checked on the report; the gate that reads it is Part 3. The timing case is 206 files instead of 300, because 300 files took 3.3-8 s for the slow version under this machine's load."
+    },
+    {
+      "part": 2,
+      "test": "test_observation_log_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Repeated Runs and Uncertainty: 'Keep individual traces... traces guide repair'; Layer 2 case categories; provenance bound to every raw per-run prediction",
+      "exactness": "nine RunObservations appended in completion order by two log objects read back equal, in run order, after a reopen: an abstention (None) as an empty cell, latencies 812.0, 1e-07, 1234.5678901234567, 0.1 + 0.2, 2.5e-05 and 100/3, traces with \\r\\n, quotes, commas, a leading space and a trailing tab, non-ASCII text and an empty trace; observations_digest recomputed from the log equals the in-memory digest, which catches int/float drift that dataclass equality hides; the raw file is a plain CSV with the given header and the latency cell written exactly",
+      "traps": [
+        "None written as 'None', or the empty cell read back as ''",
+        "'' accepted as an abstention",
+        "every empty cell read as None (the empty trace too)",
+        "latency formatted (.3f, %g, rounded) or read as Decimal; 812.0 written as 812 and read as int",
+        "read without newline='' (\\r\\n in a trace becomes \\n); cells stripped",
+        "runs returned in file (completion) order, or as tuples",
+        "header written on every append, or decided when the log object is created (two workers)",
+        "file opened with 'w'",
+        "validation after the write; NaN, infinite, negative or integer latency, unknown category accepted",
+        "duplicate run or a gap in run numbers not refused",
+        "rows joined by hand without quoting"
+      ],
+      "clarifying_questions": [
+        "how to write an abstention",
+        "rounding latency",
+        "a run appended twice",
+        "case order",
+        "extra columns",
+        "fsync and locking"
+      ],
+      "deviation": "A trace column (the host's raw output for the run) joins case_id, run, category, predicted_skill and latency_ms: the lesson's 'keep individual traces', and the field where newline='' matters. A duplicate run may be refused at append or at load; the test accepts either."
+    },
+    {
+      "part": 3,
+      "test": "test_release_gate",
+      "kind": "core algorithm",
+      "lesson_anchor": "Release Gates (the YAML thresholds, declared before the results, one failure per layer); Separate fixture success, local integrity, and production readiness (fixturePassed, localEvidenceReady, productionReady, passed follows productionReady; evidenceRoot and the out-of-band trusted attestation digest); Repeated Runs (per-task regressions even when the average improves; safety cases all pass); quiz Q10.3 (gating on rounded metrics)",
+      "traps": [
+        "structure: only E_ counted (an unprefixed code slips through) or W_ warnings counted",
+        "precision/recall compared with the report's rounded ratios: 19999/25000 shows as 0.8 and passes min_recall 0.8",
+        "> instead of >= at precision 0.95, one near-miss false positive and an artifact pass rate of 0.85",
+        "near misses limited by all false positives, counted per case, or passing when there are no near-miss cases",
+        "artifact pass rate pooled with the baseline, or averaged over tasks instead of runs",
+        "regression judged on pooled averages, with <=, or run by run across the two conditions; regressions not in task order",
+        "empty scripts or safety layer passing (all([])); safety judged by a pass rate; scripts with any()",
+        "portability over present verdicts only, requiring native, counting non-required hosts, or accepting anything but blocked",
+        "installed tree not verified",
+        "evidence root without the policy, over the checks, over first runs and rates, or json.dumps without sorted keys",
+        "attestation: version compared with == (True, 1.0), digest of re-serialized JSON, digest not checked, malformed or non-UTF-8 bytes raising, a JSON array",
+        "production_ready without local evidence or without the checks; passed = checks_passed; fixture_passed in captured mode",
+        "local evidence ready with any source, blank sources, or in fixture mode",
+        "failed layers sorted by name"
+      ],
+      "integration": "trigger_report and verify_manifest from Part 1 feed the routing and installed-tree layers",
+      "clarifying_questions": [
+        "W_ warnings",
+        "a value exactly at the threshold",
+        "rounded report values",
+        "what a regression is",
+        "a layer with no checks",
+        "degraded hosts",
+        "what the evidence root covers",
+        "bytes or decoded attestation",
+        "fixture with an attestation"
+      ],
+      "deviation": "'Declared before looking at the results' is made checkable by binding the policy into the evidence root: loosening a threshold afterwards voids the attestation. Local evidence readiness is captured mode plus a source for each of four evidence layers; the per-layer local digests of the lesson's code are left out because they add no failure the attestation check does not already cover. The test policy uses min_artifact_pass_rate 0.85 rather than the lesson's 0.90 (still the default): float 0.9 is slightly above 9/10, so an exact Fraction comparison and float division disagree at 18/20, while 0.85 and 0.95 agree."
+    },
+    {
+      "part": 4,
+      "test": "test_junit_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Repeated Runs and Uncertainty (each behavioral case run more than once, k/n per case, traces guide repair); Layer 1's CI angle (block on failures, keep evidence per check); Layer 2 adversarial wording (prompts with injected quotes and markup)",
+      "wire_format": "JUnit XML text: a <testsuite name tests> opening chunk before any run finishes, one complete <testcase classname name time> chunk per case in declared order with <failure message='k/n runs matched: prompt' type='trigger-mismatch'> and one 'run i: trace' line per run, then <properties> (failures, runs, matched) and </testsuite>; decided by the test's ElementTree parse of the joined text and of each testcase chunk, with an optional XML declaration",
+      "traps": [
+        "saxutils.escape (quotes), html.escape (newlines normalized in attributes), no escaping, & escaped after <",
+        "every case gathered before the first testcase (probe: ship goes out while audit-tag still runs)",
+        "testcases in completion order; a case's runs listed in completion order",
+        "cases run one after another (peak 3), the limit around cases (peak 12), no limit (peak 15)",
+        "time in milliseconds, from the slowest run, or rounded to whole seconds",
+        "the message counting failed runs; a failure on passing cases; traces on one line",
+        "the suite opened only after the first case",
+        "failures counting failed runs instead of failed cases; matched or tests counted wrongly; the failure type left out",
+        "runs and concurrency not validated (Semaphore(0) stalls; the test times out after 2 s)",
+        "a plain async function instead of an async generator"
+      ],
+      "clarifying_questions": [
+        "seconds or milliseconds",
+        "XML declaration",
+        "counts on the opening tag",
+        "run order in the failure text",
+        "a router that raises"
+      ],
+      "deviation": "The failure count cannot be known when the suite opens, so the counts go into a trailing <properties> element; tests (the number of cases) is on the opening tag. The JUnit XSD puts properties first; that trade-off is a follow-up question. The concurrency limit is checked by its peak, so sequential scheduling fails."
+    },
+    {
+      "part": 5,
+      "test": "test_portability_matrix",
+      "kind": "graph",
+      "lesson_anchor": "Portability is a capability matrix (the capability table with its dependency and fallback columns; supported and tested, adapter, degraded with a documented fallback, unsupported so installation must fail; silent degradation); Portability tests need host fixtures (a claim points to a test or current official contract); Real-Host Portability Checkpoint (unverified rows)",
+      "traps": [
+        "own claim only, or dependencies one level deep",
+        "adapter not carried to dependents",
+        "a missing claim taken as supported or raising KeyError; blank evidence accepted",
+        "degraded without a fallback taken as degraded; a fallback that rescues degraded but not unsupported",
+        "optional capabilities blocking",
+        "one memo shared across hosts",
+        "ties going to the dependency, or to the last equally bad dependency; the capability's own evidence instead of its cause's; the cause always itself",
+        "the documented fallback reported when it is not in use",
+        "verdict checking adapter before degraded",
+        "capabilities sorted by name",
+        "a global visited set taking the shared catalog-entry for a cycle; no cycle check (RecursionError); an unknown dependency in an unused capability ignored; unknown status or undeclared names raising KeyError instead of ValueError; fallback names not checked; a capability both required and optional; a cycle among capabilities nothing uses, found only while resolving"
+      ],
+      "clarifying_questions": [
+        "no claim",
+        "blank evidence",
+        "equally bad dependencies",
+        "optional capabilities",
+        "unsupported with a fallback",
+        "whole catalog or what is used"
+      ],
+      "deviation": "Host features the table names as dependencies (host router, host extension, host parser, file and process tools) are catalog nodes of their own. A missing or evidence-less claim counts as unsupported, the lesson's 'unverified' row. The cause rule (own claim wins ties, then the first declared dependency) is defined in the docstring so the evidence is deterministic."
+    }
+  ],
+  "deviations": [
+    "Part 1 adds a fifth defect in build_manifest (root-level keys './SKILL.md'): it is the error that surfaces one call away, in verify_manifest, and the natural temptation to normalize keys that the overfix guard catches. The timing case is 206 files instead of 300 to keep the slow version near 1.5-2.5 s here.",
+    "Part 2 adds a trace column to the suggested columns, and accepts refusing a duplicate run either at append or at load.",
+    "Part 3 binds the policy into the evidence root to make 'declared before the results' testable, keeps local readiness to captured mode plus four sources, and uses an artifact threshold of 0.85 in the test policy so that float and exact comparisons agree at the boundary.",
+    "Part 4 puts the counts in trailing <properties>, because the failures are unknown when the suite opens.",
+    "Part 5 models the table's host features as catalog nodes and treats missing or evidence-less claims as unsupported."
+  ]
+}
