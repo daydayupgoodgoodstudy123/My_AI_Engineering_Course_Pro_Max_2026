@@ -1,0 +1,149 @@
+{
+  "lesson": "phases/13-tools-and-protocols/19-a2a-protocol",
+  "title": "A2A — Agent-to-Agent Protocol",
+  "format": "staged-brownfield",
+  "service": "agentcard: the lesson's writer agent serving tasks/send and follow-up messages, a caller that downloads its report in base64 chunks, a SQLite task store, signed Agent Card discovery and skill choice, a length-prefixed frame binding for streamed tasks, and caller views of a multi-hop delegation",
+  "sources": {
+    "docs/en.md": "5c54f7443ce3693f8b9f4b7eb9e37daea2d9b74b2ff37e7afed9835df87dfd9c",
+    "code/main.py": "5623c202fef4cdcf44764607bd0ae067a614834801391be473a3378483ca5942"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_writer_lifecycle",
+      "kind": "debug",
+      "lesson_anchor": "Task lifecycle (submitted -> working -> input_required -> working -> completed, terminal states, rejected); Messages and Parts; Artifacts (streamed as chunks, the caller accumulates); code/main.py writer_tasks_send, writer_tasks_reply, finish",
+      "planted_bugs": [
+        "target_length reads only the first data part; the first message has its targetLength in the middle of three, so the task waits in input_required, and the AttributeError surfaces two calls away, in artifact_chunks under read_report",
+        "tasks_send never looks at the card, so an unknown skill goes working and completed instead of submitted -> rejected",
+        "tasks_reply ignores terminal states: a reply to a completed task reopens it, finishes it again and replaces its artifact",
+        "ArtifactAssembler.add concatenates, slices, validates and decodes all the base64 received so far on every chunk, quadratic over 20000 chunks"
+      ],
+      "timing_assert": "20000 chunks of 9 base64 characters (135000 bytes) under 0.12 s; the starter takes 1.22 to 1.51 s unloaded and up to 3.6 s under load, the reference 3.7 to 5.4 ms; the natural bytes += fix takes 31 to 45 ms",
+      "overfix_guard": "chunk boundaries fall inside 4-character groups (7 characters per chunk for the report, 9 for the timing), so decoding each chunk on its own, with or without added padding, fails; received must grow chunk by chunk and a bad group must fail once it is complete, which rules out decoding everything in finish(); targetLength sits in the middle data part, which rules out data[-1]; a reply to a rejected task must also raise, which rules out checking only completed; the terminal check must come before the reply is recorded; a group in base64url's alphabet must raise, which rules out decoding without validate=True"
+    },
+    {
+      "part": 2,
+      "test": "test_task_store_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Task (a unit of delegation with a lifecycle and final artifact), Message, Part (text, file with mimeType, data), Artifact; the lesson code's in-memory TASK_STORE",
+      "exactness": "a task with 13 messages, a first message whose parts are data, text (CRLF and NUL), file (PDF bytes with NUL, CRLF, 0xFE 0xFF), an empty file and text, a data payload whose key order and value types (int, float 1.0, bool, a 20-digit int, nested list and object) are compared one by one, a history with repeated states and a file-part artifact, read back equal in the same connection and after a reopen; the PDF bytes must appear as a BLOB in the database file",
+      "traps": [
+        "file bytes kept as latin-1 or base64 text",
+        "an empty file stored as NULL",
+        "parts read back grouped by type",
+        "message order kept in a text column",
+        "data written with sorted keys",
+        "bools or whole numbers changed by SQLite's JSON functions or a REAL column",
+        "history kept as a set of states",
+        "saving again adds rows instead of replacing them",
+        "load hands back the live task",
+        "old rows deleted in a transaction of their own, or committed by hand without a rollback",
+        "CREATE TABLE without IF NOT EXISTS",
+        "an unknown id loads as None",
+        "task ids not sorted, or the state filter ignored"
+      ],
+      "clarifying_questions": [
+        "one JSON document per task",
+        "append or replace on a second save",
+        "data key order",
+        "task_ids order",
+        "a save that fails halfway"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_discover_and_choose",
+      "kind": "core algorithm",
+      "lesson_anchor": "Agent Card at /.well-known/agent.json (skills with inputModes and outputModes, capabilities.streaming); Signed Agent Cards; Exercise 2 (HMAC over the card's canonical JSON, a verifier that fails on a mutated card); quiz Q11 for the signature format",
+      "traps": [
+        "the old signature left in the canonical JSON",
+        "default separators, \\u escapes, or keys not sorted",
+        "only some fields signed",
+        "standard base64, padding kept, or a hex digest",
+        "sign_card writes into the card it was given",
+        "an unsigned card, alg none, or an unknown kid accepted, or a missing kid raising KeyError",
+        "check_card taking empty strings, string or numeric booleans, empty mode lists, duplicate ids, http, relative or host-less URLs, outputModes outside text and artifact, or raising KeyError",
+        "skill chosen by any overlap, exact match, alphabetical order or fewest modes, outputModes not checked, or a fallback to the first skill",
+        "an empty message matching every skill",
+        "delivery read from pushNotifications"
+      ],
+      "integration": "a writer card signed with sign_card is discovered, checked and used to delegate a message to Part 1's WriterAgent",
+      "clarifying_questions": [
+        "an unknown kid",
+        "several skills fit",
+        "inputModes equal or covering",
+        "an unsigned card from a trusted origin",
+        "constant-time comparison",
+        "artifact as an input mode"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_stream_frames",
+      "kind": "streaming",
+      "lesson_anchor": "Two transport bindings (JSON-RPC over HTTP with SSE, and gRPC); Artifacts can be streamed as chunks and the caller accumulates; Exercise 3 (incremental artifact chunks); Task lifecycle (failed, canceled)",
+      "wire_format": "the exam's own stand-in for the second binding, documented in agentcard/frames.py and decided by the test's struct.unpack('>I') parser: a 4-byte big-endian length of the JSON bytes, then that many bytes of UTF-8 JSON, one status or artifact event per frame, the final status last",
+      "traps": [
+        "little-endian or native length, or a length that counts its own 4 bytes",
+        "frames collected and yielded at the end, joined into one write, or the model read to the end first",
+        "seq from 1, empty pieces sent or numbered",
+        "a model error that escapes, a failed status that isn't final, completed sent after failed, or a partial artifact kept",
+        "the model's stream left open when the caller closes, the task left working, or the working yield outside the try",
+        "encode_frame without the size check",
+        "the length checked only once the body is in, or a frame of exactly MAX_FRAME refused",
+        "one frame per feed, or a partial frame dropped by the next chunk",
+        "bytes after the final status ignored, or only checked in a later chunk",
+        "seq not checked, or one counter for every artifact",
+        "any status taken as final, or close without the final status",
+        "the task completed only after its final frame, or a close after the final frame canceling a completed task",
+        "the artifact name written as report instead of the name stream_task is given"
+      ],
+      "clarifying_questions": [
+        "does the length include itself",
+        "several frames in one yield",
+        "empty pieces",
+        "a canceled frame on close",
+        "escaping non-ASCII",
+        "closing after the final frame"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_delegation_views",
+      "kind": "recursive structure",
+      "lesson_anchor": "Opacity preservation (the caller sees task state and artifacts; chain-of-thought, tool calls and sub-agent delegation are invisible); Exercise 5 (multi-hop task delegation); terminal states failed and rejected",
+      "traps": [
+        "the forward flag ignored, or a delegate's plan artifacts forwarded instead of what it returned",
+        "artifacts copied with internal fields, or views carrying steps",
+        "any failure below fails every caller above, or required delegates never fail their caller",
+        "required defaulting to false",
+        "the client's delegation counted as hop 0, or a task at max_hops rejected",
+        "a rejected task still running its delegates",
+        "a task that fails on its own skipping its delegates",
+        "views keyed by agent, or results remembered per agent",
+        "entries for tasks with no delegates",
+        "a failed task returning its artifacts",
+        "forwarded artifacts before the task's own or in reverse delegate order",
+        "defaults written into the plan",
+        "a task id used twice (checked only among siblings or only for tasks that run), or max_hops 0, accepted"
+      ],
+      "clarifying_questions": [
+        "hop 0 or 1",
+        "a rejected task's delegates",
+        "delegates of a task that fails on its own",
+        "artifacts from deeper down",
+        "a task id used twice",
+        "cycles"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the four suggested defects are kept. The first failure surfaces in the caller's download (read_report into artifact_chunks), two calls from the data-part bug. The writer returns its report as a file part (report.md), so the artifact travels as base64 cut every N characters, as the suggested overfix guard needs. The suggested 20000 chunks are kept (9 characters each); the limit is 0.12 s, which leaves 10x below the starter's fastest run and 22x above the reference's slowest, and lets the still-quadratic bytes += and keep-the-whole-text fixes pass with about 2x to spare.",
+    "Part 2: as suggested, plus two rules the round trip needs: load returns the task as it was saved rather than the live object, and a second save replaces the first in one transaction. task_ids is sorted by id instead of insertion order, and the UTF-8 decode and missing-commit traps are not featured, because earlier lessons of this chapter already use them twice (the round trip still catches them).",
+    "Part 3: as suggested. The signature field follows the lesson's quiz Q11 (HS256, kid, base64url without padding over canonical JSON with ensure_ascii=False). discover() and delegate() are given glue, so the work is check_card, canonical_json, sign_card, verify_card and choose_skill. outputModes are the lesson card's text and artifact.",
+    "Part 4: frames carry status events and numbered text pieces (seq per artifact), and the writer is an async generator over a fake model, with probes on when the working status and the first piece go out. A model error ends the stream with a final failed status, and a caller that closes the stream cancels the task and must close the model's stream. The suggested characters-versus-bytes length trap is not featured, because 03 and 11 already use it: the writer's JSON uses json.dumps defaults, so the trap only bites a candidate who switches to ensure_ascii=False, and the reader is still fed raw UTF-8 frames cut at every byte. The part adds a MAX_FRAME limit checked from the header alone, per-artifact seq checks and nothing after the final status.",
+    "Part 5: as suggested, with two rules that make opacity concrete: an artifact reaches a caller only when every hop on the way forwards it, and each delegate is required (the default) or optional for its caller, so the caller's own state follows its own rule. The client's delegation is hop 1. No cycles."
+  ]
+}

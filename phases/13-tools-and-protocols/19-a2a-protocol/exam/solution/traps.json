@@ -1,0 +1,1484 @@
+{
+  "package": "agentcard",
+  "tests": [
+    "test_writer_lifecycle",
+    "test_task_store_roundtrip",
+    "test_discover_and_choose",
+    "test_stream_frames",
+    "test_delegation_views"
+  ],
+  "layers": [
+    {
+      "test": "test_writer_lifecycle",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "AttributeError"
+        },
+        {
+          "name": "every data part counts",
+          "edits": [
+            {
+              "file": "writer.py",
+              "old": "    data = [part.data for part in message.parts if part.type == \"data\"]\n    if data and \"targetLength\" in data[0]:\n        return data[0][\"targetLength\"]\n",
+              "new": "    for part in message.parts:\n        if part.type == \"data\" and \"targetLength\" in part.data:\n            return part.data[\"targetLength\"]\n"
+            }
+          ],
+          "expect": "a skill the card doesn't list is rejected before any work starts"
+        },
+        {
+          "name": "+ reject a skill the card doesn't list",
+          "edits": [
+            {
+              "file": "writer.py",
+              "old": "        self.tasks[task.id] = task\n        task.messages.append(message)\n",
+              "new": "        self.tasks[task.id] = task\n        task.messages.append(message)\n        if skill_id not in [skill[\"id\"] for skill in self.card[\"skills\"]]:\n            task.move(\"rejected\")\n            task.messages.append(agent_says(f\"This agent has no skill {skill_id!r}.\"))\n            return task\n"
+            }
+          ],
+          "expect": "DID NOT RAISE"
+        },
+        {
+          "name": "+ a finished task never changes",
+          "edits": [
+            {
+              "file": "writer.py",
+              "old": "from .model import Artifact, Message, Task, file_part, text_part\n",
+              "new": "from .model import TERMINAL, Artifact, Message, Task, TaskError, file_part, text_part\n"
+            },
+            {
+              "file": "writer.py",
+              "old": "        task = self.tasks[task_id]\n        task.messages.append(message)\n",
+              "new": "        task = self.tasks[task_id]\n        if task.state in TERMINAL:\n            raise TaskError(f\"{task_id} is {task.state}, and a finished task never changes\")\n        task.messages.append(message)\n"
+            }
+          ],
+          "expect": "adding a chunk must not decode everything that arrived before it again"
+        },
+        {
+          "name": "+ decode only the groups the new chunk completes",
+          "edits": [
+            {
+              "file": "caller.py",
+              "old": "        self._text = \"\"\n        self.received = b\"\"\n\n    def add(self, chunk: str) -> None:\n        self._text += chunk\n        whole = len(self._text) - len(self._text) % 4\n        self.received = base64.b64decode(self._text[:whole], validate=True)\n",
+              "new": "        self._pending = \"\"\n        self.received = b\"\"\n\n    def add(self, chunk: str) -> None:\n        text = self._pending + chunk\n        whole = len(text) - len(text) % 4\n        self.received += base64.b64decode(text[:whole], validate=True)\n        self._pending = text[whole:]\n"
+            },
+            {
+              "file": "caller.py",
+              "old": "        if len(self._text) % 4:\n",
+              "new": "        if self._pending:\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_writer_lifecycle",
+      "name": "each chunk decoded on its own (overfix)",
+      "edits": [
+        {
+          "file": "caller.py",
+          "old": "        text = self._pending + chunk\n        whole = len(text) - len(text) % 4\n        self._received += base64.b64decode(text[:whole], validate=True)\n        self._pending = text[whole:]\n",
+          "new": "        self._received += base64.b64decode(chunk, validate=True)\n"
+        }
+      ],
+      "expect": "binascii.Error"
+    },
+    {
+      "test": "test_writer_lifecycle",
+      "name": "each chunk padded and decoded on its own (overfix)",
+      "edits": [
+        {
+          "file": "caller.py",
+          "old": "        text = self._pending + chunk\n        whole = len(text) - len(text) % 4\n        self._received += base64.b64decode(text[:whole], validate=True)\n        self._pending = text[whole:]\n",
+          "new": "        self._received += base64.b64decode(chunk + \"=\" * (-len(chunk) % 4), validate=True)\n"
+        }
+      ],
+      "expect": "binascii.Error"
+    },
+    {
+      "test": "test_writer_lifecycle",
+      "name": "everything decoded once, in finish (overfix)",
+      "edits": [
+        {
+          "file": "caller.py",
+          "old": "        text = self._pending + chunk\n        whole = len(text) - len(text) % 4\n        self._received += base64.b64decode(text[:whole], validate=True)\n        self._pending = text[whole:]\n",
+          "new": "        self._pending += chunk\n"
+        },
+        {
+          "file": "caller.py",
+          "old": "        if self._pending:\n            raise ValueError(\"the artifact stopped in the middle of a base64 group\")\n        return self.received\n",
+          "new": "        if len(self._pending) % 4:\n            raise ValueError(\"the artifact stopped in the middle of a base64 group\")\n        return base64.b64decode(self._pending, validate=True)\n"
+        }
+      ],
+      "expect": "bytes are available as soon as their 4-character group is complete"
+    },
+    {
+      "test": "test_writer_lifecycle",
+      "name": "characters left over from a chunk dropped",
+      "edits": [
+        {
+          "file": "caller.py",
+          "old": "        self._pending = text[whole:]\n",
+          "new": "        self._pending = \"\"\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_writer_lifecycle",
+      "name": "targetLength read from the last data part",
+      "edits": [
+        {
+          "file": "writer.py",
+          "old": "    for part in message.parts:\n        if part.type == \"data\" and \"targetLength\" in part.data:\n            return part.data[\"targetLength\"]\n",
+          "new": "    data = [part.data for part in message.parts if part.type == \"data\"]\n    if data and \"targetLength\" in data[-1]:\n        return data[-1][\"targetLength\"]\n"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_writer_lifecycle",
+      "name": "an unknown skill fails instead of being rejected",
+      "edits": [
+        {
+          "file": "writer.py",
+          "old": "            task.move(\"rejected\")\n",
+          "new": "            task.move(\"failed\")\n"
+        }
+      ],
+      "expect": "a skill the card doesn't list is rejected before any work starts"
+    },
+    {
+      "test": "test_writer_lifecycle",
+      "name": "an unknown skill rejected after the task started working",
+      "edits": [
+        {
+          "file": "writer.py",
+          "old": "        task.messages.append(message)\n        if skill_id not in [skill[\"id\"] for skill in self.card[\"skills\"]]:\n",
+          "new": "        task.messages.append(message)\n        task.move(\"working\")\n        if skill_id not in [skill[\"id\"] for skill in self.card[\"skills\"]]:\n"
+        },
+        {
+          "file": "writer.py",
+          "old": "            return task\n        task.move(\"working\")\n",
+          "new": "            return task\n"
+        }
+      ],
+      "expect": "a skill the card doesn't list is rejected before any work starts"
+    },
+    {
+      "test": "test_writer_lifecycle",
+      "name": "skills checked against draft_report instead of the card",
+      "edits": [
+        {
+          "file": "writer.py",
+          "old": "        if skill_id not in [skill[\"id\"] for skill in self.card[\"skills\"]]:\n",
+          "new": "        if skill_id != \"draft_report\":\n"
+        }
+      ],
+      "expect": "the writer serves the skills on its own card"
+    },
+    {
+      "test": "test_writer_lifecycle",
+      "name": "the rejection doesn't say which skill",
+      "edits": [
+        {
+          "file": "writer.py",
+          "old": "agent_says(f\"This agent has no skill {skill_id!r}.\")",
+          "new": "agent_says(\"That skill is not on this card.\")"
+        }
+      ],
+      "expect": "the rejection names the skill"
+    },
+    {
+      "test": "test_writer_lifecycle",
+      "name": "the terminal check comes after the reply is recorded",
+      "edits": [
+        {
+          "file": "writer.py",
+          "old": "        task = self.tasks[task_id]\n        if task.state in TERMINAL:\n            raise TaskError(f\"{task_id} is {task.state}, and a finished task never changes\")\n        task.messages.append(message)\n",
+          "new": "        task = self.tasks[task_id]\n        task.messages.append(message)\n        if task.state in TERMINAL:\n            raise TaskError(f\"{task_id} is {task.state}, and a finished task never changes\")\n"
+        }
+      ],
+      "expect": "a task in a terminal state never changes"
+    },
+    {
+      "test": "test_writer_lifecycle",
+      "name": "only completed counts as finished",
+      "edits": [
+        {
+          "file": "writer.py",
+          "old": "        if task.state in TERMINAL:\n            raise TaskError",
+          "new": "        if task.state == \"completed\":\n            raise TaskError"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_writer_lifecycle",
+      "name": "an unknown task id reported as TaskError",
+      "edits": [
+        {
+          "file": "writer.py",
+          "old": "        task = self.tasks[task_id]\n        if task.state in TERMINAL:\n            raise TaskError(f\"{task_id} is {task.state}, and a finished task never changes\")\n        task.messages.append(message)\n",
+          "new": "        task = self.tasks.get(task_id)\n        if task is None or task.state in TERMINAL:\n            raise TaskError(f\"{task_id} cannot take a reply\")\n        task.messages.append(message)\n"
+        }
+      ],
+      "expect": "TaskError"
+    },
+    {
+      "test": "test_writer_lifecycle",
+      "name": "groups decoded without validate=True",
+      "edits": [
+        {
+          "file": "caller.py",
+          "old": "base64.b64decode(text[:whole], validate=True)",
+          "new": "base64.b64decode(text[:whole])"
+        }
+      ],
+      "expect": "accepted a group in base64url's alphabet"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "file bytes kept as latin-1 text",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return (\"file\", None, part.file.name, part.file.mimeType, bytes(part.file.content), None)\n",
+          "new": "        return (\"file\", None, part.file.name, part.file.mimeType, bytes(part.file.content).decode(\"latin-1\"), None)\n"
+        },
+        {
+          "file": "store.py",
+          "old": "        return Part(\"file\", file=File(name, mime_type, content))\n",
+          "new": "        return Part(\"file\", file=File(name, mime_type, content.encode(\"latin-1\")))\n"
+        }
+      ],
+      "expect": "a file part's bytes are stored as they are, in a BLOB"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "file bytes kept as base64 text",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return (\"file\", None, part.file.name, part.file.mimeType, bytes(part.file.content), None)\n",
+          "new": "        return (\"file\", None, part.file.name, part.file.mimeType, __import__(\"base64\").b64encode(part.file.content).decode(\"ascii\"), None)\n"
+        },
+        {
+          "file": "store.py",
+          "old": "        return Part(\"file\", file=File(name, mime_type, content))\n",
+          "new": "        return Part(\"file\", file=File(name, mime_type, __import__(\"base64\").b64decode(content)))\n"
+        }
+      ],
+      "expect": "a file part's bytes are stored as they are, in a BLOB"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "an empty file stored as NULL",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "bytes(part.file.content), None)",
+          "new": "bytes(part.file.content) or None, None)"
+        }
+      ],
+      "expect": "messages come back exactly, in order, with their parts in order"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "parts read back grouped by type",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": " WHERE task_id = ? ORDER BY message_seq, seq\",",
+          "new": " WHERE task_id = ? ORDER BY message_seq, type, seq\","
+        }
+      ],
+      "expect": "messages come back exactly, in order, with their parts in order"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "message order kept in a text column",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "CREATE TABLE IF NOT EXISTS messages (\n    task_id TEXT NOT NULL,\n    seq INTEGER NOT NULL,",
+          "new": "CREATE TABLE IF NOT EXISTS messages (\n    task_id TEXT NOT NULL,\n    seq TEXT NOT NULL,"
+        },
+        {
+          "file": "store.py",
+          "old": "            Message(role, parts.get(seq, []))\n",
+          "new": "            Message(role, parts.get(int(seq), []))\n"
+        }
+      ],
+      "expect": "messages come back exactly, in order, with their parts in order"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "data written with sorted keys",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return (\"data\", None, None, None, None, json.dumps(part.data))\n",
+          "new": "        return (\"data\", None, None, None, None, json.dumps(part.data, sort_keys=True))\n"
+        }
+      ],
+      "expect": "a data part keeps its keys in order and every value's type"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "bools read back as 0 and 1, the way SQLite's JSON functions return them",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    return Part(\"data\", data=json.loads(data))\n",
+          "new": "    return Part(\"data\", data={key: int(value) if isinstance(value, bool) else value for key, value in json.loads(data).items()})\n"
+        }
+      ],
+      "expect": "a data part keeps its keys in order and every value's type"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "whole numbers read back as floats, the way a REAL column returns them",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    return Part(\"data\", data=json.loads(data))\n",
+          "new": "    return Part(\"data\", data=json.loads(data, parse_int=float))\n"
+        }
+      ],
+      "expect": "messages come back exactly, in order, with their parts in order"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "history kept as a set of states",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    state TEXT NOT NULL,\n    PRIMARY KEY (task_id, seq)\n);\nCREATE TABLE IF NOT EXISTS messages",
+          "new": "    state TEXT NOT NULL,\n    PRIMARY KEY (task_id, seq),\n    UNIQUE (task_id, state)\n);\nCREATE TABLE IF NOT EXISTS messages"
+        },
+        {
+          "file": "store.py",
+          "old": "\"INSERT INTO history (task_id, seq, state) VALUES (?, ?, ?)\"",
+          "new": "\"INSERT OR IGNORE INTO history (task_id, seq, state) VALUES (?, ?, ?)\""
+        }
+      ],
+      "expect": "the history keeps every state in order, repeats included"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "saving again adds rows instead of replacing them",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "TABLES = ((\"tasks\", \"id\"), (\"history\", \"task_id\"), (\"messages\", \"task_id\"), (\"artifacts\", \"task_id\"), (\"parts\", \"task_id\"))",
+          "new": "TABLES = ((\"tasks\", \"id\"), (\"artifacts\", \"task_id\"))"
+        }
+      ],
+      "expect": "IntegrityError"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "old rows deleted in a transaction of their own",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        rows = [\n            (task.id, owner, seq, *_columns(part))\n            for owner, parts in owners\n            for seq, part in enumerate(parts)\n        ]\n        with self._db:\n            for table, column in TABLES:\n                self._db.execute(f\"DELETE FROM {table} WHERE {column} = ?\", (task.id,))\n",
+          "new": "        with self._db:\n            for table, column in TABLES:\n                self._db.execute(f\"DELETE FROM {table} WHERE {column} = ?\", (task.id,))\n        rows = [\n            (task.id, owner, seq, *_columns(part))\n            for owner, parts in owners\n            for seq, part in enumerate(parts)\n        ]\n        with self._db:\n"
+        }
+      ],
+      "expect": "a save that fails leaves the stored task as it was"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "rows built inside the transaction, committed by hand",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        rows = [\n            (task.id, owner, seq, *_columns(part))\n            for owner, parts in owners\n            for seq, part in enumerate(parts)\n        ]\n        with self._db:\n            for table, column in TABLES:\n                self._db.execute(f\"DELETE FROM {table} WHERE {column} = ?\", (task.id,))\n",
+          "new": "        if True:\n            for table, column in TABLES:\n                self._db.execute(f\"DELETE FROM {table} WHERE {column} = ?\", (task.id,))\n            rows = [\n                (task.id, owner, seq, *_columns(part))\n                for owner, parts in owners\n                for seq, part in enumerate(parts)\n            ]\n"
+        },
+        {
+          "file": "store.py",
+          "old": "                rows,\n            )\n\n    def load",
+          "new": "                rows,\n            )\n            self._db.commit()\n\n    def load"
+        }
+      ],
+      "expect": "a save that fails leaves the stored task as it was"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "CREATE TABLE IF NOT EXISTS tasks",
+          "new": "CREATE TABLE tasks"
+        }
+      ],
+      "expect": "already exists"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "an unknown id loads as None",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if row is None:\n            raise KeyError(task_id)\n",
+          "new": "        if row is None:\n            return None\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "task ids not sorted",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "\"SELECT id FROM tasks ORDER BY id\"",
+          "new": "\"SELECT id FROM tasks ORDER BY rowid\""
+        }
+      ],
+      "expect": "task ids come back sorted"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "load hands back the live task it was given",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        with self._db:\n            for table, column in TABLES:\n",
+          "new": "        self.__dict__.setdefault(\"_live\", {})[task.id] = task\n        with self._db:\n            for table, column in TABLES:\n"
+        },
+        {
+          "file": "store.py",
+          "old": "        \"\"\"The task as it was last saved. Unknown ids raise KeyError.\"\"\"\n",
+          "new": "        \"\"\"The task as it was last saved. Unknown ids raise KeyError.\"\"\"\n        if task_id in self.__dict__.get(\"_live\", {}):\n            return self._live[task_id]\n"
+        }
+      ],
+      "expect": "load returns the task as it was saved"
+    },
+    {
+      "test": "test_task_store_roundtrip",
+      "name": "the state filter ignored",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "\"SELECT id FROM tasks WHERE state = ? ORDER BY id\", (state,)",
+          "new": "\"SELECT id FROM tasks ORDER BY id\""
+        }
+      ],
+      "expect": "task_ids can filter by current state"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "canonical JSON keeps the old signature",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    body = {key: value for key, value in card.items() if key != \"signature\"}\n",
+          "new": "    body = dict(card)\n"
+        }
+      ],
+      "expect": "signing again replaces the old signature"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "default separators",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    return json.dumps(body, sort_keys=True, separators=(\",\", \":\"), ensure_ascii=False).encode(\"utf-8\")\n",
+          "new": "    return json.dumps(body, sort_keys=True, ensure_ascii=False).encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "the signature is an HMAC of the card's canonical JSON, as the docstring defines it"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "non-ASCII written as \\u escapes",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    return json.dumps(body, sort_keys=True, separators=(\",\", \":\"), ensure_ascii=False).encode(\"utf-8\")\n",
+          "new": "    return json.dumps(body, sort_keys=True, separators=(\",\", \":\")).encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "the signature is an HMAC of the card's canonical JSON, as the docstring defines it"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "keys not sorted",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    return json.dumps(body, sort_keys=True, separators=(\",\", \":\"), ensure_ascii=False).encode(\"utf-8\")\n",
+          "new": "    return json.dumps(body, separators=(\",\", \":\"), ensure_ascii=False).encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "the signature is an HMAC of the card's canonical JSON, as the docstring defines it"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "only name, url and skills signed",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    body = {key: value for key, value in card.items() if key != \"signature\"}\n",
+          "new": "    body = {key: card[key] for key in (\"name\", \"url\", \"skills\")}\n"
+        }
+      ],
+      "expect": "the signature is an HMAC of the card's canonical JSON, as the docstring defines it"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "standard base64 alphabet",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    value = base64.urlsafe_b64encode(mac).rstrip(b\"=\").decode(\"ascii\")\n",
+          "new": "    value = base64.b64encode(mac).rstrip(b\"=\").decode(\"ascii\")\n"
+        }
+      ],
+      "expect": "the signature is an HMAC of the card's canonical JSON, as the docstring defines it"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "base64 padding kept",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    value = base64.urlsafe_b64encode(mac).rstrip(b\"=\").decode(\"ascii\")\n",
+          "new": "    value = base64.urlsafe_b64encode(mac).decode(\"ascii\")\n"
+        }
+      ],
+      "expect": "the signature is an HMAC of the card's canonical JSON, as the docstring defines it"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "hex digest",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    value = base64.urlsafe_b64encode(mac).rstrip(b\"=\").decode(\"ascii\")\n",
+          "new": "    value = mac.hex()\n"
+        }
+      ],
+      "expect": "the signature is an HMAC of the card's canonical JSON, as the docstring defines it"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "sign_card writes the signature into the card it was given",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    return {**card, \"signature\": {\"alg\": \"HS256\", \"kid\": kid, \"value\": value}}\n",
+          "new": "    card[\"signature\"] = {\"alg\": \"HS256\", \"kid\": kid, \"value\": value}\n    return card\n"
+        }
+      ],
+      "expect": "sign_card leaves the card as it was"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "an unsigned card verifies",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    if not isinstance(signature, dict) or signature.get(\"alg\") != \"HS256\":\n",
+          "new": "    if signature is None:\n        return True\n    if not isinstance(signature, dict) or signature.get(\"alg\") != \"HS256\":\n"
+        }
+      ],
+      "expect": "a card with no signature must not verify"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "alg not checked",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    if not isinstance(signature, dict) or signature.get(\"alg\") != \"HS256\":\n",
+          "new": "    if not isinstance(signature, dict):\n"
+        }
+      ],
+      "expect": "a card with alg none must not verify"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "kid read with []",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    kid, value = signature.get(\"kid\"), signature.get(\"value\")\n",
+          "new": "    kid, value = signature[\"kid\"], signature.get(\"value\")\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "an unknown kid falls back to a known key",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    if not isinstance(kid, str) or kid not in keys or not isinstance(value, str):\n        return False\n    expected = sign_card(card, keys[kid], kid)[\"signature\"][\"value\"]\n",
+          "new": "    if not isinstance(value, str):\n        return False\n    key = keys.get(kid) or next(iter(keys.values()))\n    expected = sign_card(card, key, kid)[\"signature\"][\"value\"]\n"
+        }
+      ],
+      "expect": "a card with an unknown key id must not verify"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "check_card takes any value that is present as a boolean",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "        isinstance(capabilities.get(flag), bool) for flag in",
+          "new": "        capabilities.get(flag) is not None for flag in"
+        }
+      ],
+      "expect": "check_card accepts a card with streaming as a string"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "check_card takes empty mode lists",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "            if not isinstance(modes, list) or not modes or any(",
+          "new": "            if not isinstance(modes, list) or any("
+        }
+      ],
+      "expect": "check_card accepts a card with a skill with empty inputModes"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "check_card takes a skill id used twice",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "        if skill[\"id\"] in seen:\n            raise CardError(f\"skill id {skill['id']!r} is used twice\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "check_card accepts a card with two skills with one id"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "check_card takes any scheme",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    if url.scheme != \"https\" or not url.netloc:\n",
+          "new": "    if not url.netloc:\n"
+        }
+      ],
+      "expect": "check_card accepts a card with an http url"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "check_card takes a relative url",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    if url.scheme != \"https\" or not url.netloc:\n",
+          "new": "    if url.scheme not in (\"https\", \"\"):\n"
+        }
+      ],
+      "expect": "check_card accepts a card with a relative url"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "check_card reads modes with []",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "            modes = skill.get(field)\n",
+          "new": "            modes = skill[field]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "check_card uses one vocabulary for inputs and outputs",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "(\"outputModes\", OUTPUT_MODES)",
+          "new": "(\"outputModes\", INPUT_MODES + (\"artifact\",))"
+        }
+      ],
+      "expect": "check_card accepts a card with a skill that outputs files"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "a skill that takes any one of the part types",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "        if needed <= set(skill[\"inputModes\"]) and wants in skill[\"outputModes\"]:\n",
+          "new": "        if needed & set(skill[\"inputModes\"]) and wants in skill[\"outputModes\"]:\n"
+        }
+      ],
+      "expect": "the first skill in card order that takes every part type"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "a skill whose inputModes match exactly",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "        if needed <= set(skill[\"inputModes\"]) and wants in skill[\"outputModes\"]:\n",
+          "new": "        if needed == set(skill[\"inputModes\"]) and wants in skill[\"outputModes\"]:\n"
+        }
+      ],
+      "expect": "the first skill in card order that takes every part type"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "skills tried in alphabetical order",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    for skill in card[\"skills\"]:\n",
+          "new": "    for skill in sorted(card[\"skills\"], key=lambda s: s[\"id\"]):\n"
+        }
+      ],
+      "expect": "the first skill in card order that takes every part type"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "the skill with the fewest inputModes first",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    for skill in card[\"skills\"]:\n",
+          "new": "    for skill in sorted(card[\"skills\"], key=lambda s: len(s[\"inputModes\"])):\n"
+        }
+      ],
+      "expect": "the first skill in card order that takes every part type"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "outputModes not checked",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "        if needed <= set(skill[\"inputModes\"]) and wants in skill[\"outputModes\"]:\n",
+          "new": "        if needed <= set(skill[\"inputModes\"]):\n"
+        }
+      ],
+      "expect": "the first skill in card order that takes every part type"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "no fit falls back to the first skill",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "            return Choice(skill[\"id\"], delivery)\n    return None\n",
+          "new": "            return Choice(skill[\"id\"], delivery)\n    return Choice(card[\"skills\"][0][\"id\"], \"poll\")\n"
+        }
+      ],
+      "expect": "the first skill in card order that takes every part type"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "an empty message goes to the first skill",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    if not message.parts:\n        raise ValueError(\"a message carries one or more parts\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "delivery read from pushNotifications",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "card[\"capabilities\"][\"streaming\"]",
+          "new": "card[\"capabilities\"][\"pushNotifications\"]"
+        }
+      ],
+      "expect": "an agent that can't stream is polled"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "check_card takes empty strings",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    return isinstance(value, str) and value != \"\"\n",
+          "new": "    return isinstance(value, str)\n"
+        }
+      ],
+      "expect": "check_card accepts a card with an empty description"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "check_card checks only the skill id",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "        for field in (\"id\", \"name\", \"description\"):\n",
+          "new": "        for field in (\"id\",):\n"
+        }
+      ],
+      "expect": "check_card accepts a card with a skill with an empty name"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "check_card only looks for an https:// prefix",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "    if url.scheme != \"https\" or not url.netloc:\n",
+          "new": "    if not card[\"url\"].startswith(\"https://\"):\n"
+        }
+      ],
+      "expect": "check_card accepts a card with a url without a host"
+    },
+    {
+      "test": "test_discover_and_choose",
+      "name": "check_card takes 0 and 1 as booleans",
+      "edits": [
+        {
+          "file": "cards.py",
+          "old": "isinstance(capabilities.get(flag), bool) for flag",
+          "new": "capabilities.get(flag) in (True, False) for flag"
+        }
+      ],
+      "expect": "check_card accepts a card with pushNotifications as a number"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "little-endian length",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "    return struct.pack(\">I\", len(body)) + body\n",
+          "new": "    return struct.pack(\"<I\", len(body)) + body\n"
+        }
+      ],
+      "expect": "a frame is a 4-byte big-endian length, then exactly that many bytes of JSON"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "native byte order",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "    return struct.pack(\">I\", len(body)) + body\n",
+          "new": "    return struct.pack(\"I\", len(body)) + body\n"
+        }
+      ],
+      "expect": "a frame is a 4-byte big-endian length, then exactly that many bytes of JSON"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "the length counts its own 4 bytes",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "    return struct.pack(\">I\", len(body)) + body\n",
+          "new": "    return struct.pack(\">I\", len(body) + 4) + body\n"
+        }
+      ],
+      "expect": "Extra data"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "frames collected, then yielded at the end",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "    task.move(\"working\")\n    text: list[str] = []\n    try:\n        yield encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"working\", \"final\": False})\n        async for piece in pieces:\n            if not piece:\n                continue\n            frame = {\"kind\": \"artifact\", \"taskId\": task.id, \"name\": artifact, \"seq\": len(text), \"text\": piece}\n            text.append(piece)\n            yield encode_frame(frame)\n    except ModelError as error:\n        task.move(\"failed\")\n        yield encode_frame(\n            {\"kind\": \"status\", \"taskId\": task.id, \"state\": \"failed\", \"final\": True, \"message\": str(error)}\n        )\n        return\n    except GeneratorExit:\n        task.move(\"canceled\")\n        close = getattr(pieces, \"aclose\", None)\n        if close is not None:\n            await close()\n        raise\n    task.artifact = Artifact(artifact, \"text/markdown\", [text_part(\"\".join(text))])\n    task.move(\"completed\")\n    yield encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"completed\", \"final\": True})\n",
+          "new": "    task.move(\"working\")\n    text: list[str] = []\n    frames = [encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"working\", \"final\": False})]\n    try:\n        async for piece in pieces:\n            if not piece:\n                continue\n            frames.append(encode_frame({\"kind\": \"artifact\", \"taskId\": task.id, \"name\": artifact, \"seq\": len(text), \"text\": piece}))\n            text.append(piece)\n    except ModelError as error:\n        task.move(\"failed\")\n        frames.append(encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"failed\", \"final\": True, \"message\": str(error)}))\n    else:\n        task.artifact = Artifact(artifact, \"text/markdown\", [text_part(\"\".join(text))])\n        task.move(\"completed\")\n        frames.append(encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"completed\", \"final\": True}))\n    if True:\n        for frame in frames:\n            yield frame\n"
+        }
+      ],
+      "expect": "the working status goes out before the model is asked for anything"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "frames joined into one write",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "    task.move(\"working\")\n    text: list[str] = []\n    try:\n        yield encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"working\", \"final\": False})\n        async for piece in pieces:\n            if not piece:\n                continue\n            frame = {\"kind\": \"artifact\", \"taskId\": task.id, \"name\": artifact, \"seq\": len(text), \"text\": piece}\n            text.append(piece)\n            yield encode_frame(frame)\n    except ModelError as error:\n        task.move(\"failed\")\n        yield encode_frame(\n            {\"kind\": \"status\", \"taskId\": task.id, \"state\": \"failed\", \"final\": True, \"message\": str(error)}\n        )\n        return\n    except GeneratorExit:\n        task.move(\"canceled\")\n        close = getattr(pieces, \"aclose\", None)\n        if close is not None:\n            await close()\n        raise\n    task.artifact = Artifact(artifact, \"text/markdown\", [text_part(\"\".join(text))])\n    task.move(\"completed\")\n    yield encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"completed\", \"final\": True})\n",
+          "new": "    task.move(\"working\")\n    text: list[str] = []\n    frames = [encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"working\", \"final\": False})]\n    try:\n        async for piece in pieces:\n            if not piece:\n                continue\n            frames.append(encode_frame({\"kind\": \"artifact\", \"taskId\": task.id, \"name\": artifact, \"seq\": len(text), \"text\": piece}))\n            text.append(piece)\n    except ModelError as error:\n        task.move(\"failed\")\n        frames.append(encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"failed\", \"final\": True, \"message\": str(error)}))\n    else:\n        task.artifact = Artifact(artifact, \"text/markdown\", [text_part(\"\".join(text))])\n        task.move(\"completed\")\n        frames.append(encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"completed\", \"final\": True}))\n    if True:\n        yield b\"\".join(frames)\n"
+        }
+      ],
+      "expect": "every frame is yielded on its own"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "pieces read to the end before the first one goes out",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "        async for piece in pieces:\n",
+          "new": "        for piece in [piece async for piece in pieces]:\n"
+        }
+      ],
+      "expect": "each piece goes out as soon as the model writes it"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "seq counted from 1",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "\"seq\": len(text), ",
+          "new": "\"seq\": len(text) + 1, "
+        }
+      ],
+      "expect": "working, then the numbered pieces, then the final status"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "empty pieces sent as frames",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "            if not piece:\n                continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "working, then the numbered pieces, then the final status"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "empty pieces skipped but still numbered",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "        async for piece in pieces:\n            if not piece:\n                continue\n            frame = {\"kind\": \"artifact\", \"taskId\": task.id, \"name\": artifact, \"seq\": len(text), \"text\": piece}\n",
+          "new": "        seq = -1\n        async for piece in pieces:\n            seq += 1\n            if not piece:\n                continue\n            frame = {\"kind\": \"artifact\", \"taskId\": task.id, \"name\": artifact, \"seq\": seq, \"text\": piece}\n"
+        }
+      ],
+      "expect": "working, then the numbered pieces, then the final status"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "a model error left to escape",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "    except ModelError as error:\n        task.move(\"failed\")\n        yield encode_frame(\n            {\"kind\": \"status\", \"taskId\": task.id, \"state\": \"failed\", \"final\": True, \"message\": str(error)}\n        )\n        return\n",
+          "new": ""
+        }
+      ],
+      "expect": "ModelError"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "the failed status not final",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "\"state\": \"failed\", \"final\": True",
+          "new": "\"state\": \"failed\", \"final\": False"
+        }
+      ],
+      "expect": "a model error ends the stream with a final failed status"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "the stream goes on to completed after a failure",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "        )\n        return\n    except GeneratorExit:",
+          "new": "        )\n    except GeneratorExit:"
+        }
+      ],
+      "expect": "a model error ends the stream with a final failed status"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "the partial text kept as the failed task's artifact",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "    except ModelError as error:\n        task.move(\"failed\")\n",
+          "new": "    except ModelError as error:\n        task.artifact = Artifact(artifact, \"text/markdown\", [text_part(\"\".join(text))])\n        task.move(\"failed\")\n"
+        }
+      ],
+      "expect": "a task whose model fails ends failed, without an artifact"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "the model's stream left open when the caller closes",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "        close = getattr(pieces, \"aclose\", None)\n        if close is not None:\n            await close()\n",
+          "new": ""
+        }
+      ],
+      "expect": "closing the stream closes the model's stream at once"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "a closed stream leaves its task working",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "    except GeneratorExit:\n        task.move(\"canceled\")\n",
+          "new": "    except GeneratorExit:\n"
+        }
+      ],
+      "expect": "a stream the caller closes cancels its task"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "only a close inside the piece loop cancels",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "    try:\n        yield encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"working\", \"final\": False})\n",
+          "new": "    yield encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"working\", \"final\": False})\n    try:\n"
+        }
+      ],
+      "expect": "a stream closed right after its working status cancels its task too"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "encode_frame doesn't check the size",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "    if len(body) > MAX_FRAME:\n        raise ValueError(f\"a frame of {len(body)} bytes is over the {MAX_FRAME}-byte limit\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "accepted an event over MAX_FRAME"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "the length checked only once the body is in",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "            if length > MAX_FRAME:\n                raise ValueError(f\"a frame of {length} bytes is over the {MAX_FRAME}-byte limit\")\n            if len(self._buffer) < 4 + length:\n                break\n",
+          "new": "            if len(self._buffer) < 4 + length:\n                break\n            if length > MAX_FRAME:\n                raise ValueError(f\"a frame of {length} bytes is over the {MAX_FRAME}-byte limit\")\n"
+        }
+      ],
+      "expect": "accepted a length over MAX_FRAME"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "a frame of exactly MAX_FRAME refused",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "            if length > MAX_FRAME:\n",
+          "new": "            if length >= MAX_FRAME:\n"
+        }
+      ],
+      "expect": "is over the"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "one frame per feed",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "            events.append(event)\n",
+          "new": "            events.append(event)\n            break\n"
+        }
+      ],
+      "expect": "the same events whatever the chunk sizes"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "a partial frame dropped when the next chunk comes",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "        self._buffer += data\n",
+          "new": "        self._buffer = bytearray(data)\n"
+        }
+      ],
+      "expect": "the same events whatever the chunk sizes"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "bytes after the final status ignored",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "        if self._final and data:\n            raise ValueError(\"bytes arrived after the final status\")\n",
+          "new": "        if self._final:\n            return []\n"
+        },
+        {
+          "file": "frames.py",
+          "old": "            if self._final and self._buffer:\n                raise ValueError(\"bytes arrived after the final status\")\n",
+          "new": "            if self._final:\n                break\n"
+        }
+      ],
+      "expect": "accepted a frame after the final status"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "bytes after the final status only checked in a later chunk",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "            if self._final and self._buffer:\n                raise ValueError(\"bytes arrived after the final status\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "accepted a frame after the final status"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "seq not checked",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "            if event[\"seq\"] != expected:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "accepted a piece that skips a seq"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "one seq counter for every artifact",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "            expected = self._next_seq.get(event[\"name\"], 0)\n",
+          "new": "            expected = self._next_seq.get(\"*\", 0)\n"
+        },
+        {
+          "file": "frames.py",
+          "old": "            self._next_seq[event[\"name\"]] = expected + 1\n",
+          "new": "            self._next_seq[\"*\"] = expected + 1\n"
+        }
+      ],
+      "expect": "arrived where 1 was next"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "any status ends the stream",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "        elif event.get(\"kind\") == \"status\" and event.get(\"final\"):\n",
+          "new": "        elif event.get(\"kind\") == \"status\":\n"
+        }
+      ],
+      "expect": "bytes arrived after the final status"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "close doesn't need the final status",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "        if not self._final:\n            raise ValueError(\"the stream stopped before its final status\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "accepted a stream that stopped before its final status"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "the task completed after its final frame goes out",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "    task.artifact = Artifact(artifact, \"text/markdown\", [text_part(\"\".join(text))])\n    task.move(\"completed\")\n    yield encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"completed\", \"final\": True})\n",
+          "new": "    yield encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"completed\", \"final\": True})\n    task.artifact = Artifact(artifact, \"text/markdown\", [text_part(\"\".join(text))])\n    task.move(\"completed\")\n"
+        }
+      ],
+      "expect": "the task has completed by the time its final frame goes out"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "the final frame yielded inside the cancel handler",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "            text.append(piece)\n            yield encode_frame(frame)\n    except ModelError",
+          "new": "            text.append(piece)\n            yield encode_frame(frame)\n        task.artifact = Artifact(artifact, \"text/markdown\", [text_part(\"\".join(text))])\n        task.move(\"completed\")\n        yield encode_frame({\"kind\": \"status\", \"taskId\": task.id, \"state\": \"completed\", \"final\": True})\n        return\n    except ModelError"
+        }
+      ],
+      "expect": "closing a stream after its final status changes nothing"
+    },
+    {
+      "test": "test_stream_frames",
+      "name": "the artifact name written as report",
+      "edits": [
+        {
+          "file": "frames.py",
+          "old": "\"name\": artifact, \"seq\"",
+          "new": "\"name\": \"report\", \"seq\""
+        }
+      ],
+      "expect": "pieces and the artifact carry the artifact name stream_task is given"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "the forward flag ignored",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "            if _flag(child, \"forward\"):\n                returned += copy.deepcopy(view[\"artifacts\"])\n",
+          "new": "            returned += copy.deepcopy(view[\"artifacts\"])\n"
+        }
+      ],
+      "expect": "a caller sees the task's own artifacts, then what it forwards, and no internal fields"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "a forwarded delegate's own artifacts instead of what it returned",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "            if _flag(child, \"forward\"):\n                returned += copy.deepcopy(view[\"artifacts\"])\n",
+          "new": "            if _flag(child, \"forward\"):\n                returned += [_public(a) for a in child.get(\"artifacts\", [])]\n"
+        }
+      ],
+      "expect": "a caller sees the task's own artifacts, then what it forwards, and no internal fields"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "artifacts copied whole, internal fields included",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "    return {key: copy.deepcopy(artifact[key]) for key in (\"name\", \"mimeType\", \"parts\")}\n",
+          "new": "    return copy.deepcopy(artifact)\n"
+        }
+      ],
+      "expect": "a caller sees the task's own artifacts, then what it forwards, and no internal fields"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "views carry the agent's steps",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "    return {\"task\": node[\"task\"], \"agent\": node[\"agent\"], \"state\": state, \"artifacts\": artifacts}\n",
+          "new": "    return {\"task\": node[\"task\"], \"agent\": node[\"agent\"], \"state\": state, \"artifacts\": artifacts, \"steps\": node.get(\"steps\", [])}\n"
+        }
+      ],
+      "expect": "a caller sees the task's own artifacts, then what it forwards, and no internal fields"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "any delegate that doesn't complete fails its caller",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "            _flag(child, \"required\") and view[\"state\"] != \"completed\"\n",
+          "new": "            view[\"state\"] != \"completed\"\n"
+        }
+      ],
+      "expect": "a caller sees the task's own artifacts, then what it forwards, and no internal fields"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "a required delegate never fails its caller",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "        if _flag(node, \"fails\") or missing:\n",
+          "new": "        if _flag(node, \"fails\"):\n"
+        }
+      ],
+      "expect": "a task fails when a delegate it requires doesn't complete"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "required defaults to false",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "DEFAULTS = {\"required\": True,",
+          "new": "DEFAULTS = {\"required\": False,"
+        }
+      ],
+      "expect": "a task fails when a delegate it requires doesn't complete"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "the client's delegation counted as hop 0",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "    views[\"client\"] = [run(plan, 1)]\n",
+          "new": "    views[\"client\"] = [run(plan, 0)]\n"
+        }
+      ],
+      "expect": "a task past max_hops is rejected"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "a task at max_hops rejected",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "        if hop > max_hops:\n",
+          "new": "        if hop >= max_hops:\n"
+        }
+      ],
+      "expect": "a caller sees the task's own artifacts, then what it forwards, and no internal fields"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "a rejected task still runs its delegates",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "        if hop > max_hops:\n            return _view(node, \"rejected\", [])\n        delegates = node.get(\"delegates\", [])\n        seen = [run(child, hop + 1) for child in delegates]\n        if seen:\n            views[node[\"task\"]] = seen\n",
+          "new": "        delegates = node.get(\"delegates\", [])\n        seen = [run(child, hop + 1) for child in delegates]\n        if seen:\n            views[node[\"task\"]] = seen\n        if hop > max_hops:\n            return _view(node, \"rejected\", [])\n"
+        }
+      ],
+      "expect": "the client's own delegation is hop 1, and a rejected task never runs"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "a task that fails on its own skips its delegates",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "        delegates = node.get(\"delegates\", [])\n        seen = [",
+          "new": "        if _flag(node, \"fails\"):\n            return _view(node, \"failed\", [])\n        delegates = node.get(\"delegates\", [])\n        seen = ["
+        }
+      ],
+      "expect": "its delegates still ran"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "views keyed by agent",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "            views[node[\"task\"]] = seen\n",
+          "new": "            views[node[\"agent\"]] = seen\n"
+        }
+      ],
+      "expect": "a task past max_hops is rejected"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "an entry for every task that ran",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "        if seen:\n            views[node[\"task\"]] = seen\n",
+          "new": "        views[node[\"task\"]] = seen\n"
+        }
+      ],
+      "expect": "one entry per task that ran and delegated something, keyed by task id"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "a failed task still returns its artifacts",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "        if _flag(node, \"fails\") or missing:\n            return _view(node, \"failed\", [])\n",
+          "new": "        if _flag(node, \"fails\") or missing:\n            return _view(node, \"failed\", [_public(a) for a in node.get(\"artifacts\", [])])\n"
+        }
+      ],
+      "expect": "a caller sees the task's own artifacts, then what it forwards, and no internal fields"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "forwarded artifacts before the task's own",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "        returned = [_public(artifact) for artifact in node.get(\"artifacts\", [])]\n        for child, view in zip(delegates, seen):\n            if _flag(child, \"forward\"):\n                returned += copy.deepcopy(view[\"artifacts\"])\n",
+          "new": "        returned = []\n        for child, view in zip(delegates, seen):\n            if _flag(child, \"forward\"):\n                returned += copy.deepcopy(view[\"artifacts\"])\n        returned += [_public(artifact) for artifact in node.get(\"artifacts\", [])]\n"
+        }
+      ],
+      "expect": "a caller sees the task's own artifacts, then what it forwards, and no internal fields"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "forwarded artifacts in reverse delegate order",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "        for child, view in zip(delegates, seen):\n            if _flag(child, \"forward\"):\n",
+          "new": "        for child, view in reversed(list(zip(delegates, seen))):\n            if _flag(child, \"forward\"):\n"
+        }
+      ],
+      "expect": "a caller sees the task's own artifacts, then what it forwards, and no internal fields"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "defaults written into the plan",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "    return node.get(name, DEFAULTS[name])\n",
+          "new": "    return node.setdefault(name, DEFAULTS[name])\n"
+        }
+      ],
+      "expect": "caller_views leaves the plan as it was"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "results remembered per agent",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "    def run(node: dict, hop: int) -> dict:\n        if hop > max_hops:\n",
+          "new": "    done: dict[str, dict] = {}\n\n    def run(node: dict, hop: int) -> dict:\n        if node[\"agent\"] not in done:\n            done[node[\"agent\"]] = _run(node, hop)\n        return {**done[node[\"agent\"]], \"task\": node[\"task\"]}\n\n    def _run(node: dict, hop: int) -> dict:\n        if hop > max_hops:\n"
+        }
+      ],
+      "expect": "a task past max_hops is rejected"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "a task id used twice accepted",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "    if node[\"task\"] in seen:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "max_hops of 0 accepted",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "    if max_hops < 1:\n",
+          "new": "    if max_hops < 0:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_delegation_views",
+      "name": "task ids checked only for tasks that run",
+      "edits": [
+        {
+          "file": "delegation.py",
+          "old": "    _check_ids(plan, set())\n    views: dict[str, list[dict]] = {}\n\n    def run(node: dict, hop: int) -> dict:\n        if hop > max_hops:\n            return _view(node, \"rejected\", [])\n",
+          "new": "    seen_ids: set[str] = set()\n    views: dict[str, list[dict]] = {}\n\n    def run(node: dict, hop: int) -> dict:\n        if hop > max_hops:\n            return _view(node, \"rejected\", [])\n        if node[\"task\"] in seen_ids:\n            raise ValueError(\"dup\")\n        seen_ids.add(node[\"task\"])\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    }
+  ]
+}
