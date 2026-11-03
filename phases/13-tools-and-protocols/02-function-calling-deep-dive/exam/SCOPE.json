@@ -1,0 +1,118 @@
+{
+  "lesson": "phases/13-tools-and-protocols/02-function-calling-deep-dive",
+  "title": "Function Calling Deep Dive — OpenAI, Anthropic, Gemini",
+  "format": "staged-brownfield",
+  "service": "FCBridge: one canonical tool-calling model translated at the edge for OpenAI, Anthropic and Gemini, with a SQLite conversation store, per-provider request rendering, a cross-provider equivalence probe and an OpenAI strict-mode schema compiler",
+  "sources": {
+    "docs/en.md": "4691bbc616aa41426d78eb1e3b77b8635de13cf451272e63fba79b59094a7e71",
+    "code/main.py": "aeaddcafc116b57f259106982d983c6c49274859ea23dedc182391aec1dacad2",
+    "quiz/quiz.md": "e15033f88ac8b5bea50288d83fe0d3d7c6ae3d6ecc9d6a2fd03fe3f34d325d63"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network: scripted fake providers in the tests check each request the way the lesson says the real API would",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_edge_translators",
+      "kind": "debug",
+      "lesson_anchor": "Shape diffs (Required / Any, Force-a-tool); Limits you will actually hit (depth 5, practical limit 10); code/main.py _gemini_schema, tool_choice_anthropic, parse_openai; quiz Q4, Q5, Q9, Q10",
+      "planted_bugs": [
+        "tool_choice_anthropic folds auto, none and required into one tuple check copied from tool_choice_openai, so required becomes {type: required}; the fake Anthropic API rejects the whole request, two calls from the root (Bridge.ask -> tool_fields -> tool_choice_anthropic)",
+        "_gemini_schema upper-cases only string types (the lesson's own code), so WEATHER's [string, null] goes out as a list; the fake Gemini API rejects functionDeclarations[0].parameters.properties.units.type three calls from the root; the fix writes one upper-case type plus nullable: true and raises ValueError for a union of two real types (quiz Q9.3)",
+        "parse_openai hands the empty arguments string of a no-parameter tool to json.loads (JSONDecodeError); it means no arguments, and raw_arguments keeps ''",
+        "schema_depth recurses twice per child, once in the comparison and once for the value, so the work doubles at every nested hop"
+      ],
+      "timing_assert": "schema_depth of a folder tree 10 folders deep (object -> array -> object ...) under 0.03 s; measured on this machine (Apple M5) with and without other jobs running: the double recursion 0.31-0.59 s on Python 3.12 (0.34-0.44 s on 3.14, 0.45-0.92 s on 3.10), the single recursion 0.015-0.11 ms",
+      "overfix_guard": "a property named type and a [null, string] type order (translating every type key crashes on the property, taking the first list entry gives NULL); invalid JSON arguments still raise ValueError (swallowing the error as {} would run the tool with no arguments); exact depths 8 and 12 with per-provider limits (OpenAI rejects 8, OpenAI and Anthropic reject 12, Gemini has no limit), which rules out capping the recursion at OpenAI's or Anthropic's limit to make it fast"
+    },
+    {
+      "part": 2,
+      "test": "test_conversation_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "Shape diffs (Arguments type: stringified JSON vs parsed object; Id format call_ / toolu_ / UUID); The translator pattern (canonical turns); Errors and repair",
+      "exactness": "OpenAI's arguments text comes back byte for byte (a space before a comma, an upper-case \\u00E3 escape, the empty string of a no-parameter tool); Anthropic and Gemini calls come back as objects with raw_arguments None; the whole conversation round-trips as JSON text, which tells True from 1, 140.0 from 140 and one key order from another, across close and reopen, with a 2^64 + 1 integer and non-ASCII text in the fixture; parallel calls keep their order (their ids are not in alphabetical order)",
+      "traps": [
+        "arguments text rebuilt from args with json.dumps, or compacted on the way in (SQLite's json() also strips the spaces)",
+        "empty arguments text stored as NULL",
+        "one arguments-text column for every provider",
+        "is_error read back as SQLite's 1 (Python's 1 == True hides it)",
+        "argument objects stored with sorted keys",
+        "replace done as DELETE plus INSERT or INSERT OR REPLACE with ORDER BY rowid (the redacted result moves to the end)",
+        "positions counted across every conversation",
+        "calls moved to a table keyed by call_id and read back in id order",
+        "replace without the conversation filter, which also rewrites the other conversation's turn at the same position",
+        "positions starting at 1",
+        "calls read back as plain dicts",
+        "assistant text None stored as an empty string",
+        "an unknown conversation raising instead of returning []"
+      ],
+      "clarifying_questions": ["re-serializing OpenAI's arguments", "positions per conversation", "what replace may change", "concurrent writers"]
+    },
+    {
+      "part": 3,
+      "test": "test_render_requests",
+      "kind": "core algorithm",
+      "lesson_anchor": "The translator pattern; Shape diffs (Result block, Arguments type); Limits you will actually hit (128 / 64 / 64 tools, argument string <= 8192 bytes); Parallel calls; quiz Q11",
+      "traps": [
+        "OpenAI results batched into one tool message, as the lesson's 'batched tool-role message' wording suggests",
+        "one Anthropic or Gemini user message per result instead of one per turn",
+        "OpenAI's own arguments re-serialized instead of sent back unchanged, or an empty one replaced by json_text(args)",
+        "arguments sent to OpenAI as an object, or with json.dumps defaults (\\u escapes)",
+        "Anthropic input or Gemini args filled with OpenAI's raw text",
+        "text block after the tool_use blocks; is_error dropped",
+        "Gemini model turns with role assistant; functionCall or functionResponse without the id",
+        "an empty tool_calls list on a turn without calls",
+        "tool count compared with >=, one cap for every provider, or Gemini's single tool object counted instead of its functions",
+        "LimitError without the provider's name; schema depth not checked, checked for OpenAI only, or with an exclusive bound",
+        "arguments measured in characters or with \\u escapes; the byte limit made exclusive, applied to every provider, or summed over a turn's calls"
+      ],
+      "integration": "the TRIP conversation, stored with Part 2's store and reopened, renders byte-identical requests for all three providers",
+      "clarifying_questions": ["batching OpenAI results", "mixed-provider conversations", "rewriting ids", "which text the 8192 bytes count", "8192 bytes per call or per request", "Gemini's depth limit"]
+    },
+    {
+      "part": 4,
+      "test": "test_equivalence_probe",
+      "kind": "streaming",
+      "lesson_anchor": "code/main.py main(), the equivalence check; Use It (one canonical_call() for all three shapes); Errors and repair (bad JSON, refusal); Exercise 5",
+      "wire_format": "CSV with a header: provider,call_id,name,arguments_json,status, one record per provider in arrival order and an equivalence summary record last, decided by the test's csv.reader and csv.DictReader; each yielded chunk is one whole record",
+      "traps": [
+        "providers asked one after another, or every reply collected before the first record",
+        "fields joined with commas, or quoted without doubling the quotes inside",
+        "no header; records without a line ending",
+        "arguments_json written as Python's repr",
+        "summary comparing JSON text, OpenAI's raw text, whole calls with ids, only names or only arguments",
+        "any failure making the summary incomplete although two answers disagree, or same although a provider failed, including two agreeing answers and a timeout",
+        "only timeouts caught (a 429 ends the stream), or only provider errors (bad JSON ends it)",
+        "no per-provider timeout, a timed-out request left running, as_completed's whole-probe timeout, an asyncio.wait FIRST_COMPLETED loop that restarts timeout_s at every reply",
+        "a timeout reported as an error; a refusal left out; a reply with two calls reported by its first call",
+        "an error message, or the first of several calls, written into an error record"
+      ],
+      "clarifying_questions": ["refusals", "per-provider or global timeout", "summary when one provider failed", "raw text in arguments_json", "an error reason in the record"]
+    },
+    {
+      "part": 5,
+      "test": "test_strict_compiler",
+      "kind": "recursive structure",
+      "lesson_anchor": "Limits you will actually hit (OpenAI strict mode: no $ref, every property listed in required; depth 5); code/main.py WEATHER (units as [string, null]); quiz Q7, Q8, Q14",
+      "traps": [
+        "one compiled $def shared by all its references, so shipping's null leaks into billing; nullable made on a shallow copy, so nested dicts stay shared",
+        "compiled in place on the input; leaf values such as enum lists shared with the input",
+        "array items or anyOf branches not visited; $defs carried into the output; a $ref replaced by an uncompiled copy",
+        "required keeping only the original names, or sorted by name",
+        "optional properties left alone, wrapped in anyOf instead of the WEATHER style, or made nullable before their $ref is inlined",
+        "null added twice to a type that already allows it; enums not given None; None added only for newly optional properties (WEATHER's units stays broken)",
+        "optional anyOf without a null branch",
+        "depth measured before inlining, with Anthropic's limit, or with an exclusive limit",
+        "the compiled tool keeping the input's strict=False, as dataclasses.replace does; null put first instead of last"
+      ],
+      "clarifying_questions": ["cyclic $defs", "required nullable properties", "keys next to $ref", "a compiled schema that is too deep", "marking a non-strict input strict"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the four suggested defects are kept. The timing case is a folder tree 10 deep (object -> array -> object) rather than the suggested 12-level chain, because the double recursion costs about 2^hops: a 12-level object chain takes about 2 ms even with the bug. Ten deep keeps the slow version under a second on a loaded machine (an 11-deep tree takes 1.4-2 s, and up to 9 s at load average 310). The 8- and 12-level chains stay as the exactness guard. The Gemini fix also raises ValueError for a union of two real types (quiz Q9.3), and a property named type plus a [null, string] order guard the naive fixes. Both the Anthropic and the Gemini errors surface in fake providers that check requests.",
+    "Part 1: tool_fields (declarations plus tool choice, with every Gemini declaration in one functionDeclarations object) is working code, because Bridge.ask needs it; Part 3's Gemini trap moves from that wrapper to the tool count, where 64 counts functions and not the single tool object.",
+    "Part 2: the round trip also compares JSON text, which catches SQLite's 0/1 for is_error and sorted keys. Integers beyond 2^53 (2^64 + 1) are in the fixture, but Python's json keeps them exactly, so they only bite a store that puts numbers in SQLite INTEGER columns (OverflowError above 2^63) or reads them through SQLite's JSON functions (REAL). The rowid trap needs a write in the middle of a conversation: replace() redacts a tool result in place.",
+    "Part 3: non-OpenAI calls go to OpenAI as json_text (UTF-8, no \\u escapes, a given helper), which makes the byte limit exact: the arguments text of {\"summary\": 2725 CJK characters plus \"ab\"} is exactly 8192 bytes but 2742 characters, and 16367 bytes with \\u escapes.",
+    "Part 4: statuses are ok, error and timeout; the summary is same, different or incomplete, and different wins over a failure. A refusal and a reply with two calls are error records, and the timed-out request must be cancelled. Lesson 03's streaming reassembly and parallel execution are not used.",
+    "Part 5: besides inlining, additionalProperties and nullable optionals, an optional anyOf gains a null branch, an enum next to a nullable type gains None (WEATHER's units, quiz Q7), the input stays unchanged and copies share nothing (the test mutates one). A schema deeper than OpenAI's 5 once inlined raises LimitError."
+  ]
+}

@@ -1,0 +1,1521 @@
+{
+  "package": "fcbridge",
+  "tests": [
+    "test_edge_translators",
+    "test_conversation_store",
+    "test_render_requests",
+    "test_equivalence_probe",
+    "test_strict_compiler"
+  ],
+  "layers": [
+    {
+      "test": "test_edge_translators",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "tool_choice.type: 'required' is not one of"
+        },
+        {
+          "name": "fix tool_choice_anthropic",
+          "edits": [
+            {
+              "file": "translate.py",
+              "old": "    if tc.mode in (\"auto\", \"none\", \"required\"):\n        return {\"type\": tc.mode}\n",
+              "new": "    if tc.mode in (\"auto\", \"none\"):\n        return {\"type\": tc.mode}\n    if tc.mode == \"required\":\n        return {\"type\": \"any\"}\n"
+            }
+          ],
+          "expect": "units.type: expected one of"
+        },
+        {
+          "name": "+ nullable types for Gemini",
+          "edits": [
+            {
+              "file": "translate.py",
+              "old": "            if k == \"type\" and isinstance(v, str):\n                out[\"type\"] = v.upper()\n                continue\n",
+              "new": "            if k == \"type\" and isinstance(v, str):\n                out[\"type\"] = v.upper()\n                continue\n            if k == \"type\" and isinstance(v, list):\n                real = [name for name in v if name != \"null\"]\n                if len(real) != 1:\n                    raise ValueError(f\"Gemini cannot express the type {v!r}\")\n                out[\"type\"] = real[0].upper()\n                if \"null\" in v:\n                    out[\"nullable\"] = True\n                continue\n"
+            }
+          ],
+          "expect": "JSONDecodeError"
+        },
+        {
+          "name": "+ empty arguments mean {}",
+          "edits": [
+            {
+              "file": "translate.py",
+              "old": "        args = json.loads(raw)\n",
+              "new": "        args = json.loads(raw) if raw else {}\n"
+            }
+          ],
+          "expect": "the depth check runs before every request"
+        },
+        {
+          "name": "+ one recursive call per child",
+          "edits": [
+            {
+              "file": "limits.py",
+              "old": "    deepest = 0\n    for sub in _subschemas(schema):\n        if schema_depth(sub) > deepest:\n            deepest = schema_depth(sub)\n    return own + deepest\n",
+              "new": "    return own + max((schema_depth(sub) for sub in _subschemas(schema)), default=0)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_edge_translators",
+      "name": "every type key translated, property names included",
+      "edits": [
+        {
+          "file": "translate.py",
+          "old": "        if k == \"type\":\n            names = [v] if isinstance(v, str) else list(v)\n",
+          "new": "        if k == \"type\":\n            names = v if isinstance(v, list) else [v]\n"
+        },
+        {
+          "file": "translate.py",
+          "old": "        elif k == \"properties\":\n            # property names are not keywords: a property may be called \"type\"\n            out[k] = {name: _gemini_schema(sub) for name, sub in v.items()}\n        else:\n",
+          "new": "        else:\n"
+        }
+      ],
+      "expect": "'dict' object has no attribute 'upper'"
+    },
+    {
+      "test": "test_edge_translators",
+      "name": "null dropped without nullable: true",
+      "edits": [
+        {
+          "file": "translate.py",
+          "old": "            if \"null\" in names:\n                out[\"nullable\"] = True\n",
+          "new": ""
+        }
+      ],
+      "expect": "one upper-case type plus nullable: true"
+    },
+    {
+      "test": "test_edge_translators",
+      "name": "a type union narrowed to its first type",
+      "edits": [
+        {
+          "file": "translate.py",
+          "old": "            if len(real) != 1:\n                raise ValueError(f\"Gemini cannot express the type {v!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_edge_translators",
+      "name": "every name in a type list upper-cased",
+      "edits": [
+        {
+          "file": "translate.py",
+          "old": "            out[\"type\"] = real[0].upper()\n",
+          "new": "            out[\"type\"] = real[0].upper() if isinstance(v, str) else [name.upper() for name in v]\n"
+        }
+      ],
+      "expect": "units.type: expected one of"
+    },
+    {
+      "test": "test_edge_translators",
+      "name": "the first name of a type list taken as the type",
+      "edits": [
+        {
+          "file": "translate.py",
+          "old": "            out[\"type\"] = real[0].upper()\n",
+          "new": "            out[\"type\"] = names[0].upper()\n"
+        }
+      ],
+      "expect": "plate.type: expected one of"
+    },
+    {
+      "test": "test_edge_translators",
+      "name": "required mapped to auto for Anthropic",
+      "edits": [
+        {
+          "file": "translate.py",
+          "old": "        return {\"type\": \"any\"}\n",
+          "new": "        return {\"type\": \"auto\"}\n"
+        }
+      ],
+      "expect": "required means the model must call a tool"
+    },
+    {
+      "test": "test_edge_translators",
+      "name": "canonical mode renamed to Anthropic's any",
+      "edits": [
+        {
+          "file": "translate.py",
+          "old": "    if tc.mode == \"required\":\n        return {\"type\": \"any\"}\n",
+          "new": "    if tc.mode == \"any\":\n        return {\"type\": \"any\"}\n"
+        }
+      ],
+      "expect": "unknown tool_choice mode 'required'"
+    },
+    {
+      "test": "test_edge_translators",
+      "name": "invalid JSON swallowed as no arguments",
+      "edits": [
+        {
+          "file": "translate.py",
+          "old": "        args = json.loads(raw) if raw else {}\n",
+          "new": "        try:\n            args = json.loads(raw) if raw else {}\n        except ValueError:\n            args = {}\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_edge_translators",
+      "name": "empty arguments text not kept as raw_arguments",
+      "edits": [
+        {
+          "file": "translate.py",
+          "old": "        calls.append(Call(tc[\"id\"], fn[\"name\"], args, raw))\n",
+          "new": "        calls.append(Call(tc[\"id\"], fn[\"name\"], args, raw or None))\n"
+        }
+      ],
+      "expect": "empty arguments text means no arguments"
+    },
+    {
+      "test": "test_edge_translators",
+      "name": "depth stops counting past OpenAI's limit",
+      "edits": [
+        {
+          "file": "limits.py",
+          "old": "    return own + max((schema_depth(sub) for sub in _subschemas(schema)), default=0)\n",
+          "new": "    return min(LIMITS[\"openai\"].max_depth + 1, own + max((schema_depth(sub) for sub in _subschemas(schema)), default=0))\n"
+        }
+      ],
+      "expect": "report the exact depth"
+    },
+    {
+      "test": "test_edge_translators",
+      "name": "depth stops counting past Anthropic's limit",
+      "edits": [
+        {
+          "file": "limits.py",
+          "old": "    return own + max((schema_depth(sub) for sub in _subschemas(schema)), default=0)\n",
+          "new": "    return min(LIMITS[\"anthropic\"].max_depth + 1, own + max((schema_depth(sub) for sub in _subschemas(schema)), default=0))\n"
+        }
+      ],
+      "expect": "report the exact depth"
+    },
+    {
+      "test": "test_edge_translators",
+      "name": "arrays counted as a level",
+      "edits": [
+        {
+          "file": "limits.py",
+          "old": "    own = 1 if \"object\" in _types(schema) else 0\n",
+          "new": "    own = 1 if {\"object\", \"array\"} & set(_types(schema)) else 0\n"
+        }
+      ],
+      "expect": "report the exact depth"
+    },
+    {
+      "test": "test_edge_translators",
+      "name": "lru_cache on schema_depth",
+      "edits": [
+        {
+          "file": "limits.py",
+          "old": "def schema_depth(schema: dict) -> int:\n",
+          "new": "@__import__(\"functools\").lru_cache(maxsize=None)\ndef schema_depth(schema: dict) -> int:\n"
+        }
+      ],
+      "expect": "unhashable type"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "no commit after insert",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        with self._db:\n            (position,) = self._db.execute(",
+          "new": "        if True:\n            (position,) = self._db.execute("
+        }
+      ],
+      "expect": "a reopened store sees every turn"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "CREATE TABLE IF NOT EXISTS turns",
+          "new": "CREATE TABLE turns"
+        }
+      ],
+      "expect": "table turns already exists"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "OpenAI's arguments text rebuilt from args with json.dumps",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            return kind, json.dumps(asdict(turn), ensure_ascii=False)\n",
+          "new": "            fields = asdict(turn)\n            for call in fields.get(\"calls\", []):\n                if call[\"raw_arguments\"] is not None:\n                    call[\"raw_arguments\"] = json.dumps(call[\"args\"])\n            return kind, json.dumps(fields, ensure_ascii=False)\n"
+        }
+      ],
+      "expect": "OpenAI's arguments text comes back byte for byte"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "arguments text minified on the way in",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        fields[\"calls\"] = [Call(**call) for call in fields[\"calls\"]]\n",
+          "new": "        for call in fields[\"calls\"]:\n            if call[\"raw_arguments\"]:\n                call[\"raw_arguments\"] = json.dumps(json.loads(call[\"raw_arguments\"]), separators=(\",\", \":\"), ensure_ascii=False)\n        fields[\"calls\"] = [Call(**call) for call in fields[\"calls\"]]\n"
+        }
+      ],
+      "expect": "OpenAI's arguments text comes back byte for byte"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "empty arguments text stored as NULL",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            return kind, json.dumps(asdict(turn), ensure_ascii=False)\n",
+          "new": "            fields = asdict(turn)\n            for call in fields.get(\"calls\", []):\n                call[\"raw_arguments\"] = call[\"raw_arguments\"] or None\n            return kind, json.dumps(fields, ensure_ascii=False)\n"
+        }
+      ],
+      "expect": "OpenAI's arguments text comes back byte for byte"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "one arguments-text column for every provider",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        fields[\"calls\"] = [Call(**call) for call in fields[\"calls\"]]\n",
+          "new": "        for call in fields[\"calls\"]:\n            if call[\"raw_arguments\"] is None:\n                call[\"raw_arguments\"] = json.dumps(call[\"args\"])\n        fields[\"calls\"] = [Call(**call) for call in fields[\"calls\"]]\n"
+        }
+      ],
+      "expect": "Anthropic and Gemini sent objects, not text"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "is_error read back as SQLite's 0 or 1",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    return KINDS[kind](**fields)\n",
+          "new": "    if kind == \"tool\":\n        fields[\"is_error\"] = int(fields[\"is_error\"])\n    return KINDS[kind](**fields)\n"
+        }
+      ],
+      "expect": "turns round-trip exactly as JSON"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "turns stored with sorted keys",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            return kind, json.dumps(asdict(turn), ensure_ascii=False)\n",
+          "new": "            return kind, json.dumps(asdict(turn), ensure_ascii=False, sort_keys=True)\n"
+        }
+      ],
+      "expect": "turns round-trip exactly as JSON"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "rowid order, replace done as delete plus insert",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        kind, body = _encode(turn)\n        with self._db:\n            cursor = self._db.execute(\n                \"UPDATE turns SET kind = ?, body = ? WHERE conversation_id = ? AND position = ?\",\n                (kind, body, conversation_id, position),\n            )\n        if cursor.rowcount == 0:\n            raise KeyError((conversation_id, position))\n",
+          "new": "        kind, body = _encode(turn)\n        with self._db:\n            cursor = self._db.execute(\n                \"DELETE FROM turns WHERE conversation_id = ? AND position = ?\", (conversation_id, position)\n            )\n            if cursor.rowcount == 0:\n                raise KeyError((conversation_id, position))\n            self._db.execute(\n                \"INSERT INTO turns (conversation_id, position, kind, body) VALUES (?, ?, ?, ?)\",\n                (conversation_id, position, kind, body),\n            )\n"
+        },
+        {
+          "file": "store.py",
+          "old": "            \"SELECT kind, body FROM turns WHERE conversation_id = ? ORDER BY position\",\n",
+          "new": "            \"SELECT kind, body FROM turns WHERE conversation_id = ? ORDER BY rowid\",\n"
+        }
+      ],
+      "expect": "a replaced turn keeps its place"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "rowid order, replace done as INSERT OR REPLACE",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        kind, body = _encode(turn)\n        with self._db:\n            cursor = self._db.execute(\n                \"UPDATE turns SET kind = ?, body = ? WHERE conversation_id = ? AND position = ?\",\n                (kind, body, conversation_id, position),\n            )\n        if cursor.rowcount == 0:\n            raise KeyError((conversation_id, position))\n",
+          "new": "        kind, body = _encode(turn)\n        if self._db.execute(\n            \"SELECT 1 FROM turns WHERE conversation_id = ? AND position = ?\", (conversation_id, position)\n        ).fetchone() is None:\n            raise KeyError((conversation_id, position))\n        with self._db:\n            self._db.execute(\n                \"INSERT OR REPLACE INTO turns (conversation_id, position, kind, body) VALUES (?, ?, ?, ?)\",\n                (conversation_id, position, kind, body),\n            )\n"
+        },
+        {
+          "file": "store.py",
+          "old": "            \"SELECT kind, body FROM turns WHERE conversation_id = ? ORDER BY position\",\n",
+          "new": "            \"SELECT kind, body FROM turns WHERE conversation_id = ? ORDER BY rowid\",\n"
+        }
+      ],
+      "expect": "a replaced turn keeps its place"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "positions counted across every conversation",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "                \"SELECT COALESCE(MAX(position) + 1, 0) FROM turns WHERE conversation_id = ?\",\n                (conversation_id,),\n",
+          "new": "                \"SELECT COALESCE(MAX(position) + 1, 0) FROM turns\",\n                (),\n"
+        }
+      ],
+      "expect": "positions count from 0 in each conversation"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "unknown provider accepted",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    if isinstance(turn, AssistantTurn) and turn.provider not in PROVIDERS:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "replacing an unknown position does nothing",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if cursor.rowcount == 0:\n            raise KeyError((conversation_id, position))\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "assistant text None stored as an empty string",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            return kind, json.dumps(asdict(turn), ensure_ascii=False)\n",
+          "new": "            fields = asdict(turn)\n            if \"text\" in fields and fields[\"text\"] is None:\n                fields[\"text\"] = \"\"\n            return kind, json.dumps(fields, ensure_ascii=False)\n"
+        }
+      ],
+      "expect": "every turn round-trips"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "positions start at 1",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "\"SELECT COALESCE(MAX(position) + 1, 0) FROM turns WHERE conversation_id = ?\"",
+          "new": "\"SELECT COALESCE(MAX(position) + 1, 1) FROM turns WHERE conversation_id = ?\""
+        }
+      ],
+      "expect": "append returns positions 0, 1, 2"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "calls read back as plain dicts",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    if kind == \"assistant\":\n        fields[\"calls\"] = [Call(**call) for call in fields[\"calls\"]]\n",
+          "new": ""
+        }
+      ],
+      "expect": "'dict' object has no attribute"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "an unknown conversation raises KeyError",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return [_decode(kind, body) for kind, body in rows]\n",
+          "new": "        found = [_decode(kind, body) for kind, body in rows]\n        if not found:\n            raise KeyError(conversation_id)\n        return found\n"
+        }
+      ],
+      "expect": "KeyError: 'weekend'"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "replace updates by position only, in every conversation",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "\"UPDATE turns SET kind = ?, body = ? WHERE conversation_id = ? AND position = ?\",\n                (kind, body, conversation_id, position),",
+          "new": "\"UPDATE turns SET kind = ?, body = ? WHERE position = ?\",\n                (kind, body, position),"
+        }
+      ],
+      "expect": "replace changes only its own conversation"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "calls read back in id order, as from a calls table keyed by call id",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        fields[\"calls\"] = [Call(**call) for call in fields[\"calls\"]]\n",
+          "new": "        fields[\"calls\"] = sorted((Call(**call) for call in fields[\"calls\"]), key=lambda call: call.id)\n"
+        }
+      ],
+      "expect": "parallel calls come back in the order they were made"
+    },
+    {
+      "test": "test_conversation_store",
+      "name": "next position from a falsy-zero test",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "\"SELECT COALESCE(MAX(position) + 1, 0) FROM turns WHERE conversation_id = ?\",",
+          "new": "\"SELECT MAX(position) FROM turns WHERE conversation_id = ?\","
+        },
+        {
+          "file": "store.py",
+          "old": "            ).fetchone()\n            self._db.execute(\n                \"INSERT INTO turns",
+          "new": "            ).fetchone()\n            position = position + 1 if position else 0\n            self._db.execute(\n                \"INSERT INTO turns"
+        }
+      ],
+      "expect": "IntegrityError"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "OpenAI's own arguments re-serialized",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    arguments = call.raw_arguments if call.raw_arguments is not None else json_text(call.args)\n",
+          "new": "    arguments = json_text(call.args)\n"
+        }
+      ],
+      "expect": "OpenAI's own arguments text goes back unchanged"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "arguments sent to OpenAI as the object",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    arguments = call.raw_arguments if call.raw_arguments is not None else json_text(call.args)\n",
+          "new": "    arguments = call.args\n"
+        },
+        {
+          "file": "render.py",
+          "old": "    size = len(arguments.encode(\"utf-8\"))\n",
+          "new": "    size = len(json_text(arguments).encode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "OpenAI takes the arguments as JSON text"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "other providers' calls sent with json.dumps defaults",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    arguments = call.raw_arguments if call.raw_arguments is not None else json_text(call.args)\n",
+          "new": "    arguments = call.raw_arguments if call.raw_arguments is not None else __import__(\"json\").dumps(call.args)\n"
+        }
+      ],
+      "expect": "a call from another provider goes to OpenAI as json_text(args)"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "OpenAI results batched into one tool message",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "            messages.append({\"role\": \"tool\", \"tool_call_id\": turn.call_id, \"content\": json_text(turn.content)})\n",
+          "new": "            entry = {\"tool_call_id\": turn.call_id, \"content\": json_text(turn.content)}\n            if messages and messages[-1][\"role\"] == \"tool\":\n                messages[-1][\"content\"].append(entry)\n            else:\n                messages.append({\"role\": \"tool\", \"content\": [entry]})\n"
+        }
+      ],
+      "expect": "OpenAI takes one tool message per result"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "empty tool_calls list on a turn without calls",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "            if turn.calls:\n                message[\"tool_calls\"] = [_openai_call(call, max_bytes) for call in turn.calls]\n",
+          "new": "            message[\"tool_calls\"] = [_openai_call(call, max_bytes) for call in turn.calls]\n"
+        }
+      ],
+      "expect": "OpenAI's request, message by message"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "one Anthropic user message per result",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    messages: list[dict] = []\n    for item in _grouped(conversation):\n",
+          "new": "    messages: list[dict] = []\n    for item in [[t] if isinstance(t, ToolResult) else t for t in conversation]:\n"
+        }
+      ],
+      "expect": "Anthropic takes all the results of one turn in one user message"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "Anthropic input taken from OpenAI's raw text",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "            content += [{\"type\": \"tool_use\", \"id\": c.id, \"name\": c.name, \"input\": c.args} for c in item.calls]\n",
+          "new": "            content += [{\"type\": \"tool_use\", \"id\": c.id, \"name\": c.name, \"input\": c.args if c.raw_arguments is None else c.raw_arguments} for c in item.calls]\n"
+        }
+      ],
+      "expect": "Anthropic's input is the arguments object, whoever made the call"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "is_error dropped",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "                if result.is_error:\n                    block[\"is_error\"] = True\n",
+          "new": ""
+        }
+      ],
+      "expect": "Anthropic's request, block by block"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "Anthropic text block after the tool_use blocks",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "            content = [{\"type\": \"text\", \"text\": item.text}] if item.text else []\n            content += [{\"type\": \"tool_use\", \"id\": c.id, \"name\": c.name, \"input\": c.args} for c in item.calls]\n",
+          "new": "            content = [{\"type\": \"tool_use\", \"id\": c.id, \"name\": c.name, \"input\": c.args} for c in item.calls]\n            content += [{\"type\": \"text\", \"text\": item.text}] if item.text else []\n"
+        }
+      ],
+      "expect": "Anthropic's request, block by block"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "one Gemini user content per result",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    contents: list[dict] = []\n    for item in _grouped(conversation):\n",
+          "new": "    contents: list[dict] = []\n    for item in [[t] if isinstance(t, ToolResult) else t for t in conversation]:\n"
+        }
+      ],
+      "expect": "Gemini's turns are user and model"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "Gemini model turns sent with role assistant",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "            contents.append({\"role\": \"model\", \"parts\": parts})\n",
+          "new": "            contents.append({\"role\": \"assistant\", \"parts\": parts})\n"
+        }
+      ],
+      "expect": "Gemini's turns are user and model"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "Gemini args taken from OpenAI's raw text",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "            parts += [{\"functionCall\": {\"id\": c.id, \"name\": c.name, \"args\": c.args}} for c in item.calls]\n",
+          "new": "            parts += [{\"functionCall\": {\"id\": c.id, \"name\": c.name, \"args\": c.args if c.raw_arguments is None else c.raw_arguments}} for c in item.calls]\n"
+        }
+      ],
+      "expect": "Gemini's request, part by part"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "functionResponse without the call's id",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "            parts = [{\"functionResponse\": {\"id\": r.call_id, \"name\": r.name, \"response\": r.content}} for r in item]\n",
+          "new": "            parts = [{\"functionResponse\": {\"name\": r.name, \"response\": r.content}} for r in item]\n"
+        }
+      ],
+      "expect": "Gemini's request, part by part"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "functionCall without the call's id",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "            parts += [{\"functionCall\": {\"id\": c.id, \"name\": c.name, \"args\": c.args}} for c in item.calls]\n",
+          "new": "            parts += [{\"functionCall\": {\"name\": c.name, \"args\": c.args}} for c in item.calls]\n"
+        }
+      ],
+      "expect": "Gemini's request, part by part"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "Gemini response sent as JSON text",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "\"response\": r.content}} for r in item]\n",
+          "new": "\"response\": json_text(r.content)}} for r in item]\n"
+        }
+      ],
+      "expect": "Gemini's request, part by part"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "Anthropic tool_result content sent as the object",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "                block = {\"type\": \"tool_result\", \"tool_use_id\": result.call_id, \"content\": json_text(result.content)}\n",
+          "new": "                block = {\"type\": \"tool_result\", \"tool_use_id\": result.call_id, \"content\": result.content}\n"
+        }
+      ],
+      "expect": "Anthropic's request, block by block"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "OpenAI tool message content sent as the object",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "            messages.append({\"role\": \"tool\", \"tool_call_id\": turn.call_id, \"content\": json_text(turn.content)})\n",
+          "new": "            messages.append({\"role\": \"tool\", \"tool_call_id\": turn.call_id, \"content\": turn.content})\n"
+        }
+      ],
+      "expect": "OpenAI's request, message by message"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "tool count compared with >=",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    if len(tools) > limits.max_tools:\n",
+          "new": "    if len(tools) >= limits.max_tools:\n"
+        }
+      ],
+      "expect": "128 tools is within openai's limit"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "one 64-tool cap for every provider",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    if len(tools) > limits.max_tools:\n",
+          "new": "    if len(tools) > 64:\n"
+        }
+      ],
+      "expect": "128 tools is within openai's limit"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "LimitError without the provider's name",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "        raise LimitError(f\"{provider}: {len(tools)} tools in one request; the limit is {limits.max_tools}\")\n",
+          "new": "        raise LimitError(f\"{len(tools)} tools in one request; the limit is {limits.max_tools}\")\n"
+        }
+      ],
+      "expect": "one tool too many raises a LimitError that names the provider"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "Gemini's functions counted as tool objects",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    if len(tools) > limits.max_tools:\n        raise LimitError(f\"{provider}: {len(tools)} tools in one request; the limit is {limits.max_tools}\")\n",
+          "new": ""
+        },
+        {
+          "file": "render.py",
+          "old": "    body = tool_fields(provider, tools, choice)\n",
+          "new": "    body = tool_fields(provider, tools, choice)\n    if len(body[\"tools\"]) > limits.max_tools:\n        raise LimitError(f\"{provider}: {len(body['tools'])} tools in one request; the limit is {limits.max_tools}\")\n"
+        }
+      ],
+      "expect": "one tool too many raises a LimitError that names the provider"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "schema depth not checked",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    check_depth(provider, tools)\n",
+          "new": ""
+        }
+      ],
+      "expect": "render checks the schema depth too"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "arguments measured in characters",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    size = len(arguments.encode(\"utf-8\"))\n",
+          "new": "    size = len(arguments)\n"
+        }
+      ],
+      "expect": "the limit counts UTF-8 bytes, not characters"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "arguments measured as json.dumps with \\u escapes",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    size = len(arguments.encode(\"utf-8\"))\n",
+          "new": "    size = len(__import__(\"json\").dumps(call.args).encode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "8192 bytes of UTF-8 is within OpenAI's limit"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "the byte limit is exclusive",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    if max_bytes is not None and size > max_bytes:\n",
+          "new": "    if max_bytes is not None and size >= max_bytes:\n"
+        }
+      ],
+      "expect": "8192 bytes of UTF-8 is within OpenAI's limit"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "OpenAI's byte cap applied to every provider",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    check_depth(provider, tools)\n",
+          "new": "    check_depth(provider, tools)\n    for turn in conversation:\n        for call in getattr(turn, \"calls\", []):\n            if len(json_text(call.args).encode(\"utf-8\")) > LIMITS[\"openai\"].max_argument_bytes:\n                raise LimitError(f\"{provider}: the arguments of call {call.id} are too long\")\n"
+        }
+      ],
+      "expect": "only OpenAI caps the arguments text"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "an empty raw arguments text replaced with json_text(args)",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    arguments = call.raw_arguments if call.raw_arguments is not None else json_text(call.args)\n",
+          "new": "    arguments = call.raw_arguments or json_text(call.args)\n"
+        }
+      ],
+      "expect": "an empty arguments text goes back unchanged too"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "argument bytes summed over a turn's calls",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "                message[\"tool_calls\"] = [_openai_call(call, max_bytes) for call in turn.calls]\n",
+          "new": "                message[\"tool_calls\"] = [_openai_call(call, max_bytes) for call in turn.calls]\n                total = sum(len(c[\"function\"][\"arguments\"].encode(\"utf-8\")) for c in message[\"tool_calls\"])\n                if max_bytes is not None and total > max_bytes:\n                    raise LimitError(f\"openai: one turn sends {total} bytes of arguments; the limit is {max_bytes}\")\n"
+        }
+      ],
+      "expect": "8192 bytes of UTF-8 is within OpenAI's limit"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "schema depth checked for OpenAI only",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    check_depth(provider, tools)\n",
+          "new": "    if provider == \"openai\":\n        check_depth(provider, tools)\n"
+        }
+      ],
+      "expect": "render checks the schema depth too, against each provider's limit"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "depth limit written in render as an exclusive bound",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "    check_depth(provider, tools)\n",
+          "new": "    if limits.max_depth is not None and any(\n        __import__(\"fcbridge.limits\", fromlist=[\"schema_depth\"]).schema_depth(t.input_schema) >= limits.max_depth for t in tools\n    ):\n        raise LimitError(f\"{provider}: a schema is too deep\")\n"
+        }
+      ],
+      "expect": "5 levels deep is within openai's limit"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "Gemini text part after the functionCall parts",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "            parts = [{\"text\": item.text}] if item.text else []\n            parts += [{\"functionCall\": {\"id\": c.id, \"name\": c.name, \"args\": c.args}} for c in item.calls]\n",
+          "new": "            parts = [{\"functionCall\": {\"id\": c.id, \"name\": c.name, \"args\": c.args}} for c in item.calls]\n            parts += [{\"text\": item.text}] if item.text else []\n"
+        }
+      ],
+      "expect": "Gemini's request, part by part"
+    },
+    {
+      "test": "test_render_requests",
+      "name": "is_error: false written on every Anthropic result",
+      "edits": [
+        {
+          "file": "render.py",
+          "old": "                if result.is_error:\n                    block[\"is_error\"] = True\n",
+          "new": "                block[\"is_error\"] = result.is_error\n"
+        }
+      ],
+      "expect": "Anthropic's request, block by block"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "providers asked one after another",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    answers: list[Call] = []\n    for arrival in asyncio.as_completed([answer(p) for p in providers]):\n        provider, call, status = await arrival\n",
+          "new": "    answers: list[Call] = []\n    for p in providers:\n        provider, call, status = await answer(p)\n"
+        }
+      ],
+      "expect": "records come in the order the replies arrive"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "every reply collected before the first record",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    answers: list[Call] = []\n    for arrival in asyncio.as_completed([answer(p) for p in providers]):\n        provider, call, status = await arrival\n",
+          "new": "    answers: list[Call] = []\n    arrived = [await arrival for arrival in asyncio.as_completed([answer(p) for p in providers])]\n    for provider, call, status in arrived:\n"
+        }
+      ],
+      "expect": "report each reply as soon as it arrives"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "fields joined with commas",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    buffer = io.StringIO()\n    csv.writer(buffer).writerow(fields)\n    return buffer.getvalue()\n",
+          "new": "    return \",\".join(fields) + \"\\n\"\n"
+        }
+      ],
+      "expect": "every record has the header's five fields"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "fields quoted without doubling the quotes inside",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    buffer = io.StringIO()\n    csv.writer(buffer).writerow(fields)\n    return buffer.getvalue()\n",
+          "new": "    return \",\".join(f'\"{field}\"' for field in fields) + \"\\n\"\n"
+        }
+      ],
+      "expect": "every record has the header's five fields"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "no header record",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    yield _record(HEADER)\n",
+          "new": ""
+        }
+      ],
+      "expect": "the report starts with its header"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "records without a line ending",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    return buffer.getvalue()\n",
+          "new": "    return buffer.getvalue().rstrip(\"\\r\\n\")\n"
+        }
+      ],
+      "expect": "each chunk is one whole CSV record"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "arguments_json written as Python's repr",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "            yield _record((provider, call.id, call.name, json_text(call.args), status))\n",
+          "new": "            yield _record((provider, call.id, call.name, str(call.args), status))\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "arguments compared as JSON text",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    if any((c.name, c.args) != (answers[0].name, answers[0].args) for c in answers[1:]):\n",
+          "new": "    if any((c.name, json_text(c.args)) != (answers[0].name, json_text(answers[0].args)) for c in answers[1:]):\n"
+        }
+      ],
+      "expect": "the summary compares the tools and the parsed arguments, not ids or text"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "OpenAI's raw text compared with the others' objects",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    if any((c.name, c.args) != (answers[0].name, answers[0].args) for c in answers[1:]):\n",
+          "new": "    if any((c.name, c.raw_arguments or json_text(c.args)) != (answers[0].name, answers[0].raw_arguments or json_text(answers[0].args)) for c in answers[1:]):\n"
+        }
+      ],
+      "expect": "the summary compares the tools and the parsed arguments, not ids or text"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "whole calls compared, ids included",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    if any((c.name, c.args) != (answers[0].name, answers[0].args) for c in answers[1:]):\n",
+          "new": "    if any(c != answers[0] for c in answers[1:]):\n"
+        }
+      ],
+      "expect": "the summary compares the tools and the parsed arguments, not ids or text"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "only the tool names compared",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    if any((c.name, c.args) != (answers[0].name, answers[0].args) for c in answers[1:]):\n",
+          "new": "    if any(c.name != answers[0].name for c in answers[1:]):\n"
+        }
+      ],
+      "expect": "two answers that disagree make the probe different"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "only the arguments compared",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    if any((c.name, c.args) != (answers[0].name, answers[0].args) for c in answers[1:]):\n",
+          "new": "    if any(c.args != answers[0].args for c in answers[1:]):\n"
+        }
+      ],
+      "expect": "a different tool name makes the probe different"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "a reply with several calls reported by its first call",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "        if len(calls) != 1:\n            return provider, None, \"error\"\n",
+          "new": "        if not calls:\n            return provider, None, \"error\"\n"
+        }
+      ],
+      "expect": "a reply with several calls is an error"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "any failure makes the summary incomplete",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "def _verdict(answers: list[Call], asked: int) -> str:\n",
+          "new": "def _verdict(answers: list[Call], asked: int) -> str:\n    if len(answers) < asked:\n        return \"incomplete\"\n"
+        }
+      ],
+      "expect": "two answers that disagree make the probe different"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "same whenever the answers that came agree",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    return \"same\" if len(answers) == asked else \"incomplete\"\n",
+          "new": "    return \"same\"\n"
+        }
+      ],
+      "expect": "every failure gets its own record, and a hung provider times out"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "only timeouts caught",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "        except Exception:\n            return provider, None, \"error\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "429 RESOURCE_EXHAUSTED"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "only provider errors and timeouts caught",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "from .bridge import Bridge\n",
+          "new": "from .bridge import Bridge, ProviderError\n"
+        },
+        {
+          "file": "probe.py",
+          "old": "        except Exception:\n",
+          "new": "        except ProviderError:\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "no timeout",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "            calls = await asyncio.wait_for(bridge.ask(provider, tools, prompt, choice), timeout_s)\n",
+          "new": "            calls = await bridge.ask(provider, tools, prompt, choice)\n"
+        }
+      ],
+      "expect": "every failure gets its own record, and a hung provider times out"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "timed-out request left running",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "            calls = await asyncio.wait_for(bridge.ask(provider, tools, prompt, choice), timeout_s)\n",
+          "new": "            task = asyncio.ensure_future(bridge.ask(provider, tools, prompt, choice))\n            done, _ = await asyncio.wait({task}, timeout=timeout_s)\n            if not done:\n                return provider, None, \"timeout\"\n            calls = task.result()\n"
+        }
+      ],
+      "expect": "the timed-out request is cancelled, not left running"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "one deadline for the whole probe (as_completed timeout)",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "            calls = await asyncio.wait_for(bridge.ask(provider, tools, prompt, choice), timeout_s)\n",
+          "new": "            calls = await bridge.ask(provider, tools, prompt, choice)\n"
+        },
+        {
+          "file": "probe.py",
+          "old": "    for arrival in asyncio.as_completed([answer(p) for p in providers]):\n",
+          "new": "    for arrival in asyncio.as_completed([answer(p) for p in providers], timeout=timeout_s):\n"
+        }
+      ],
+      "expect": "TimeoutError"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "a timeout reported as an error",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "        except asyncio.TimeoutError:\n            return provider, None, \"timeout\"\n",
+          "new": "        except asyncio.TimeoutError:\n            return provider, None, \"error\"\n"
+        }
+      ],
+      "expect": "every failure gets its own record, and a hung provider times out"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "a reply without a call left out of the report",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "        if len(calls) != 1:\n            return provider, None, \"error\"\n",
+          "new": "        if len(calls) != 1:\n            return None\n"
+        },
+        {
+          "file": "probe.py",
+          "old": "        provider, call, status = await arrival\n",
+          "new": "        result = await arrival\n        if result is None:\n            continue\n        provider, call, status = result\n"
+        }
+      ],
+      "expect": "a reply without a call is an error record"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "same when at least two answers agree",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    return \"same\" if len(answers) == asked else \"incomplete\"\n",
+          "new": "    return \"same\" if len(answers) >= 2 else \"incomplete\"\n"
+        }
+      ],
+      "expect": "same needs an answer from every provider"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "asyncio.wait FIRST_COMPLETED loop, so the timeout restarts at every reply",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    answers: list[Call] = []\n    for arrival in asyncio.as_completed([answer(p) for p in providers]):\n        provider, call, status = await arrival\n",
+          "new": "    async def ask(provider):\n        try:\n            calls = await bridge.ask(provider, tools, prompt, choice)\n        except Exception:\n            return provider, None, \"error\"\n        if len(calls) != 1:\n            return provider, None, \"error\"\n        return provider, calls[0], \"ok\"\n\n    async def arrivals():\n        tasks = {asyncio.ensure_future(ask(p)): p for p in providers}\n        pending = set(tasks)\n        while pending:\n            done, pending = await asyncio.wait(pending, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED)\n            if not done:\n                for task in pending:\n                    task.cancel()\n                    yield tasks[task], None, \"timeout\"\n                return\n            for task in done:\n                yield task.result()\n\n    answers: list[Call] = []\n    async for provider, call, status in arrivals():\n"
+        }
+      ],
+      "expect": "timeout_s counts from the start, for each provider"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "the error message written into arguments_json",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    providers = list(bridge.providers)\n",
+          "new": "    providers = list(bridge.providers)\n    errors: dict = {}\n"
+        },
+        {
+          "file": "probe.py",
+          "old": "        except Exception:\n            return provider, None, \"error\"\n",
+          "new": "        except Exception as exc:\n            errors[provider] = str(exc)\n            return provider, None, \"error\"\n"
+        },
+        {
+          "file": "probe.py",
+          "old": "            yield _record((provider, \"\", \"\", \"\", status))\n",
+          "new": "            yield _record((provider, \"\", \"\", errors.get(provider, \"\"), status))\n"
+        }
+      ],
+      "expect": "error, timeout and summary records leave call_id, name and arguments_json empty"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "a reply with several calls reported as an error with its first call",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "        if len(calls) != 1:\n            return provider, None, \"error\"\n",
+          "new": "        if len(calls) != 1:\n            return provider, (calls[0] if calls else None), \"error\"\n"
+        },
+        {
+          "file": "probe.py",
+          "old": "        else:\n            answers.append(call)\n",
+          "new": "        else:\n            if status == \"ok\":\n                answers.append(call)\n"
+        }
+      ],
+      "expect": "error, timeout and summary records leave call_id, name and arguments_json empty"
+    },
+    {
+      "test": "test_equivalence_probe",
+      "name": "fields escaped with a backslash instead of quoted",
+      "edits": [
+        {
+          "file": "probe.py",
+          "old": "    csv.writer(buffer).writerow(fields)\n",
+          "new": "    csv.writer(buffer, quoting=csv.QUOTE_NONE, escapechar=\"\\\\\").writerow(fields)\n"
+        }
+      ],
+      "expect": "every record has the header's five fields"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "each $def compiled once and shared by its references",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "def _compile(node: dict, defs: dict) -> dict:\n    \"\"\"A fresh compiled copy of one schema node; nothing in it is shared with the input or another copy.\"\"\"\n    if \"$ref\" in node:\n        ref = node[\"$ref\"]\n        if not ref.startswith(REF_PREFIX) or ref[len(REF_PREFIX):] not in defs:\n            raise ValueError(f\"unknown $ref {ref!r}\")\n        siblings = {k: v for k, v in node.items() if k != \"$ref\"}\n        return _compile({**defs[ref[len(REF_PREFIX):]], **siblings}, defs)\n    out: dict = {}\n    for key, value in node.items():\n        if key == \"$defs\":\n            continue\n        if key == \"properties\":\n            out[key] = {name: _compile(sub, defs) for name, sub in value.items()}\n        elif key == \"items\" and isinstance(value, dict):\n            out[key] = _compile(value, defs)\n        elif key == \"anyOf\":\n            out[key] = [_compile(branch, defs) for branch in value]\n        else:\n            out[key] = copy.deepcopy(value)\n",
+          "new": "def _compile(node: dict, defs: dict) -> dict:\n    \"\"\"Compile in place; a reference resolves to the definition itself.\"\"\"\n    if \"$ref\" in node:\n        return _compile(defs[node[\"$ref\"][len(REF_PREFIX):]], defs)\n    out = node\n    out.pop(\"$defs\", None)\n    if \"properties\" in out:\n        for name in list(out[\"properties\"]):\n            out[\"properties\"][name] = _compile(out[\"properties\"][name], defs)\n    if isinstance(out.get(\"items\"), dict):\n        out[\"items\"] = _compile(out[\"items\"], defs)\n    if \"anyOf\" in out:\n        out[\"anyOf\"] = [_compile(branch, defs) for branch in out[\"anyOf\"]]\n"
+        },
+        {
+          "file": "strict.py",
+          "old": "    schema = _compile(tool.input_schema, tool.input_schema.get(\"$defs\", {}))\n",
+          "new": "    work = copy.deepcopy(tool.input_schema)\n    schema = _compile(work, work.get(\"$defs\", {}))\n"
+        }
+      ],
+      "expect": "shipping is optional, so its copy of the address is nullable"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "shared $def, nullable made on a shallow copy",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "def _compile(node: dict, defs: dict) -> dict:\n    \"\"\"A fresh compiled copy of one schema node; nothing in it is shared with the input or another copy.\"\"\"\n    if \"$ref\" in node:\n        ref = node[\"$ref\"]\n        if not ref.startswith(REF_PREFIX) or ref[len(REF_PREFIX):] not in defs:\n            raise ValueError(f\"unknown $ref {ref!r}\")\n        siblings = {k: v for k, v in node.items() if k != \"$ref\"}\n        return _compile({**defs[ref[len(REF_PREFIX):]], **siblings}, defs)\n    out: dict = {}\n    for key, value in node.items():\n        if key == \"$defs\":\n            continue\n        if key == \"properties\":\n            out[key] = {name: _compile(sub, defs) for name, sub in value.items()}\n        elif key == \"items\" and isinstance(value, dict):\n            out[key] = _compile(value, defs)\n        elif key == \"anyOf\":\n            out[key] = [_compile(branch, defs) for branch in value]\n        else:\n            out[key] = copy.deepcopy(value)\n",
+          "new": "def _compile(node: dict, defs: dict) -> dict:\n    \"\"\"Compile in place; a reference resolves to the definition itself.\"\"\"\n    if \"$ref\" in node:\n        return _compile(defs[node[\"$ref\"][len(REF_PREFIX):]], defs)\n    out = node\n    out.pop(\"$defs\", None)\n    if \"properties\" in out:\n        for name in list(out[\"properties\"]):\n            out[\"properties\"][name] = _compile(out[\"properties\"][name], defs)\n    if isinstance(out.get(\"items\"), dict):\n        out[\"items\"] = _compile(out[\"items\"], defs)\n    if \"anyOf\" in out:\n        out[\"anyOf\"] = [_compile(branch, defs) for branch in out[\"anyOf\"]]\n"
+        },
+        {
+          "file": "strict.py",
+          "old": "    schema = _compile(tool.input_schema, tool.input_schema.get(\"$defs\", {}))\n",
+          "new": "    work = copy.deepcopy(tool.input_schema)\n    schema = _compile(work, work.get(\"$defs\", {}))\n"
+        },
+        {
+          "file": "strict.py",
+          "old": "def _nullable(schema: dict) -> dict:\n",
+          "new": "def _nullable(schema: dict) -> dict:\n    schema = dict(schema)\n"
+        }
+      ],
+      "expect": "the copies share nothing with each other or with the input"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "optional properties made nullable before their $ref is inlined",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "            out[key] = {name: _compile(sub, defs) for name, sub in value.items()}\n",
+          "new": "            out[key] = {\n                name: _compile(sub if name in node.get(\"required\", []) else _nullable(copy.deepcopy(sub)), defs)\n                for name, sub in value.items()\n            }\n"
+        },
+        {
+          "file": "strict.py",
+          "old": "        for name in properties:\n            if name not in required:\n                properties[name] = _nullable(properties[name])\n",
+          "new": ""
+        }
+      ],
+      "expect": "shipping is optional, so its copy of the address is nullable"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "compiled in place on the input",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "def _compile(node: dict, defs: dict) -> dict:\n    \"\"\"A fresh compiled copy of one schema node; nothing in it is shared with the input or another copy.\"\"\"\n    if \"$ref\" in node:\n        ref = node[\"$ref\"]\n        if not ref.startswith(REF_PREFIX) or ref[len(REF_PREFIX):] not in defs:\n            raise ValueError(f\"unknown $ref {ref!r}\")\n        siblings = {k: v for k, v in node.items() if k != \"$ref\"}\n        return _compile({**defs[ref[len(REF_PREFIX):]], **siblings}, defs)\n    out: dict = {}\n    for key, value in node.items():\n        if key == \"$defs\":\n            continue\n        if key == \"properties\":\n            out[key] = {name: _compile(sub, defs) for name, sub in value.items()}\n        elif key == \"items\" and isinstance(value, dict):\n            out[key] = _compile(value, defs)\n        elif key == \"anyOf\":\n            out[key] = [_compile(branch, defs) for branch in value]\n        else:\n            out[key] = copy.deepcopy(value)\n",
+          "new": "def _compile(node: dict, defs: dict) -> dict:\n    \"\"\"Compile in place; a reference resolves to the definition itself.\"\"\"\n    if \"$ref\" in node:\n        return _compile(defs[node[\"$ref\"][len(REF_PREFIX):]], defs)\n    out = node\n    out.pop(\"$defs\", None)\n    if \"properties\" in out:\n        for name in list(out[\"properties\"]):\n            out[\"properties\"][name] = _compile(out[\"properties\"][name], defs)\n    if isinstance(out.get(\"items\"), dict):\n        out[\"items\"] = _compile(out[\"items\"], defs)\n    if \"anyOf\" in out:\n        out[\"anyOf\"] = [_compile(branch, defs) for branch in out[\"anyOf\"]]\n"
+        }
+      ],
+      "expect": "strict_tool leaves its input alone"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "leaf values shared with the input",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "            out[key] = copy.deepcopy(value)\n",
+          "new": "            out[key] = value\n"
+        }
+      ],
+      "expect": "strict_tool leaves its input alone"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "a $ref replaced by a raw copy of its definition",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "        return _compile({**defs[ref[len(REF_PREFIX):]], **siblings}, defs)\n",
+          "new": "        return copy.deepcopy({**defs[ref[len(REF_PREFIX):]], **siblings})\n"
+        }
+      ],
+      "expect": "strict mode allows no $ref"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "optional properties wrapped in anyOf with null",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "                properties[name] = _nullable(properties[name])\n",
+          "new": "                properties[name] = {\"anyOf\": [properties[name], {\"type\": \"null\"}]}\n"
+        }
+      ],
+      "expect": "an optional property becomes nullable, and its enum must allow None"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "$defs carried into the output",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "        if key == \"$defs\":\n            continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "strict mode allows no $ref"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "array items not visited",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "        elif key == \"items\" and isinstance(value, dict):\n            out[key] = _compile(value, defs)\n",
+          "new": ""
+        }
+      ],
+      "expect": "strict mode allows no $ref"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "anyOf branches not visited",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "        elif key == \"anyOf\":\n            out[key] = [_compile(branch, defs) for branch in value]\n",
+          "new": ""
+        }
+      ],
+      "expect": "every object gets additionalProperties: false, in array items and anyOf branches too"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "required keeps only the originally required properties",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "        out[\"required\"] = list(properties)\n",
+          "new": "        out[\"required\"] = list(node.get(\"required\", []))\n"
+        }
+      ],
+      "expect": "required lists every property, in order"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "required sorted by name",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "        out[\"required\"] = list(properties)\n",
+          "new": "        out[\"required\"] = sorted(properties)\n"
+        }
+      ],
+      "expect": "required lists every property, in order"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "optional properties left as they were",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "        for name in properties:\n            if name not in required:\n                properties[name] = _nullable(properties[name])\n",
+          "new": ""
+        }
+      ],
+      "expect": "an optional property becomes nullable, and its enum must allow None"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "enums never given None",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "    _enum_allows_null(schema)\n    return schema\n",
+          "new": "    return schema\n"
+        },
+        {
+          "file": "strict.py",
+          "old": "    _enum_allows_null(out)\n    return out\n",
+          "new": "    return out\n"
+        }
+      ],
+      "expect": "an optional property becomes nullable, and its enum must allow None"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "null added again to a type that allows it",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "        if \"null\" not in types:\n            schema[\"type\"] = types + [\"null\"]\n",
+          "new": "        schema[\"type\"] = types + [\"null\"]\n"
+        }
+      ],
+      "expect": "a type that already allows null keeps one null"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "optional anyOf left without a null branch",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "    elif \"anyOf\" in schema and {\"type\": \"null\"} not in schema[\"anyOf\"]:\n        schema[\"anyOf\"].append({\"type\": \"null\"})\n",
+          "new": ""
+        }
+      ],
+      "expect": "an optional property becomes nullable, and its enum must allow None"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "None added only to newly optional enums",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "    _enum_allows_null(out)\n    return out\n",
+          "new": "    return out\n"
+        }
+      ],
+      "expect": "WEATHER's units may be null, so its enum must list None"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "depth measured before inlining",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "    depth = schema_depth(schema)\n",
+          "new": "    depth = schema_depth(tool.input_schema)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "the depth limit is exclusive",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "    if depth > limit:\n",
+          "new": "    if depth >= limit:\n"
+        }
+      ],
+      "expect": "org_chart nests 5 objects deep"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "Anthropic's depth limit used for strict mode",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "    limit = LIMITS[\"openai\"].max_depth\n",
+          "new": "    limit = LIMITS[\"anthropic\"].max_depth\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "the compiled tool keeps the input's strict flag, as dataclasses.replace does",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "    return Tool(tool.name, tool.description, schema, strict=True)\n",
+          "new": "    return Tool(tool.name, tool.description, schema, strict=tool.strict)\n"
+        }
+      ],
+      "expect": "the same tool, marked strict"
+    },
+    {
+      "test": "test_strict_compiler",
+      "name": "the null branch put first in an optional anyOf",
+      "edits": [
+        {
+          "file": "strict.py",
+          "old": "        schema[\"anyOf\"].append({\"type\": \"null\"})\n",
+          "new": "        schema[\"anyOf\"].insert(0, {\"type\": \"null\"})\n"
+        }
+      ],
+      "expect": "an optional property becomes nullable, and its enum must allow None"
+    }
+  ]
+}
