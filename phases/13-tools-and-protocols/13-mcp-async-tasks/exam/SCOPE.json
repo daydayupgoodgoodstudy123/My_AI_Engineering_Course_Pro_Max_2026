@@ -1,0 +1,162 @@
+{
+  "lesson": "phases/13-tools-and-protocols/13-mcp-async-tasks",
+  "title": "MCP Tasks Extension: Durable Work on a Stateless Core",
+  "format": "staged-brownfield",
+  "service": "DurableTask: an MCP Tasks extension server: server-directed task handles, tasks/get, tasks/update and tasks/cancel, a worker that runs task-backed tools, a store shared through a directory, a subscriptions/listen SSE stream, worker leases and expiry cleanup",
+  "sources": {
+    "docs/en.md": "6987b0cabf06d9f37c5f42b31a76889ad26b36b3571aeaae6629ceb2cd0f7314",
+    "code/main.py": "675245a235f4941402eb50df8cd18102662238f0d3cc6f69ddd29530c19b214b",
+    "quiz/quiz.md": "5fa979e1fc0f1ab0209b79bfb5a8b32a510cd0b057c779c1c14ffaff1225fcbd"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_poll_and_cancel",
+      "kind": "debug",
+      "lesson_anchor": "Poll with tasks/get (outer resultType complete, task state in status); Cancellation Is Cooperative; Durability, Expiry, and Ownership (ttlMs measured from creation, null for no limit); code/main.py TaskService.tasks_get, tasks_cancel and Task",
+      "planted_bugs": [
+        "_fail_if_overdue compares the clock with expires_at() without handling None; the TypeError surfaces while polling a different task, inside the sweep that tasks_get runs over every task, when it reaches the task whose ttlMs is null",
+        "tasks_get sets the outer resultType from the task's status (task while running, complete once finished), the parser bug the lesson describes, written on the server",
+        "tasks_cancel's else branch cancels every task that is not working, so a completed task loses its result; the damage shows on the next tasks/get",
+        "Task.expires_at adds the ttl to last_updated_at although the docstring and the lesson measure it from createdAt",
+        "tasks_get fails overdue tasks by scanning the whole store before every poll, O(tasks) per tasks/get"
+      ],
+      "timing_assert": "3000 tasks in a MemoryStore, 20 polls with the clock advancing one second per poll, timed after gc.collect(), under 0.04 s. Measured here under load (load average 8 to 14): the whole-store sweep takes 0.58 to 0.96 s (at least 14x the limit), the per-task check 0.3 to 0.9 ms (at least 40x under it). A sweep throttled to once per clock second fails as well, because the clock advances between polls",
+      "overfix_guard": "dropping the expiry check to make polling fast fails 'a task expires ttlMs after it was created'; cancelling working tasks at once, as code/main.py does, fails the cooperative check, and making cancel a no-op leaves a task waiting for input uncancelled; a cancel that keeps a finished task's status but saves it again changes lastUpdatedAt; ttlMs null read as expired, an exclusive boundary and ttlMs read as seconds all fail; an expiry shown but not saved keeps the old lastUpdatedAt; tasks/cancel losing its expiry check altogether (instead of checking the one task) cancels an overdue task that should have failed"
+    },
+    {
+      "part": 2,
+      "test": "test_task_files",
+      "kind": "model and persistence",
+      "lesson_anchor": "Durability, Expiry, and Ownership (persist id, status, timestamps, ttl, poll interval, ownership, result or error, input requests and every issued key; atomic writes); Stateless Core, Stateful Application (a task id routes to any replica backed by the same durable store); code/main.py TaskStore.persist and reload",
+      "exactness": "four tricky tasks (two outstanding input requests, a completed task with a nested CallToolResult whose structuredContent holds 0.1 + 0.2, nested lists and non-ASCII text, a failed task with error data, ttl_ms null with cancel_requested) read back equal through a fresh store; a golden record written by another instance reads back as the expected Task and is written back JSON-equal, so the record format is dataclasses.asdict with Z wire timestamps",
+      "traps": [
+        "the lesson's load-once cache (an instance never sees another instance's new task)",
+        "a read-through cache filled on the first miss (an instance never sees another instance's later write)",
+        "reloading the whole directory on every get (timing: 2000 files, 20 gets under 0.04 s; measured 0.7 to 2.7 ms against 1.6 to 2.5 s)",
+        "isoformat() or json.dumps(default=str) timestamps instead of 2026-08-21T10:30:00Z",
+        "timestamps read back naive, or left as text",
+        "json.dumps(default=format_time) silently turning a stray datetime into text instead of raising TypeError",
+        "writing <taskId>.json in place (write_text or json.dump): a reader that already opened the file reads the new bytes (POSIX only)",
+        "a failed write that destroys the previous record",
+        "temporary files, .swp files or leases listed as tasks (iterdir, glob('tsk_*'))",
+        "temporary or .bak files left behind after a successful save",
+        "task ids used as file names unchecked (../elsewhere/tsk_... reads another tenant's file)",
+        "create replacing an existing task",
+        "issued_keys written sorted",
+        "null fields dropped on write and a missing ttl_ms filled with the default on read",
+        "get raising for a missing id, delete raising for a missing task",
+        "task ids listed in directory order instead of sorted"
+      ],
+      "clarifying_questions": [
+        "caching tasks in memory",
+        "fsync",
+        "what get returns for an unknown id",
+        "timestamp format on disk",
+        "extra fields in the record",
+        "temporary file name and place"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_worker_and_input",
+      "kind": "core algorithm",
+      "lesson_anchor": "The Task Shape; Input During Task Execution (keys unique for the task's lifetime; unknown, superseded or fulfilled keys ignored; a partial update stays input_required); Failure Semantics; Exercises 1 and 2",
+      "traps": [
+        "a partial answer resuming the task, or an answered key left in inputRequests",
+        "responses for unknown keys stored, or a later answer replacing the first (checking issued_keys instead of the outstanding requests)",
+        "anything shaped like an object, or an accept without a content object, counted as an elicitation result",
+        "decline cancelling the whole task, as code/main.py does, instead of answering the key",
+        "a key the tool asked for earlier issued again, including after another round (issued_keys replaced instead of extended)",
+        "isError: true failing the task",
+        "the nested CallToolResult stored without resultType or without serverInfo",
+        "a tool's JSON-RPC error kept without data, with data: null, or turned into an isError result",
+        "the worker stepping tasks that wait for input, or ignoring a cancel request",
+        "lastUpdatedAt not stamped by the worker or by tasks/update, or stamped by an update that answered nothing",
+        "tasks/update without the owner check, or someone else's task reported differently from an unknown id",
+        "inputResponses used without checking it is an object",
+        "tasks/update refused for a task that waits for nothing",
+        "the statusMessage of a finished task not taken from the outcome (Done's message, the error's message)",
+        "tasks/update taking input for an overdue task instead of failing it first",
+        "the worker crashing on an unknown task id"
+      ],
+      "clarifying_questions": [
+        "whether decline answers a key",
+        "a key answered twice",
+        "a tool that reuses a key",
+        "tasks/update on a task that is not waiting",
+        "malformed responses",
+        "tool exceptions that are not McpError"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_listen_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Optional Notifications (POST-response SSE stream, notifications/subscriptions/acknowledged, full snapshots through notifications/tasks, subscriptionId equal to the listen request id); Exercise 4; Durability, Expiry, and Ownership (ownership checked on every subscription)",
+      "wire_format": "one SSE event per yielded string: a data: line with the message's compact JSON and a blank line, decided by the test's parser (field: value lines, comments skipped, data lines joined, json.loads); the stream ends with the listen request's result",
+      "traps": [
+        "every requested id acknowledged, or a repeated id acknowledged twice",
+        "an id the caller cannot see ending the subscription with an error",
+        "snapshots read without tasks/get's expiry check, or an expiry shown in the stream but not stored",
+        "notifications keeping tasks/get's resultType, or carrying serverInfo instead of the subscription id",
+        "the subscription id sent as text, or missing from the final result",
+        "every tick sending every watched task, or initial snapshots sent after the acknowledgement",
+        "a notification only when status or lastUpdatedAt changes (the probe changes only statusMessage, in the second the task was created)",
+        "finished tasks still watched, so the stream does not end when nothing is left",
+        "notifications held back until the end, or the acknowledgement waiting for the first tick",
+        "no listen result at the end",
+        "pretty-printed JSON behind one data: prefix, events without a blank line, bytes instead of text",
+        "the Tasks extension not required, or task ids read from the wrong place",
+        "finished tasks of the caller's own left out of the acknowledgement"
+      ],
+      "clarifying_questions": [
+        "initial snapshots after the acknowledgement",
+        "duplicate ids",
+        "when the stream ends",
+        "keepalives",
+        "event fields"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_leases_and_cleanup",
+      "kind": "concurrency control and cleanup",
+      "lesson_anchor": "Exercise 3 (a worker lease with expiry; two instances cannot complete the same task); Exercise 5 (expiry cleanup that tells an expired task from a malformed id without leaking cross-tenant existence); Durability, Expiry, and Ownership (a server may fail and later delete an expired task; a multi-replica service needs a worker lease)",
+      "traps": [
+        "leases timed by the wall clock instead of the injected clock",
+        "a lease exactly lease_ms old still holding",
+        "an expired lease never taken over, or a live lease overwritten",
+        "the worker never taking a lease",
+        "a worker committing after losing its lease, or after its lease ran out with no one taking over (holds ignoring expiry, or only checking that the task is unchanged)",
+        "release removing a lease that now belongs to another worker",
+        "leases never given back, or given back only after a commit",
+        "the sweep deleting running tasks at once, never failing them, deleting only failed tasks, counting from lastUpdatedAt, or crashing on ttlMs null",
+        "a deleted task answering 'task expired' instead of 'task not found'",
+        "expiry checked before ownership, so someone else's request fails your task",
+        "task ids reaching the file system unchecked",
+        "a holder's second acquire not renewing its lease",
+        "the sweep skipping overdue tasks that wait for input, keeping a task exactly ttlMs old, or failing a task without stamping lastUpdatedAt"
+      ],
+      "clarifying_questions": [
+        "lease length",
+        "a worker re-acquiring its own lease",
+        "taking over an expired lease",
+        "removing lease files in the sweep",
+        "what a deleted task answers",
+        "overdue tasks waiting for input in the sweep"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1 runs on MemoryStore, the in-memory store that ships with the service, because the file store is what Part 2 builds and Part 1 must pass before Part 2 exists. The suggested fourth bug (TaskStore.get reloading the whole directory) and its guard (two TaskServices on one directory see each other's updates) therefore move into Part 2's requirements: get reads one file, timed over 2000 files, and two stores on one directory see each other's writes, in both directions, which also rules out the lesson's load-once cache and a read-through cache. Part 1's performance bug becomes the lazy-expiry sweep that tasks_get runs over every task, and a fifth bug is added: the comparison with expires_at() that crashes on a task whose ttlMs is null, which surfaces while polling a different task.",
+    "Part 1's outer resultType bug keeps the server-side form of the lesson's parser bug (task while running, complete once finished). The nested result's own resultType and serverInfo are checked in Part 3, where the worker stores the tool's CallToolResult, because Part 1 has no worker.",
+    "Cancellation is cooperative in a way the tests can see: a working task only records the request (cancel_requested) and its worker cancels it at the next step without running the tool, while a task waiting for input is cancelled at once. code/main.py cancels every non-terminal task immediately; the lesson allows either and asks clients not to infer a final state from the acknowledgement.",
+    "Part 2's 'ttlMs null versus missing' trap is the writer that drops null fields together with a reader that fills a missing ttl_ms with the default; every record written by the reference has every key. Part 2 also requires atomic replacement observably: a reader that opened the old file keeps reading the old record (POSIX only, since Windows will not rename over an open file).",
+    "Superseded keys: the worker runs only while nothing is outstanding, so a key is superseded when a newer request replaces the question (approve_outline after a decline, then approve_outline_2). The rule the service implements covers unknown, fulfilled and superseded keys at once: only outstanding keys are accepted. A tool that asks again for an issued key fails the task with -32603.",
+    "Part 4 polls the shared store on ticks supplied by the caller, so it also sees changes made by other instances; snapshots come from tasks/get itself, so lazy expiry and ownership are the same as polling. No initial snapshots are sent after the acknowledgement. The stream ends, when nothing is left to watch, with the listen request's result carrying subscriptionId next to serverInfo; that final result comes from lesson 09 (this phase), not from this lesson's text.",
+    "Part 5 replaces the nested-structure part, which this lesson does not have, with exercises 3 and 5 as the chapter plan suggests: leases are <taskId>.lease files next to the task files, created exclusively, expiring on the injected clock, with fencing before commit; the sweep fails an overdue task that is still running and deletes it on a later sweep, and deletes an overdue task that had already finished. A deleted task answers 'task not found', as quiz/quiz.md's answer to Q12 describes; the expiry error EXPIRED_ERROR (-32603, Task expired) is this service's choice, also following that answer, since the lesson names no code.",
+    "Out of scope, to stay clear of other lessons: A2A cards and artifacts (lesson 19), races between request cancellation and task cancellation, and two workers taking over one expired lease at the same moment (lesson 29), SSE event ids (lessons 09 and 29). The HTTP layer, Mcp-Name and server/discover are not part of this pack."
+  ]
+}

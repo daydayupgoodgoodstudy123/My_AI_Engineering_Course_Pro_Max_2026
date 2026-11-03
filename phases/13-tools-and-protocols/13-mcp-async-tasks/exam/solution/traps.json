@@ -1,0 +1,1635 @@
+{
+  "package": "durabletask",
+  "tests": [
+    "test_poll_and_cancel",
+    "test_task_files",
+    "test_worker_and_input",
+    "test_listen_stream",
+    "test_leases_and_cleanup"
+  ],
+  "layers": [
+    {
+      "test": "test_poll_and_cancel",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "TypeError"
+        },
+        {
+          "name": "fix the comparison with a task that has no ttl",
+          "edits": [
+            {
+              "file": "service.py",
+              "old": "        if task.status in TERMINAL_STATUSES or self._now() < task.expires_at():\n",
+              "new": "        deadline = task.expires_at()\n        if task.status in TERMINAL_STATUSES or deadline is None or self._now() < deadline:\n"
+            }
+          ],
+          "expect": "tasks/get itself completed; the task's own state is in status"
+        },
+        {
+          "name": "+ tasks/get is always resultType complete",
+          "edits": [
+            {
+              "file": "service.py",
+              "old": "        result_type = \"complete\" if task.status in TERMINAL_STATUSES else \"task\"\n        return {\"resultType\": result_type, **task.to_wire(), \"_meta\": server_meta()}\n",
+              "new": "        return complete(**task.to_wire())\n"
+            }
+          ],
+          "expect": "a finished task never changes, not even its lastUpdatedAt"
+        },
+        {
+          "name": "+ cancel leaves finished tasks alone",
+          "edits": [
+            {
+              "file": "service.py",
+              "old": "        else:\n            task.status = \"cancelled\"\n",
+              "new": "        elif task.status == \"input_required\":\n            task.status = \"cancelled\"\n"
+            }
+          ],
+          "expect": "a task expires ttlMs after it was created"
+        },
+        {
+          "name": "+ the ttl counts from createdAt",
+          "edits": [
+            {
+              "file": "task.py",
+              "old": "        return self.last_updated_at + timedelta(milliseconds=self.ttl_ms)\n",
+              "new": "        return self.created_at + timedelta(milliseconds=self.ttl_ms)\n"
+            }
+          ],
+          "expect": "tasks/get should not slow down as tasks pile up"
+        },
+        {
+          "name": "+ a poll checks only the task it asks about",
+          "edits": [
+            {
+              "file": "service.py",
+              "old": "        self._fail_overdue()\n        task = self._owned_task(params.get(\"taskId\"), principal)\n        return complete(**task.to_wire())\n",
+              "new": "        task = self._fail_if_overdue(self._owned_task(params.get(\"taskId\"), principal))\n        return complete(**task.to_wire())\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_poll_and_cancel",
+      "name": "polling made fast by dropping the expiry check",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        task = self._fail_if_overdue(self._owned_task(params.get(\"taskId\"), principal))\n        return complete(**task.to_wire())\n",
+          "new": "        task = self._owned_task(params.get(\"taskId\"), principal)\n        return complete(**task.to_wire())\n"
+        }
+      ],
+      "expect": "a task expires ttlMs after it was created"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "every poll sweeps every task, as the starter does",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        task = self._fail_if_overdue(self._owned_task(params.get(\"taskId\"), principal))\n        return complete(**task.to_wire())\n",
+          "new": "        if True:\n            for other in self.store.task_ids():\n                found = self.store.get(other)\n                if found is not None:\n                    self._fail_if_overdue(found)\n        task = self._fail_if_overdue(self._owned_task(params.get(\"taskId\"), principal))\n        return complete(**task.to_wire())\n"
+        }
+      ],
+      "expect": "tasks/get should not slow down as tasks pile up"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "the sweep throttled to once per clock second",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        task = self._fail_if_overdue(self._owned_task(params.get(\"taskId\"), principal))\n        return complete(**task.to_wire())\n",
+          "new": "        if getattr(self, \"_swept_at\", None) != self._now():\n            self._swept_at = self._now()\n            for other in self.store.task_ids():\n                found = self.store.get(other)\n                if found is not None:\n                    self._fail_if_overdue(found)\n        task = self._fail_if_overdue(self._owned_task(params.get(\"taskId\"), principal))\n        return complete(**task.to_wire())\n"
+        }
+      ],
+      "expect": "tasks/get should not slow down as tasks pile up"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "resultType input_required while the task waits for input (core MRTR's discriminator)",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        task = self._fail_if_overdue(self._owned_task(params.get(\"taskId\"), principal))\n        return complete(**task.to_wire())\n",
+          "new": "        task = self._fail_if_overdue(self._owned_task(params.get(\"taskId\"), principal))\n        result = complete(**task.to_wire())\n        if task.status == \"input_required\":\n            result[\"resultType\"] = \"input_required\"\n        return result\n"
+        }
+      ],
+      "expect": "tasks/get is complete whatever the task's status, input_required included"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "tools/call also answers resultType complete",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        return {\"resultType\": \"task\", **task.to_wire(), \"_meta\": server_meta()}\n",
+          "new": "        return complete(**task.to_wire())\n"
+        }
+      ],
+      "expect": "tools/call answers with the task's handle, resultType task"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "cancel stops a working task at once, as the lesson's code does",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if task.status == \"working\":\n            if not task.cancel_requested:\n                task.cancel_requested = True\n                task.status_message = CANCEL_REQUESTED\n                self._save(task)\n        elif task.status == \"input_required\":\n",
+          "new": "        if task.status in (\"working\", \"input_required\"):\n"
+        }
+      ],
+      "expect": "cancellation is cooperative: a working task stops at its worker's next step"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "cancel changes only working tasks",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        elif task.status == \"input_required\":\n            task.status = \"cancelled\"\n",
+          "new": "        elif False:\n            task.status = \"cancelled\"\n"
+        }
+      ],
+      "expect": "a task waiting for input has no worker to wait for"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "cancel keeps a finished task's status but saves it again",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            task.input_requests = {}\n            self._save(task)\n        return complete()\n",
+          "new": "            task.input_requests = {}\n            self._save(task)\n        elif task.status in TERMINAL_STATUSES:\n            self._save(task)\n        return complete()\n"
+        }
+      ],
+      "expect": "a finished task never changes, not even its lastUpdatedAt"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "a repeated cancel is saved again",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            if not task.cancel_requested:\n                task.cancel_requested = True\n",
+          "new": "            if True:\n                task.cancel_requested = True\n"
+        }
+      ],
+      "expect": "a repeated cancel changes nothing"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "ttlMs null read as already expired",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "or deadline is None or self._now() < deadline:\n",
+          "new": "or (deadline is not None and self._now() < deadline):\n"
+        }
+      ],
+      "expect": "a task with ttlMs null never expires"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "a task exactly ttlMs old is still running",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "or deadline is None or self._now() < deadline:\n",
+          "new": "or deadline is None or self._now() <= deadline:\n"
+        }
+      ],
+      "expect": "a task expires ttlMs after it was created"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "ttlMs read as seconds",
+      "edits": [
+        {
+          "file": "task.py",
+          "old": "        return self.created_at + timedelta(milliseconds=self.ttl_ms)\n",
+          "new": "        return self.created_at + timedelta(seconds=self.ttl_ms)\n"
+        }
+      ],
+      "expect": "a task expires ttlMs after it was created"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "an expired task reported as failed but never saved",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        task.error = dict(EXPIRED_ERROR)\n        task.input_requests = {}\n        self._save(task)\n        return task\n",
+          "new": "        task.error = dict(EXPIRED_ERROR)\n        task.input_requests = {}\n        return task\n"
+        }
+      ],
+      "expect": "expiring a task is a change, stored when it happens"
+    },
+    {
+      "test": "test_task_files",
+      "name": "timestamps written with isoformat()",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    record[\"created_at\"] = format_time(task.created_at)\n    record[\"last_updated_at\"] = format_time(task.last_updated_at)\n",
+          "new": "    record[\"created_at\"] = task.created_at.isoformat()\n    record[\"last_updated_at\"] = task.last_updated_at.isoformat()\n"
+        },
+        {
+          "file": "store.py",
+          "old": "    record[\"created_at\"] = parse_time(record[\"created_at\"])\n    record[\"last_updated_at\"] = parse_time(record[\"last_updated_at\"])\n",
+          "new": "    record[\"created_at\"] = __import__(\"datetime\").datetime.fromisoformat(record[\"created_at\"])\n    record[\"last_updated_at\"] = __import__(\"datetime\").datetime.fromisoformat(record[\"last_updated_at\"])\n"
+        }
+      ],
+      "expect": "every instance writes the shared record format"
+    },
+    {
+      "test": "test_task_files",
+      "name": "datetimes turned into text by json.dumps(default=str)",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    record = asdict(task)\n    record[\"created_at\"] = format_time(task.created_at)\n    record[\"last_updated_at\"] = format_time(task.last_updated_at)\n    return json.dumps(record, indent=2, sort_keys=True)\n",
+          "new": "    return json.dumps(asdict(task), indent=2, sort_keys=True, default=str)\n"
+        },
+        {
+          "file": "store.py",
+          "old": "    record[\"created_at\"] = parse_time(record[\"created_at\"])\n    record[\"last_updated_at\"] = parse_time(record[\"last_updated_at\"])\n",
+          "new": "    record[\"created_at\"] = __import__(\"datetime\").datetime.fromisoformat(record[\"created_at\"])\n    record[\"last_updated_at\"] = __import__(\"datetime\").datetime.fromisoformat(record[\"last_updated_at\"])\n"
+        }
+      ],
+      "expect": "every instance writes the shared record format"
+    },
+    {
+      "test": "test_task_files",
+      "name": "every datetime written with json.dumps(default=format_time)",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    record = asdict(task)\n    record[\"created_at\"] = format_time(task.created_at)\n    record[\"last_updated_at\"] = format_time(task.last_updated_at)\n    return json.dumps(record, indent=2, sort_keys=True)\n",
+          "new": "    return json.dumps(asdict(task), indent=2, sort_keys=True, default=format_time)\n"
+        }
+      ],
+      "expect": "a task that cannot be written is an error"
+    },
+    {
+      "test": "test_task_files",
+      "name": "timestamps read back without a time zone",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    record[\"created_at\"] = parse_time(record[\"created_at\"])\n    record[\"last_updated_at\"] = parse_time(record[\"last_updated_at\"])\n",
+          "new": "    record[\"created_at\"] = __import__(\"datetime\").datetime.strptime(record[\"created_at\"], \"%Y-%m-%dT%H:%M:%SZ\")\n    record[\"last_updated_at\"] = __import__(\"datetime\").datetime.strptime(record[\"last_updated_at\"], \"%Y-%m-%dT%H:%M:%SZ\")\n"
+        }
+      ],
+      "expect": "a handle resolves on every instance as soon as tools/call returns it"
+    },
+    {
+      "test": "test_task_files",
+      "name": "every task loaded once, when the store opens (the lesson's cache)",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        self.directory.mkdir(parents=True, exist_ok=True)\n\n    def create(",
+          "new": "        self.directory.mkdir(parents=True, exist_ok=True)\n        self._cache = {name: _decode((self.directory / f\"{name}.json\").read_text(encoding=\"utf-8\")) for name in self.task_ids()}\n\n    def create("
+        },
+        {
+          "file": "store.py",
+          "old": "        try:\n            text = self._path(task_id).read_text(encoding=\"utf-8\")\n        except FileNotFoundError:\n            return None\n        return _decode(text)\n",
+          "new": "        self._path(task_id)\n        task = self._cache.get(task_id)\n        return copy.deepcopy(task) if task is not None else None\n"
+        },
+        {
+          "file": "store.py",
+          "old": "            os.replace(temporary, path)\n",
+          "new": "            os.replace(temporary, path)\n            self._cache[task.task_id] = copy.deepcopy(task)\n"
+        }
+      ],
+      "expect": "a handle resolves on every instance as soon as tools/call returns it"
+    },
+    {
+      "test": "test_task_files",
+      "name": "the cache filled when a task is first missed",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        self.directory.mkdir(parents=True, exist_ok=True)\n\n    def create(",
+          "new": "        self.directory.mkdir(parents=True, exist_ok=True)\n        self._cache = {}\n\n    def create("
+        },
+        {
+          "file": "store.py",
+          "old": "        try:\n            text = self._path(task_id).read_text(encoding=\"utf-8\")\n        except FileNotFoundError:\n            return None\n        return _decode(text)\n",
+          "new": "        if task_id not in self._cache:\n            try:\n                self._cache[task_id] = _decode(self._path(task_id).read_text(encoding=\"utf-8\"))\n            except FileNotFoundError:\n                return None\n        return copy.deepcopy(self._cache[task_id])\n"
+        }
+      ],
+      "expect": "an instance sees another instance's writes, even of a task it has read"
+    },
+    {
+      "test": "test_task_files",
+      "name": "every get reloads the whole directory",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        try:\n            text = self._path(task_id).read_text(encoding=\"utf-8\")\n        except FileNotFoundError:\n            return None\n        return _decode(text)\n",
+          "new": "        everything = {}\n        for name in self.task_ids():\n            everything[name] = _decode((self.directory / f\"{name}.json\").read_text(encoding=\"utf-8\"))\n        self._path(task_id)\n        return everything.get(task_id)\n"
+        }
+      ],
+      "expect": "get reads one task's file, however many tasks there are"
+    },
+    {
+      "test": "test_task_files",
+      "name": "json.dump straight into <taskId>.json",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        text = _encode(task)\n        handle, temporary = tempfile.mkstemp(dir=self.directory, prefix=f\".{task.task_id}.\", suffix=\".tmp\")\n        try:\n            with os.fdopen(handle, \"w\", encoding=\"utf-8\") as file:\n                file.write(text)\n            os.replace(temporary, path)\n        except BaseException:\n            Path(temporary).unlink(missing_ok=True)\n            raise\n",
+          "new": "        record = asdict(task)\n        record[\"created_at\"] = format_time(task.created_at)\n        record[\"last_updated_at\"] = format_time(task.last_updated_at)\n        with open(path, \"w\", encoding=\"utf-8\") as file:\n            json.dump(record, file, indent=2, sort_keys=True)\n"
+        }
+      ],
+      "expect": "a save puts a whole new file in place"
+    },
+    {
+      "test": "test_task_files",
+      "name": "the temporary file copied instead of renamed",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            os.replace(temporary, path)\n",
+          "new": "            __import__(\"shutil\").copyfile(temporary, path)\n"
+        }
+      ],
+      "expect": "a save puts a whole new file in place"
+    },
+    {
+      "test": "test_task_files",
+      "name": "a .bak copy of the previous record kept next to it",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            os.replace(temporary, path)\n",
+          "new": "            if path.exists():\n                __import__(\"shutil\").copyfile(path, path.with_name(path.name + \".bak\"))\n            os.replace(temporary, path)\n"
+        }
+      ],
+      "expect": "one file per task, and nothing left behind"
+    },
+    {
+      "test": "test_task_files",
+      "name": "a write that cannot be encoded is skipped quietly",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        text = _encode(task)\n",
+          "new": "        try:\n            text = _encode(task)\n        except TypeError:\n            return\n"
+        }
+      ],
+      "expect": "a task that cannot be written is an error"
+    },
+    {
+      "test": "test_task_files",
+      "name": "every file in the directory read as a task",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            path.stem for path in self.directory.glob(\"*.json\") if TASK_ID.fullmatch(path.stem)\n",
+          "new": "            path.name.split(\".\")[0] for path in self.directory.iterdir()\n"
+        }
+      ],
+      "expect": "only <taskId>.json files are tasks"
+    },
+    {
+      "test": "test_task_files",
+      "name": "tasks listed by glob('tsk_*')",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            path.stem for path in self.directory.glob(\"*.json\") if TASK_ID.fullmatch(path.stem)\n",
+          "new": "            path.stem for path in self.directory.glob(\"tsk_*\")\n"
+        }
+      ],
+      "expect": "only <taskId>.json files are tasks"
+    },
+    {
+      "test": "test_task_files",
+      "name": "task ids used as file names unchecked",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return self.directory / f\"{check_task_id(task_id)}.json\"\n",
+          "new": "        return self.directory / f\"{task_id}.json\"\n"
+        }
+      ],
+      "expect": "a task id from a client never becomes a path of its choosing"
+    },
+    {
+      "test": "test_task_files",
+      "name": "create replaces an existing task",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if path.exists():\n            raise ValueError(f\"task {task.task_id} already exists\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "create never replaces an existing task"
+    },
+    {
+      "test": "test_task_files",
+      "name": "issued keys written sorted",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    record = asdict(task)\n",
+          "new": "    record = asdict(task)\n    record[\"issued_keys\"] = sorted(task.issued_keys)\n"
+        }
+      ],
+      "expect": "every task reads back exactly"
+    },
+    {
+      "test": "test_task_files",
+      "name": "null fields left out, and a missing ttl_ms read as the default",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    return json.dumps(record, indent=2, sort_keys=True)\n",
+          "new": "    return json.dumps({key: value for key, value in record.items() if value is not None}, indent=2, sort_keys=True)\n"
+        },
+        {
+          "file": "store.py",
+          "old": "    return Task(**record)\n",
+          "new": "    record.setdefault(\"ttl_ms\", 900_000)\n    return Task(**record)\n"
+        }
+      ],
+      "expect": "every task reads back exactly"
+    },
+    {
+      "test": "test_task_files",
+      "name": "get raises for an id with no file",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        try:\n            text = self._path(task_id).read_text(encoding=\"utf-8\")\n        except FileNotFoundError:\n            return None\n        return _decode(text)\n",
+          "new": "        return _decode(self._path(task_id).read_text(encoding=\"utf-8\"))\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_task_files",
+      "name": "deleting a task twice raises",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        self._path(task_id).unlink(missing_ok=True)\n",
+          "new": "        self._path(task_id).unlink()\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "a partial answer resumes the task",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "                if not task.input_requests:\n",
+          "new": "                if True:\n"
+        }
+      ],
+      "expect": "a partial answer leaves the other keys outstanding"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "an answered key stays in inputRequests",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "                    del task.input_requests[key]\n",
+          "new": "                    task.input_requests.get(key)\n"
+        }
+      ],
+      "expect": "a partial answer leaves the other keys outstanding"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "every response stored, whatever its key",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            answered = [\n                key\n                for key, response in responses.items()\n                if key in task.input_requests and _is_elicitation_result(response)\n            ]\n",
+          "new": "            answered = [key for key, response in responses.items() if _is_elicitation_result(response)]\n"
+        },
+        {
+          "file": "service.py",
+          "old": "                    del task.input_requests[key]\n",
+          "new": "                    task.input_requests.pop(key, None)\n"
+        }
+      ],
+      "expect": "a key that is no longer outstanding is ignored, and changes nothing"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "any key ever issued may be answered again",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "                if key in task.input_requests and _is_elicitation_result(response)\n",
+          "new": "                if key in task.issued_keys and _is_elicitation_result(response)\n"
+        },
+        {
+          "file": "service.py",
+          "old": "                    del task.input_requests[key]\n",
+          "new": "                    task.input_requests.pop(key, None)\n"
+        }
+      ],
+      "expect": "a key that is no longer outstanding is ignored, and changes nothing"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "any object counts as an answer",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "    if not isinstance(response, dict):\n        return False\n    action",
+          "new": "    if isinstance(response, dict):\n        return True\n    action"
+        }
+      ],
+      "expect": "a partial answer leaves the other keys outstanding"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "a decline cancels the task, as the lesson's code does",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if task.status == \"input_required\":\n            answered = [\n",
+          "new": "        if task.status == \"input_required\" and any(\n            isinstance(responses[key], dict) and responses[key].get(\"action\") in (\"decline\", \"cancel\")\n            for key in responses if key in task.input_requests\n        ):\n            task.status = \"cancelled\"\n            task.status_message = CANCELLED\n            task.input_requests = {}\n            self._save(task)\n        elif task.status == \"input_required\":\n            answered = [\n"
+        }
+      ],
+      "expect": "once every key is answered the task is working again"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "tasks/update without the owner check",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        task = self._fail_if_overdue(self._owned_task(params.get(\"taskId\"), principal))\n        responses = params.get(\"inputResponses\")\n",
+          "new": "        task = self.store.get(params.get(\"taskId\"))\n        responses = params.get(\"inputResponses\")\n"
+        }
+      ],
+      "expect": "tasks/update should have failed"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "someone else's task reported as forbidden",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if task is None or task.owner != principal:\n            raise McpError(-32602, \"task not found\")\n",
+          "new": "        if task is None:\n            raise McpError(-32602, \"task not found\")\n        if task.owner != principal:\n            raise McpError(-32602, \"task belongs to another principal\")\n"
+        }
+      ],
+      "expect": "treats someone else's task exactly like a task that does not exist"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "inputResponses used without checking it is an object",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if not isinstance(responses, dict):\n            raise McpError(-32602, \"inputResponses must be an object\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "a key the tool asked for before is issued again",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            reused = [key for key in outcome.requests if key in task.issued_keys]\n",
+          "new": "            reused = []\n"
+        }
+      ],
+      "expect": "an input key is issued once in a task's lifetime"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "the worker steps tasks that wait for input",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if task is None or task.status != \"working\":\n            return False\n",
+          "new": "        if task is None or task.status in TERMINAL_STATUSES:\n            return False\n"
+        }
+      ],
+      "expect": "a task waiting for input has no work for its worker"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "the worker ignores a cancel request",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if task.cancel_requested:\n            task.status = \"cancelled\"\n",
+          "new": "        if False:\n            task.status = \"cancelled\"\n"
+        }
+      ],
+      "expect": "the worker honours a cancel request at its next step"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "isError: true fails the task",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        elif isinstance(outcome, Done):\n",
+          "new": "        elif isinstance(outcome, Done) and outcome.result.get(\"isError\"):\n            task.status = \"failed\"\n            task.status_message = outcome.message\n            task.error = {\"code\": -32603, \"message\": \"tool reported an error\"}\n        elif isinstance(outcome, Done):\n"
+        }
+      ],
+      "expect": "a tool result with isError: true still completes the task"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "the tool's result stored untyped",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            task.result = {\"resultType\": \"complete\", **copy.deepcopy(outcome.result), \"_meta\": server_meta()}\n",
+          "new": "            task.result = copy.deepcopy(outcome.result)\n"
+        }
+      ],
+      "expect": "a completed task carries the tool call's own result, with its resultType and serverInfo"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "the tool's result without serverInfo",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            task.result = {\"resultType\": \"complete\", **copy.deepcopy(outcome.result), \"_meta\": server_meta()}\n",
+          "new": "            task.result = {\"resultType\": \"complete\", **copy.deepcopy(outcome.result)}\n"
+        }
+      ],
+      "expect": "a completed task carries the tool call's own result, with its resultType and serverInfo"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "a tool's JSON-RPC error kept without its data",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            task.error = outcome.to_error()\n",
+          "new": "            task.error = {\"code\": outcome.code, \"message\": outcome.message}\n"
+        }
+      ],
+      "expect": "a JSON-RPC error during the work fails the task and is kept as its error"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "data: null kept for an error without data",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            task.error = outcome.to_error()\n",
+          "new": "            task.error = {\"code\": outcome.code, \"message\": outcome.message, \"data\": outcome.data}\n"
+        }
+      ],
+      "expect": "an error without data has no data"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "a tool's JSON-RPC error turned into an isError result",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            task.status = \"failed\"\n            task.status_message = outcome.message\n            task.error = outcome.to_error()\n",
+          "new": "            task.status = \"completed\"\n            task.status_message = outcome.message\n            task.result = {\"resultType\": \"complete\", \"content\": [{\"type\": \"text\", \"text\": outcome.message}], \"isError\": True, \"_meta\": server_meta()}\n"
+        }
+      ],
+      "expect": "a JSON-RPC error during the work fails the task and is kept as its error"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "every requested id acknowledged",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "        except McpError:\n            continue\n        accepted.append(task_id)\n",
+          "new": "        except McpError:\n            accepted.append(task_id)\n            continue\n        accepted.append(task_id)\n"
+        },
+        {
+          "file": "listen.py",
+          "old": "    watching = [task_id for task_id in accepted if last[task_id][\"status\"]",
+          "new": "    watching = [task_id for task_id in accepted if task_id in last and last[task_id][\"status\"]"
+        }
+      ],
+      "expect": "acknowledge first, listing only the caller's own tasks, each once"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "an id the caller cannot see ends the subscription with an error",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "        except McpError:\n            continue\n        accepted.append(task_id)\n",
+          "new": "        except McpError:\n            raise\n        accepted.append(task_id)\n"
+        }
+      ],
+      "expect": "McpError"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "a repeated id acknowledged twice",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "        if task_id in accepted:\n            continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "acknowledge first, listing only the caller's own tasks, each once"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "snapshots read without tasks/get's expiry check",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "        result = service.tasks_get({\"taskId\": task_id, \"_meta\": meta}, principal=principal)\n        return {key: value for key, value in result.items() if key not in (\"resultType\", \"_meta\")}\n",
+          "new": "        return service._owned_task(task_id, principal).to_wire()\n"
+        }
+      ],
+      "expect": "push every change once, and only changes"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "expiry shown in the stream but not stored",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "        result = service.tasks_get({\"taskId\": task_id, \"_meta\": meta}, principal=principal)\n        return {key: value for key, value in result.items() if key not in (\"resultType\", \"_meta\")}\n",
+          "new": "        task = service._owned_task(task_id, principal)\n        deadline = task.expires_at()\n        if task.status not in TERMINAL_STATUSES and deadline is not None and service._now() >= deadline:\n            from .task import EXPIRED_ERROR, EXPIRED_MESSAGE\n            task.status, task.status_message, task.error = \"failed\", EXPIRED_MESSAGE, dict(EXPIRED_ERROR)\n            task.last_updated_at = service._now()\n        return task.to_wire()\n"
+        }
+      ],
+      "expect": "a notification carries the task exactly as tasks/get shows it at that moment"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "notifications keep tasks/get's resultType",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "if key not in (\"resultType\", \"_meta\")}\n",
+          "new": "if key != \"_meta\"}\n"
+        }
+      ],
+      "expect": "a notification carries the task exactly as tasks/get shows it at that moment"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "notifications carry serverInfo instead of the subscription id",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "                            \"params\": {**current, \"_meta\": dict(tag)},\n",
+          "new": "                            \"params\": {**current, \"_meta\": server_meta()},\n"
+        }
+      ],
+      "expect": "every message carries the subscription id"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "the subscription id sent as text",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "    tag = {SUBSCRIPTION_ID_META: request.get(\"id\")}\n",
+          "new": "    tag = {SUBSCRIPTION_ID_META: str(request.get(\"id\"))}\n"
+        }
+      ],
+      "expect": "every message carries the subscription id"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "the final result without the subscription id",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "            \"result\": {\"resultType\": \"complete\", \"_meta\": {**server_meta(), **tag}},\n",
+          "new": "            \"result\": {\"resultType\": \"complete\", \"_meta\": server_meta()},\n"
+        }
+      ],
+      "expect": "every message carries the subscription id"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "every tick sends every watched task",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "                if current != last[task_id]:\n",
+          "new": "                if True:\n"
+        }
+      ],
+      "expect": "push every change once, and only changes"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "a notification only when the status changes",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "                if current != last[task_id]:\n",
+          "new": "                if current[\"status\"] != last[task_id][\"status\"]:\n"
+        }
+      ],
+      "expect": "push a change at the first tick that sees it"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "finished tasks stay watched",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "                if current[\"status\"] in TERMINAL_STATUSES:\n                    watching.remove(task_id)\n",
+          "new": "                if False:\n                    watching.remove(task_id)\n"
+        }
+      ],
+      "expect": "the stream ends as soon as no watched task is left unfinished"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "notifications held back until the stream ends",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "    if watching:\n        async for _ in ticks:\n",
+          "new": "    pending = []\n    if watching:\n        async for _ in ticks:\n"
+        },
+        {
+          "file": "listen.py",
+          "old": "                    yield _event(\n                        {\n                            \"jsonrpc\": \"2.0\",\n                            \"method\": \"notifications/tasks\",\n                            \"params\": {**current, \"_meta\": dict(tag)},\n                        }\n                    )\n",
+          "new": "                    pending.append(_event(\n                        {\n                            \"jsonrpc\": \"2.0\",\n                            \"method\": \"notifications/tasks\",\n                            \"params\": {**current, \"_meta\": dict(tag)},\n                        }\n                    ))\n"
+        },
+        {
+          "file": "listen.py",
+          "old": "    yield _event(\n        {\n            \"jsonrpc\": \"2.0\",\n            \"id\": request.get(\"id\"),\n            \"result\": {\"resultType\": \"complete\", \"_meta\": {**server_meta(), **tag}},\n        }\n    )\n",
+          "new": "    for frame in pending:\n        yield frame\n    yield _event(\n        {\n            \"jsonrpc\": \"2.0\",\n            \"id\": request.get(\"id\"),\n            \"result\": {\"resultType\": \"complete\", \"_meta\": {**server_meta(), **tag}},\n        }\n    )\n"
+        }
+      ],
+      "expect": "push a change at the first tick that sees it"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "the acknowledgement waits for the first tick",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "    yield _event(\n        {\n            \"jsonrpc\": \"2.0\",\n            \"method\": \"notifications/subscriptions/acknowledged\",\n",
+          "new": "    await ticks.__anext__()\n    yield _event(\n        {\n            \"jsonrpc\": \"2.0\",\n            \"method\": \"notifications/subscriptions/acknowledged\",\n"
+        }
+      ],
+      "expect": "acknowledge before waiting for anything to change"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "the stream never sends the listen result",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "    yield _event(\n        {\n            \"jsonrpc\": \"2.0\",\n            \"id\": request.get(\"id\"),\n            \"result\": {\"resultType\": \"complete\", \"_meta\": {**server_meta(), **tag}},\n        }\n    )\n",
+          "new": ""
+        }
+      ],
+      "expect": "the stream ends with the listen request's result"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "pretty-printed JSON after one data: prefix",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "    return f\"data: {json.dumps(message, separators=(',', ':'))}\\n\\n\"\n",
+          "new": "    return f\"data: {json.dumps(message, indent=2)}\\n\\n\"\n"
+        }
+      ],
+      "expect": "an SSE line is a field and a value"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "events not ended by a blank line",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "    return f\"data: {json.dumps(message, separators=(',', ':'))}\\n\\n\"\n",
+          "new": "    return f\"data: {json.dumps(message, separators=(',', ':'))}\\n\"\n"
+        }
+      ],
+      "expect": "each frame is one SSE event, ending in a blank line"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "the Tasks extension not checked for the subscription",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "    meta = validate_request_meta(params)\n    require_tasks_extension(meta)\n",
+          "new": "    meta = validate_request_meta(params)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "task ids read from params.taskIds",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "    requested = notifications.get(\"taskIds\") if isinstance(notifications, dict) else None\n",
+          "new": "    requested = params.get(\"taskIds\")\n"
+        }
+      ],
+      "expect": "McpError"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "leases timed by the wall clock",
+      "edits": [
+        {
+          "file": "lease.py",
+          "old": "            \"expiresAt\": format_time(self.clock() + timedelta(milliseconds=self.lease_ms)),\n",
+          "new": "            \"expiresAt\": format_time(datetime.now(__import__(\"datetime\").timezone.utc) + timedelta(milliseconds=self.lease_ms)),\n"
+        },
+        {
+          "file": "lease.py",
+          "old": "        return self.clock() >= parse_time(lease[\"expiresAt\"])\n",
+          "new": "        return datetime.now(__import__(\"datetime\").timezone.utc) >= parse_time(lease[\"expiresAt\"])\n"
+        }
+      ],
+      "expect": "an expired lease can be taken over"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "a lease exactly lease_ms old still holds",
+      "edits": [
+        {
+          "file": "lease.py",
+          "old": "        return self.clock() >= parse_time(lease[\"expiresAt\"])\n",
+          "new": "        return self.clock() > parse_time(lease[\"expiresAt\"])\n"
+        }
+      ],
+      "expect": "an expired lease can be taken over"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "an expired lease is never taken over",
+      "edits": [
+        {
+          "file": "lease.py",
+          "old": "                return False\n            path.unlink(missing_ok=True)\n",
+          "new": "                return False\n            return False\n"
+        }
+      ],
+      "expect": "an expired lease can be taken over"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "acquire writes over a live lease",
+      "edits": [
+        {
+          "file": "lease.py",
+          "old": "            if lease[\"holder\"] != holder and not self._expired(lease):\n                return False\n",
+          "new": ""
+        }
+      ],
+      "expect": "a task leased by another worker is left alone"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "the worker never takes a lease",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if self.leases is not None and not self.leases.acquire(task_id, self.worker):\n            return False\n",
+          "new": ""
+        }
+      ],
+      "expect": "a task leased by another worker is left alone"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "a worker commits after losing its lease",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if self.leases is not None and not self.leases.holds(task_id, self.worker):\n            return False\n",
+          "new": ""
+        }
+      ],
+      "expect": "a worker that lost its lease commits nothing"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "release removes whatever lease is there",
+      "edits": [
+        {
+          "file": "lease.py",
+          "old": "        if lease is not None and lease[\"holder\"] == holder:\n            path.unlink(missing_ok=True)\n",
+          "new": "        path.unlink(missing_ok=True)\n"
+        }
+      ],
+      "expect": "a lease taken over from a dead worker belongs to its new holder"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "the lease is never given back",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        finally:\n            if self.leases is not None:\n                self.leases.release(task_id, self.worker)\n",
+          "new": "        finally:\n            pass\n"
+        }
+      ],
+      "expect": "a worker gives its lease back when its step ends"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "the sweep deletes running tasks too",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            if task.status in TERMINAL_STATUSES:\n                self.store.delete(task_id)\n",
+          "new": "            if True:\n                self.store.delete(task_id)\n"
+        }
+      ],
+      "expect": "an overdue task that had finished is deleted; one still running is not, yet"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "the sweep never fails a running task",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            else:\n                self._fail_if_overdue(task)\n        return sorted(deleted)\n",
+          "new": "        return sorted(deleted)\n"
+        }
+      ],
+      "expect": "a task still running when its ttl runs out is failed first"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "the sweep counts the ttl from lastUpdatedAt",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            deadline = task.expires_at() if task is not None else None\n",
+          "new": "            deadline = (task.last_updated_at + __import__(\"datetime\").timedelta(milliseconds=task.ttl_ms)) if task is not None and task.ttl_ms is not None else None\n"
+        }
+      ],
+      "expect": "an overdue task that had finished is deleted; one still running is not, yet"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "the sweep forgets ttlMs null",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            deadline = task.expires_at() if task is not None else None\n            if deadline is None or now < deadline:\n",
+          "new": "            deadline = task.created_at + __import__(\"datetime\").timedelta(milliseconds=task.ttl_ms)\n            if now < deadline:\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "expiry checked before ownership",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if task is None or task.owner != principal:\n            raise McpError(-32602, \"task not found\")\n        return task\n",
+          "new": "        if task is not None:\n            task = self._fail_if_overdue(task)\n        if task is None or task.owner != principal:\n            raise McpError(-32602, \"task not found\")\n        return task\n"
+        }
+      ],
+      "expect": "someone else's request never touches your task"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "task ids used as file names unchecked",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return self.directory / f\"{check_task_id(task_id)}.json\"\n",
+          "new": "        return self.directory / f\"{task_id}.json\"\n"
+        }
+      ],
+      "expect": "tasks/get should have failed"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "cancelling a finished task refused with an error",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            task.input_requests = {}\n            self._save(task)\n        return complete()\n",
+          "new": "            task.input_requests = {}\n            self._save(task)\n        else:\n            raise McpError(-32602, \"task already finished\")\n        return complete()\n"
+        }
+      ],
+      "expect": "tasks/cancel failed"
+    },
+    {
+      "test": "test_task_files",
+      "name": "timestamps left as text on read",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    record[\"created_at\"] = parse_time(record[\"created_at\"])\n    record[\"last_updated_at\"] = parse_time(record[\"last_updated_at\"])\n",
+          "new": ""
+        }
+      ],
+      "expect": "a handle resolves on every instance as soon as tools/call returns it"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "only the content of an answer kept",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "                    task.answers[key] = copy.deepcopy(responses[key])\n",
+          "new": "                    task.answers[key] = copy.deepcopy(responses[key].get(\"content\"))\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "tasks/update refused for a task that waits for nothing",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if task.status == \"input_required\":\n            answered = [\n",
+          "new": "        if task.status != \"input_required\":\n            raise McpError(-32602, \"task is not waiting for input\")\n        if task.status == \"input_required\":\n            answered = [\n"
+        }
+      ],
+      "expect": "tasks/update failed"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "the first tick only records the snapshots",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "    if watching:\n        async for _ in ticks:\n",
+          "new": "    first_tick = True\n    if watching:\n        async for _ in ticks:\n"
+        },
+        {
+          "file": "listen.py",
+          "old": "                if current != last[task_id]:\n",
+          "new": "                if first_tick:\n                    last[task_id] = current\n                elif current != last[task_id]:\n"
+        },
+        {
+          "file": "listen.py",
+          "old": "            if not watching:\n                break\n",
+          "new": "            first_tick = False\n            if not watching:\n                break\n"
+        }
+      ],
+      "expect": "push every change once, and only changes"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "no snapshot kept at the acknowledgement",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "        accepted.append(task_id)\n        last[task_id] = current\n",
+          "new": "        accepted.append(task_id)\n        last[task_id] = {\"status\": current[\"status\"]}\n"
+        }
+      ],
+      "expect": "push every change once, and only changes"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "events yielded as bytes",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "    return f\"data: {json.dumps(message, separators=(',', ':'))}\\n\\n\"\n",
+          "new": "    return f\"data: {json.dumps(message, separators=(',', ':'))}\\n\\n\".encode()\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "the sweep deletes only failed tasks",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            if task.status in TERMINAL_STATUSES:\n                self.store.delete(task_id)\n",
+          "new": "            if task.status == \"failed\":\n                self.store.delete(task_id)\n"
+        }
+      ],
+      "expect": "an overdue task that had finished is deleted; one still running is not, yet"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "a deleted task leaves a tombstone that answers task expired",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "                self.store.delete(task_id)\n                deleted.append(task_id)\n",
+          "new": "                self.store.delete(task_id)\n                (self.store.directory / f\"{task_id}.gone\").write_text(task.owner)\n                deleted.append(task_id)\n"
+        },
+        {
+          "file": "service.py",
+          "old": "        if task is None or task.owner != principal:\n            raise McpError(-32602, \"task not found\")\n        return task\n",
+          "new": "        if task is None and (getattr(self.store, \"directory\", None) is not None) and (self.store.directory / f\"{task_id}.gone\").exists():\n            raise McpError(-32602, \"task expired\")\n        if task is None or task.owner != principal:\n            raise McpError(-32602, \"task not found\")\n        return task\n"
+        }
+      ],
+      "expect": "a deleted task answers like one that never existed"
+    },
+    {
+      "test": "test_task_files",
+      "name": "write_text straight into <taskId>.json",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        text = _encode(task)\n        handle, temporary = tempfile.mkstemp(dir=self.directory, prefix=f\".{task.task_id}.\", suffix=\".tmp\")\n        try:\n            with os.fdopen(handle, \"w\", encoding=\"utf-8\") as file:\n                file.write(text)\n            os.replace(temporary, path)\n        except BaseException:\n            Path(temporary).unlink(missing_ok=True)\n            raise\n",
+          "new": "        path.write_text(_encode(task), encoding=\"utf-8\")\n"
+        }
+      ],
+      "expect": "a save puts a whole new file in place"
+    },
+    {
+      "test": "test_task_files",
+      "name": "a failed write cleans up the record instead of the temporary file",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        text = _encode(task)\n        handle, temporary = tempfile.mkstemp(dir=self.directory, prefix=f\".{task.task_id}.\", suffix=\".tmp\")\n        try:\n            with os.fdopen(handle, \"w\", encoding=\"utf-8\") as file:\n                file.write(text)\n            os.replace(temporary, path)\n        except BaseException:\n            Path(temporary).unlink(missing_ok=True)\n            raise\n",
+          "new": "        handle, temporary = tempfile.mkstemp(dir=self.directory, prefix=f\".{task.task_id}.\", suffix=\".tmp\")\n        try:\n            with os.fdopen(handle, \"w\", encoding=\"utf-8\") as file:\n                file.write(_encode(task))\n            os.replace(temporary, path)\n        except BaseException:\n            path.unlink(missing_ok=True)\n            raise\n"
+        }
+      ],
+      "expect": "a write that fails leaves the previous record"
+    },
+    {
+      "test": "test_task_files",
+      "name": "save stamps last_updated_at itself",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        text = _encode(task)\n",
+          "new": "        task.last_updated_at = __import__(\"datetime\").datetime.now(__import__(\"datetime\").timezone.utc).replace(microsecond=0)\n        text = _encode(task)\n"
+        }
+      ],
+      "expect": "every instance writes the shared record format"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "the result built before the expiry check runs",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        task = self._fail_if_overdue(self._owned_task(params.get(\"taskId\"), principal))\n        return complete(**task.to_wire())\n",
+          "new": "        task = self._owned_task(params.get(\"taskId\"), principal)\n        wire = task.to_wire()\n        self._fail_if_overdue(task)\n        return complete(**wire)\n"
+        }
+      ],
+      "expect": "a task expires ttlMs after it was created"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "tasks/get without _meta",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        task = self._fail_if_overdue(self._owned_task(params.get(\"taskId\"), principal))\n        return complete(**task.to_wire())\n",
+          "new": "        task = self._fail_if_overdue(self._owned_task(params.get(\"taskId\"), principal))\n        return {\"resultType\": \"complete\", **task.to_wire()}\n"
+        }
+      ],
+      "expect": "a poll shows the task the handle described"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "the cancel acknowledgement carries the task",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            task.input_requests = {}\n            self._save(task)\n        return complete()\n",
+          "new": "            task.input_requests = {}\n            self._save(task)\n        return complete(**task.to_wire())\n"
+        }
+      ],
+      "expect": "tasks/cancel answers with an empty acknowledgement"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "a task cancelled while waiting keeps its old status message",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            task.status = \"cancelled\"\n            task.status_message = CANCELLED\n            task.input_requests = {}\n",
+          "new": "            task.status = \"cancelled\"\n            task.input_requests = {}\n"
+        }
+      ],
+      "expect": "a task waiting for input has no worker to wait for"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "issued keys replaced at every request, not added to",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "                task.issued_keys.extend(outcome.requests)\n",
+          "new": "                task.issued_keys = list(outcome.requests)\n"
+        }
+      ],
+      "expect": "an input key is issued once in a task's lifetime"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "the worker stores a task without stamping lastUpdatedAt",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            raise TypeError(f\"tool {task.tool!r} returned {outcome!r}\")\n        self._save(task)\n",
+          "new": "            raise TypeError(f\"tool {task.tool!r} returned {outcome!r}\")\n        self.store.save(task)\n"
+        }
+      ],
+      "expect": "every change to a task stamps lastUpdatedAt"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "an update saves the task even when nothing was answered",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            if answered:\n                for key in answered:",
+          "new": "            if True:\n                for key in answered:"
+        }
+      ],
+      "expect": "a key that is no longer outstanding is ignored, and changes nothing"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "an update stores the task without stamping lastUpdatedAt",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "                    task.status_message = INPUT_RECEIVED\n                self._save(task)\n",
+          "new": "                    task.status_message = INPUT_RECEIVED\n                self.store.save(task)\n"
+        }
+      ],
+      "expect": "every change to a task stamps lastUpdatedAt"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "only accept counts as an answer",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "    return action in (\"decline\", \"cancel\")\n",
+          "new": "    return False\n"
+        }
+      ],
+      "expect": "once every key is answered the task is working again"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "the listen result without serverInfo",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "            \"result\": {\"resultType\": \"complete\", \"_meta\": {**server_meta(), **tag}},\n",
+          "new": "            \"result\": {\"resultType\": \"complete\", \"_meta\": dict(tag)},\n"
+        }
+      ],
+      "expect": "the stream ends with the listen request's result"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "holds ignores the lease's expiry",
+      "edits": [
+        {
+          "file": "lease.py",
+          "old": "        return lease is not None and lease[\"holder\"] == holder and not self._expired(lease)\n",
+          "new": "        return lease is not None and lease[\"holder\"] == holder\n"
+        }
+      ],
+      "expect": "a lease that has run out is lost, even if no one has taken it over"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "a worker checks only that the task is unchanged before committing",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if self.leases is not None and not self.leases.holds(task_id, self.worker):\n            return False\n",
+          "new": "        latest = self.store.get(task_id)\n        if latest is None or latest != task:\n            return False\n"
+        }
+      ],
+      "expect": "a lease that has run out is lost, even if no one has taken it over"
+    },
+    {
+      "test": "test_poll_and_cancel",
+      "name": "tasks/cancel lets an overdue task skip its expiry",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        task = self._fail_if_overdue(self._owned_task(params.get(\"taskId\"), principal))\n        if task.status == \"working\":\n",
+          "new": "        task = self._owned_task(params.get(\"taskId\"), principal)\n        if task.status == \"working\":\n"
+        }
+      ],
+      "expect": "tasks/cancel fails an overdue task first, as tasks/get does"
+    },
+    {
+      "test": "test_task_files",
+      "name": "task ids listed in directory order",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return sorted(\n            path.stem for path in self.directory.glob(\"*.json\") if TASK_ID.fullmatch(path.stem)\n        )",
+          "new": "        return [path.stem for path in self.directory.glob(\"*.json\") if TASK_ID.fullmatch(path.stem)]"
+        }
+      ],
+      "expect": "only <taskId>.json files are tasks"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "a failed task keeps its old statusMessage",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            task.status = \"failed\"\n            task.status_message = outcome.message\n",
+          "new": "            task.status = \"failed\"\n"
+        }
+      ],
+      "expect": "a JSON-RPC error during the work fails the task and is kept as its error"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "accept without content counts as an answer",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        return isinstance(response.get(\"content\"), dict)\n",
+          "new": "        return True\n"
+        }
+      ],
+      "expect": "a partial answer leaves the other keys outstanding"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "tasks/update takes input for an overdue task",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        task = self._fail_if_overdue(self._owned_task(params.get(\"taskId\"), principal))\n        responses = params.get(\"inputResponses\")\n",
+          "new": "        task = self._owned_task(params.get(\"taskId\"), principal)\n        responses = params.get(\"inputResponses\")\n"
+        }
+      ],
+      "expect": "tasks/update fails an overdue task first, as tasks/get does"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "a completed task gets a fixed statusMessage instead of the tool's",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            task.status = \"completed\"\n            task.status_message = outcome.message\n",
+          "new": "            task.status = \"completed\"\n            task.status_message = \"Completed.\"\n"
+        }
+      ],
+      "expect": "a finished task's statusMessage is the message its tool gave"
+    },
+    {
+      "test": "test_worker_and_input",
+      "name": "the worker assumes the task exists",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if task is None or task.status != \"working\":\n            return False\n        if task.cancel_requested:",
+          "new": "        if task.status != \"working\":\n            return False\n        if task.cancel_requested:"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "finished tasks left out of the acknowledgement",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "        accepted.append(task_id)\n",
+          "new": "        if current[\"status\"] in TERMINAL_STATUSES:\n            continue\n        accepted.append(task_id)\n"
+        }
+      ],
+      "expect": "a finished task of its own is acknowledged"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "a change detected by lastUpdatedAt alone",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "                if current != last[task_id]:",
+          "new": "                if current[\"lastUpdatedAt\"] != last[task_id][\"lastUpdatedAt\"]:"
+        }
+      ],
+      "expect": "push a change at the first tick that sees it"
+    },
+    {
+      "test": "test_listen_stream",
+      "name": "notifications carry serverInfo next to the subscription id",
+      "edits": [
+        {
+          "file": "listen.py",
+          "old": "\"params\": {**current, \"_meta\": dict(tag)},",
+          "new": "\"params\": {**current, \"_meta\": {**server_meta(), **tag}},"
+        }
+      ],
+      "expect": "a notification carries the task exactly as tasks/get shows it at that moment"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "the sweep keeps a task exactly ttlMs old",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            if deadline is None or now < deadline:",
+          "new": "            if deadline is None or now <= deadline:"
+        }
+      ],
+      "expect": "an overdue task that had finished is deleted; one still running is not, yet"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "the lease given back only after a commit",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        try:\n            return self._step(task_id)\n        finally:\n            if self.leases is not None:\n                self.leases.release(task_id, self.worker)\n",
+          "new": "        changed = self._step(task_id)\n        if changed and self.leases is not None:\n            self.leases.release(task_id, self.worker)\n        return changed\n"
+        }
+      ],
+      "expect": "a worker gives its lease back when its step ends"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "a holder's second acquire does not renew",
+      "edits": [
+        {
+          "file": "lease.py",
+          "old": "        if lease is not None:\n            if lease[\"holder\"] != holder",
+          "new": "        if lease is not None:\n            if lease[\"holder\"] == holder:\n                return True\n            if lease[\"holder\"] != holder"
+        }
+      ],
+      "expect": "a holder that takes its lease again renews it"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "the sweep fails a task without stamping lastUpdatedAt",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            else:\n                self._fail_if_overdue(task)\n",
+          "new": "            else:\n                task.status = 'failed'; task.status_message = EXPIRED_MESSAGE; task.error = dict(EXPIRED_ERROR); self.store.save(task)\n"
+        }
+      ],
+      "expect": "failing an overdue task is a change, stamped when the sweep makes it"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "the lease checked before the tool runs, not after",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if self.leases is not None and not self.leases.holds(task_id, self.worker):\n            return False\n        if isinstance(outcome, McpError):",
+          "new": "        if isinstance(outcome, McpError):"
+        },
+        {
+          "file": "service.py",
+          "old": "        tool = self.tools[task.tool]\n",
+          "new": "        if self.leases is not None and not self.leases.holds(task_id, self.worker):\n            return False\n        tool = self.tools[task.tool]\n"
+        }
+      ],
+      "expect": "a worker that lost its lease commits nothing"
+    },
+    {
+      "test": "test_leases_and_cleanup",
+      "name": "the sweep fails only working tasks",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "            if task.status in TERMINAL_STATUSES:\n                self.store.delete(task_id)",
+          "new": "            if task.status == 'input_required':\n                continue\n            if task.status in TERMINAL_STATUSES:\n                self.store.delete(task_id)"
+        }
+      ],
+      "expect": "a task waiting for input has not finished either"
+    }
+  ]
+}
