@@ -1,0 +1,1071 @@
+{
+  "package": "toolloop",
+  "tests": [
+    "test_tool_loop",
+    "test_session_log",
+    "test_rule_of_two",
+    "test_trace_stream",
+    "test_composite_tools"
+  ],
+  "layers": [
+    {
+      "test": "test_tool_loop",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "KeyError"
+        },
+        {
+          "name": "fix tool_message id",
+          "edits": [
+            {
+              "file": "loop.py",
+              "old": "    return {\"role\": \"tool\", \"id\": f\"call_{uuid.uuid4().hex[:8]}\", \"name\": call[\"name\"], \"content\": result}\n",
+              "new": "    return {\"role\": \"tool\", \"id\": call[\"id\"], \"name\": call[\"name\"], \"content\": result}\n"
+            }
+          ],
+          "expect": "invalid arguments never reach the executor"
+        },
+        {
+          "name": "+ bool is not a number",
+          "edits": [
+            {
+              "file": "schema.py",
+              "old": "    if t == \"number\" and not isinstance(value, (int, float)):\n",
+              "new": "    if t == \"number\" and (isinstance(value, bool) or not isinstance(value, (int, float))):\n"
+            }
+          ],
+          "expect": "the model may answer on its last turn"
+        },
+        {
+          "name": "+ max_turns turns, not max_turns - 1",
+          "edits": [
+            {
+              "file": "loop.py",
+              "old": "    for turn in range(1, max_turns):\n",
+              "new": "    for turn in range(1, max_turns + 1):\n"
+            }
+          ],
+          "expect": "quick to fill and to search"
+        },
+        {
+          "name": "+ registry indexed by name",
+          "edits": [
+            {
+              "file": "tools.py",
+              "old": "        self._tools: list[Tool] = []\n",
+              "new": "        self._tools: list[Tool] = []\n        self._by_name: dict[str, Tool] = {}\n"
+            },
+            {
+              "file": "tools.py",
+              "old": "        self._tools.append(tool)\n",
+              "new": "        self._tools.append(tool)\n        self._by_name[tool.name] = tool\n"
+            },
+            {
+              "file": "tools.py",
+              "old": "        for tool in self._tools:\n            if tool.name == name:\n                return tool\n        raise KeyError(name)\n",
+              "new": "        return self._by_name[name]\n"
+            },
+            {
+              "file": "tools.py",
+              "old": "        return any(tool.name == name for tool in self._tools)\n",
+              "new": "        return name in self._by_name\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_tool_loop",
+      "name": "circuit breaker removed",
+      "edits": [
+        {
+          "file": "loop.py",
+          "old": "    for turn in range(1, max_turns + 1):\n",
+          "new": "    for turn in __import__(\"itertools\").count(1):\n"
+        }
+      ],
+      "expect": "asked more than 100 times"
+    },
+    {
+      "test": "test_tool_loop",
+      "name": "breaker allows one turn too many",
+      "edits": [
+        {
+          "file": "loop.py",
+          "old": "    for turn in range(1, max_turns + 1):\n",
+          "new": "    for turn in range(1, max_turns + 2):\n"
+        }
+      ],
+      "expect": "the circuit breaker allows exactly max_turns model turns"
+    },
+    {
+      "test": "test_tool_loop",
+      "name": "bool fixed by accepting floats only",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    if t == \"number\" and (isinstance(value, bool) or not isinstance(value, (int, float))):\n",
+          "new": "    if t == \"number\" and not isinstance(value, float):\n"
+        }
+      ],
+      "expect": "a valid call runs once"
+    },
+    {
+      "test": "test_tool_loop",
+      "name": "KeyError silenced in the scripted model instead of fixing the id",
+      "edits": [
+        {
+          "file": "loop.py",
+          "old": "\"id\": call[\"id\"]",
+          "new": "\"id\": f\"call_{__import__('uuid').uuid4().hex[:8]}\""
+        },
+        {
+          "file": "model.py",
+          "old": "self.observed[call_id] = answers[call_id]",
+          "new": "self.observed[call_id] = answers.get(call_id)"
+        }
+      ],
+      "expect": "the model reads each result under its call id"
+    },
+    {
+      "test": "test_tool_loop",
+      "name": "an invalid call ends the request, as in the lesson's code",
+      "edits": [
+        {
+          "file": "loop.py",
+          "old": "            error = rejection(registry, call)\n",
+          "new": "            error = rejection(registry, call)\n            if error is not None:\n                return Outcome(None, \"invalid\", turn, history)\n"
+        }
+      ],
+      "expect": "a call that cannot run is answered with the reason"
+    },
+    {
+      "test": "test_tool_loop",
+      "name": "duplicate-name check dropped to load faster",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        if tool.name in self._by_name:\n            raise ValueError(f\"a tool named {tool.name!r} is already registered\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_tool_loop",
+      "name": "index used for membership only, get() still scans",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        return self._by_name[name]\n",
+          "new": "        for tool in self._by_name.values():\n            if tool.name == name:\n                return tool\n        raise KeyError(name)\n"
+        }
+      ],
+      "expect": "quick to fill and to search"
+    },
+    {
+      "test": "test_tool_loop",
+      "name": "describe() sorted by name",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "            for tool in self._by_name.values()\n        ]\n",
+          "new": "            for tool in sorted(self._by_name.values(), key=lambda t: t.name)\n        ]\n"
+        }
+      ],
+      "expect": "the registry keeps its tools in registration order"
+    },
+    {
+      "test": "test_tool_loop",
+      "name": "iterating the new index yields names, not tools",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        return iter(self._by_name.values())\n",
+          "new": "        return iter(self._by_name)\n"
+        }
+      ],
+      "expect": "has no attribute 'name'"
+    },
+    {
+      "test": "test_tool_loop",
+      "name": "off-by-one fixed with range(max_turns), so turns count from 0",
+      "edits": [
+        {
+          "file": "loop.py",
+          "old": "    for turn in range(1, max_turns + 1):\n",
+          "new": "    for turn in range(max_turns):\n"
+        }
+      ],
+      "expect": "the model may answer on its last turn"
+    },
+    {
+      "test": "test_tool_loop",
+      "name": "calls on the last turn answered with an error instead of run",
+      "edits": [
+        {
+          "file": "loop.py",
+          "old": "            result = error if error is not None else execute(registry.get(call[\"name\"]), call[\"arguments\"])\n",
+          "new": "            if error is None and turn == max_turns:\n                error = {\"error\": \"out of turns\"}\n            result = error if error is not None else execute(registry.get(call[\"name\"]), call[\"arguments\"])\n"
+        }
+      ],
+      "expect": "calls asked for on the last turn still run"
+    },
+    {
+      "test": "test_session_log",
+      "name": "json.dumps default writes NaN and Infinity",
+      "edits": [
+        {
+          "file": "sessionlog.py",
+          "old": "json.dumps(message, ensure_ascii=False, allow_nan=False)",
+          "new": "json.dumps(message, ensure_ascii=False)"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_session_log",
+      "name": "no flush after append",
+      "edits": [
+        {
+          "file": "sessionlog.py",
+          "old": "        self._file.flush()\n",
+          "new": ""
+        }
+      ],
+      "expect": "every append is in the file when append returns"
+    },
+    {
+      "test": "test_session_log",
+      "name": "log opened for writing, which empties it",
+      "edits": [
+        {
+          "file": "sessionlog.py",
+          "old": "self._file = open(self.path, \"ab\")",
+          "new": "self._file = open(self.path, \"wb\")"
+        }
+      ],
+      "expect": "every append is in the file when append returns"
+    },
+    {
+      "test": "test_session_log",
+      "name": "message streamed to the file chunk by chunk, as json.dump does",
+      "edits": [
+        {
+          "file": "sessionlog.py",
+          "old": "        line = json.dumps(message, ensure_ascii=False, allow_nan=False) + \"\\n\"\n        self._file.write(line.encode(\"utf-8\"))\n",
+          "new": "        for chunk in json.JSONEncoder(ensure_ascii=False, allow_nan=False).iterencode(message):\n            self._file.write(chunk.encode(\"utf-8\"))\n        self._file.write(b\"\\n\")\n        line = json.dumps(message, ensure_ascii=False)\n"
+        }
+      ],
+      "expect": "is corrupt"
+    },
+    {
+      "test": "test_session_log",
+      "name": "non-ASCII written as \\u escapes",
+      "edits": [
+        {
+          "file": "sessionlog.py",
+          "old": "json.dumps(message, ensure_ascii=False, allow_nan=False)",
+          "new": "json.dumps(message, allow_nan=False)"
+        }
+      ],
+      "expect": "non-ASCII is written as UTF-8, not escaped"
+    },
+    {
+      "test": "test_session_log",
+      "name": "whole file decoded as UTF-8 before the torn line is cut",
+      "edits": [
+        {
+          "file": "sessionlog.py",
+          "old": "data = self.path.read_bytes() if self.path.exists() else b\"\"",
+          "new": "data = self.path.read_text(encoding=\"utf-8\").encode(\"utf-8\") if self.path.exists() else b\"\""
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_session_log",
+      "name": "torn line skipped but left in the file",
+      "edits": [
+        {
+          "file": "sessionlog.py",
+          "old": "        if end < len(data):\n            os.truncate(self.path, end)  # drop the torn write, so the next line starts clean\n",
+          "new": ""
+        }
+      ],
+      "expect": "is corrupt"
+    },
+    {
+      "test": "test_session_log",
+      "name": "torn line cut at a character offset instead of a byte offset",
+      "edits": [
+        {
+          "file": "sessionlog.py",
+          "old": "os.truncate(self.path, end)",
+          "new": "os.truncate(self.path, len(data[:end].decode(\"utf-8\")))"
+        }
+      ],
+      "expect": "is corrupt"
+    },
+    {
+      "test": "test_session_log",
+      "name": "torn line told apart by a failed parse, not by the missing newline",
+      "edits": [
+        {
+          "file": "sessionlog.py",
+          "old": "        end = data.rfind(b\"\\n\") + 1  # a line counts once its newline is on disk\n",
+          "new": "        try:\n            json.loads(data[data.rfind(b\"\\n\") + 1 :])\n            data += b\"\\n\"\n        except ValueError:\n            pass\n        end = data.rfind(b\"\\n\") + 1\n"
+        }
+      ],
+      "expect": "a last line without its newline is dropped"
+    },
+    {
+      "test": "test_session_log",
+      "name": "every unreadable line skipped",
+      "edits": [
+        {
+          "file": "sessionlog.py",
+          "old": "                raise ValueError(f\"{self.path}: line {number} is corrupt\") from exc\n",
+          "new": "                continue\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_session_log",
+      "name": "message kept in memory before it is serialised",
+      "edits": [
+        {
+          "file": "sessionlog.py",
+          "old": "        line = json.dumps(message, ensure_ascii=False, allow_nan=False) + \"\\n\"\n",
+          "new": "        self._messages.append(message)\n        line = json.dumps(message, ensure_ascii=False, allow_nan=False) + \"\\n\"\n"
+        },
+        {
+          "file": "sessionlog.py",
+          "old": "        self._messages.append(json.loads(line))\n",
+          "new": ""
+        }
+      ],
+      "expect": "a rejected message leaves no trace"
+    },
+    {
+      "test": "test_session_log",
+      "name": "whole file decoded with errors=replace, torn line cut by its re-encoded length",
+      "edits": [
+        {
+          "file": "sessionlog.py",
+          "old": "        end = data.rfind(b\"\\n\") + 1  # a line counts once its newline is on disk\n",
+          "new": "        end = len(data) - len(data.decode(\"utf-8\", errors=\"replace\").split(\"\\n\")[-1].encode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "a last line cut short by a crash is dropped"
+    },
+    {
+      "test": "test_session_log",
+      "name": "an unreadable last line dropped although it has its newline",
+      "edits": [
+        {
+          "file": "sessionlog.py",
+          "old": "            except ValueError as exc:  # bad UTF-8 or bad JSON\n",
+          "new": "            except ValueError as exc:  # bad UTF-8 or bad JSON\n                if number == data[:end].count(b\"\\n\"):\n                    end -= len(line) + 1\n                    break\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_session_log",
+      "name": "torn last line kept and given its newline when the JSON parses",
+      "edits": [
+        {
+          "file": "sessionlog.py",
+          "old": "        if end < len(data):\n            os.truncate(self.path, end)  # drop the torn write, so the next line starts clean\n",
+          "new": "        if end < len(data):\n            try:\n                self._messages.append(json.loads(data[end:].decode(\"utf-8\")))\n                with open(self.path, \"ab\") as f:\n                    f.write(b\"\\n\")\n            except ValueError:\n                os.truncate(self.path, end)\n"
+        }
+      ],
+      "expect": "a last line without its newline is dropped"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "taint reset at every model turn",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "    untrusted = sensitive = False  # what this request carries so far, over all its turns\n",
+          "new": ""
+        },
+        {
+          "file": "trust.py",
+          "old": "        decision = model(history, tools)\n",
+          "new": "        untrusted = sensitive = False\n        decision = model(history, tools)\n"
+        }
+      ],
+      "expect": "untrusted input and sensitive data stay for the whole request"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "taint kept at module level, so it outlives the request",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "BLOCKED = {\"error\": \"blocked: the user did not confirm this action\"}\n",
+          "new": "BLOCKED = {\"error\": \"blocked: the user did not confirm this action\"}\n_carried = {\"untrusted\": False, \"sensitive\": False}\n"
+        },
+        {
+          "file": "trust.py",
+          "old": "    untrusted = sensitive = False  # what this request carries so far, over all its turns\n",
+          "new": "    untrusted, sensitive = _carried[\"untrusted\"], _carried[\"sensitive\"]\n"
+        },
+        {
+          "file": "trust.py",
+          "old": "                    untrusted, sensitive = with_untrusted, with_sensitive\n",
+          "new": "                    untrusted, sensitive = with_untrusted, with_sensitive\n                    _carried.update(untrusted=untrusted, sensitive=sensitive)\n"
+        }
+      ],
+      "expect": "nothing carries over to the next request"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "any two of the three already need confirmation",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "if tool.consequential and with_untrusted and with_sensitive and not confirm(call):",
+          "new": "if tool.consequential and (with_untrusted or with_sensitive) and not confirm(call):"
+        }
+      ],
+      "expect": "two of the three are allowed without asking"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "the rest of the turn dropped after a block",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "            history.append(tool_message(call, result))\n",
+          "new": "            history.append(tool_message(call, result))\n            if result == BLOCKED:\n                break\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "no circuit breaker in run_request",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "    for turn in range(1, max_turns + 1):\n",
+          "new": "    for turn in __import__(\"itertools\").count(1):\n"
+        }
+      ],
+      "expect": "asked more than 100 times"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "one approval covers every later call to the same tool",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "    untrusted = sensitive = False  # what this request carries so far, over all its turns\n",
+          "new": "    untrusted = sensitive = False  # what this request carries so far, over all its turns\n    approved: set[str] = set()\n"
+        },
+        {
+          "file": "trust.py",
+          "old": "                if tool.consequential and with_untrusted and with_sensitive and not confirm(call):\n",
+          "new": "                needs = tool.consequential and with_untrusted and with_sensitive and tool.name not in approved\n                if needs and not confirm(call):\n"
+        },
+        {
+          "file": "trust.py",
+          "old": "                else:\n                    untrusted, sensitive = with_untrusted, with_sensitive\n",
+          "new": "                else:\n                    if needs:\n                        approved.add(tool.name)\n                    untrusted, sensitive = with_untrusted, with_sensitive\n"
+        }
+      ],
+      "expect": "every consequential call is confirmed on its own"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "an approved call clears the request's taint",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "                    untrusted, sensitive = with_untrusted, with_sensitive\n",
+          "new": "                    if tool.consequential and with_untrusted and with_sensitive:\n                        with_untrusted = with_sensitive = False\n                    untrusted, sensitive = with_untrusted, with_sensitive\n"
+        }
+      ],
+      "expect": "every consequential call is confirmed on its own"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "taint is only what earlier turns left",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "        for call in decision[\"tool_calls\"]:\n",
+          "new": "        carried = (untrusted, sensitive)\n        for call in decision[\"tool_calls\"]:\n"
+        },
+        {
+          "file": "trust.py",
+          "old": "                with_untrusted = untrusted or tool.reads_untrusted\n                with_sensitive = sensitive or tool.touches_sensitive\n",
+          "new": "                with_untrusted = carried[0] or tool.reads_untrusted\n                with_sensitive = carried[1] or tool.touches_sensitive\n"
+        },
+        {
+          "file": "trust.py",
+          "old": "                    untrusted, sensitive = with_untrusted, with_sensitive\n",
+          "new": "                    untrusted, sensitive = untrusted or with_untrusted, sensitive or with_sensitive\n"
+        }
+      ],
+      "expect": "every consequential call is confirmed on its own"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "a consequential action counted as the third leg for later reads",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "    untrusted = sensitive = False  # what this request carries so far, over all its turns\n",
+          "new": "    untrusted = sensitive = acted = False\n"
+        },
+        {
+          "file": "trust.py",
+          "old": "if tool.consequential and with_untrusted and with_sensitive and not confirm(call):",
+          "new": "if (tool.consequential or acted) and with_untrusted and with_sensitive and not confirm(call):"
+        },
+        {
+          "file": "trust.py",
+          "old": "                    untrusted, sensitive = with_untrusted, with_sensitive\n",
+          "new": "                    untrusted, sensitive = with_untrusted, with_sensitive\n                    acted = acted or tool.consequential\n"
+        }
+      ],
+      "expect": "only a consequential call can need confirmation"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "a call's own flags left out of the check",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "                with_untrusted = untrusted or tool.reads_untrusted\n                with_sensitive = sensitive or tool.touches_sensitive\n",
+          "new": "                with_untrusted, with_sensitive = untrusted, sensitive\n"
+        },
+        {
+          "file": "trust.py",
+          "old": "                    untrusted, sensitive = with_untrusted, with_sensitive\n",
+          "new": "                    untrusted, sensitive = untrusted or tool.reads_untrusted, sensitive or tool.touches_sensitive\n"
+        }
+      ],
+      "expect": "a call's own flags count"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "taint recorded before the decision, even for a blocked call",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "                with_untrusted = untrusted or tool.reads_untrusted\n                with_sensitive = sensitive or tool.touches_sensitive\n",
+          "new": "                untrusted = with_untrusted = untrusted or tool.reads_untrusted\n                sensitive = with_sensitive = sensitive or tool.touches_sensitive\n"
+        }
+      ],
+      "expect": "a blocked call adds nothing to the request"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "blocked call left without a tool message",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "                    result = dict(BLOCKED)\n",
+          "new": "                    continue\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "user asked before the arguments are checked",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "            result = rejection(registry, call)\n            if result is None:\n",
+          "new": "            result = None if call[\"name\"] in registry else rejection(registry, call)\n            if result is None:\n"
+        },
+        {
+          "file": "trust.py",
+          "old": "                    result = execute(tool, call[\"arguments\"])\n",
+          "new": "                    result = rejection(registry, call) or execute(tool, call[\"arguments\"])\n"
+        }
+      ],
+      "expect": "only a call that can run is put to the user"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "an approved call's own flags left out of the request",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "                if tool.consequential and with_untrusted and with_sensitive and not confirm(call):\n                    result = dict(BLOCKED)\n",
+          "new": "                if tool.consequential and with_untrusted and with_sensitive:\n                    result = execute(tool, call[\"arguments\"]) if confirm(call) else dict(BLOCKED)\n"
+        }
+      ],
+      "expect": "a call the user allowed still adds its flags"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "a call rejected by validation still taints the request",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "            result = rejection(registry, call)\n            if result is None:\n",
+          "new": "            result = rejection(registry, call)\n            if result is not None and call[\"name\"] in registry:\n                untrusted = untrusted or registry.get(call[\"name\"]).reads_untrusted\n                sensitive = sensitive or registry.get(call[\"name\"]).touches_sensitive\n            if result is None:\n"
+        }
+      ],
+      "expect": "a call that could not run adds nothing to the request"
+    },
+    {
+      "test": "test_rule_of_two",
+      "name": "after one denial, later calls are blocked without asking",
+      "edits": [
+        {
+          "file": "trust.py",
+          "old": "    untrusted = sensitive = False  # what this request carries so far, over all its turns\n",
+          "new": "    untrusted = sensitive = False  # what this request carries so far, over all its turns\n    denied = False\n"
+        },
+        {
+          "file": "trust.py",
+          "old": "                if tool.consequential and with_untrusted and with_sensitive and not confirm(call):\n                    result = dict(BLOCKED)\n",
+          "new": "                if tool.consequential and with_untrusted and with_sensitive and (denied or not confirm(call)):\n                    denied = True\n                    result = dict(BLOCKED)\n"
+        }
+      ],
+      "expect": "every consequential call is confirmed on its own"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "the lesson's timing kept on the EXECUTE line",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "-> {_json(result)}\\n\"",
+          "new": "-> {_json(result)} [0.01 ms]\\n\""
+        }
+      ],
+      "expect": "Extra data"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "json.dumps default separators",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "json.dumps(value, ensure_ascii=False, separators=(\",\", \":\"))",
+          "new": "json.dumps(value, ensure_ascii=False)"
+        }
+      ],
+      "expect": "JSON in the trace is compact and keeps non-ASCII as is"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "non-ASCII escaped",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "json.dumps(value, ensure_ascii=False, separators=(\",\", \":\"))",
+          "new": "json.dumps(value, separators=(\",\", \":\"))"
+        }
+      ],
+      "expect": "JSON in the trace is compact and keeps non-ASCII as is"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "answer written as raw text",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "yield f\"MODEL : {_json(decision['content'])}\\n\"",
+          "new": "yield f\"MODEL : {decision['content']}\\n\""
+        }
+      ],
+      "expect": "every item is one line, ending in a newline"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "break after the final answer, so the breaker line follows it",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "            yield f\"MODEL : {_json(decision['content'])}\\n\"\n            return\n",
+          "new": "            yield f\"MODEL : {_json(decision['content'])}\\n\"\n            break\n"
+        }
+      ],
+      "expect": "the trace shows every step of the loop, in order"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "breaker line also yielded inside the last turn",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "        yield f\"TURN {turn} OBSERVE: history length = {len(history)}\\n\"\n",
+          "new": "        yield f\"TURN {turn} OBSERVE: history length = {len(history)}\\n\"\n        if turn == max_turns:\n            yield \"LOOP TERMINATED : hit MAX_TURNS circuit breaker\\n\"\n"
+        }
+      ],
+      "expect": "the circuit breaker line comes once, at the end"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "a turn's lines buffered and sent together",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "        for call in decision[\"tool_calls\"]:\n            yield f\"TURN {turn} DECIDE : call {call['name']} id={call['id']}\\n\"\n            yield f\"           args = {_json(call['arguments'])}\\n\"\n",
+          "new": "        buffered = []\n        for call in decision[\"tool_calls\"]:\n            buffered.append(f\"TURN {turn} DECIDE : call {call['name']} id={call['id']}\\n\")\n            buffered.append(f\"           args = {_json(call['arguments'])}\\n\")\n"
+        },
+        {
+          "file": "trace.py",
+          "old": "                yield f\"           ERROR : {_json(result)}\\n\"\n",
+          "new": "                buffered.append(f\"           ERROR : {_json(result)}\\n\")\n"
+        },
+        {
+          "file": "trace.py",
+          "old": "                yield f\"TURN {turn} EXECUTE: {call['name']} -> {_json(result)}\\n\"\n",
+          "new": "                buffered.append(f\"TURN {turn} EXECUTE: {call['name']} -> {_json(result)}\\n\")\n"
+        },
+        {
+          "file": "trace.py",
+          "old": "        yield f\"TURN {turn} OBSERVE: history length = {len(history)}\\n\"\n",
+          "new": "        for text in buffered:\n            yield text\n        yield f\"TURN {turn} OBSERVE: history length = {len(history)}\\n\"\n"
+        }
+      ],
+      "expect": "each line is sent as soon as its step happens"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "async executors not awaited",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "        if inspect.isawaitable(result):\n            result = await result\n",
+          "new": ""
+        }
+      ],
+      "expect": "not JSON serializable"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "exceptions from an awaited executor not caught",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "    try:\n        result = tool.executor(arguments)\n        if inspect.isawaitable(result):\n            result = await result\n    except Exception as exc:\n        return {\"error\": f\"{type(exc).__name__}: {exc}\"}\n    return result\n",
+          "new": "    try:\n        result = tool.executor(arguments)\n    except Exception as exc:\n        return {\"error\": f\"{type(exc).__name__}: {exc}\"}\n    if inspect.isawaitable(result):\n        result = await result\n    return result\n"
+        }
+      ],
+      "expect": "empty query"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "an executor's error result printed as an ERROR line",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "                yield f\"TURN {turn} EXECUTE: {call['name']} -> {_json(result)}\\n\"\n",
+          "new": "                if isinstance(result, dict) and \"error\" in result:\n                    yield f\"           ERROR : {_json(result)}\\n\"\n                else:\n                    yield f\"TURN {turn} EXECUTE: {call['name']} -> {_json(result)}\\n\"\n"
+        }
+      ],
+      "expect": "a tool that raises still ran"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "async model not awaited",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "        decision = await model(history, tools)\n",
+          "new": "        decision = model(history, tools)\n"
+        }
+      ],
+      "expect": "coroutine"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "the lesson's VALIDATION ERRORS line kept",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "                yield f\"           ERROR : {_json(result)}\\n\"\n",
+          "new": "                yield f\"           VALIDATION ERRORS : {result.get('details')}\\n\"\n"
+        }
+      ],
+      "expect": "not a trace line"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "user message written as raw text",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "    yield f\"USER : {_json(user_message)}\\n\"\n",
+          "new": "    yield f\"USER : {user_message}\\n\"\n"
+        }
+      ],
+      "expect": "Expecting value"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "the args line held back until the tool has run",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "            yield f\"           args = {_json(call['arguments'])}\\n\"\n            result = rejection(registry, call)\n            if result is not None:\n                yield f\"           ERROR : {_json(result)}\\n\"\n            else:\n                result = await _execute(registry.get(call[\"name\"]), call[\"arguments\"])\n",
+          "new": "            result = rejection(registry, call)\n            if result is not None:\n                yield f\"           args = {_json(call['arguments'])}\\n\"\n                yield f\"           ERROR : {_json(result)}\\n\"\n            else:\n                result = await _execute(registry.get(call[\"name\"]), call[\"arguments\"])\n                yield f\"           args = {_json(call['arguments'])}\\n\"\n"
+        }
+      ],
+      "expect": "each line is sent as soon as its step happens"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "a turn's executors started together, lines still in order",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "        for call in decision[\"tool_calls\"]:\n            yield f\"TURN {turn} DECIDE",
+          "new": "        runs = {\n            c[\"id\"]: __import__(\"asyncio\").ensure_future(_execute(registry.get(c[\"name\"]), c[\"arguments\"]))\n            for c in decision[\"tool_calls\"]\n            if rejection(registry, c) is None\n        }\n        for call in decision[\"tool_calls\"]:\n            yield f\"TURN {turn} DECIDE"
+        },
+        {
+          "file": "trace.py",
+          "old": "                result = await _execute(registry.get(call[\"name\"]), call[\"arguments\"])\n",
+          "new": "                result = await runs[call[\"id\"]]\n"
+        }
+      ],
+      "expect": "each line is sent as soon as its step happens"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "tool message content written as the trace's JSON text, like the lesson",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "            history.append(tool_message(call, result))\n",
+          "new": "            history.append(tool_message(call, _json(result)))\n"
+        }
+      ],
+      "expect": "the model reads its results as in run_loop"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "unknown tool reported with the lesson's raw ERROR text",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "                yield f\"           ERROR : {_json(result)}\\n\"\n",
+          "new": "                if call[\"name\"] not in registry:\n                    yield f\"           ERROR : unknown tool {call['name']}\\n\"\n                else:\n                    yield f\"           ERROR : {_json(result)}\\n\"\n"
+        }
+      ],
+      "expect": "Expecting value"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "OBSERVE counts only the tool messages",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "history length = {len(history)}",
+          "new": "history length = {sum(m['role'] == 'tool' for m in history)}"
+        }
+      ],
+      "expect": "the trace shows every step of the loop, in order"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "only direct calls followed",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "            below = [visit(callee) for callee in sorted(set(tool.calls))]\n",
+          "new": "            below = [\n                Effect(\"consequential\", (callee,), (callee,)) if by_name[callee].consequential else Effect(\"pure\", (), ())\n                for callee in sorted(set(tool.calls))\n            ]\n"
+        }
+      ],
+      "expect": "a tool is consequential if anything it can reach is"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "a shared callee counted once per path",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "            actions = {action for effect in below for action in effect.actions}\n",
+          "new": "            actions = [action for effect in below for action in effect.actions]\n"
+        },
+        {
+          "file": "compose.py",
+          "old": "                actions.add(name)\n",
+          "new": "                actions.append(name)\n"
+        }
+      ],
+      "expect": "each action is listed once, sorted"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "path follows the calls in declaration order",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "for callee in sorted(set(tool.calls))]",
+          "new": "for callee in dict.fromkeys(tool.calls)]"
+        }
+      ],
+      "expect": "the path is the alphabetically first"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "shortest path instead of alphabetically first",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "path = next(((name, *effect.path) for effect in below if effect.path), ())",
+          "new": "path = min(((name, *effect.path) for effect in below if effect.path), key=len, default=())"
+        }
+      ],
+      "expect": "alphabetically first, not shortest"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "the alphabetically first callee followed even when it is pure",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "path = next(((name, *effect.path) for effect in below if effect.path), ())",
+          "new": "path = (name, *below[0].path) if any(effect.path for effect in below) else ()"
+        }
+      ],
+      "expect": "the path is the alphabetically first"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "a visited set where a memo is needed",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        if name not in effects:  # worked out once, however many paths lead here\n",
+          "new": "        if name in effects:\n            return Effect(\"pure\", (), ())\n        if True:\n"
+        }
+      ],
+      "expect": "a tool declared consequential is consequential"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "a tool's own flag ignored",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "            if tool.consequential:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "a tool declared consequential is consequential"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "a declared composite tool explained through its callees",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "            if tool.consequential:\n",
+          "new": "            if tool.consequential and not tool.calls:\n"
+        }
+      ],
+      "expect": "a tool declared consequential is its own reason"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "unknown callees skipped",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        unknown = sorted(set(tool.calls) - by_name.keys())\n",
+          "new": "        unknown = []\n"
+        },
+        {
+          "file": "compose.py",
+          "old": "for callee in sorted(set(tool.calls))]",
+          "new": "for callee in sorted(set(tool.calls)) if callee in by_name]"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "unknown callee found only while walking (KeyError)",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        unknown = sorted(set(tool.calls) - by_name.keys())\n",
+          "new": "        unknown = []\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "one pass in list order, as if callees always came first",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "            below = [visit(callee) for callee in sorted(set(tool.calls))]\n",
+          "new": "            below = [effects[callee] for callee in sorted(set(tool.calls))]\n"
+        }
+      ],
+      "expect": "KeyError: 'cancel_trip'"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "actions stop at the first declared consequential tool on each path",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "            actions = {action for effect in below for action in effect.actions}\n",
+          "new": "            actions = {\n                action\n                for callee, effect in zip(sorted(set(tool.calls)), below)\n                for action in ((callee,) if by_name[callee].consequential else effect.actions)\n            }\n"
+        }
+      ],
+      "expect": "actions are everything it can set off, also through another action"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "a declared consequential tool stops the walk, so its actions are only itself",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "            below = [visit(callee) for callee in sorted(set(tool.calls))]\n",
+          "new": "            below = [] if tool.consequential else [visit(callee) for callee in sorted(set(tool.calls))]\n"
+        }
+      ],
+      "expect": "a tool declared consequential is its own reason"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "path picked by the alphabetically first action it ends in",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "path = next(((name, *effect.path) for effect in below if effect.path), ())",
+          "new": "path = min(((name, *effect.path) for effect in below if effect.path), key=lambda p: (p[-1], p), default=())"
+        }
+      ],
+      "expect": "alphabetically first, not shortest"
+    },
+    {
+      "test": "test_composite_tools",
+      "name": "unknown callee reported without its name",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "            raise ValueError(f\"{tool.name} calls unknown tools: {', '.join(unknown)}\")\n",
+          "new": "            raise ValueError(f\"{tool.name} calls a tool that is not in the catalog\")\n"
+        }
+      ],
+      "expect": "calls a tool that is not in the catalog"
+    }
+  ]
+}

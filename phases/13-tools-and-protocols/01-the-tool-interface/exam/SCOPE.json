@@ -1,0 +1,114 @@
+{
+  "lesson": "phases/13-tools-and-protocols/01-the-tool-interface",
+  "title": "The Tool Interface — Why Agents Need Structured I/O",
+  "format": "staged-brownfield",
+  "service": "ToolLoop: a tool-calling host with a registry, a JSON Schema subset, the four-step loop and a scripted stand-in model",
+  "sources": {
+    "docs/en.md": "03823fa620a739c438f4e907af32445f81cc3a26387b86d13ca90ff0d1f14533",
+    "code/main.py": "27692fffd3af4163972b8d7d7cb4e328c7f8178fb7889fe6e90eb428c82a056d"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_tool_loop",
+      "kind": "debug",
+      "lesson_anchor": "The Concept, steps three and four (validate, execute, observe with matching id); Circuit breakers; code/main.py validate and run_loop",
+      "planted_bugs": [
+        "tool_message gives the tool message a fresh uuid instead of the call's id; the KeyError surfaces a turn later, in the scripted model, which reads results by call id",
+        "validate accepts True as a number because bool is a subclass of int, so add(a=True, b=2) runs",
+        "run_loop uses range(1, max_turns) and gives the model one turn too few, so a request answered on turn 5 is reported as max_turns",
+        "Registry keeps a list and scans it in register, get and __contains__, O(n^2) to fill"
+      ],
+      "timing_assert": "filling a 7,000-tool registry and a 3,500-tool subset built with get() under 0.04 s (scanning registry 0.7 to 1 s, fixed 0.6 to 2 ms; a fix that leaves get() scanning about 0.15 s)",
+      "overfix_guard": "a model that never stops calling tools gets exactly max_turns turns and stop=max_turns (no breaker: the stand-in fails on its 101st request); an answer on the last turn reports turns=max_turns, so range(max_turns) counting from 0 fails; calls on the last turn really run; invalid arguments never reach the executor; ints stay numbers; duplicate names still raise ValueError; registration order is kept"
+    },
+    {
+      "part": 2,
+      "test": "test_session_log",
+      "kind": "model and persistence",
+      "lesson_anchor": "Step four: observe (the history); 'The result must be serializable'",
+      "exactness": "messages round-trip by value and type (float.hex), across a reopen and a crash: -0.0, 1e-310, 42.0 vs 42, an id above 2^53, non-ASCII, a newline inside a string",
+      "traps": [
+        "json.dumps writes NaN and Infinity unless allow_nan=False",
+        "json.dump streams chunks, so a rejected message leaves half a line that the next append joins",
+        "no flush: a second reader sees nothing",
+        "ensure_ascii=False is required",
+        "torn last line cut inside a UTF-8 character: decoding the whole file fails",
+        "torn line must be truncated by byte offset, or the next append is glued to it",
+        "a complete JSON line without its newline is still torn",
+        "corruption raises ValueError instead of being skipped: a middle line, and a last line that has its newline"
+      ],
+      "clarifying_questions": ["complete JSON without a newline", "corrupt middle line", "unreadable last line with its newline", "NaN in a result", "fsync"]
+    },
+    {
+      "part": 3,
+      "test": "test_rule_of_two",
+      "kind": "core algorithm",
+      "lesson_anchor": "The trust split: pure vs consequential; Meta's Rule of Two; Exercise 3 (confirmation gate)",
+      "traps": [
+        "taint lasts for the whole user request, across model turns, and is not reset per turn",
+        "calls in one turn are decided in order, with the taint left by the calls before them",
+        "two of the three are allowed without asking",
+        "only consequential calls are confirmed; a past consequential action is not a third leg",
+        "a call's own flags count",
+        "a blocked call adds no taint",
+        "a call rejected by validation adds no taint",
+        "a call that runs after the user allowed it adds its own flags",
+        "every call is confirmed on its own; an approval neither carries over nor clears the taint",
+        "a blocked call is answered with BLOCKED under its own id and the rest of the turn goes on",
+        "invalid or unknown calls are rejected before the user is asked",
+        "nothing carries over to the next request"
+      ],
+      "integration": "the gate runs on Part 1's pieces (rejection, execute, tool_message) and the scripted model, which fails if a blocked call is left unanswered; the circuit breaker still applies",
+      "clarifying_questions": ["per turn or per request", "one approval for later calls", "asking about invalid calls", "an allowed call's own flags", "a tool that raised"]
+    },
+    {
+      "part": 4,
+      "test": "test_trace_stream",
+      "kind": "streaming",
+      "lesson_anchor": "code/main.py run_loop trace lines (TURN n DECIDE/EXECUTE/OBSERVE, MODEL, LOOP TERMINATED)",
+      "wire_format": "one text line per step, the lesson's line shapes without timings, values as compact JSON with non-ASCII kept, parsed by the test's regex",
+      "traps": [
+        "the lesson's [x ms] timing makes the result unparsable",
+        "default json.dumps spacing and ASCII escaping",
+        "an answer with a newline written raw",
+        "a turn's lines buffered instead of yielded as each step happens",
+        "the args line goes out before the tool runs",
+        "the async model and async executors must be awaited, and an exception inside the await becomes an error result",
+        "an executor that raised still ran: EXECUTE, not ERROR",
+        "break after the final answer adds a breaker line; the breaker line comes once",
+        "an unknown tool is an ERROR line with the JSON error result, not the lesson's raw text",
+        "tool message content is the result value, not the trace line's JSON text"
+      ],
+      "clarifying_questions": ["timings", "concurrent calls in a turn", "newlines in the answer", "unknown tools in the trace"]
+    },
+    {
+      "part": 5,
+      "test": "test_composite_tools",
+      "kind": "graph",
+      "lesson_anchor": "The trust split; Exercise 3 (classify each tool as pure or consequential)",
+      "traps": [
+        "consequential spreads through calls transitively",
+        "a diamond lists the shared action once",
+        "actions include what a declared consequential tool sets off in turn",
+        "the path is the lexicographically smallest, not the declaration order and not the shortest",
+        "the first callee by name may be pure",
+        "a tool declared consequential is its own reason",
+        "leaves keep their declared kind",
+        "the catalog may list a tool before the tools it calls",
+        "a visited set is not a memo",
+        "an unknown callee raises ValueError naming it"
+      ],
+      "clarifying_questions": ["cycles", "which path", "catalog order", "unknown callee"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the suggested fourth bug (a consequential tool runs before it is confirmed) was left out. Confirmation belongs to Part 3, and a Part 1 rule that confirms every consequential tool would contradict the Rule of Two, which asks only when all three combine.",
+    "Part 1 timing: instead of 2,000 tools times 20,000 dispatches, the test fills a 7,000-tool registry and builds a 3,500-tool subset with get(). Each dispatch through validate and execute costs about 1.5 microseconds in the fixed version, so dispatch timing alone cannot keep 8x margins on both sides within 3 s. Filling the registry plus bare lookups does (0.7 to 1 s against 0.6 to 2 ms), and the 3,500 lookups still catch a fix that leaves get() scanning.",
+    "The history includes the assistant message with its tool_calls (the lesson's quiz points out that the lesson's history lacks it), and a tool message's content is the result value itself, not a JSON string, so a NaN reaches the log's serializer.",
+    "Part 4: the trace keeps the lesson's line shapes but drops the timing, writes the user message, arguments, results, errors and answer as compact JSON with non-ASCII kept, and merges the lesson's ERROR and VALIDATION ERRORS lines into one ERROR line that carries the error result. The model is async and executors may be async, so the generator has something to await.",
+    "Part 5: besides the kind and one explanation path, every tool reports actions, the declared-consequential tools it can reach, sorted and listed once. That is where the diamond is checked.",
+    "Part 2 does not test str.splitlines() on U+2028 and U+0085. Chapter 13 already tests that trap in the stdio and transport lessons (07, 09), where newline framing is part of the protocol."
+  ]
+}
