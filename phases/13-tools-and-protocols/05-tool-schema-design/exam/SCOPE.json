@@ -1,0 +1,115 @@
+{
+  "lesson": "phases/13-tools-and-protocols/05-tool-schema-design",
+  "title": "Tool Schema Design — Naming, Descriptions, Parameter Constraints",
+  "format": "staged-brownfield",
+  "service": "ToolLint: the lesson's tool-schema linter run in CI, with a content-addressed release store, a breaking-change gate between releases, a streaming check of a paginated registry and a graph of the 'use <tool>' references in descriptions",
+  "sources": {
+    "docs/en.md": "960a389a1c12b06ec7f4731f06cfb5713657b665b15e09cd271c2be6c92a8d2b",
+    "code/main.py": "16d73804c69b205f2ef107b273f42ae5e2f62689a4379b7a8824c1604848f587",
+    "outputs/skill-tool-schema-linter.md": "b7b2f068d87b6b60ccdbff2d6b36e6311f4aba055e969375cc6e56221eac42ad",
+    "quiz/quiz.md": "ca054b46740ac1ebb288487b09307006696bcd6acc4d27d819a4ff292b419c19"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_lint_registry",
+      "kind": "debug",
+      "lesson_anchor": "Naming rules (rule 6: get_weather_for_city(city), not get_weather_in_tokyo()); Description pattern (stay under 1024 characters); code/main.py lint_name, lint_description, lint_registry and the BAD_REGISTRY summary 20 findings (6 block, 11 warn, 3 nit)",
+      "planted_bugs": [
+        "lint_tool passes schema.get('required') to lint_name as the tool's parameters: None for the lesson's BAD_REGISTRY, so the TypeError surfaces one call down, in lint_name's 'm.group(2) not in params'; once defaulted to [] it still misses optional parameters (notes_export_for_user(user))",
+        "lint_description measures the description with len(desc.encode()), UTF-8 bytes: a 696-character description with 600 Chinese characters is 1,896 bytes and is reported over 1024",
+        "duplicate_names lists every occurrence of a duplicated name, so a name used three times gives three block findings",
+        "duplicate_names calls names.count() inside the comprehension, O(n^2)"
+      ],
+      "timing_assert": "duplicate_names on 20,050 names under 0.1 s. Apple M5 at load average about 5: the names.count version takes at least 1.95 s on Python 3.10 and 3.12, 2.01 s on 3.13 and 2.58 s on 3.14 (19x the limit or more); over 200 runs each on 3.10, 3.12 and 3.14, the Counter version, a plain dict loop and sorted(..., key=names.index) take at most 2.6 ms (39x under the limit or more)",
+      "overfix_guard": "duplicated names come in order of first appearance, one finding each with the name as its path, and a duplicated tool's second copy keeps its own findings; sorted(set(...)), list(set(...)), second-appearance order, count order (Counter.most_common), a single 'registry has duplicates' finding and linting each name once all fail. Boundaries: 1024 characters passes, 1025 fails, and 1100 Chinese characters fail (counting ASCII characters only is caught)"
+    },
+    {
+      "part": 2,
+      "test": "test_release_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "Versioning (tools evolve; releases and a deprecation window need every release kept); code/main.py GOOD_REGISTRY descriptors as the stored content",
+      "exactness": "every release loads back with the same encode_descriptor() bytes per tool, in published order, after a reopen: a regenerated schema with maximum 50.0 instead of 50 (equal under Python ==, different bytes) and a description with 600 Chinese characters",
+      "traps": [
+        "versions sorted as strings or by their digits with the dots removed (1.2.10, 1.9.0, 1.10.0)",
+        "patch releases published after a newer line (1.9.1, 1.2.10 after 1.10.0); history() in file-name or publish order, or only where the digest changed",
+        "version parsed with int() (accepts 02 and a trailing newline) or matched with $ instead of fullmatch",
+        "blob not named by the SHA-256 of its bytes: ASCII-escaped JSON, a .json extension, one blob per release",
+        "unchanged tools found by comparing parsed descriptors (50 == 50.0), manifest written with sorted keys",
+        "no digest check on load, the digest taken over the re-encoded descriptor instead of the bytes read (a trailing newline goes unnoticed), or descriptors cached in memory so a tampered blob goes unnoticed",
+        "a version republished, two tools with one name, blobs written before the release is checked (each refused release carries a new descriptor, so a late duplicate, existence or format check leaves a blob behind)",
+        "the manifest created with open(path, 'xb'), so a republish raises FileExistsError instead of ValueError",
+        "unknown version as an empty release or a FileNotFoundError instead of KeyError",
+        "manifest path from Path(version).with_suffix('.json'), so 1.9.0 and 1.9.1 share 1.9.json",
+        "manifests kept in memory only"
+      ],
+      "clarifying_questions": ["valid version format", "publishing an older patch after a newer release", "republishing a version", "a corrupt blob", "garbage collection"]
+    },
+    {
+      "part": 3,
+      "test": "test_breaking_changes",
+      "kind": "core algorithm",
+      "lesson_anchor": "Versioning: never rename a stable tool (add get_weather_v2, deprecate get_weather); never change argument types, loosening (string to string-or-number) requires a new version; add optional parameters freely; remove tools only after a release that published deprecated: true",
+      "traps": [
+        "loosening a type counted as safe",
+        "types compared as written or as ordered lists instead of as sets; whole property compared, description included; an untyped field skipped",
+        "optional made required not reported; made optional counted as breaking or not reported; every new parameter counted as optional; an added required parameter also reported as made required; removed parameters not reported",
+        "schema without a required list or without properties read with []",
+        "every removal breaking or every removal safe; deprecation looked up in the new release",
+        "deprecated reported again while the flag stays",
+        "renames guessed from identical schemas; a removed tool's parameters reported too, or an added tool's parameters reported one by one",
+        "one change per parameter (elif) when a parameter changes type and becomes required at once",
+        "changes in discovery order, or grouped by severity, instead of sorted by path, then change"
+      ],
+      "integration": "the given ToolRegistry release gate (Part 1 lint, Part 2 store, this diff): a rename is refused, the lesson's get_weather_v2 + deprecate path is accepted and the deprecated tool can go in 2.0.0, and the patch release 1.0.1 is compared with 1.0.0, not with 2.0.0",
+      "clarifying_questions": ["loosening a type", "detecting renames", "enum, nested properties, descriptions", "where deprecated lives", "a schema without properties"]
+    },
+    {
+      "part": 4,
+      "test": "test_lint_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Exercise 4 (lint in CI, fail the build on block findings); Finding.__str__ and the report summary in code/main.py; outputs/skill-tool-schema-linter.md (one line per finding, a summary line and a pass/fail verdict); quiz Q15 (report only the tools a PR changed)",
+      "wire_format": "an async generator of log lines without line breaks: str(Finding) per finding, then 'summary: N findings (b block, w warn, n nit)', then FAIL or PASS; the test compares the lines, parses the summary with a regex and counts the lines by their padded severity prefix",
+      "traps": [
+        "severity not padded to the lesson's width ([warn] instead of [warn ]), or lines ending with a newline",
+        "each page linted as a registry of its own; duplicates looked for within a page only, or found by digest instead of by name",
+        "a duplicate reported at every later copy, after the copy's findings, or without linting the copy",
+        "an empty page taken for the end of the registry",
+        "summary leaving out the duplicate findings, or re-linting the whole registry",
+        "any finding failing the build, or a duplicate name not failing it; the lesson's 'PASS : no findings' line instead of a summary",
+        "baseline matched by name, new tools skipped, unchanged tools skipped before the duplicate check, the baseline's names taken as already seen, baseline ignored",
+        "every page read before logging, or one page read ahead"
+      ],
+      "clarifying_questions": ["duplicates among unchanged tools", "where the duplicate line goes", "output for a clean registry", "whether warn fails the build"]
+    },
+    {
+      "part": 5,
+      "test": "test_reference_graph",
+      "kind": "graph",
+      "lesson_anchor": "Description pattern: the 'Do not use for' line disambiguates close competitors; GOOD_REGISTRY points at notes_get and notes_update, which the registry does not have (quiz Q11); namespace prefixes for large registries (notes_*)",
+      "traps": [
+        "words split on whitespace, with punctuation or backticks left on the name",
+        "'use' matched inside reuse, matched case-sensitively, or not required at all; backticks not allowed; only 'use X instead' counted",
+        "tool names matched without digits or with a single underscore, so maps_route_v2 is cut short",
+        "unknown references reported only in namespaces the registry has (the quiz's lint_cross_refs) or only in the tool's own namespace",
+        "every mention kept instead of one edge per tool; a missing tool reported at every mention",
+        "a self-reference dropped from the graph or not reported",
+        "namespace taken before the last underscore",
+        "a missing tool turned into a node that links the tools pointing at it",
+        "pieces found over the whole graph, through another namespace",
+        "references followed one way only",
+        "groups or pieces in registry order"
+      ],
+      "clarifying_questions": ["what counts as a reference", "references into other namespaces", "unknown names whose prefix no tool has", "names without an underscore"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the embedded-argument bug sits one call up from the suggested place. lint_name already compares the suffix with the tool's parameters; lint_tool hands it schema.get('required'), which is None for the lesson's BAD_REGISTRY. That gives the required far-from-root-cause error (a TypeError inside lint_name) and keeps the suggested behaviour: get_weather_in_tokyo is reported, get_weather_for_city(city) is not, and an optional parameter in the name (notes_export_for_user(user)) is not reported either.",
+    "Part 1: the O(n^2) timing is measured on duplicate_names directly. Linting 20,000 tools takes about 50 ms by itself, which leaves no room for 8x margins on both sides of a limit on lint_registry.",
+    "Part 2: parse_version and history(name) were added. Releases are immutable and validated before anything is written; malformed versions (leading zeros, a trailing newline) are rejected. The 1 vs 1.0 round trip is a regenerated schema with maximum 50.0 instead of 50, which Python's == cannot tell apart; encode_descriptor and descriptor_digest are given, so the whole-descriptor digest that is 13/15's Part 1 is not asked again here.",
+    "Part 3: severities are breaking and safe rather than block, warn and nit. Parameter removal (breaking), required to optional (safe), untyped fields, type sets and a strict-mode migration that changes one parameter twice were added. The end-to-end check runs through a given ToolRegistry release gate.",
+    "Part 4: after the summary line comes a PASS or FAIL verdict, from the lesson's skill output ('a summary line and a pass/fail verdict') and Exercise 4 (fail the build on block findings). An optional baseline (the previous release's manifest, as Part 2 stores it) makes CI lint only new and changed tools, following the quiz's CI answer (Q15); unchanged tools still count for duplicate names.",
+    "Part 5: 'same-prefix neighbours where neither points to the other' is checked per namespace group as connected pieces of the undirected graph of references inside the group, one nit finding per group that falls apart, rather than one finding per unlinked pair. Unknown references use the quiz Q11 wording ('description references unknown tool ...') without the quiz's same-prefix restriction: the test has a reference to maps_route_v2, whose prefix no tool in the registry has, and why the quiz restricts it is a follow-up question."
+  ]
+}

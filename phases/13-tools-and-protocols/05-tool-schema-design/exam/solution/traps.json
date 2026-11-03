@@ -1,0 +1,1442 @@
+{
+  "package": "toollint",
+  "tests": [
+    "test_lint_registry",
+    "test_release_store",
+    "test_breaking_changes",
+    "test_lint_stream",
+    "test_reference_graph"
+  ],
+  "layers": [
+    {
+      "test": "test_lint_registry",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "TypeError"
+        },
+        {
+          "name": "pass the schema's properties to lint_name",
+          "edits": [
+            {
+              "file": "rules.py",
+              "old": "    findings = lint_name(name, schema.get(\"required\"))\n",
+              "new": "    findings = lint_name(name, schema.get(\"properties\", {}))\n"
+            }
+          ],
+          "expect": "description length is counted in characters"
+        },
+        {
+          "name": "+ count characters, not bytes",
+          "edits": [
+            {
+              "file": "rules.py",
+              "old": "    length = len(desc.encode())\n",
+              "new": "    length = len(desc)\n"
+            }
+          ],
+          "expect": "each duplicated name once, in order of first appearance"
+        },
+        {
+          "name": "+ list each duplicated name once",
+          "edits": [
+            {
+              "file": "rules.py",
+              "old": "    return [name for name in names if names.count(name) > 1]\n",
+              "new": "    return list(dict.fromkeys(name for name in names if names.count(name) > 1))\n"
+            }
+          ],
+          "expect": "the duplicate check should be fast on a 20,000-tool registry"
+        },
+        {
+          "name": "+ count the names once",
+          "edits": [
+            {
+              "file": "rules.py",
+              "old": "    return list(dict.fromkeys(name for name in names if names.count(name) > 1))\n",
+              "new": "    counts = Counter(names)\n    return [name for name, n in counts.items() if n > 1]\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_lint_registry",
+      "name": "parameters taken from the required list",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "schema.get(\"properties\", {}))",
+          "new": "schema.get(\"required\", []))"
+        }
+      ],
+      "expect": "a parameter named in the tool name is not an argument value"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "parameters from the required list, falling back to the properties when it is empty",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "schema.get(\"properties\", {}))",
+          "new": "schema.get(\"required\") or schema.get(\"properties\", {}))"
+        }
+      ],
+      "expect": "a parameter named in the tool name is not an argument value"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "embedded-argument rule ignores the parameters, as in the lesson code",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "    if m and m.group(2) not in params:\n",
+          "new": "    if m:\n"
+        }
+      ],
+      "expect": "a parameter named in the tool name is not an argument value"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "properties read with [], so a tool without parameters crashes",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "schema.get(\"properties\", {}))",
+          "new": "schema[\"properties\"])"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "length counted without the non-ASCII characters",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "    length = len(desc)\n",
+          "new": "    length = len(desc.encode(\"ascii\", \"ignore\"))\n"
+        }
+      ],
+      "expect": "1100 characters is over the limit in any script"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "1024 characters counted as over the limit",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "    if length > MAX_DESCRIPTION:\n",
+          "new": "    if length >= MAX_DESCRIPTION:\n"
+        }
+      ],
+      "expect": "1024 characters is within the limit"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "duplicates sorted by name",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "    return [name for name, n in counts.items() if n > 1]\n",
+          "new": "    return sorted(name for name, n in counts.items() if n > 1)\n"
+        }
+      ],
+      "expect": "each duplicated name once, in order of first appearance"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "duplicates collected in a set",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "    return [name for name, n in counts.items() if n > 1]\n",
+          "new": "    return list({name for name, n in counts.items() if n > 1})\n"
+        }
+      ],
+      "expect": "each duplicated name once, in order of first appearance"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "duplicates in the order of their second appearance",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "    counts = Counter(names)\n    return [name for name, n in counts.items() if n > 1]\n",
+          "new": "    seen: set[str] = set()\n    found: dict[str, None] = {}\n    for name in names:\n        if name in seen:\n            found.setdefault(name)\n        seen.add(name)\n    return list(found)\n"
+        }
+      ],
+      "expect": "each duplicated name once, in order of first appearance"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "every occurrence still listed, counted with a Counter",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "    return [name for name, n in counts.items() if n > 1]\n",
+          "new": "    return [name for name in names if counts[name] > 1]\n"
+        }
+      ],
+      "expect": "each duplicated name once, in order of first appearance"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "duplicates listed once but still counted per name",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "    counts = Counter(names)\n    return [name for name, n in counts.items() if n > 1]\n",
+          "new": "    return list(dict.fromkeys(name for name in names if names.count(name) > 1))\n"
+        }
+      ],
+      "expect": "the duplicate check should be fast on a 20,000-tool registry"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "one registry finding that does not name the duplicates",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "    findings = [Finding(\"block\", name, \"duplicate tool name\") for name in duplicate_names(names)]\n",
+          "new": "    findings = [Finding(\"block\", \"registry\", \"duplicate tool names\")] if duplicate_names(names) else []\n"
+        }
+      ],
+      "expect": "one block finding per duplicated name, then every tool's own findings"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "duplicate findings after the tools' own findings",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "    findings = [Finding(\"block\", name, \"duplicate tool name\") for name in duplicate_names(names)]\n    for tool in registry:\n        findings.extend(lint_tool(tool))\n    return findings\n",
+          "new": "    findings = []\n    for tool in registry:\n        findings.extend(lint_tool(tool))\n    findings += [Finding(\"block\", name, \"duplicate tool name\") for name in duplicate_names(names)]\n    return findings\n"
+        }
+      ],
+      "expect": "one block finding per duplicated name, then every tool's own findings"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "every name linted once, so the second copy's findings are lost",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "    for tool in registry:\n        findings.extend(lint_tool(tool))\n",
+          "new": "    for tool in {t.get(\"name\", \"\"): t for t in registry}.values():\n        findings.extend(lint_tool(tool))\n"
+        }
+      ],
+      "expect": "one block finding per duplicated name, then every tool's own findings"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "a missing parameter list skips the embedded-argument rule",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "    findings = lint_name(name, schema.get(\"properties\", {}))\n",
+          "new": "    findings = lint_name(name, schema.get(\"required\"))\n"
+        },
+        {
+          "file": "rules.py",
+          "old": "    if m and m.group(2) not in params:\n",
+          "new": "    if m and params is not None and m.group(2) not in params:\n"
+        }
+      ],
+      "expect": "the lesson's BAD_REGISTRY"
+    },
+    {
+      "test": "test_lint_registry",
+      "name": "duplicates ordered by count with Counter.most_common",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "    return [name for name, n in counts.items() if n > 1]\n",
+          "new": "    return [name for name, n in counts.most_common() if n > 1]\n"
+        }
+      ],
+      "expect": "each duplicated name once, in order of first appearance"
+    },
+    {
+      "test": "test_release_store",
+      "name": "versions sorted as strings",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "        return sorted(found, key=parse_version)\n",
+          "new": "        return sorted(found)\n"
+        }
+      ],
+      "expect": "versions sort as semantic versions"
+    },
+    {
+      "test": "test_release_store",
+      "name": "versions sorted by their digits with the dots removed",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "        return sorted(found, key=parse_version)\n",
+          "new": "        return sorted(found, key=lambda v: int(v.replace(\".\", \"\")))\n"
+        }
+      ],
+      "expect": "versions sort as semantic versions"
+    },
+    {
+      "test": "test_release_store",
+      "name": "history in file-name order",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "        for version in self.versions():\n            digest = self._manifest(version).get(name)\n",
+          "new": "        for path in sorted(self.releases.glob(\"*.json\")):\n            version = path.name.removesuffix(\".json\")\n            digest = self._manifest(version).get(name)\n"
+        }
+      ],
+      "expect": "history follows a tool through every release that has it"
+    },
+    {
+      "test": "test_release_store",
+      "name": "history keeps only the releases where the descriptor changed",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "            if digest is not None:\n                out.append((version, digest))\n",
+          "new": "            if digest is not None and (not out or out[-1][1] != digest):\n                out.append((version, digest))\n"
+        }
+      ],
+      "expect": "history follows a tool through every release that has it"
+    },
+    {
+      "test": "test_release_store",
+      "name": "no digest check when loading",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "            if hashlib.sha256(data).hexdigest() != digest:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_release_store",
+      "name": "descriptors cached in memory, so a corrupt blob goes unnoticed",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "        self.releases.mkdir(parents=True, exist_ok=True)\n",
+          "new": "        self.releases.mkdir(parents=True, exist_ok=True)\n        self._cache: dict[str, dict] = {}\n"
+        },
+        {
+          "file": "releases.py",
+          "old": "            data = (self.blobs / digest).read_bytes()\n            if hashlib.sha256(data).hexdigest() != digest:\n                raise ValueError(f\"blob {digest} of {name!r} in release {version} is corrupt\")\n            tools.append(json.loads(data))\n",
+          "new": "            if digest not in self._cache:\n                data = (self.blobs / digest).read_bytes()\n                if hashlib.sha256(data).hexdigest() != digest:\n                    raise ValueError(f\"blob {digest} of {name!r} in release {version} is corrupt\")\n                self._cache[digest] = json.loads(data)\n            tools.append(self._cache[digest])\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_release_store",
+      "name": "one blob per release",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "            blob = self.blobs / digest\n",
+          "new": "            blob = self.blobs / f\"{digest}-{version}\"\n"
+        },
+        {
+          "file": "releases.py",
+          "old": "            data = (self.blobs / digest).read_bytes()\n",
+          "new": "            data = (self.blobs / f\"{digest}-{version}\").read_bytes()\n"
+        }
+      ],
+      "expect": "a descriptor that several releases share is stored once"
+    },
+    {
+      "test": "test_release_store",
+      "name": "unchanged tools found by comparing parsed descriptors, so 50.0 becomes 50",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "            digest = hashlib.sha256(data).hexdigest()\n            manifest[name] = digest\n",
+          "new": "            digest = hashlib.sha256(data).hexdigest()\n            for earlier in self.versions():\n                kept = self._manifest(earlier).get(name)\n                if kept and json.loads((self.blobs / kept).read_bytes()) == tool:\n                    digest, data = kept, (self.blobs / kept).read_bytes()\n            manifest[name] = digest\n"
+        }
+      ],
+      "expect": "a release must round-trip exactly"
+    },
+    {
+      "test": "test_release_store",
+      "name": "manifest written with sorted keys",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "        _write_atomic(path, json.dumps(manifest).encode(\"utf-8\"))\n",
+          "new": "        _write_atomic(path, json.dumps(manifest, sort_keys=True).encode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "a release must round-trip exactly"
+    },
+    {
+      "test": "test_release_store",
+      "name": "blob bytes written as ASCII-escaped JSON",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "            data = encode_descriptor(tool)\n            digest = hashlib.sha256(data).hexdigest()\n",
+          "new": "            digest = descriptor_digest(tool)\n            data = json.dumps(tool, sort_keys=True).encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "is corrupt"
+    },
+    {
+      "test": "test_release_store",
+      "name": "digests taken over ASCII-escaped JSON",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "            data = encode_descriptor(tool)\n",
+          "new": "            data = json.dumps(tool, sort_keys=True).encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "the manifest maps every tool to its digest, in published order"
+    },
+    {
+      "test": "test_release_store",
+      "name": "publishing a version again overwrites it",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "        if path.exists():\n            raise ValueError(f\"release {version} already exists\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_release_store",
+      "name": "two tools with one name: the last one wins",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "            if name in manifest:\n                raise ValueError(f\"release {version} has two tools named {name!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_release_store",
+      "name": "blobs written before the release is checked",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "            blobs.append((digest, data))\n",
+          "new": "            blobs.append((digest, data))\n            _write_atomic(self.blobs / digest, data)\n"
+        }
+      ],
+      "expect": "a refused release leaves nothing behind"
+    },
+    {
+      "test": "test_release_store",
+      "name": "version parts read with int(), which accepts 02",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "    match = VERSION.fullmatch(version) if isinstance(version, str) else None\n    if match is None:\n        raise ValueError(f\"not a MAJOR.MINOR.PATCH version: {version!r}\")\n    major, minor, patch = (int(part) for part in match.groups())\n",
+          "new": "    parts = version.split(\".\")\n    if len(parts) != 3:\n        raise ValueError(f\"not a MAJOR.MINOR.PATCH version: {version!r}\")\n    major, minor, patch = (int(part) for part in parts)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_release_store",
+      "name": "version matched with $, which allows a trailing newline",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "    match = VERSION.fullmatch(version) if isinstance(version, str) else None\n",
+          "new": "    match = re.match(VERSION.pattern + \"$\", version) if isinstance(version, str) else None\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_release_store",
+      "name": "leading zeros accepted",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "VERSION = re.compile(r\"(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\")\n",
+          "new": "VERSION = re.compile(r\"([0-9]+)\\.([0-9]+)\\.([0-9]+)\")\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_release_store",
+      "name": "manifest path built with with_suffix, so 1.9.1 lands on 1.9.json",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "        return self.releases / f\"{version}.json\"\n",
+          "new": "        return (self.releases / version).with_suffix(\".json\")\n"
+        }
+      ],
+      "expect": "already exists"
+    },
+    {
+      "test": "test_release_store",
+      "name": "manifests kept in memory only",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "        self.releases.mkdir(parents=True, exist_ok=True)\n",
+          "new": "        self.releases.mkdir(parents=True, exist_ok=True)\n        self._memory: dict[str, dict[str, str]] = {}\n"
+        },
+        {
+          "file": "releases.py",
+          "old": "        if path.exists():\n",
+          "new": "        if version in self._memory:\n"
+        },
+        {
+          "file": "releases.py",
+          "old": "        _write_atomic(path, json.dumps(manifest).encode(\"utf-8\"))\n",
+          "new": "        self._memory[version] = manifest\n"
+        },
+        {
+          "file": "releases.py",
+          "old": "        found = []\n        for path in self.releases.glob(\"*.json\"):\n            version = path.name.removesuffix(\".json\")\n            if VERSION.fullmatch(version):\n                found.append(version)\n        return sorted(found, key=parse_version)\n",
+          "new": "        return sorted(self._memory, key=parse_version)\n"
+        },
+        {
+          "file": "releases.py",
+          "old": "        path = self._manifest_path(version)\n        if not path.exists():\n            raise KeyError(version)\n        return json.loads(path.read_bytes())\n",
+          "new": "        parse_version(version)\n        return self._memory[version]\n"
+        }
+      ],
+      "expect": "a reopened store sees every release"
+    },
+    {
+      "test": "test_release_store",
+      "name": "blob files given a .json extension",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "            blob = self.blobs / digest\n",
+          "new": "            blob = self.blobs / f\"{digest}.json\"\n"
+        },
+        {
+          "file": "releases.py",
+          "old": "            data = (self.blobs / digest).read_bytes()\n",
+          "new": "            data = (self.blobs / f\"{digest}.json\").read_bytes()\n"
+        }
+      ],
+      "expect": "every blob is named by the SHA-256 of its bytes"
+    },
+    {
+      "test": "test_release_store",
+      "name": "an unknown version raises FileNotFoundError",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "        if not path.exists():\n            raise KeyError(version)\n",
+          "new": ""
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_release_store",
+      "name": "an unknown version loads as an empty release",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "        if not path.exists():\n            raise KeyError(version)\n",
+          "new": "        if not path.exists():\n            return {}\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_release_store",
+      "name": "digest checked on the re-encoded descriptor, so a trailing newline goes unnoticed",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "            data = (self.blobs / digest).read_bytes()\n            if hashlib.sha256(data).hexdigest() != digest:\n                raise ValueError(f\"blob {digest} of {name!r} in release {version} is corrupt\")\n            tools.append(json.loads(data))\n",
+          "new": "            tool = json.loads((self.blobs / digest).read_bytes())\n            if descriptor_digest(tool) != digest:\n                raise ValueError(f\"blob {digest} of {name!r} in release {version} is corrupt\")\n            tools.append(tool)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_release_store",
+      "name": "an existing version found only after the blobs are written",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "        path = self._manifest_path(version)\n        if path.exists():\n            raise ValueError(f\"release {version} already exists\")\n        manifest: dict[str, str] = {}\n",
+          "new": "        path = self._manifest_path(version)\n        manifest: dict[str, str] = {}\n"
+        },
+        {
+          "file": "releases.py",
+          "old": "        _write_atomic(path, json.dumps(manifest).encode(\"utf-8\"))\n        return manifest\n",
+          "new": "        if path.exists():\n            raise ValueError(f\"release {version} already exists\")\n        _write_atomic(path, json.dumps(manifest).encode(\"utf-8\"))\n        return manifest\n"
+        }
+      ],
+      "expect": "a refused release leaves nothing behind"
+    },
+    {
+      "test": "test_release_store",
+      "name": "version format checked only after the blobs are written",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "        path = self._manifest_path(version)\n        if path.exists():\n",
+          "new": "        path = self.releases / f\"{version}.json\"\n        if path.exists():\n"
+        },
+        {
+          "file": "releases.py",
+          "old": "        _write_atomic(path, json.dumps(manifest).encode(\"utf-8\"))\n        return manifest\n",
+          "new": "        parse_version(version)\n        _write_atomic(path, json.dumps(manifest).encode(\"utf-8\"))\n        return manifest\n"
+        }
+      ],
+      "expect": "a refused release leaves nothing behind"
+    },
+    {
+      "test": "test_release_store",
+      "name": "manifest created exclusively with open(path, 'xb'), so a republish raises FileExistsError",
+      "edits": [
+        {
+          "file": "releases.py",
+          "old": "        if path.exists():\n            raise ValueError(f\"release {version} already exists\")\n",
+          "new": ""
+        },
+        {
+          "file": "releases.py",
+          "old": "        _write_atomic(path, json.dumps(manifest).encode(\"utf-8\"))\n        return manifest\n",
+          "new": "        with open(path, \"xb\") as fh:\n            fh.write(json.dumps(manifest).encode(\"utf-8\"))\n        return manifest\n"
+        }
+      ],
+      "expect": "FileExistsError"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "loosening a type counted as safe",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "        if _types(prop) != _types(new_props[param]):\n",
+          "new": "        old_types, new_types = _types(prop), _types(new_props[param])\n        if old_types != new_types and not (old_types and new_types and old_types <= new_types):\n"
+        }
+      ],
+      "expect": "loosening a type needs a new version too"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "types compared as written",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "        if _types(prop) != _types(new_props[param]):\n",
+          "new": "        if prop.get(\"type\") != new_props[param].get(\"type\"):\n"
+        }
+      ],
+      "expect": "descriptions, key order and the spelling of a type are not contract changes"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "type lists compared in order",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "    return frozenset([declared] if isinstance(declared, str) else declared)\n",
+          "new": "    return tuple([declared] if isinstance(declared, str) else declared)\n"
+        }
+      ],
+      "expect": "descriptions, key order and the spelling of a type are not contract changes"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "an untyped field left out of the type check",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "        if _types(prop) != _types(new_props[param]):\n",
+          "new": "        if None not in (_types(prop), _types(new_props[param])) and _types(prop) != _types(new_props[param]):\n"
+        }
+      ],
+      "expect": "a schema without a required list requires nothing, and an untyped field accepts any type"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "a parameter made required not reported",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "        if param in new_required and param not in old_required:\n            changes.append(Change(path, \"made required\", \"breaking\"))\n",
+          "new": ""
+        }
+      ],
+      "expect": "an optional parameter that becomes required breaks old calls"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "whole property compared, description included",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "        if _types(prop) != _types(new_props[param]):\n",
+          "new": "        if prop != new_props[param]:\n"
+        }
+      ],
+      "expect": "descriptions, key order and the spelling of a type are not contract changes"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "one change per parameter (elif)",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "        if param in new_required and param not in old_required:\n",
+          "new": "        elif param in new_required and param not in old_required:\n"
+        }
+      ],
+      "expect": "one parameter can change in more than one way at once"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "a parameter made optional not reported",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "        if param in old_required and param not in new_required:\n            changes.append(Change(path, \"made optional\", \"safe\"))\n",
+          "new": ""
+        }
+      ],
+      "expect": "removing a parameter breaks the calls that send it"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "a parameter made optional counted as breaking",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "            changes.append(Change(path, \"made optional\", \"safe\"))\n",
+          "new": "            changes.append(Change(path, \"made optional\", \"breaking\"))\n"
+        }
+      ],
+      "expect": "removing a parameter breaks the calls that send it"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "every new parameter counted as optional",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "            if param in new_required:\n                changes.append(Change(f\"{name}.{param}\", \"added required\", \"breaking\"))\n            else:\n                changes.append(Change(f\"{name}.{param}\", \"added optional\", \"safe\"))\n",
+          "new": "            changes.append(Change(f\"{name}.{param}\", \"added optional\", \"safe\"))\n"
+        }
+      ],
+      "expect": "optional parameters can be added freely, required ones cannot"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "removed parameters not reported",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "            changes.append(Change(path, \"removed\", \"breaking\"))\n            continue\n",
+          "new": "            continue\n"
+        }
+      ],
+      "expect": "removing a parameter breaks the calls that send it"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "required list read with []",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "    return schema.get(\"properties\", {}), set(schema.get(\"required\", []))\n",
+          "new": "    return schema.get(\"properties\", {}), set(schema[\"required\"])\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "every removal counted as breaking",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "            severity = \"safe\" if tool.get(\"deprecated\") is True else \"breaking\"\n",
+          "new": "            severity = \"breaking\"\n"
+        }
+      ],
+      "expect": "a tool may only go after a release that marked it deprecated"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "deprecation looked up in the new release",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "            severity = \"safe\" if tool.get(\"deprecated\") is True else \"breaking\"\n",
+          "new": "            severity = \"safe\" if after.get(name, {}).get(\"deprecated\") is True else \"breaking\"\n"
+        }
+      ],
+      "expect": "a tool may only go after a release that marked it deprecated"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "every removal counted as safe",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "            severity = \"safe\" if tool.get(\"deprecated\") is True else \"breaking\"\n",
+          "new": "            severity = \"safe\"\n"
+        }
+      ],
+      "expect": "a renamed tool is a removal plus an addition"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "deprecated reported again in every release that keeps the flag",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "        if tool.get(\"deprecated\") is True and before[name].get(\"deprecated\") is not True:\n",
+          "new": "        if tool.get(\"deprecated\") is True:\n"
+        }
+      ],
+      "expect": "a tool is deprecated once, in the release that marks it"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "renames guessed from identical schemas",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "    return sorted(changes)\n",
+          "new": "    gone = [c.path for c in changes if c.change == \"removed\" and \".\" not in c.path]\n    for old_name in gone:\n        twins = [n for n in after if n not in before\n                 and after[n].get(\"input_schema\") == before[old_name].get(\"input_schema\")]\n        if twins:\n            changes = [c for c in changes if c.path not in (old_name, twins[0])]\n            changes.append(Change(f\"{old_name} -> {twins[0]}\", \"renamed\", \"breaking\"))\n    return sorted(changes)\n"
+        }
+      ],
+      "expect": "a renamed tool is a removal plus an addition"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "a removed tool's parameters reported as well",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "            changes.append(Change(name, \"removed\", severity))\n",
+          "new": "            changes.append(Change(name, \"removed\", severity))\n            changes.extend(_parameter_changes(name, tool, {}))\n"
+        }
+      ],
+      "expect": "a renamed tool is a removal plus an addition"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "changes in the order they were found",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "    return sorted(changes)\n",
+          "new": "    return changes\n"
+        }
+      ],
+      "expect": "changes are sorted by path, then by change"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "properties read with [], so a tool without parameters crashes",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "    return schema.get(\"properties\", {}), set(schema.get(\"required\", []))\n",
+          "new": "    return schema[\"properties\"], set(schema.get(\"required\", []))\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "an added tool's parameters reported one by one",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "            changes.append(Change(name, \"added\", \"safe\"))\n            continue\n",
+          "new": "            changes.append(Change(name, \"added\", \"safe\"))\n            changes.extend(_parameter_changes(name, {}, tool))\n            continue\n"
+        }
+      ],
+      "expect": "a renamed tool is a removal plus an addition"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "an added required parameter also reported as made required",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "                changes.append(Change(f\"{name}.{param}\", \"added required\", \"breaking\"))\n",
+          "new": "                changes.append(Change(f\"{name}.{param}\", \"added required\", \"breaking\"))\n                changes.append(Change(f\"{name}.{param}\", \"made required\", \"breaking\"))\n"
+        }
+      ],
+      "expect": "optional parameters can be added freely, required ones cannot"
+    },
+    {
+      "test": "test_breaking_changes",
+      "name": "changes sorted by severity first",
+      "edits": [
+        {
+          "file": "compat.py",
+          "old": "    return sorted(changes)\n",
+          "new": "    return sorted(changes, key=lambda c: (c.severity, c.path, c.change))\n"
+        }
+      ],
+      "expect": "removing a parameter breaks the calls that send it"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "lines without the lesson's severity padding",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                yield str(finding)\n",
+          "new": "                yield f\"[{finding.severity}] {finding.path}: {finding.message}\"\n"
+        }
+      ],
+      "expect": "every finding is logged as str(Finding), in lint_tool's order"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "lines end with a newline",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                yield str(finding)\n",
+          "new": "                yield str(finding) + \"\\n\"\n"
+        }
+      ],
+      "expect": "every finding is logged as str(Finding), in lint_tool's order"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "each page linted as a registry of its own",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "from .rules import Finding, lint_tool, summary_line\n",
+          "new": "from .rules import Finding, lint_registry, lint_tool, summary_line\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "        for tool in page:\n            name = tool.get(\"name\", \"\")\n            found: list[Finding] = []\n            if name not in seen:\n                seen.add(name)\n            elif name not in reported:\n                reported.add(name)\n                found.append(Finding(\"block\", name, \"duplicate tool name\"))\n            if baseline is None or baseline.get(name) != descriptor_digest(tool):\n                found.extend(lint_tool(tool))\n            for finding in found:\n                logged.append(finding)\n                yield str(finding)\n",
+          "new": "        for finding in lint_registry(page):\n            logged.append(finding)\n            yield str(finding)\n"
+        }
+      ],
+      "expect": "every finding is logged as str(Finding), in lint_tool's order"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "duplicates looked for within each page only",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for page in pages:\n        for tool in page:\n",
+          "new": "    async for page in pages:\n        seen, reported = set(), set()\n        for tool in page:\n"
+        }
+      ],
+      "expect": "a duplicate is reported when its second copy arrives, just before that copy's findings"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "a duplicate reported at every later copy",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            elif name not in reported:\n                reported.add(name)\n",
+          "new": "            else:\n"
+        }
+      ],
+      "expect": "a duplicated name is reported once"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "a duplicate reported after the copy's own findings",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                found.extend(lint_tool(tool))\n",
+          "new": "                found[:0] = lint_tool(tool)\n"
+        }
+      ],
+      "expect": "a duplicate is reported when its second copy arrives, just before that copy's findings"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "an empty page taken for the end of the registry",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        for tool in page:\n",
+          "new": "        if not page:\n            break\n        for tool in page:\n"
+        }
+      ],
+      "expect": "a duplicate is reported when its second copy arrives, just before that copy's findings"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "a duplicate copy is not linted",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if baseline is None or baseline.get(name) != descriptor_digest(tool):\n",
+          "new": "            if name not in reported and (baseline is None or baseline.get(name) != descriptor_digest(tool)):\n"
+        }
+      ],
+      "expect": "a duplicate is reported when its second copy arrives, just before that copy's findings"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "summary leaves out the duplicate findings",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            for finding in found:\n                logged.append(finding)\n",
+          "new": "            for finding in found:\n                if finding.message != \"duplicate tool name\":\n                    logged.append(finding)\n"
+        }
+      ],
+      "expect": "the summary counts the lines above it"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "summary re-lints the whole registry, unchanged tools included",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "from .rules import Finding, lint_tool, summary_line\n",
+          "new": "from .rules import Finding, lint_registry, lint_tool, summary_line\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "    logged: list[Finding] = []\n",
+          "new": "    logged: list[Finding] = []\n    everything: list[dict] = []\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "            name = tool.get(\"name\", \"\")\n",
+          "new": "            name = tool.get(\"name\", \"\")\n            everything.append(tool)\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "    yield summary_line(logged)\n",
+          "new": "    yield summary_line(lint_registry(everything))\n"
+        }
+      ],
+      "expect": "with a baseline, only new and changed tools are linted, but every tool counts for duplicates"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "any finding fails the build",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    yield \"FAIL\" if any(f.severity == \"block\" for f in logged) else \"PASS\"\n",
+          "new": "    yield \"FAIL\" if logged else \"PASS\"\n"
+        }
+      ],
+      "expect": "only block findings fail the build"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "the lesson's 'PASS : no findings' line for a clean registry",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    yield summary_line(logged)\n",
+          "new": "    if not logged:\n        yield \"PASS : no findings\"\n        return\n    yield summary_line(logged)\n"
+        }
+      ],
+      "expect": "an empty registry still gets a summary and a verdict"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "baseline matched by name",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if baseline is None or baseline.get(name) != descriptor_digest(tool):\n",
+          "new": "            if baseline is None or name not in baseline:\n"
+        }
+      ],
+      "expect": "with a baseline, only new and changed tools are linted, but every tool counts for duplicates"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "unchanged tools skipped before the duplicate check",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            name = tool.get(\"name\", \"\")\n",
+          "new": "            if baseline is not None and baseline.get(tool.get(\"name\", \"\")) == descriptor_digest(tool):\n                continue\n            name = tool.get(\"name\", \"\")\n"
+        }
+      ],
+      "expect": "with a baseline, only new and changed tools are linted, but every tool counts for duplicates"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "new tools skipped when there is a baseline",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if baseline is None or baseline.get(name) != descriptor_digest(tool):\n",
+          "new": "            if baseline is None or (name in baseline and baseline[name] != descriptor_digest(tool)):\n"
+        }
+      ],
+      "expect": "with a baseline, only new and changed tools are linted, but every tool counts for duplicates"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "baseline ignored",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if baseline is None or baseline.get(name) != descriptor_digest(tool):\n",
+          "new": "            if True:\n"
+        }
+      ],
+      "expect": "with a baseline, only new and changed tools are linted, but every tool counts for duplicates"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "reads every page before logging",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for page in pages:\n",
+          "new": "    for page in [page async for page in pages]:\n"
+        }
+      ],
+      "expect": "a page is logged before the next page is fetched"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "looks one page ahead",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for page in pages:\n",
+          "new": "    async for page in _one_ahead(pages):\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "    yield \"FAIL\" if any(f.severity == \"block\" for f in logged) else \"PASS\"\n",
+          "new": "    yield \"FAIL\" if any(f.severity == \"block\" for f in logged) else \"PASS\"\n\n\nasync def _one_ahead(pages):\n    held = None\n    async for page in pages:\n        if held is not None:\n            yield held\n        held = page\n    if held is not None:\n        yield held\n"
+        }
+      ],
+      "expect": "a page is logged before the next page is fetched"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "baseline names taken as already seen",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    seen: set[str] = set()\n",
+          "new": "    seen: set[str] = set(baseline or ())\n"
+        }
+      ],
+      "expect": "with a baseline, only new and changed tools are linted, but every tool counts for duplicates"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "the verdict ignores duplicate-name findings",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    yield \"FAIL\" if any(f.severity == \"block\" for f in logged) else \"PASS\"\n",
+          "new": "    yield \"FAIL\" if any(f.severity == \"block\" and f.message != \"duplicate tool name\" for f in logged) else \"PASS\"\n"
+        }
+      ],
+      "expect": "with a baseline, only new and changed tools are linted, but every tool counts for duplicates"
+    },
+    {
+      "test": "test_lint_stream",
+      "name": "duplicates found by descriptor digest instead of by name",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if name not in seen:\n                seen.add(name)\n            elif name not in reported:\n",
+          "new": "            key = descriptor_digest(tool)\n            if key not in seen:\n                seen.add(key)\n            elif name not in reported:\n"
+        }
+      ],
+      "expect": "a duplicate is reported when its second copy arrives, just before that copy's findings"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "words split on whitespace",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "        found = REFERENCE.findall(tool.get(\"description\", \"\"))\n",
+          "new": "        words = tool.get(\"description\", \"\").split()\n        found = [w for u, w in zip(words, words[1:]) if u.lower() == \"use\" and \"_\" in w]\n"
+        }
+      ],
+      "expect": "a reference is 'use' and a tool name, whatever the punctuation, each tool once"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "punctuation stripped from the words, backticks kept",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "        found = REFERENCE.findall(tool.get(\"description\", \"\"))\n",
+          "new": "        words = tool.get(\"description\", \"\").split()\n        found = [w.strip(\".,;:()\") for u, w in zip(words, words[1:])\n                 if u.lower().strip(\"(\") == \"use\" and \"_\" in w]\n"
+        }
+      ],
+      "expect": "a reference is 'use' and a tool name, whatever the punctuation, each tool once"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "every mention kept",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "        graph[tool[\"name\"]] = list(dict.fromkeys(found))\n",
+          "new": "        graph[tool[\"name\"]] = found\n"
+        }
+      ],
+      "expect": "a reference is 'use' and a tool name, whatever the punctuation, each tool once"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "'use' matched inside other words",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "REFERENCE = re.compile(r\"\\b(?i:use)\\s+`?([a-z][a-z0-9]*_[a-z0-9_]*)\")\n",
+          "new": "REFERENCE = re.compile(r\"(?i:use)\\s+`?([a-z][a-z0-9]*_[a-z0-9_]*)\")\n"
+        }
+      ],
+      "expect": "a reference is 'use' and a tool name, whatever the punctuation, each tool once"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "'use' matched in lower case only",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "REFERENCE = re.compile(r\"\\b(?i:use)\\s+`?([a-z][a-z0-9]*_[a-z0-9_]*)\")\n",
+          "new": "REFERENCE = re.compile(r\"\\buse\\s+`?([a-z][a-z0-9]*_[a-z0-9_]*)\")\n"
+        }
+      ],
+      "expect": "a reference is 'use' and a tool name, whatever the punctuation, each tool once"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "backticks not allowed",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "REFERENCE = re.compile(r\"\\b(?i:use)\\s+`?([a-z][a-z0-9]*_[a-z0-9_]*)\")\n",
+          "new": "REFERENCE = re.compile(r\"\\b(?i:use)\\s+([a-z][a-z0-9]*_[a-z0-9_]*)\")\n"
+        }
+      ],
+      "expect": "a reference is 'use' and a tool name, whatever the punctuation, each tool once"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "only 'use X instead' counts",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "REFERENCE = re.compile(r\"\\b(?i:use)\\s+`?([a-z][a-z0-9]*_[a-z0-9_]*)\")\n",
+          "new": "REFERENCE = re.compile(r\"\\b(?i:use)\\s+`?([a-z][a-z0-9]*_[a-z0-9_]*)`?\\s+instead\")\n"
+        }
+      ],
+      "expect": "the lesson's GOOD_REGISTRY points at two tools it does not have"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "any snake_case word counts, with or without 'use'",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "REFERENCE = re.compile(r\"\\b(?i:use)\\s+`?([a-z][a-z0-9]*_[a-z0-9_]*)\")\n",
+          "new": "REFERENCE = re.compile(r\"`?([a-z][a-z0-9]*_[a-z0-9_]*)\")\n"
+        }
+      ],
+      "expect": "a reference is 'use' and a tool name, whatever the punctuation, each tool once"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "self-references dropped from the graph",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "        graph[tool[\"name\"]] = list(dict.fromkeys(found))\n",
+          "new": "        graph[tool[\"name\"]] = [ref for ref in dict.fromkeys(found) if ref != tool[\"name\"]]\n"
+        }
+      ],
+      "expect": "a reference is 'use' and a tool name, whatever the punctuation, each tool once"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "namespace taken before the last underscore",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "            groups.setdefault(name.split(\"_\", 1)[0], []).append(name)\n",
+          "new": "            groups.setdefault(name.rsplit(\"_\", 1)[0], []).append(name)\n"
+        }
+      ],
+      "expect": "only references between tools of one namespace link it; a missing tool links nothing"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "a self-reference not reported",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "            if ref == name:\n                findings.append(Finding(\"warn\", name, \"description references the tool itself\"))\n            elif ref not in graph:\n",
+          "new": "            if ref not in graph:\n"
+        }
+      ],
+      "expect": "a description must not send the model to the tool itself or to a tool that is not there"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "a missing tool reported at every mention",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "    for name, refs in graph.items():\n        for ref in refs:\n",
+          "new": "    for tool in tools:\n        name = tool[\"name\"]\n        for ref in REFERENCE.findall(tool.get(\"description\", \"\")):\n"
+        }
+      ],
+      "expect": "a description must not send the model to the tool itself or to a tool that is not there"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "a missing tool becomes a node that links the tools pointing at it",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "    inside = set(members)\n    links: dict[str, set[str]] = {name: set() for name in members}\n    for name in members:\n",
+          "new": "    inside = set(members) | {ref for name in members for ref in graph[name] if ref not in graph}\n    links: dict[str, set[str]] = {name: set() for name in inside}\n    for name in members:\n"
+        },
+        {
+          "file": "refs.py",
+          "old": "        pieces.append(sorted(piece))\n",
+          "new": "        pieces.append(sorted(p for p in piece if p in graph))\n"
+        }
+      ],
+      "expect": "only references between tools of one namespace link it; a missing tool links nothing"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "pieces found over the whole registry, through other namespaces",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "    inside = set(members)\n    links: dict[str, set[str]] = {name: set() for name in members}\n    for name in members:\n",
+          "new": "    inside = set(graph)\n    links: dict[str, set[str]] = {name: set() for name in graph}\n    for name in graph:\n"
+        },
+        {
+          "file": "refs.py",
+          "old": "        pieces.append(sorted(piece))\n",
+          "new": "        pieces.append(sorted(p for p in piece if p in members))\n"
+        }
+      ],
+      "expect": "only references between tools of one namespace link it; a missing tool links nothing"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "references followed one way only",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "                links[ref].add(name)\n",
+          "new": ""
+        }
+      ],
+      "expect": "the lesson's GOOD_REGISTRY points at two tools it does not have"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "namespace groups in registry order",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "    for prefix in sorted(groups):\n",
+          "new": "    for prefix in groups:\n"
+        }
+      ],
+      "expect": "only references between tools of one namespace link it; a missing tool links nothing"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "pieces in registry order",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "    for start in sorted(members):\n",
+          "new": "    for start in members:\n"
+        }
+      ],
+      "expect": "the lesson's GOOD_REGISTRY points at two tools it does not have"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "unknown references reported only in namespaces the registry has, as in the quiz's lint_cross_refs",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "            elif ref not in graph:\n",
+          "new": "            elif ref not in graph and ref.split(\"_\", 1)[0] in {n.split(\"_\", 1)[0] for n in graph}:\n"
+        }
+      ],
+      "expect": "a description must not send the model to the tool itself or to a tool that is not there"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "unknown references reported only in the tool's own namespace",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "            elif ref not in graph:\n",
+          "new": "            elif ref not in graph and ref.split(\"_\", 1)[0] == name.split(\"_\", 1)[0]:\n"
+        }
+      ],
+      "expect": "a description must not send the model to the tool itself or to a tool that is not there"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "tool names matched as word_word, so maps_route_v2 is cut short",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "REFERENCE = re.compile(r\"\\b(?i:use)\\s+`?([a-z][a-z0-9]*_[a-z0-9_]*)\")",
+          "new": "REFERENCE = re.compile(r\"\\b(?i:use)\\s+`?([a-z]+_[a-z]+)\")"
+        }
+      ],
+      "expect": "a reference is 'use' and a tool name, whatever the punctuation, each tool once"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "tool names without digits",
+      "edits": [
+        {
+          "file": "refs.py",
+          "old": "REFERENCE = re.compile(r\"\\b(?i:use)\\s+`?([a-z][a-z0-9]*_[a-z0-9_]*)\")",
+          "new": "REFERENCE = re.compile(r\"\\b(?i:use)\\s+`?([a-z][a-z_]*_[a-z_]*)\")"
+        }
+      ],
+      "expect": "a reference is 'use' and a tool name, whatever the punctuation, each tool once"
+    }
+  ]
+}
