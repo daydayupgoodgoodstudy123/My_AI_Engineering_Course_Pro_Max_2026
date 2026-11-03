@@ -1,0 +1,137 @@
+{
+  "lesson": "phases/13-tools-and-protocols/22-skills-and-agent-sdks",
+  "title": "Agent Skills: Portable Contract and Runtime Boundary",
+  "format": "staged-brownfield",
+  "service": "SkillPack: the lesson's SKILL.md toolchain for a host: the YAML-subset parser and name rules, a writer that YAML hosts read the same way, an ordered package validator, a streaming TAP check of the host's lifecycle events, and the workflow edges between skills with an install order",
+  "sources": {
+    "docs/en.md": "adc5ec9cd045c954ade287b53453397cfaf3c1152024d5cf01f896b80f4ff2b6",
+    "code/main.py": "571791b390ee15dc974e053b89bc5fc1de19b89a0465ea47f1586f5fce53b17f",
+    "code/tests/test_main.py": "2e049c481c8df6f54170033068377d3d52118d726eb57f40a0c9812ddb5ded04",
+    "quiz/quiz.md": "f5d2c0224565826800a2ed4a2ac4c21b0009f8d26552986eed2c9f152730f9ce",
+    "outputs/skill-contract-reviewer/SKILL.md": "84345705cb4959f2234d49b35fffbcf15066109e8e90925877f1283129dbbe73",
+    "outputs/skill-contract-reviewer/references/contract.md": "8435abe9bf7845bbe23c67aafb45e0f43c2ddb44681feb224e2b809b3594a7de"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_frontmatter_and_names",
+      "kind": "debug",
+      "lesson_anchor": "The portable core (name: lowercase letters, digits and single hyphens, matching the parent directory); Frontmatter is executable metadata; code/main.py parse_frontmatter, _decode_scalar ('' inside single quotes) and the name chain of validate_skill_text; code/main.讲解.md on Windows line endings",
+      "planted_bugs": [
+        "line_content strips only the \\n of a \\r\\n line ending; the error surfaces one call up, as parse_frontmatter's 'SKILL.md must begin with an exact --- line' for a file whose first line is ---",
+        "decode_scalar drops the outer single quotes but does not turn '' back into '",
+        "NAME_PATTERN is [a-z0-9-]+, so leading, trailing and doubled hyphens pass",
+        "name_issue compares name and directory with lower(), so Release-Readiness matches release-readiness",
+        "split_lines copies the rest of the text once per line (rest = rest[cut:]), O(n^2)"
+      ],
+      "timing_assert": "parse_frontmatter on a 2.6 MB SKILL.md (50,000 body lines) under 0.1 s. At load average 6-8, five series: rest-slicing version 1.04-1.86 s per run (series minimum 10.4-14.9x the limit); position-based split 4.7-12.5 ms (series median 5.2-8.9 ms, worst single run 8.0x under the limit); a lazy parser that slices the body off at the closing line takes under 0.1 ms",
+      "overfix_guard": "the CRLF fix keeps indentation (strip() breaks the > block and the metadata map), drops only a \\r before \\n, and does not cut a character from a last line without one; the speed fix keeps a closing --- that is the file's last line, starts the body right after a ---\\r\\n closing line and keeps the last unterminated line (text.find('\\n---\\n'), a fixed 4-character offset, split('\\n')[:-1] and partition are all caught); the name fix keeps 2fa-helper, v2, a, skill-contract-reviewer and 64 characters valid (a letter first, letters only, one hyphen at most or at least are caught) and still rejects release-, café-notes and a name ending in a line break (re.match, isalnum/islower, ^...$ with re.match)"
+    },
+    {
+      "part": 2,
+      "test": "test_skill_file_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "The portable core and its optional fields; Runtime extensions are a second layer; outputs/skill-contract-reviewer/SKILL.md (lesson: \"22\"); quiz Q7 (description: Use when: deploying fails in PyYAML), Q9 (only | and > blocks), Q12 (allowed_tools is a syntax error)",
+      "storage": "the SKILL.md file itself: frontmatter in the lesson's YAML subset, then the Markdown body",
+      "exactness": "parse_frontmatter(render_skill(fields, body)) == (fields, body) through a SKILL.md written and read as bytes, field order kept, and the exact text a YAML host reads the same way: the lesson's own SKILL.md byte for byte, 43 single values (plain where safe, JSON double quotes where YAML would read them differently, typed scalars quoted for core fields and metadata only), | blocks where the subset reads them back exactly and double quotes otherwise",
+      "traps": [
+        "quoting nothing, quoting everything, repr() or YAML single quotes, json.dumps with ensure_ascii",
+        "numbers, dates, booleans and null left plain in core fields or metadata (lesson: \"22\"); the same rule applied to host extensions (user-invocable: \"false\"); YAML words matched case-sensitively or as a prefix; only digits treated as numbers",
+        "': ' and ' #' widened to any : or #, or a trailing : left plain",
+        "only the parser's [ { & * ! treated as indicators; quote characters, |, >, #, -, ?, @, %, `, ], } and , first left plain",
+        "leading or trailing whitespace, the empty string, tabs and invisible characters left plain",
+        "a > block, empty block lines written as two spaces, blocks for values the parser cannot read back (indented line, leading or trailing line break, \\r, a tab) or for metadata values",
+        "a blank line after the closing ---, the body stripped, fields sorted",
+        "lists, nested metadata, a map in a field other than metadata, non-string values, empty metadata, an underscore key or a key with a space written instead of a ValueError"
+      ],
+      "clarifying_questions": [
+        "validate before writing",
+        "quote style",
+        "field order",
+        "host extension types",
+        "|- blocks",
+        "empty metadata"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_validation_order",
+      "kind": "core algorithm",
+      "lesson_anchor": "Build It: Validation order matters (cheap structural facts before deeper content rules); the issue codes and limits of code/main.py; Exercise 2 (compatibility 500 passes, 501 fails); Exercise 3 (an allowed extension stays distinguishable); references/contract.md",
+      "traps": [
+        "validation continued after a frontmatter syntax error",
+        "a second name issue (directory-mismatch beside name-format)",
+        "lengths in UTF-8 bytes (1024 Chinese characters of description, 500 of compatibility), >= at 1024 or 500",
+        "blank description, compatibility or body counted as present; compatibility checked when absent",
+        "allowed-tools split on any whitespace (a | block of tool names) or only checked for being non-empty",
+        "unknown fields before body-required, in file order, or checked against a consumed iterator",
+        "allowed extensions left out of runtime_extensions; core_fields or runtime_extensions unsorted; the report's body stripped",
+        "the later rules skipped once the name has an issue"
+      ],
+      "integration": "name issues come from Part 1's name_issue; a skill written by Part 2's render_skill validates with one allowed extension",
+      "clarifying_questions": [
+        "two name problems",
+        "extensions after a syntax error",
+        "double spaces in allowed-tools",
+        "the type of allowed_runtime_extensions"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_lifecycle_tap",
+      "kind": "streaming",
+      "lesson_anchor": "The skill lifecycle: discovery, validation, cataloging, selection, activation, disclosure, execution, verification; 'A discovered skill is not active. An active skill is not authorized to do everything it describes. A permitted tool call is not proof that the result is correct.'; Claude Code's explicit /skill invocation",
+      "wire_format": "TAP: one 'ok N - name' or 'not ok N - name # reason' line per session as it ends, the plan '1..N' last, every line ending in \\n; decided by the test's join, split('\\n') and a TAP-line regex, plus a probe that records how many events had been pulled when each line arrived",
+      "traps": [
+        "every event read first, a failing session reported at its first problem, numbering by opening order, the plan put first",
+        "missing or doubled newlines",
+        "stage order checked before the failed validation; only activation and later stages checked against a failed validation (cataloged after failed validation); a failed validation alone reported as a failure; each stage made to need the one listed before it",
+        "a tool call counted as verified by any earlier verified event",
+        "a skill's state kept after ended, or one seen set shared through a mutable default argument",
+        "open sessions left out, sorted by name, ordered by their last event, or always 'session not ended'",
+        "an unverified tool call put before the session's first problem; no plan when there are no sessions"
+      ],
+      "clarifying_questions": [
+        "a failed validation followed by nothing",
+        "repeated stages",
+        "unknown stages",
+        "sessions open at the end",
+        "plan first",
+        "an open session whose last event is an unverified tool call"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_workflow_edges",
+      "kind": "graph",
+      "lesson_anchor": "Skills do not import one another: write cross-skill dependencies as observable workflow edges ('After producing the candidate changelog, invoke the `release-risk-review` skill. ... If that skill is unavailable, stop and report the missing dependency.'); Exercise 5 (fail clearly when a dependency is unavailable)",
+      "traps": [
+        "the frontmatter scanned (a self-edge from the description)",
+        "names without backticks counted; phrases matched within one line; Invoke or If matched in one case only",
+        "code fences found only at column 0 or only as a bare ```, or not handled",
+        "one edge per reference; edges in discovery order",
+        "a guard covering every reference, or the reference after it; an edge guarded when any one reference is",
+        "install order by heap-ordered Kahn, depth-first post-order, number of dependencies, closest dependency, reversed; missing dependencies installed, or holding their skill back"
+      ],
+      "clarifying_questions": [
+        "other phrasings",
+        "a guard in a later paragraph",
+        "installing a skill whose dependency is missing",
+        "cycles",
+        "~~~ fences",
+        "two guards after one reference"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1 has five planted bugs instead of the four suggested. The added one, line_content keeping the \\r of \\r\\n, gives the far-from-root error the spec asks for: parse_frontmatter says 'SKILL.md must begin with an exact --- line' about a file whose first line is ---.",
+    "Part 1's overfix guards are not the suggested splitlines/U+2028 check. str.splitlines and CRLF-exact content are already traps in lessons 01, 03, 07, 09 and 14 of this chapter, and the spec allows a trap kind at most twice per chapter. The guards here are the indentation strip() removes, a closing --- that is the file's last line, the body starting right after a ---\\r\\n line, and the lesson's name rules (2fa-helper, two hyphens). splitlines(keepends=True) passes and is a follow-up question; a CRLF body is only checked to start after the closing line.",
+    "Part 1 times a 2.6 MB SKILL.md with 50,000 body lines rather than 500 KB. On this machine the slicing version takes about 0.1 s at 500 KB (copying cache-resident text is fast), which leaves no room for 8x margins on both sides; 2.6 MB gives 1.0-1.9 s against a 0.1 s limit and about 5 ms for the fix.",
+    "parse_frontmatter keeps the body exactly as written (the lesson's code strips it) so that Part 2 can round-trip it; body-required tests body.strip().",
+    "Part 2's quoting rules add YAML-typed scalars (numbers, dates, booleans, null) for core fields and metadata, from the lesson's own SKILL.md (lesson: \"22\"); runtime extension fields stay host-typed (user-invocable: false). The suggested 'a body line starting with --- must not end the frontmatter' is a regression check (a --- rule in the body) rather than a writer trap, because this grammar never makes the writer emit an unindented --- line.",
+    "Part 3's allowed-tools-shape also covers tools separated by tabs or line breaks (a | block of names), reading the lesson's 'non-empty space-separated string' literally; the lesson's code only checks that it is non-empty.",
+    "Part 4 adds an explicit 'ended' event, which the lesson's eight stages do not name, to close a session; a failed validation followed by nothing is ok (the host did its job), and sessions still open at the end get a line with their first problem or 'session not ended'.",
+    "Part 5: a reference is 'invoke the `name` skill' with the name in backticks, a guard ('if that skill is unavailable') covers the nearest reference before it, and a missing dependency does not hold a skill back from the install order, since skills are invoked through the runtime rather than imported."
+  ]
+}
