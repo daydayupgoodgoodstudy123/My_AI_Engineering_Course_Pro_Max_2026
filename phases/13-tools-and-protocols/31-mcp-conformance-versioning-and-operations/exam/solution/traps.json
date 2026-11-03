@@ -1,0 +1,2275 @@
+{
+  "package": "conformance",
+  "tests": [
+    "test_release_gate",
+    "test_transcript_corpus",
+    "test_response_conformance",
+    "test_proxy_tap",
+    "test_sdk_differential"
+  ],
+  "layers": [
+    {
+      "test": "test_release_gate",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "no credential reaches the report, however its key is spelled"
+        },
+        {
+          "name": "redact compares canonical key names",
+          "edits": [
+            {
+              "file": "evidence.py",
+              "old": "            key: REDACTED if key in SECRET_KEYS else redact(item)\n",
+              "new": "            key: REDACTED if canonical_field_name(key) in SECRET_KEYS else redact(item)\n"
+            }
+          ],
+          "expect": "a canary that reported no samples never promotes"
+        },
+        {
+          "name": "+ a missing or mistyped observation fails the health window",
+          "edits": [
+            {
+              "file": "release.py",
+              "old": "    reasons: list[str] = []\n    if health.get(\"sampleCount\", policy.min_samples) < policy.min_samples:\n        reasons.append(\"health window has too few samples\")\n    if health.get(\"errorRate\", 0.0) > policy.max_error_rate:\n        reasons.append(\"error rate exceeds the release threshold\")\n    if health.get(\"p95Ms\", 0.0) > policy.max_p95_ms:\n        reasons.append(\"p95 latency exceeds the release threshold\")\n    return not reasons, reasons\n",
+              "new": "    reasons: list[str] = []\n    samples = health.get(\"sampleCount\")\n    if not isinstance(samples, int) or isinstance(samples, bool) or samples < policy.min_samples:\n        reasons.append(\"health window has too few samples\")\n    error_rate = health.get(\"errorRate\")\n    if not isinstance(error_rate, (int, float)) or isinstance(error_rate, bool) or error_rate > policy.max_error_rate:\n        reasons.append(\"error rate exceeds the release threshold\")\n    p95 = health.get(\"p95Ms\")\n    if not isinstance(p95, (int, float)) or isinstance(p95, bool) or p95 > policy.max_p95_ms:\n        reasons.append(\"p95 latency exceeds the release threshold\")\n    return not reasons, reasons\n"
+            }
+          ],
+          "expect": "a failing candidate holds when its rollback target is no longer active in the Registry"
+        },
+        {
+          "name": "+ registryStatus must be exactly active",
+          "edits": [
+            {
+              "file": "release.py",
+              "old": "    if rollback.get(\"registryStatus\") == \"deleted\":\n",
+              "new": "    if rollback.get(\"registryStatus\") != \"active\":\n"
+            }
+          ],
+          "expect": "artifactDigest='sha256:"
+        },
+        {
+          "name": "+ pins must be SHA-256 digests",
+          "edits": [
+            {
+              "file": "release.py",
+              "old": "    if not all(isinstance(rollback.get(field), str) and rollback[field] for field in PIN_FIELDS):\n",
+              "new": "    if not all(is_sha256_digest(rollback.get(field)) for field in PIN_FIELDS):\n"
+            }
+          ],
+          "expect": "the gate should stay fast on a large corpus"
+        },
+        {
+          "name": "+ redact the transcripts once per evaluation",
+          "edits": [
+            {
+              "file": "release.py",
+              "old": "        case_digests = {\n            case.name: digest(self._transcripts(cases)[case.name][\"evidence\"]) for case in cases\n        }\n        evidence = {\n            \"transcripts\": self._transcripts(cases),\n",
+              "new": "        transcripts = self._transcripts(cases)\n        case_digests = {name: digest(record[\"evidence\"]) for name, record in transcripts.items()}\n        evidence = {\n            \"transcripts\": transcripts,\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_release_gate",
+      "name": "redact lowercases keys but keeps separators",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "            key: REDACTED if canonical_field_name(key) in SECRET_KEYS else redact(item)\n",
+          "new": "            key: REDACTED if key.lower() in SECRET_KEYS else redact(item)\n"
+        }
+      ],
+      "expect": "no credential reaches the report, however its key is spelled"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "canonical form drops hyphens only",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "    return \"\".join(character for character in key.casefold() if character.isalnum())\n",
+          "new": "    return key.casefold().replace(\"-\", \"\")\n"
+        }
+      ],
+      "expect": "no credential reaches the report, however its key is spelled"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "canonical form drops hyphens and underscores but not dots",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "    return \"\".join(character for character in key.casefold() if character.isalnum())\n",
+          "new": "    return key.casefold().replace(\"-\", \"\").replace(\"_\", \"\")\n"
+        }
+      ],
+      "expect": "no credential reaches the report, however its key is spelled"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "denylist matched as substrings",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "            key: REDACTED if canonical_field_name(key) in SECRET_KEYS else redact(item)\n",
+          "new": "            key: REDACTED if any(word in canonical_field_name(key) for word in SECRET_KEYS) else redact(item)\n"
+        }
+      ],
+      "expect": "only keys whose canonical form is on the denylist are redacted"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "every string value redacted",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "    return value\n",
+          "new": "    return REDACTED if isinstance(value, str) else value\n"
+        }
+      ],
+      "expect": "only keys whose canonical form is on the denylist are redacted"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "redaction stops at lists",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "    if isinstance(value, list):\n        return [redact(item) for item in value]\n",
+          "new": "    if isinstance(value, list):\n        return list(value)\n"
+        }
+      ],
+      "expect": "no credential reaches the report, however its key is spelled"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "failing defaults but no type checks (the lesson's own shape)",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    reasons: list[str] = []\n    samples = health.get(\"sampleCount\")\n    if not _is_int(samples):\n        reasons.append(\"health window has no sample count\")\n    elif samples < policy.min_samples:\n        reasons.append(\"health window has too few samples\")\n    error_rate = health.get(\"errorRate\")\n    if not _is_number(error_rate):\n        reasons.append(\"health window has no error rate\")\n    elif not error_rate <= policy.max_error_rate:\n        reasons.append(\"error rate exceeds the release threshold\")\n    p95 = health.get(\"p95Ms\")\n    if not _is_number(p95):\n        reasons.append(\"health window has no p95 latency\")\n    elif not p95 <= policy.max_p95_ms:\n        reasons.append(\"p95 latency exceeds the release threshold\")\n    return not reasons, reasons\n",
+          "new": "    reasons: list[str] = []\n    if health.get(\"sampleCount\", 0) < policy.min_samples:\n        reasons.append(\"health window has too few samples\")\n    if health.get(\"errorRate\", 1.0) > policy.max_error_rate:\n        reasons.append(\"error rate exceeds the release threshold\")\n    if health.get(\"p95Ms\", float(\"inf\")) > policy.max_p95_ms:\n        reasons.append(\"p95 latency exceeds the release threshold\")\n    return not reasons, reasons\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "missing observations are skipped",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    reasons: list[str] = []\n    samples = health.get(\"sampleCount\")\n    if not _is_int(samples):\n        reasons.append(\"health window has no sample count\")\n    elif samples < policy.min_samples:\n        reasons.append(\"health window has too few samples\")\n    error_rate = health.get(\"errorRate\")\n    if not _is_number(error_rate):\n        reasons.append(\"health window has no error rate\")\n    elif not error_rate <= policy.max_error_rate:\n        reasons.append(\"error rate exceeds the release threshold\")\n    p95 = health.get(\"p95Ms\")\n    if not _is_number(p95):\n        reasons.append(\"health window has no p95 latency\")\n    elif not p95 <= policy.max_p95_ms:\n        reasons.append(\"p95 latency exceeds the release threshold\")\n    return not reasons, reasons\n",
+          "new": "    reasons: list[str] = []\n    samples, error_rate, p95 = health.get(\"sampleCount\"), health.get(\"errorRate\"), health.get(\"p95Ms\")\n    if samples is not None and samples < policy.min_samples:\n        reasons.append(\"health window has too few samples\")\n    if error_rate is not None and error_rate > policy.max_error_rate:\n        reasons.append(\"error rate exceeds the release threshold\")\n    if p95 is not None and p95 > policy.max_p95_ms:\n        reasons.append(\"p95 latency exceeds the release threshold\")\n    return not reasons, reasons\n"
+        }
+      ],
+      "expect": "a canary that reported no samples never promotes"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "a numeric-string sample count is coerced",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    samples = health.get(\"sampleCount\")\n",
+          "new": "    samples = int(health.get(\"sampleCount\") or 0)\n"
+        }
+      ],
+      "expect": "fails the window: {'sampleCount': '1200'"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "the sample threshold is exclusive",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    elif samples < policy.min_samples:\n",
+          "new": "    elif samples <= policy.min_samples:\n"
+        }
+      ],
+      "expect": "a window exactly at the thresholds is healthy"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "the error-rate limit is exclusive",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    elif not error_rate <= policy.max_error_rate:\n",
+          "new": "    elif error_rate >= policy.max_error_rate:\n"
+        }
+      ],
+      "expect": "a window exactly at the thresholds is healthy"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "the latency limit is exclusive",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    elif not p95 <= policy.max_p95_ms:\n",
+          "new": "    elif p95 >= policy.max_p95_ms:\n"
+        }
+      ],
+      "expect": "a window exactly at the thresholds is healthy"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "registryStatus compared case-insensitively",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    if rollback.get(\"registryStatus\") != \"active\":\n",
+          "new": "    if str(rollback.get(\"registryStatus\")).strip().lower() != \"active\":\n"
+        }
+      ],
+      "expect": "registryStatus='Active' is not rollback evidence"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "a missing registryStatus defaults to active",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    if rollback.get(\"registryStatus\") != \"active\":\n",
+          "new": "    if rollback.get(\"registryStatus\", \"active\") != \"active\":\n"
+        }
+      ],
+      "expect": "registryStatus='<absent>' is not rollback evidence"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "pins checked by length",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    if not all(is_sha256_digest(rollback.get(field)) for field in PIN_FIELDS):\n",
+          "new": "    if not all(isinstance(rollback.get(field), str) and len(rollback[field]) == 64 for field in PIN_FIELDS):\n"
+        }
+      ],
+      "expect": "admissionEvidenceDigest='zzzz"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "pins matched with re.match and $",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "import hmac\n",
+          "new": "import hmac\nimport re\n"
+        },
+        {
+          "file": "release.py",
+          "old": "    if not all(is_sha256_digest(rollback.get(field)) for field in PIN_FIELDS):\n",
+          "new": "    if not all(isinstance(rollback.get(field), str) and re.match(r\"^[0-9a-f]{64}$\", rollback[field]) for field in PIN_FIELDS):\n"
+        }
+      ],
+      "expect": "artifactDigest='aaaa"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "pins may carry a sha256: prefix",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    if not all(is_sha256_digest(rollback.get(field)) for field in PIN_FIELDS):\n",
+          "new": "    if not all(is_sha256_digest(str(rollback.get(field)).removeprefix(\"sha256:\")) for field in PIN_FIELDS):\n"
+        }
+      ],
+      "expect": "artifactDigest='sha256:"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "healthy checked for truthiness",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    if rollback.get(\"healthy\") is not True:\n",
+          "new": "    if not rollback.get(\"healthy\"):\n"
+        }
+      ],
+      "expect": "healthy='yes' is not rollback evidence"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "version checked for truthiness",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    if not isinstance(version, str) or not version.strip():\n",
+          "new": "    if not version:\n"
+        }
+      ],
+      "expect": "version=' ' is not rollback evidence"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "a present signature is taken as valid",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    return hmac.compare_digest(signature, _sign(payload, signing_key))\n",
+          "new": "    return bool(signature)\n"
+        }
+      ],
+      "expect": "the signature covers every field"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "any configured key verifies, whoever signed",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    signing_key = trusted_signers.get(signer) if isinstance(signer, str) else None\n",
+          "new": "    signing_key = next(iter(trusted_signers.values()), None)\n"
+        }
+      ],
+      "expect": "only a trusted signer counts"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "speed-up: case digests over the raw evidence",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "        case_digests = {name: digest(record[\"evidence\"]) for name, record in transcripts.items()}\n",
+          "new": "        case_digests = {case.name: digest(case.evidence) for case in cases}\n"
+        }
+      ],
+      "expect": "digests cover the redacted evidence, so rotating a credential leaves them alone"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "bundle digest taken over the raw cases",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "            \"evidenceDigest\": digest(evidence),\n",
+          "new": "            \"evidenceDigest\": digest({\"cases\": [case.evidence for case in cases], \"health\": health}),\n"
+        }
+      ],
+      "expect": "digests cover the redacted evidence, so rotating a credential leaves them alone"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "speed-up: case digests cached by name on the gate",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "        case_digests = {name: digest(record[\"evidence\"]) for name, record in transcripts.items()}\n",
+          "new": "        cache = self.__dict__.setdefault(\"_digests\", {})\n        case_digests = {name: cache.setdefault(name, digest(record[\"evidence\"])) for name, record in transcripts.items()}\n"
+        }
+      ],
+      "expect": "a change to anything but a secret changes that case's digest"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "speed-up: case digests over the name and outcome only",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "        case_digests = {name: digest(record[\"evidence\"]) for name, record in transcripts.items()}\n",
+          "new": "        case_digests = {name: digest({\"name\": name, \"passed\": record[\"passed\"]}) for name, record in transcripts.items()}\n"
+        }
+      ],
+      "expect": "a change to anything but a secret changes that case's digest"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "case digest over the whole record",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "        case_digests = {name: digest(record[\"evidence\"]) for name, record in transcripts.items()}\n",
+          "new": "        case_digests = {name: digest(record) for name, record in transcripts.items()}\n"
+        }
+      ],
+      "expect": "a case digest is the digest of that case's redacted evidence"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "one corpus digest for every case",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "        case_digests = {name: digest(record[\"evidence\"]) for name, record in transcripts.items()}\n",
+          "new": "        corpus_digest = digest(transcripts)\n        case_digests = {name: corpus_digest for name in transcripts}\n"
+        }
+      ],
+      "expect": "each case digest covers that case's own evidence"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "speed-up: only the headers are redacted",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "\"evidence\": redact(case.evidence)}",
+          "new": "\"evidence\": {**case.evidence, \"headers\": redact(case.evidence[\"headers\"])}}"
+        }
+      ],
+      "expect": "no credential reaches the report, however its key is spelled"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "proxy evidence left unredacted",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "            \"proxy\": redact(proxy_reports),\n",
+          "new": "            \"proxy\": proxy_reports,\n"
+        }
+      ],
+      "expect": "no credential reaches the report, however its key is spelled"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "a failure always rolls back",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "        if not reasons:\n            action = \"promote\"\n        elif ready:\n            action = \"rollback\"\n        else:\n            action = \"hold\"\n",
+          "new": "        action = \"promote\" if not reasons else \"rollback\"\n"
+        }
+      ],
+      "expect": "a failing candidate holds when its rollback target is no longer active in the Registry"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "rollback readiness only checked after a failure",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "        if not ready:\n            reasons.append(\"no verified healthy rollback target\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "promotion needs a ready rollback target too"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "only string values under a secret key redacted",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "            key: REDACTED if canonical_field_name(key) in SECRET_KEYS else redact(item)\n",
+          "new": "            key: REDACTED if canonical_field_name(key) in SECRET_KEYS and isinstance(item, str) else redact(item)\n"
+        }
+      ],
+      "expect": "a secret key's whole value is replaced, whatever its type"
+    },
+    {
+      "test": "test_release_gate",
+      "name": "a float sample count accepted",
+      "edits": [
+        {
+          "file": "release.py",
+          "old": "    if not _is_int(samples):\n",
+          "new": "    if not _is_number(samples):\n"
+        }
+      ],
+      "expect": "a missing, mistyped or out-of-bounds observation fails the window: {'sampleCount': 1200.0"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "file name keeps the case",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "    slug = re.sub(r\"[^a-z0-9]+\", \"-\", name.lower()).strip(\"-\")\n",
+          "new": "    slug = re.sub(r\"[^A-Za-z0-9]+\", \"-\", name).strip(\"-\")\n"
+        }
+      ],
+      "expect": "a file name is the case name lowercased"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "file name replaces every character, not every run",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "    slug = re.sub(r\"[^a-z0-9]+\", \"-\", name.lower()).strip(\"-\")\n",
+          "new": "    slug = re.sub(r\"[^a-z0-9]\", \"-\", name.lower()).strip(\"-\")\n"
+        }
+      ],
+      "expect": "a file name is the case name lowercased"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "file name keeps dots",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "    slug = re.sub(r\"[^a-z0-9]+\", \"-\", name.lower()).strip(\"-\")\n",
+          "new": "    slug = re.sub(r\"[^a-z0-9.]+\", \"-\", name.lower()).strip(\"-\")\n"
+        }
+      ],
+      "expect": "a case name never leaves the corpus"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "file name not trimmed",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "    slug = re.sub(r\"[^a-z0-9]+\", \"-\", name.lower()).strip(\"-\")\n",
+          "new": "    slug = re.sub(r\"[^a-z0-9]+\", \"-\", name.lower())\n"
+        }
+      ],
+      "expect": "a case name never leaves the corpus"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "\\W+ keeps letters outside a-z",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "    slug = re.sub(r\"[^a-z0-9]+\", \"-\", name.lower()).strip(\"-\")\n",
+          "new": "    slug = re.sub(r\"\\W+\", \"-\", name.lower()).strip(\"-\")\n"
+        }
+      ],
+      "expect": "each case is saved under fixture_filename(name)"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "lowercased after the substitution",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "    slug = re.sub(r\"[^a-z0-9]+\", \"-\", name.lower()).strip(\"-\")\n",
+          "new": "    slug = re.sub(r\"[^a-z0-9]+\", \"-\", name).lower().strip(\"-\")\n"
+        }
+      ],
+      "expect": "a file name is the case name lowercased"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "a name without letters or digits gets a file",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "    if not slug:\n        raise ValueError(f\"case name {name!r} has no letters or digits\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a name with no letters or digits has no file"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "header names lowercased on save",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "            \"headers\": stored.headers,\n",
+          "new": "            \"headers\": {key.lower(): value for key, value in stored.headers.items()},\n"
+        }
+      ],
+      "expect": "header names keep their case"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "header names lowercased on load",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "            headers=record[\"headers\"],\n",
+          "new": "            headers={key.lower(): value for key, value in record[\"headers\"].items()},\n"
+        }
+      ],
+      "expect": "header names keep their case"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "no collision check",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "            if existing != transcript.name:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "two names that share a fixture file are refused"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "collision judged by file name",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "            if existing != transcript.name:\n",
+          "new": "            if fixture_filename(existing) != fixture_filename(transcript.name):\n"
+        }
+      ],
+      "expect": "two names that share a fixture file are refused"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "collision noticed after the file was written",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "        path = self.root / fixture_filename(transcript.name)\n        if path.exists():\n            existing = json.loads(path.read_text(encoding=\"utf-8\")).get(\"name\")\n            if existing != transcript.name:\n                raise ValueError(\n                    f\"{transcript.name!r} and {existing!r} share the fixture file {path.name}\"\n                )\n",
+          "new": "        path = self.root / fixture_filename(transcript.name)\n        existing = json.loads(path.read_text(encoding=\"utf-8\")).get(\"name\") if path.exists() else transcript.name\n"
+        },
+        {
+          "file": "corpus.py",
+          "old": "        path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + \"\\n\", encoding=\"utf-8\")\n        return path\n",
+          "new": "        path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + \"\\n\", encoding=\"utf-8\")\n        if existing != transcript.name:\n            raise ValueError(\"name collision\")\n        return path\n"
+        }
+      ],
+      "expect": "a refused name leaves the other case's file alone"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "an existing fixture is never replaced",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "            if existing != transcript.name:\n",
+          "new": "            if True:\n"
+        }
+      ],
+      "expect": "share the fixture file"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "load trusts the file name",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "        if record.get(\"name\") != name:\n            raise KeyError(name)\n",
+          "new": ""
+        }
+      ],
+      "expect": "load finds a case by its exact name"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "names read from the file names",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "        return sorted(\n            json.loads(path.read_text(encoding=\"utf-8\"))[\"name\"] for path in self.root.glob(\"*.json\")\n        )\n",
+          "new": "        return sorted(path.stem for path in self.root.glob(\"*.json\"))\n"
+        }
+      ],
+      "expect": "names come back exactly as given, read from the files"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "a fixture without an era is read as modern",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "        era = record.get(\"era\")\n",
+          "new": "        era = record.get(\"era\", \"modern\")\n"
+        }
+      ],
+      "expect": "a fixture without an era is refused"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "a missing era raises KeyError",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "        era = record.get(\"era\")\n",
+          "new": "        era = record[\"era\"]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "any era value accepted on load",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "        if era not in ERAS:\n",
+          "new": "        if era is None:\n"
+        }
+      ],
+      "expect": "a protocol version is not an era"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "collision compared without case",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "            if existing != transcript.name:\n",
+          "new": "            if existing.casefold() != transcript.name.casefold():\n"
+        }
+      ],
+      "expect": "two names that share a fixture file are refused: 'GOLDEN-MODERN-LIST'"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "the era is not checked on save",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "        if transcript.era not in ERAS:\n            raise ValueError(f\"unknown era {transcript.era!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "an unknown era is refused"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "capabilities come back as a list",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "            capabilities=frozenset(record.get(\"capabilities\", [])),\n",
+          "new": "            capabilities=record.get(\"capabilities\", []),\n"
+        }
+      ],
+      "expect": "golden-modern-list comes back exactly as recorded"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "capabilities written with default=str",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "            \"capabilities\": sorted(stored.capabilities),\n",
+          "new": "            \"capabilities\": stored.capabilities,\n"
+        },
+        {
+          "file": "corpus.py",
+          "old": "json.dumps(record, indent=2, ensure_ascii=False)",
+          "new": "json.dumps(record, indent=2, ensure_ascii=False, default=str)"
+        }
+      ],
+      "expect": "golden-modern-list comes back exactly as recorded"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "no body stored as an empty object",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "            \"responseBody\": stored.response_body,\n",
+          "new": "            \"responseBody\": stored.response_body or {},\n"
+        }
+      ],
+      "expect": "golden-notification-no-response comes back exactly as recorded"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "expect stored as text",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "            \"expect\": stored.expect,\n",
+          "new": "            \"expect\": None if stored.expect is None else str(stored.expect),\n"
+        }
+      ],
+      "expect": "negative-conflicting-method-headers comes back exactly as recorded"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "loaded fixtures cached in memory",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "        self.root.mkdir(parents=True, exist_ok=True)\n",
+          "new": "        self.root.mkdir(parents=True, exist_ok=True)\n        self._cache: dict[str, Transcript] = {}\n"
+        },
+        {
+          "file": "corpus.py",
+          "old": "        path = self.root / fixture_filename(name)\n        if not path.exists():\n            raise KeyError(name)\n",
+          "new": "        if name in self._cache:\n            return self._cache[name]\n        path = self.root / fixture_filename(name)\n        if not path.exists():\n            raise KeyError(name)\n"
+        },
+        {
+          "file": "corpus.py",
+          "old": "        return Transcript(\n            name=record[\"name\"],",
+          "new": "        self._cache[name] = Transcript(\n            name=record[\"name\"],"
+        },
+        {
+          "file": "corpus.py",
+          "old": "            expect=record.get(\"expect\"),\n        )\n",
+          "new": "            expect=record.get(\"expect\"),\n        )\n        return self._cache[name]\n"
+        }
+      ],
+      "expect": "saving a name again replaces its fixture"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "an index file beside the fixtures",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "        path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + \"\\n\", encoding=\"utf-8\")\n",
+          "new": "        path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + \"\\n\", encoding=\"utf-8\")\n        (self.root / \"_index.txt\").write_text(transcript.name, encoding=\"utf-8\")\n"
+        }
+      ],
+      "expect": "one file per case, and nothing else"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "volatile values kept as recorded",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "    return replace(\n        transcript,\n        request=_normalize(transcript.request),\n        response_body=_normalize(transcript.response_body),\n    )\n",
+          "new": "    return transcript\n"
+        }
+      ],
+      "expect": "re-recording the same behaviour writes the same fixture"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "normalization does not enter lists",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "    if isinstance(value, list):\n        return [_normalize(item) for item in value]\n",
+          "new": "    if isinstance(value, list):\n        return list(value)\n"
+        }
+      ],
+      "expect": "re-recording the same behaviour writes the same fixture"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "only the response is normalized",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "        request=_normalize(transcript.request),\n",
+          "new": "        request=transcript.request,\n"
+        }
+      ],
+      "expect": "re-recording the same behaviour writes the same fixture"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "normalization replaces any value",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "            if key in VOLATILE and isinstance(item, str) and item\n",
+          "new": "            if key in VOLATILE\n"
+        }
+      ],
+      "expect": "an empty, numeric or null value is what a negative case recorded"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "normalization replaces empty strings too",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "            if key in VOLATILE and isinstance(item, str) and item\n",
+          "new": "            if key in VOLATILE and isinstance(item, str)\n"
+        }
+      ],
+      "expect": "an empty, numeric or null value is what a negative case recorded"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "normalization in place",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "def _normalize(value: Any) -> Any:\n    if isinstance(value, dict):\n        return {\n            key: VOLATILE[key]\n            if key in VOLATILE and isinstance(item, str) and item\n            else _normalize(item)\n            for key, item in value.items()\n        }\n    if isinstance(value, list):\n        return [_normalize(item) for item in value]\n    return value\n",
+          "new": "def _normalize(value: Any) -> Any:\n    if isinstance(value, dict):\n        for key, item in value.items():\n            if key in VOLATILE and isinstance(item, str) and item:\n                value[key] = VOLATILE[key]\n            else:\n                _normalize(item)\n    elif isinstance(value, list):\n        for item in value:\n            _normalize(item)\n    return value\n"
+        }
+      ],
+      "expect": "normalizing leaves the live capture alone"
+    },
+    {
+      "test": "test_transcript_corpus",
+      "name": "capabilities stored in set order",
+      "edits": [
+        {
+          "file": "corpus.py",
+          "old": "            \"capabilities\": sorted(stored.capabilities),\n",
+          "new": "            \"capabilities\": list(stored.capabilities),\n"
+        }
+      ],
+      "expect": "capabilities are stored as a sorted list"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "unknown members rejected",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        tools = result.get(\"tools\")\n",
+          "new": "        tools = result.get(\"tools\")\n        if set(result) - {\"resultType\", \"tools\", \"nextCursor\", \"_meta\"}:\n            raise Violation(\"tools-payload\", \"unexpected member\")\n"
+        }
+      ],
+      "expect": "an unknown member beside a known result is additive"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "an unknown resultType read as complete",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if not isinstance(result_type, str) or result_type not in allowed:\n            raise Violation(\n                \"unknown-result-type\", f\"resultType {result_type!r} is unknown or not negotiated\"\n            )\n",
+          "new": "        if not isinstance(result_type, str) or result_type not in allowed:\n            result_type = \"complete\"\n"
+        }
+      ],
+      "expect": "an unknown resultType is a lifecycle the client cannot follow"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "resultType looked up without a type check",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if not isinstance(result_type, str) or result_type not in allowed:\n",
+          "new": "        if result_type not in allowed:\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "payload checked before the discriminator",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    method = request.get(\"method\")\n",
+          "new": "    method = request.get(\"method\")\n    _check_payload(method, result.get(\"resultType\") or \"complete\", result)\n"
+        }
+      ],
+      "expect": "the discriminator is checked before the payload"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a missing resultType is complete in every era",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if era != LEGACY:\n            raise Violation(\"missing-result-type\", \"a modern result names its resultType\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a modern result names its resultType"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "the legacy era needs resultType too",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if era != LEGACY:\n",
+          "new": "        if True:\n"
+        }
+      ],
+      "expect": "a legacy result without resultType is complete"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "the method check reads the raw resultType",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    if (method in COMPLETE_ONLY_METHODS and result_type != \"complete\") or (\n",
+          "new": "    if (method in COMPLETE_ONLY_METHODS and result.get(\"resultType\") != \"complete\") or (\n"
+        }
+      ],
+      "expect": "a legacy result without resultType is complete"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "an inferred result skips the payload",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    _check_payload(method, result_type, result)\n",
+          "new": "    if not inferred:\n        _check_payload(method, result_type, result)\n"
+        }
+      ],
+      "expect": "an inferred complete still carries the method's payload"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "the legacy era accepts any resultType",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    else:\n        allowed = set(CORE_RESULT_TYPES)\n",
+          "new": "    elif era != LEGACY:\n        allowed = set(CORE_RESULT_TYPES)\n"
+        }
+      ],
+      "expect": "the legacy era only excuses a missing resultType"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "input_required allowed for complete-only methods",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    if (method in COMPLETE_ONLY_METHODS and result_type != \"complete\") or (\n",
+          "new": "    if (method in COMPLETE_ONLY_METHODS and result_type not in CORE_RESULT_TYPES) or (\n"
+        }
+      ],
+      "expect": "tools/list answers complete"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "task treated as a core result type",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        allowed = set(CORE_RESULT_TYPES)\n",
+          "new": "        allowed = set(CORE_RESULT_TYPES) | {\"task\"}\n"
+        }
+      ],
+      "expect": "task needs the negotiated Tasks capability"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "any method may answer with a task",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        result_type == \"task\" and method != TASK_METHOD\n",
+          "new": "        result_type == \"task\" and method is None\n"
+        }
+      ],
+      "expect": "only tools/call answers with a task"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "capability looked up by its short name",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "            allowed |= EXTENSION_RESULT_TYPES.get(capability, frozenset())\n",
+          "new": "            allowed |= EXTENSION_RESULT_TYPES.get(capability.rsplit(\"/\", 1)[-1], frozenset())\n"
+        }
+      ],
+      "expect": "with the Tasks capability, tools/call may answer with a task"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "duplicate tool names allowed",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "            if name in names:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "a tools/list with duplicate names"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "an empty tool name allowed",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "            if not isinstance(name, str) or not name:\n",
+          "new": "            if not isinstance(name, str):\n"
+        }
+      ],
+      "expect": "a tools/list with an empty name"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "inputSchema root type not checked",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "            if not isinstance(schema, dict) or schema.get(\"type\") != \"object\":\n",
+          "new": "            if not isinstance(schema, dict):\n"
+        }
+      ],
+      "expect": "a tools/list with an array inputSchema"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "description optional",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "            if not isinstance(description, str) or not description:\n",
+          "new": "            if description is not None and not isinstance(description, str):\n"
+        }
+      ],
+      "expect": "a tools/list with no description"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "inputSchema optional",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "            if not isinstance(schema, dict) or schema.get(\"type\") != \"object\":\n",
+          "new": "            if schema is not None and (not isinstance(schema, dict) or schema.get(\"type\") != \"object\"):\n"
+        }
+      ],
+      "expect": "a tools/list with no inputSchema"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "tools assumed to be objects",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "            if not isinstance(tool, dict):\n                raise Violation(\"tools-payload\", \"every tool is an object\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a missing tools array read as empty",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        tools = result.get(\"tools\")\n",
+          "new": "        tools = result.get(\"tools\", [])\n"
+        }
+      ],
+      "expect": "a complete tools/list carries a tools array"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "missing values read as empty",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        values = completion.get(\"values\")\n",
+          "new": "        values = completion.get(\"values\", [])\n"
+        }
+      ],
+      "expect": "a completion/complete with no values"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a zero ttlMs rejected",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if ttl is not None and (not _is_int(ttl) or ttl < 0):\n",
+          "new": "        if ttl is not None and (not _is_int(ttl) or ttl <= 0):\n"
+        }
+      ],
+      "expect": "zero is a non-negative ttlMs and pollIntervalMs"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a zero pollIntervalMs rejected",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if poll is not None and (not _is_int(poll) or poll < 0):\n",
+          "new": "        if poll is not None and (not _is_int(poll) or poll <= 0):\n"
+        }
+      ],
+      "expect": "zero is a non-negative ttlMs and pollIntervalMs"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "the inferred resultType written into the wire result",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        result_type, inferred = \"complete\", True\n",
+          "new": "        result_type, inferred = \"complete\", True\n        result[\"resultType\"] = \"complete\"\n"
+        }
+      ],
+      "expect": "judging a legacy result leaves the wire evidence as it was"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "exactly 100 values rejected",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if len(values) > MAX_COMPLETION_VALUES:\n",
+          "new": "        if len(values) >= MAX_COMPLETION_VALUES:\n"
+        }
+      ],
+      "expect": "a completion may return 100 values"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "101 values allowed",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if len(values) > MAX_COMPLETION_VALUES:\n",
+          "new": "        if len(values) > MAX_COMPLETION_VALUES + 1:\n"
+        }
+      ],
+      "expect": "a completion/complete with 101 values"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "total checked for type only",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if total is not None and (not _is_int(total) or total < len(values)):\n",
+          "new": "        if total is not None and not _is_int(total):\n"
+        }
+      ],
+      "expect": "a completion/complete with a total below the number of values"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "total must exceed the number of values",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if total is not None and (not _is_int(total) or total < len(values)):\n",
+          "new": "        if total is not None and (not _is_int(total) or total <= len(values)):\n"
+        }
+      ],
+      "expect": "total may equal the number of values"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "total coerced to an integer",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if total is not None and (not _is_int(total) or total < len(values)):\n",
+          "new": "        if total is not None and int(total) < len(values):\n"
+        }
+      ],
+      "expect": "a completion/complete with a string total"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "hasMore accepted as text",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if has_more is not None and not isinstance(has_more, bool):\n",
+          "new": "        if has_more is not None and has_more not in (True, False, \"true\", \"false\"):\n"
+        }
+      ],
+      "expect": "a completion/complete with a string hasMore"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "values not checked item by item",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):\n",
+          "new": "        if not isinstance(values, list):\n"
+        }
+      ],
+      "expect": "a completion/complete with a value that is not a string"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "ttlMs optional",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if \"ttlMs\" not in result:\n            raise Violation(\"task-payload\", \"a task needs ttlMs\")\n        ttl = result[\"ttlMs\"]\n",
+          "new": "        ttl = result.get(\"ttlMs\")\n"
+        }
+      ],
+      "expect": "a task with no ttlMs"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a null ttlMs rejected",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if ttl is not None and (not _is_int(ttl) or ttl < 0):\n",
+          "new": "        if not _is_int(ttl) or ttl < 0:\n"
+        }
+      ],
+      "expect": "ttlMs may be null"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a negative ttlMs allowed",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if ttl is not None and (not _is_int(ttl) or ttl < 0):\n",
+          "new": "        if ttl is not None and not _is_int(ttl):\n"
+        }
+      ],
+      "expect": "a task with a negative ttlMs"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "task status not checked",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if result[\"status\"] not in TASK_STATUSES:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "a task with an unknown status"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "empty task strings allowed",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "            if not isinstance(value, str) or not value:\n",
+          "new": "            if not isinstance(value, str):\n"
+        }
+      ],
+      "expect": "a task with an empty createdAt"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "pollIntervalMs not range-checked",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if poll is not None and (not _is_int(poll) or poll < 0):\n",
+          "new": "        if poll is not None and not _is_int(poll):\n"
+        }
+      ],
+      "expect": "a task with a negative pollIntervalMs"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "jsonrpc not checked",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    if not isinstance(body, dict) or body.get(\"jsonrpc\") != \"2.0\":\n",
+          "new": "    if not isinstance(body, dict):\n"
+        }
+      ],
+      "expect": "jsonrpc is exactly 2.0"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "the body assumed to be an object",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    if not isinstance(body, dict) or body.get(\"jsonrpc\") != \"2.0\":\n",
+          "new": "    if body.get(\"jsonrpc\") != \"2.0\":\n"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "an error wins over a result",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    if (\"result\" in body) == (\"error\" in body):\n",
+          "new": "    if \"result\" not in body and \"error\" not in body:\n"
+        }
+      ],
+      "expect": "a response holds a result or an error, not both"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a response with neither read as an empty result",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    if (\"result\" in body) == (\"error\" in body):\n",
+          "new": "    if \"result\" in body and \"error\" in body:\n"
+        },
+        {
+          "file": "validate.py",
+          "old": "    result = body[\"result\"]\n",
+          "new": "    result = body.get(\"result\")\n"
+        }
+      ],
+      "expect": "a response holds one of them"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "error code coerced to an integer",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "            or not _is_int(error.get(\"code\"))\n",
+          "new": "            or not _is_int(int(error.get(\"code\")))\n"
+        }
+      ],
+      "expect": "an error code is an integer"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "error message optional",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "            or not isinstance(error.get(\"message\"), str)\n",
+          "new": "            or not isinstance(error.get(\"message\", \"\"), str)\n"
+        }
+      ],
+      "expect": "an error carries a message"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "the error assumed to be an object",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "            not isinstance(error, dict)\n            or not _is_int(error.get(\"code\"))\n",
+          "new": "            not _is_int(error.get(\"code\"))\n"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "HTTP status of errors not checked",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if expected is not None and status != expected:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "a proxy-collapsed -32020 is not conformant"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "-32021 left out of the status map",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        expected = PROTOCOL_ERROR_STATUS.get(code)\n",
+          "new": "        expected = {-32020: 400, -32022: 400, -32601: 404}.get(code)\n"
+        }
+      ],
+      "expect": "-32021 travels with HTTP 400"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "method not found mapped to 400",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        expected = PROTOCOL_ERROR_STATUS.get(code)\n",
+          "new": "        expected = {**PROTOCOL_ERROR_STATUS, -32601: 400}.get(code)\n"
+        }
+      ],
+      "expect": "-32601 travels with 404"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "every error must travel with a 4xx",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if expected is not None and status != expected:\n",
+          "new": "        if (expected is not None and status != expected) or not 400 <= status < 500:\n"
+        }
+      ],
+      "expect": "codes outside PROTOCOL_ERROR_STATUS are not tied to a status"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "the HTTP status of a result not checked",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    if status != 200:\n        raise Violation(\"result-status\", f\"a result travels with HTTP 200, not {status}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a result travels with HTTP 200"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a None result read as an empty one",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    result = body[\"result\"]\n",
+          "new": "    result = body[\"result\"] or {}\n"
+        }
+      ],
+      "expect": "middleware that wraps a None return is caught"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a request with no body accepted",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    if body is None:\n        raise Violation(\"missing-body\", f\"HTTP {status} carried no JSON-RPC response\")\n",
+          "new": "    if body is None:\n        return Outcome(\"notification\")\n"
+        }
+      ],
+      "expect": "a request gets a JSON-RPC response"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a notification judged by its status only",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if status != 202 or body is not None:\n",
+          "new": "        if status != 202:\n"
+        }
+      ],
+      "expect": "HTTP 202 with {'jsonrpc': '2.0', 'result': None}"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a notification body checked for truthiness",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if status != 202 or body is not None:\n",
+          "new": "        if status != 202 or body:\n"
+        }
+      ],
+      "expect": "HTTP 202 with {}"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "any 2xx answers a notification",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if status != 202 or body is not None:\n",
+          "new": "        if not 200 <= status < 300 or body is not None:\n"
+        }
+      ],
+      "expect": "HTTP 204 with None"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "only a bodiless notification reply is special",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    if \"id\" not in request:\n",
+          "new": "    if \"id\" not in request and body is None:\n"
+        }
+      ],
+      "expect": "HTTP 200 with {'jsonrpc': '2.0', 'result': None}"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a negative case passes on any violation",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        passed = isinstance(expect, str) and violation.rule == expect\n",
+          "new": "        passed = expect is not None\n"
+        }
+      ],
+      "expect": "a negative case proves its own rule, not just any failure"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "an expected refusal matches any error code",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        passed = outcome.kind == \"error\" and outcome.error_code == expect\n",
+          "new": "        passed = outcome.kind == \"error\"\n"
+        }
+      ],
+      "expect": "not with another code"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "an expected code read straight from the body",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        passed = isinstance(expect, str) and violation.rule == expect\n",
+          "new": "        error = transcript.response_body.get(\"error\") if isinstance(transcript.response_body, dict) else None\n        passed = (isinstance(expect, str) and violation.rule == expect) or (\n            isinstance(error, dict) and error.get(\"code\") == expect\n        )\n"
+        }
+      ],
+      "expect": "not on HTTP 500"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a golden case accepts a refusal",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        passed = outcome.kind in (\"result\", \"notification\")\n",
+          "new": "        passed = True\n"
+        }
+      ],
+      "expect": "a golden case expects a result, not a refusal"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "an accepted response passes a negative case",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    elif isinstance(expect, str):\n        passed = False\n",
+          "new": "    elif isinstance(expect, str):\n        passed = True\n"
+        }
+      ],
+      "expect": "a negative case fails when the response is accepted"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "evidence keys in snake case",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        \"responseStatus\": transcript.response_status,\n        \"responseBody\": transcript.response_body,\n",
+          "new": "        \"response_status\": transcript.response_status,\n        \"response_body\": transcript.response_body,\n"
+        }
+      ],
+      "expect": "a golden case passes and carries its raw evidence"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "an empty description allowed",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "            if not isinstance(description, str) or not description:\n",
+          "new": "            if not isinstance(description, str):\n"
+        }
+      ],
+      "expect": "a tools/list with an empty description is not conformant"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a boolean total accepted as an integer",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if total is not None and (not _is_int(total) or total < len(values)):\n",
+          "new": "        if total is not None and (not isinstance(total, int) or total < len(values)):\n"
+        }
+      ],
+      "expect": "a completion/complete with a boolean total is not conformant"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a boolean ttlMs accepted as an integer",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "        if ttl is not None and (not _is_int(ttl) or ttl < 0):\n",
+          "new": "        if ttl is not None and (not isinstance(ttl, int) or ttl < 0):\n"
+        }
+      ],
+      "expect": "a task with a boolean ttlMs is not conformant"
+    },
+    {
+      "test": "test_response_conformance",
+      "name": "a missing body judged by truthiness",
+      "edits": [
+        {
+          "file": "validate.py",
+          "old": "    if body is None:\n        raise Violation(\"missing-body\"",
+          "new": "    if not body:\n        raise Violation(\"missing-body\""
+        }
+      ],
+      "expect": "an empty object is a body, but not a JSON-RPC response"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "no plan line when nothing was reported",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "    yield f\"1..{count}\\n\"\n",
+          "new": "    if count:\n        yield f\"1..{count}\\n\"\n"
+        }
+      ],
+      "expect": "no exchanges: just the plan, ending with a newline"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "result lines without a newline",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "            return f\"ok {count} - {exchange}\\n\"\n",
+          "new": "            return f\"ok {count} - {exchange}\"\n"
+        }
+      ],
+      "expect": "one TAP line per exchange, then the plan; every line ends with a newline"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "an exchange opens only on its ingress",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "            views = pending.setdefault(exchange, {})\n",
+          "new": "            if view == \"ingress\":\n                pending.setdefault(exchange, {})\n            views = pending.get(exchange)\n            if views is None:\n                continue\n"
+        }
+      ],
+      "expect": "views arrive in any order"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "views compared as captured",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "    origin, egress = redact(origin), redact(egress)\n",
+          "new": ""
+        }
+      ],
+      "expect": "views are compared in redacted form"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "a collapse also reported as a status change",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "    elif egress.get(\"status\") != origin.get(\"status\"):\n",
+          "new": "    if egress.get(\"status\") != origin.get(\"status\"):\n"
+        }
+      ],
+      "expect": "an origin 404 JSON-RPC error that reaches the client as 500 was collapsed"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "only an origin 400 can be collapsed",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "        origin.get(\"status\") in (400, 404)\n",
+          "new": "        origin.get(\"status\") == 400\n"
+        }
+      ],
+      "expect": "an origin 404 JSON-RPC error that reaches the client as 500 was collapsed"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "any 400 or 404 counts as a protocol error",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "        and isinstance(origin_body, dict)\n        and \"error\" in origin_body\n",
+          "new": ""
+        }
+      ],
+      "expect": "only a JSON-RPC error can be collapsed"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "status changes other than a collapse ignored",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "    elif egress.get(\"status\") != origin.get(\"status\"):\n        problems.append(STATUS_CHANGED)\n",
+          "new": ""
+        }
+      ],
+      "expect": "only a JSON-RPC error can be collapsed"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "the body checked before the status",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "    if (\n        origin.get(\"status\") in (400, 404)\n        and isinstance(origin_body, dict)\n        and \"error\" in origin_body\n        and egress.get(\"status\") == 500\n    ):\n        problems.append(COLLAPSED)\n    elif egress.get(\"status\") != origin.get(\"status\"):\n        problems.append(STATUS_CHANGED)\n    if egress.get(\"body\") != origin_body:\n        problems.append(BODY_CHANGED)\n    return problems\n",
+          "new": "    if egress.get(\"body\") != origin_body:\n        problems.append(BODY_CHANGED)\n    if (\n        origin.get(\"status\") in (400, 404)\n        and isinstance(origin_body, dict)\n        and \"error\" in origin_body\n        and egress.get(\"status\") == 500\n    ):\n        problems.append(COLLAPSED)\n    elif egress.get(\"status\") != origin.get(\"status\"):\n        problems.append(STATUS_CHANGED)\n    return problems\n"
+        }
+      ],
+      "expect": "one line per exchange, numbered as exchanges are reported, then the plan"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "problems joined with a comma",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "{'; '.join(problems)}",
+          "new": "{', '.join(problems)}"
+        }
+      ],
+      "expect": "one line per exchange, numbered as exchanges are reported, then the plan"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "events counted instead of views",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "    reported: set[str] = set()\n",
+          "new": "    reported: set[str] = set()\n    counts: dict[str, int] = {}\n"
+        },
+        {
+          "file": "proxy.py",
+          "old": "            views.setdefault(view, event)\n            if len(views) == len(VIEWS):\n                del pending[exchange]\n                yield line(exchange, judge_exchange(views[\"ingress\"], views[\"origin\"], views[\"egress\"]))\n",
+          "new": "            views.setdefault(view, event)\n            counts[exchange] = counts.get(exchange, 0) + 1\n            if counts[exchange] == len(VIEWS):\n                del pending[exchange]\n                yield line(exchange, judge_exchange(views.get(\"ingress\", {}), views.get(\"origin\", {}), views.get(\"egress\", {})))\n"
+        }
+      ],
+      "expect": "the first copy of a view counts; a later copy is ignored"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "a reported exchange reopens on a late copy",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "        if exchange not in reported:\n",
+          "new": "        if True:\n"
+        }
+      ],
+      "expect": "one line per exchange, numbered as exchanges are reported, then the plan"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "overdue exchanges reported only at the end",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "        for overdue in [name for name in pending if deadlines[name] < clock]:\n            yield incomplete(overdue)\n",
+          "new": ""
+        }
+      ],
+      "expect": "one line per exchange, numbered as exchanges are reported, then the plan"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "the deadline restarts with every view",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "            deadlines.setdefault(exchange, at + timeout_ms)\n",
+          "new": "            deadlines[exchange] = at + timeout_ms\n"
+        }
+      ],
+      "expect": "one line per exchange, numbered as exchanges are reported, then the plan"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "overdue exchanges reported by name",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "        for overdue in [name for name in pending if deadlines[name] < clock]:\n",
+          "new": "        for overdue in sorted(name for name in pending if deadlines[name] < clock):\n"
+        }
+      ],
+      "expect": "one line per exchange, numbered as exchanges are reported, then the plan"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "exchanges still open at the end left out",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "    for left in list(pending):\n        yield incomplete(left)\n",
+          "new": ""
+        }
+      ],
+      "expect": "one line per exchange, numbered as exchanges are reported, then the plan"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "the deadline itself counts as overdue",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "if deadlines[name] < clock]",
+          "new": "if deadlines[name] <= clock]"
+        }
+      ],
+      "expect": "each line comes out the moment its exchange completes or falls past its deadline"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "lines held until the events end",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "    count = 0\n",
+          "new": "    count = 0\n    held: list[str] = []\n"
+        },
+        {
+          "file": "proxy.py",
+          "old": "                yield line(exchange, judge_exchange(views[\"ingress\"], views[\"origin\"], views[\"egress\"]))\n",
+          "new": "                held.append(line(exchange, judge_exchange(views[\"ingress\"], views[\"origin\"], views[\"egress\"])))\n"
+        },
+        {
+          "file": "proxy.py",
+          "old": "            yield incomplete(overdue)\n",
+          "new": "            held.append(incomplete(overdue))\n"
+        },
+        {
+          "file": "proxy.py",
+          "old": "    for left in list(pending):\n",
+          "new": "    for text in held:\n        yield text\n    for left in list(pending):\n"
+        }
+      ],
+      "expect": "each line comes out the moment its exchange completes or falls past its deadline"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "missing views listed alphabetically",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "        missing = \", \".join(view for view in VIEWS if view not in views)\n",
+          "new": "        missing = \", \".join(sorted(view for view in VIEWS if view not in views))\n"
+        }
+      ],
+      "expect": "one line per exchange, numbered as exchanges are reported, then the plan"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "exchanges open at the end reported by name",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "    for left in list(pending):\n",
+          "new": "    for left in sorted(pending):\n"
+        }
+      ],
+      "expect": "one line per exchange, numbered as exchanges are reported, then the plan"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "overdue exchanges expired before the event is applied",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "        clock = at if clock is None else max(clock, at)\n        if exchange not in reported:\n",
+          "new": "        clock = at if clock is None else max(clock, at)\n        for overdue in [name for name in pending if deadlines[name] < clock]:\n            yield incomplete(overdue)\n        if exchange not in reported:\n"
+        },
+        {
+          "file": "proxy.py",
+          "old": "                yield line(exchange, judge_exchange(views[\"ingress\"], views[\"origin\"], views[\"egress\"]))\n        for overdue in [name for name in pending if deadlines[name] < clock]:\n            yield incomplete(overdue)\n",
+          "new": "                yield line(exchange, judge_exchange(views[\"ingress\"], views[\"origin\"], views[\"egress\"]))\n"
+        }
+      ],
+      "expect": "a view that arrives while its exchange is open counts"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "the clock is the latest event's own time",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "        clock = at if clock is None else max(clock, at)\n",
+          "new": "        clock = at\n"
+        }
+      ],
+      "expect": "a capture already past its deadline is overdue at once"
+    },
+    {
+      "test": "test_proxy_tap",
+      "name": "a later copy of a view replaces the first",
+      "edits": [
+        {
+          "file": "proxy.py",
+          "old": "            views.setdefault(view, event)\n",
+          "new": "            views[view] = event\n"
+        }
+      ],
+      "expect": "the first copy of a view counts; a later copy is ignored"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "bookkeeping dropped at any depth",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "        may_drop = allowed.get(path, frozenset())\n",
+          "new": "        may_drop = allowed.get(\"\", frozenset())\n"
+        }
+      ],
+      "expect": "_meta below the result root is not bookkeeping"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "only the root of allowed is honoured",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "        may_drop = allowed.get(path, frozenset())\n",
+          "new": "        may_drop = allowed.get(path, frozenset()) if path == \"\" else frozenset()\n"
+        }
+      ],
+      "expect": "allowed names the objects it covers by pointer"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "bookkeeping the SDK adds is not reported",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "            elif name not in raw:\n                found.append(_Found(\"synthesized\", child, path, name, sdk[name]))\n",
+          "new": "            elif name not in raw:\n                if name not in may_drop:\n                    found.append(_Found(\"synthesized\", child, path, name, sdk[name]))\n"
+        }
+      ],
+      "expect": "a resultType the wire never had is synthesized, not bookkeeping"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "bookkeeping values are never compared",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "            else:\n                _compare(raw[name], sdk[name], child, allowed, found)\n",
+          "new": "            elif name not in may_drop:\n                _compare(raw[name], sdk[name], child, allowed, found)\n"
+        }
+      ],
+      "expect": "only dropping bookkeeping is allowed; changing it is reported"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "names not escaped",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "    return parent + \"/\" + str(token).replace(\"~\", \"~0\").replace(\"/\", \"~1\")\n",
+          "new": "    return parent + \"/\" + str(token)\n"
+        }
+      ],
+      "expect": "paths are JSON Pointers"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "escapes applied in the wrong order",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "    return parent + \"/\" + str(token).replace(\"~\", \"~0\").replace(\"/\", \"~1\")\n",
+          "new": "    return parent + \"/\" + str(token).replace(\"/\", \"~1\").replace(\"~\", \"~0\")\n"
+        }
+      ],
+      "expect": "paths are JSON Pointers"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "lists compared by value",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "        for index in range(max(len(raw), len(sdk))):\n            child = _pointer(path, index)\n            if index >= len(sdk):\n                found.append(_Found(\"dropped\", child, None, None, raw[index]))\n            elif index >= len(raw):\n                found.append(_Found(\"synthesized\", child, None, None, sdk[index]))\n            else:\n                _compare(raw[index], sdk[index], child, allowed, found)\n",
+          "new": "        for index, item in enumerate(raw):\n            if item not in sdk:\n                found.append(_Found(\"dropped\", _pointer(path, index), None, None, item))\n        for index, item in enumerate(sdk):\n            if item not in raw:\n                found.append(_Found(\"synthesized\", _pointer(path, index), None, None, item))\n"
+        }
+      ],
+      "expect": "lists are compared by position"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "items past the SDK's end ignored",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "            if index >= len(sdk):\n                found.append(_Found(\"dropped\", child, None, None, raw[index]))\n",
+          "new": "            if index >= len(sdk):\n                continue\n"
+        }
+      ],
+      "expect": "lists are compared by position"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "items only the SDK has ignored",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "            elif index >= len(raw):\n                found.append(_Found(\"synthesized\", child, None, None, sdk[index]))\n",
+          "new": "            elif index >= len(raw):\n                continue\n"
+        }
+      ],
+      "expect": "an item only the SDK has is synthesized"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "values compared as text",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "    return canonical_json(left) == canonical_json(right)\n",
+          "new": "    return str(left) == str(right)\n"
+        }
+      ],
+      "expect": "12 and '12' are different values"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "a list compared with an object item by item",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "    if isinstance(raw, dict) and isinstance(sdk, dict):\n",
+          "new": "    if isinstance(raw, list) and isinstance(sdk, dict):\n        raw = {str(i): item for i, item in enumerate(raw)}\n    if isinstance(raw, dict) and isinstance(sdk, dict):\n"
+        }
+      ],
+      "expect": "a list that became an object changed, as a whole"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "a null member read as a missing one",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "            if name not in sdk:\n",
+          "new": "            if sdk.get(name) is None and raw.get(name) is None:\n                continue\n            if name not in sdk:\n"
+        }
+      ],
+      "expect": "a member set to null is not a missing member"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "raw members first, then the SDK's",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "        for name in sorted(raw.keys() | sdk.keys()):\n",
+          "new": "        for name in sorted(raw) + sorted(set(sdk) - set(raw)):\n"
+        }
+      ],
+      "expect": "members are reported in sorted name order, whichever side has them"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "differences sorted by path text",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "    return _pair_lifts(found)\n",
+          "new": "    return sorted(_pair_lifts(found), key=lambda difference: difference.path)\n"
+        }
+      ],
+      "expect": "list items are reported in index order"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "no lifts",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "    return _pair_lifts(found)\n",
+          "new": "    return [Difference(item.kind, item.path) for item in found]\n"
+        }
+      ],
+      "expect": "members the SDK moved up are lifted"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "lifts paired in a single pass",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "def _pair_lifts(found: list[_Found]) -> list[Difference]:\n    taken: set[int] = set()\n    lifts: dict[int, str] = {}\n    for i, drop in enumerate(found):\n",
+          "new": "def _pair_lifts(found: list[_Found]) -> list[Difference]:\n    taken: set[int] = set()\n    report: list[Difference] = []\n    for i, item in enumerate(found):\n        if i in taken:\n            continue\n        if item.kind == \"dropped\" and item.parent is not None:\n            for j, add in enumerate(found):\n                if (\n                    j not in taken\n                    and add.kind == \"synthesized\"\n                    and add.parent is not None\n                    and add.name == item.name\n                    and item.parent.startswith(add.parent + \"/\")\n                    and _same(add.value, item.value)\n                ):\n                    taken.add(j)\n                    report.append(Difference(\"lifted\", item.path, add.path))\n                    break\n            else:\n                report.append(Difference(\"dropped\", item.path))\n            continue\n        report.append(Difference(item.kind, item.path))\n    return report\n\n\ndef _unused_pairing(found: list[_Found]) -> list[Difference]:\n    taken: set[int] = set()\n    lifts: dict[int, str] = {}\n    for i, drop in enumerate(found):\n"
+        }
+      ],
+      "expect": "a lift is one difference, even when its new place is reported first"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "a lift ignores the value",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "                and _same(add.value, drop.value)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a lift keeps its value; a different value is a drop and a synthesis"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "a lift reported where the member went",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "    report: list[Difference] = []\n    for i, item in enumerate(found):\n        if i in taken:\n            continue\n        if i in lifts:\n            report.append(Difference(\"lifted\", item.path, lifts[i]))\n        else:\n            report.append(Difference(item.kind, item.path))\n    return report\n",
+          "new": "    sources = {path: i for i, path in lifts.items()}\n    report: list[Difference] = []\n    for i, item in enumerate(found):\n        if i in lifts:\n            continue\n        if i in taken:\n            report.append(Difference(\"lifted\", found[sources[item.path]].path, item.path))\n        else:\n            report.append(Difference(item.kind, item.path))\n    return report\n"
+        }
+      ],
+      "expect": "a lift keeps its value; a different value is a drop and a synthesis"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "lifts only one object up",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "                and drop.parent.startswith(add.parent + \"/\")\n",
+          "new": "                and drop.parent.rsplit(\"/\", 1)[0] == add.parent\n"
+        }
+      ],
+      "expect": "a member can be lifted out of a list item"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "a move sideways counted as a lift",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "                and drop.parent.startswith(add.parent + \"/\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a move sideways is not a lift"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "one synthesized member pairs with every drop",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "                j not in taken\n",
+          "new": "                True\n"
+        }
+      ],
+      "expect": "each member takes part in at most one lift"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "values compared with Python equality",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "    elif not _same(raw, sdk):\n",
+          "new": "    elif raw != sdk:\n"
+        }
+      ],
+      "expect": "true and 1 are different JSON values"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "ancestor checked as a pointer prefix without the slash",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "                and drop.parent.startswith(add.parent + \"/\")\n",
+          "new": "                and drop.parent.startswith(add.parent)\n"
+        }
+      ],
+      "expect": "a lift goes to an ancestor object, not to any shallower one"
+    },
+    {
+      "test": "test_sdk_differential",
+      "name": "any shallower object counted as an ancestor",
+      "edits": [
+        {
+          "file": "differential.py",
+          "old": "                and drop.parent.startswith(add.parent + \"/\")\n",
+          "new": "                and drop.parent.count(\"/\") > add.parent.count(\"/\")\n"
+        }
+      ],
+      "expect": "a lift goes to an ancestor object, not to any shallower one"
+    }
+  ]
+}

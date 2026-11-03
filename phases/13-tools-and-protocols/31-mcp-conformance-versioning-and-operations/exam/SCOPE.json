@@ -1,0 +1,134 @@
+{
+  "lesson": "phases/13-tools-and-protocols/31-mcp-conformance-versioning-and-operations",
+  "title": "MCP Conformance Engineering: Versioning, Evidence, and Operations",
+  "format": "staged-brownfield",
+  "service": "conformance: an MCP conformance harness with a release gate over redacted evidence, health and authenticated rollback pins, a one-file-per-case transcript fixture directory, response conformance rules for the 2026-07-28 and legacy eras, a proxy evidence stitcher that reports TAP, and an SDK differential over nested results",
+  "sources": {
+    "docs/en.md": "fa7b16e90177a54f5ee0adb5c8a0d471a454074dda0ba277dc93b0e6abe28d57",
+    "code/main.py": "ed76ed27a5da7fa39ede87ccc09dfc7af8edc697cb8492ca5bbeccb15f0de582",
+    "code/tests/test_main.py": "66a026744c427f1225bae737b5722da15ca6bc5a998c505f67a64921602e7e14"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "deviations": [
+    "Part 1: the suggested timing case was 2,000 transcripts. The planted step redacts the whole corpus once per case, so 2,000 cases would take about a minute; the test uses 320 cases (about 1.5 s quadratic and 7 ms fixed on this machine, limit 0.15 s). The suggested defect 3 has two separate lines (a status blocklist that only refuses deleted, and pins checked for truthiness), so Part 1 has five layer steps for four defects. Health thresholds live in a HealthPolicy given to the gate, because the lesson says to define the health window before rollout; the lesson code reads them from the health dict itself.",
+    "Part 2: the fixture file holds the six suggested keys plus capabilities (Part 3 needs the negotiated Tasks capability) and expect (what a negative case proves). The file name is a lowercase slug, so names that differ only in case collide on every file system. Volatile values are taskId, createdAt and lastUpdatedAt, replaced by fixed values only when they are non-empty strings, so the malformed values of negative fixtures survive; JSON-RPC ids are chosen by the harness and are not normalized.",
+    "Part 3: response id checks are left out, as the chapter assigns JSON-RPC id types to lessons 06, 08 and 09. The lesson code reports every response violation as -32600, which cannot tell rules apart, so violations carry the harness's own rule names (wire.RULES) and a fixture's expect is either the server's error code or a rule name. 'input_required only for allowed methods' is tools/list and completion/complete answering only complete, as in the lesson code's validate_method_result; 'task only for tools/call' is tested with server/discover, because tools/list is already complete-only.",
+    "Part 4: time comes from the events' capture times (the clock is the largest at seen), and a deadline is timeout_ms after an exchange's first event, so the test is deterministic. 'Redact before judging' is read as: collectors at different boundaries ship in different redaction states, so the views are compared after redact(); an egress collector that redacts is not a body change. The ingress view is required evidence but is not judged, since request-side checks belong to lessons 06 and 09.",
+    "Part 5: a lift is a dropped member and a synthesized member with the same name and equal value, the synthesized one in an ancestor object; the allowance is keyed by the object's JSON Pointer and covers dropping only, so a synthesized or changed resultType is reported. Paths are RFC 6901 JSON Pointers.",
+    "Facts used beyond docs/en.md: the Registry statuses active, deprecated and deleted (lesson 30's docs); the task status set, the SECRET_KEYS list and the HTTP status map with -32021 to 400 and -32601 to 404 (this lesson's code/main.py). The rule names, the volatile placeholders and the TAP problem strings are this harness's own choices, stated in its docstrings."
+  ],
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_release_gate",
+      "kind": "debug",
+      "lesson_anchor": "Redact Before Evidence Leaves Memory (canonical key names, recursive replacement, hash the redacted bundle); Make Health and Rollback Part of the Gate (minimum sample count, exact types, active status, three SHA-256 pins, trusted HMAC attestation; hold without a usable rollback target); code/main.py redact, evaluate_health, rollback_evidence_ready and ReleaseGate.evaluate",
+      "planted_bugs": [
+        "redact looks the raw key up in SECRET_KEYS, which holds canonical forms, so Authorization, X-Api-Key, access_token, client.secret and Set-Cookie leak; the failure shows on the gate's report, two calls above redact (evaluate -> _transcripts -> redact), and canonical_field_name is written but unused",
+        "evaluate_health falls back to passing values: a missing sampleCount counts as min_samples, a missing errorRate or p95Ms as 0, so a canary with no samples promotes; failing defaults alone still raise TypeError on '1200'",
+        "rollback_evidence_ready refuses only registryStatus 'deleted', so 'deprecated', 'Active' and a missing status pass",
+        "rollback_evidence_ready checks the three pins for a non-empty string, so 'sha256:<hex>', 'pending' and 64 z's count as digests",
+        "evaluate computes each case digest from self._transcripts(cases), redacting the whole corpus once per case, O(n^2)"
+      ],
+      "timing_assert": "320 cases through ReleaseGate.evaluate under 0.15 s. Measured on this machine over several rounds: the quadratic version takes about 1.5 s (up to 4.9 s while other jobs pushed the load average to 50), the fixed version about 7 ms (median 14 ms and worst run 45 ms under that load); margins about 10x and 21x at the stable values",
+      "overfix_guard": "digests cover redacted evidence: rotating a bearer token leaves caseDigests and evidenceDigest unchanged, changing a stock count changes that case's digest and the bundle digest but not another case's, and a case digest equals digest(redact(evidence)); raw-evidence digests, a per-name digest cache, name-only digests, whole-record digests and one corpus digest for every case are all caught; checks that come with the fixes: a secret key's whole value is replaced even when it is an object or a list, and a float sampleCount fails the window"
+    },
+    {
+      "part": 2,
+      "test": "test_transcript_corpus",
+      "kind": "model and persistence",
+      "lesson_anchor": "Build a Transcript Corpus (fixture JSON with name, era, headers, request, responseStatus, responseBody; golden and negative classes; normalize volatile ids and timestamps); Record the selected era beside every transcript; Store fixture schemas in version control",
+      "exactness": "seven fixtures read back equal through a second corpus instance: header names with their case (Mcp-Method and mcp-method kept apart), a legacy era, a notification with no body (None, not {}), a non-ASCII name and arguments, a CRLF in the response text, frozenset capabilities through a sorted list, an int expect and a rule-name expect; the file holds exactly the documented record; re-recording a task call with other ids and timestamps writes byte-identical files",
+      "traps": [
+        "header names lowercased on save or on load",
+        "file name keeps case, keeps dots, replaces single characters, is not trimmed, or uses \\W+ and keeps non-ASCII letters",
+        "a name with no letters or digits gets '.json'",
+        "no collision check, a collision judged by file name or without case, or noticed after the file was overwritten",
+        "an existing fixture never replaced",
+        "load trusts the file name; names() read from file names",
+        "a missing era read as modern or raising KeyError; a protocol version accepted as an era; the era not checked on save",
+        "capabilities as a list, in set order, or written with default=str; no body stored as {}; expect stored as text",
+        "fixtures cached in memory; an index file beside the fixtures",
+        "volatile values kept, not normalized inside lists or in the request, empty strings and non-strings replaced, or normalized in place"
+      ],
+      "clarifying_questions": [
+        "lowercase header names",
+        "two names, one file",
+        "saving a name again",
+        "which values are volatile",
+        "a fixture without an era"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_response_conformance",
+      "kind": "core algorithm",
+      "lesson_anchor": "Unknown Fields Are Not Unknown Results (additive futureHint accepted, unknown or unadvertised resultType rejected, task only with the Tasks capability for tools/call, method payloads for tools/list and completion/complete); Start With Version Eras (missing resultType is complete only in the selected legacy era); Negative transcripts (jsonrpc, result/error exclusivity, error shape, protocol errors on the wrong HTTP status, assert the exact rejection); The Notification Invariant (202 and no body, middleware wrapping None)",
+      "traps": [
+        "unknown members rejected, or an unknown resultType read as complete; a dict resultType raising TypeError",
+        "payload checked before the discriminator",
+        "a missing resultType complete in every era, or required in legacy too; the method check reading the raw resultType; an inferred result skipping the payload or written back into the wire result; legacy accepting any resultType",
+        "input_required on complete-only methods; task as a core type, on any method, or looked up by a short capability name",
+        "tools/list: duplicate or empty names, non-object inputSchema, missing or empty description, missing schema, a missing tools array read as empty, tools assumed to be objects",
+        "completion: exactly 100 values rejected or 101 allowed, total checked for type only, coerced, a boolean, or required to exceed the values, string hasMore, unchecked items, missing values read as empty",
+        "task: ttlMs optional, null or zero rejected, negative or boolean allowed; status unchecked; empty strings allowed; pollIntervalMs zero rejected or negative allowed",
+        "jsonrpc unchecked or a non-object body assumed; error winning over result; neither read as an empty result; error code coerced, message optional, error assumed to be an object",
+        "error status unchecked, -32021 left out, -32601 mapped to 400, or every error forced into 4xx; result status unchecked; a None result read as {}; a request with no body accepted, or an empty object read as no body",
+        "notification judged by status only, by body truthiness, by any 2xx, or only when it has no body",
+        "check_case: any violation passes a negative, any error code passes a refusal, the expected code read from the body on HTTP 500, a golden case accepting a refusal, an accepted negative passing, snake_case evidence keys"
+      ],
+      "integration": "fixtures saved through Part 2, checked with run_corpus and handed to the Part 1 gate: the conformant corpus promotes, and one fixture that misses its expectation rolls back with exactly that reason",
+      "clarifying_questions": [
+        "unknown fields",
+        "HTTP status for other error codes",
+        "which rule when several break",
+        "a negative case that breaks another rule"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_proxy_tap",
+      "kind": "streaming",
+      "lesson_anchor": "Capture Proxy Evidence (ingress, origin and egress views; an origin 400 or 404 JSON-RPC error becoming a proxy 500; the egress body differing from the origin body); Redact Before Evidence Leaves Memory; code/main.py inspect_proxy",
+      "wire_format": "TAP: one 'ok N - id' or 'not ok N - id # problems' line per exchange, problems joined by '; ' in a fixed order, the plan '1..N' last, every line ending with a newline; decided by the test's regex and exact line list",
+      "traps": [
+        "no plan line for an empty stream; lines without a newline",
+        "an exchange opened only by its ingress",
+        "views compared as captured, so a redacting collector looks like a body change",
+        "a collapse also reported as a status change; only 400 collapsible; any 400 or 404 body counted as a protocol error; other status changes ignored",
+        "problems in another order or joined with a comma",
+        "events counted instead of distinct views; a later copy of a view replacing the first; a reported exchange reopened by a late copy",
+        "overdue exchanges reported only at the end, by name, or expired before the event is applied; the deadline restarting with each view; the deadline itself counted as overdue; the clock taken from the latest event instead of the largest capture time",
+        "open exchanges at the end left out or sorted by name; missing views listed alphabetically",
+        "lines held until the stream ends (probe: events pulled when each line comes out)"
+      ],
+      "clarifying_questions": [
+        "a view delivered twice",
+        "a view after the exchange was reported",
+        "which clock",
+        "order of exchanges that time out together"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_sdk_differential",
+      "kind": "recursive structure",
+      "lesson_anchor": "Add an SDK Differential (raw status and body versus the SDK-normalized value; fields lifted, synthesized, stripped or changed; SDK-only removal of resultType, _meta, ttlMs and cacheScope; a dropped futureHint is reported); Interactive Lab C and D",
+      "traps": [
+        "bookkeeping dropped at any depth, or only the root entry of allowed honoured",
+        "bookkeeping the SDK adds or changes not reported",
+        "names not escaped, or escaped in the wrong order",
+        "lists compared by value, tail drops or extra SDK items ignored",
+        "values compared as text or with Python equality (true == 1); a list compared with an object item by item; a null member read as a missing one",
+        "raw members before the SDK's; differences sorted by path text",
+        "no lifts; a lift ignoring the value, reported at its destination, limited to one object up, allowed sideways or to any shallower object, or one synthesized member paired with every drop; pairing in a single pass, so a destination reported first is counted twice"
+      ],
+      "integration": "differential_report feeds the Part 1 gate: the SDK view that drops futureHint rolls back, the one that keeps it promotes",
+      "clarifying_questions": [
+        "nested _meta",
+        "list alignment",
+        "a synthesized resultType"
+      ]
+    }
+  ]
+}
