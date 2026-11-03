@@ -1,0 +1,923 @@
+{
+  "package": "multipeer",
+  "tests": [
+    "test_route_calls",
+    "test_peer_config_roundtrip",
+    "test_era_negotiation",
+    "test_stdio_pool",
+    "test_namespace_merge"
+  ],
+  "layers": [
+    {
+      "test": "test_route_calls",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "each request carries the highest version both sides support"
+        },
+        {
+          "name": "fix mutual_version: highest common version",
+          "edits": [
+            {
+              "file": "protocol.py",
+              "old": "    for version in advertised:\n        if isinstance(version, str) and version in supported:\n            return version\n    return None\n",
+              "new": "    common = [v for v in advertised if isinstance(v, str) and v in supported]\n    return max(common) if common else None\n"
+            }
+          ],
+          "expect": "the owning peer receives the tool name it declared"
+        },
+        {
+          "name": "+ call sends the local name",
+          "edits": [
+            {
+              "file": "client.py",
+              "old": "{\"name\": canonical, \"arguments\": arguments}",
+              "new": "{\"name\": route.local_name, \"arguments\": arguments}"
+            }
+          ],
+          "expect": "archive: result omitted resultType"
+        },
+        {
+          "name": "+ a legacy result without resultType is complete",
+          "edits": [
+            {
+              "file": "client.py",
+              "old": "        if \"resultType\" not in result:\n            raise ProtocolError(f\"{peer.name}: result omitted resultType\")\n        return dict(result)\n",
+              "new": "        result = dict(result)\n        if peer.selection.era == \"legacy\":\n            result.setdefault(\"resultType\", \"complete\")\n        if \"resultType\" not in result:\n            raise ProtocolError(f\"{peer.name}: result omitted resultType\")\n        return result\n"
+            }
+          ],
+          "expect": "must not scan the table each time"
+        },
+        {
+          "name": "+ pending requests indexed by (type, id)",
+          "edits": [
+            {
+              "file": "pending.py",
+              "old": "        self._waiting: list[tuple[dict, Any]] = []\n",
+              "new": "        self._waiting: dict = {}\n"
+            },
+            {
+              "file": "pending.py",
+              "old": "        if any(same_id(pending[\"id\"], request_id) for pending, _ in self._waiting):\n            raise ValueError(f\"request {request_id!r} is already in flight\")\n        self._waiting.append((request, waiter))\n",
+              "new": "        key = (type(request_id), request_id)\n        if key in self._waiting:\n            raise ValueError(f\"request {request_id!r} is already in flight\")\n        self._waiting[key] = (request, waiter)\n"
+            },
+            {
+              "file": "pending.py",
+              "old": "        for index, (request, waiter) in enumerate(self._waiting):\n            if same_id(request[\"id\"], response_id):\n                del self._waiting[index]\n                return request, waiter\n",
+              "new": "        if valid_id(response_id) and (type(response_id), response_id) in self._waiting:\n            return self._waiting.pop((type(response_id), response_id))\n"
+            },
+            {
+              "file": "pending.py",
+              "old": "        entries, self._waiting = self._waiting, []\n",
+              "new": "        entries, self._waiting = list(self._waiting.values()), {}\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_route_calls",
+      "name": "resultType check dropped for every era",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if \"resultType\" not in result:\n            raise ProtocolError(f\"{peer.name}: result omitted resultType\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a modern result without resultType is invalid"
+    },
+    {
+      "test": "test_route_calls",
+      "name": "resultType defaulted to complete for every era",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if peer.selection is not None and peer.selection.era == \"legacy\":\n",
+          "new": "        if True:\n"
+        }
+      ],
+      "expect": "a modern result without resultType is invalid"
+    },
+    {
+      "test": "test_route_calls",
+      "name": "legacy era recognized by the 2025-11-25 version string",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if peer.selection is not None and peer.selection.era == \"legacy\":\n",
+          "new": "        if peer.selection is not None and peer.selection.protocol_version == \"2025-11-25\":\n"
+        }
+      ],
+      "expect": "archive: result omitted resultType"
+    },
+    {
+      "test": "test_route_calls",
+      "name": "pending requests keyed by the bare id (True == 1)",
+      "edits": [
+        {
+          "file": "pending.py",
+          "old": "        key = (type(request_id), request_id)\n",
+          "new": "        key = request_id\n"
+        },
+        {
+          "file": "pending.py",
+          "old": "        if valid_id(response_id):\n            entry = self._waiting.pop((type(response_id), response_id), None)\n",
+          "new": "        entry = self._waiting.pop(response_id, None)\n"
+        }
+      ],
+      "expect": "an answer with id True matches no request"
+    },
+    {
+      "test": "test_route_calls",
+      "name": "pending requests keyed by str(id)",
+      "edits": [
+        {
+          "file": "pending.py",
+          "old": "        key = (type(request_id), request_id)\n",
+          "new": "        key = str(request_id)\n"
+        },
+        {
+          "file": "pending.py",
+          "old": "            entry = self._waiting.pop((type(response_id), response_id), None)\n",
+          "new": "            entry = self._waiting.pop(str(response_id), None)\n"
+        }
+      ],
+      "expect": "request '1' is already in flight"
+    },
+    {
+      "test": "test_route_calls",
+      "name": "isinstance id check, popped before the type is compared",
+      "edits": [
+        {
+          "file": "pending.py",
+          "old": "        key = (type(request_id), request_id)\n",
+          "new": "        key = request_id\n"
+        },
+        {
+          "file": "pending.py",
+          "old": "        if valid_id(response_id):\n            entry = self._waiting.pop((type(response_id), response_id), None)\n",
+          "new": "        if isinstance(response_id, (int, str)):\n            entry = self._waiting.pop(response_id, None)\n            if entry is not None and type(entry[0][\"id\"]) is not type(response_id):\n                entry = None\n"
+        }
+      ],
+      "expect": "a rejected answer leaves the real request pending"
+    },
+    {
+      "test": "test_route_calls",
+      "name": "dict lookup, but add still scans for duplicates",
+      "edits": [
+        {
+          "file": "pending.py",
+          "old": "from .protocol import ProtocolError, valid_id\n",
+          "new": "from .protocol import ProtocolError, same_id, valid_id\n"
+        },
+        {
+          "file": "pending.py",
+          "old": "        if key in self._waiting:\n",
+          "new": "        if any(same_id(r[\"id\"], request_id) for r, _ in self._waiting.values()):\n"
+        }
+      ],
+      "expect": "must not scan the table each time"
+    },
+    {
+      "test": "test_route_calls",
+      "name": "mutual_version takes the peer's newest version",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "    return max(common) if common else None\n",
+          "new": "    return max(advertised) if common else None\n"
+        }
+      ],
+      "expect": "each request carries the highest version both sides support"
+    },
+    {
+      "test": "test_route_calls",
+      "name": "mutual_version takes the client's newest version",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "    return max(common) if common else None\n",
+          "new": "    return max(supported) if common else None\n"
+        }
+      ],
+      "expect": "files: tools/call failed with -32022"
+    },
+    {
+      "test": "test_route_calls",
+      "name": "call strips everything up to the last '/'",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "{\"name\": route.local_name, \"arguments\": arguments}",
+          "new": "{\"name\": canonical.split(\"/\")[-1], \"arguments\": arguments}"
+        }
+      ],
+      "expect": "even one with a '/' in it"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "default % interpolation when loading",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "    parser = configparser.ConfigParser(interpolation=None)\n    with open(path, encoding=\"utf-8\") as fh:",
+          "new": "    parser = configparser.ConfigParser()\n    with open(path, encoding=\"utf-8\") as fh:"
+        }
+      ],
+      "expect": "InterpolationSyntaxError"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "default % interpolation when saving",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "    parser = configparser.ConfigParser(interpolation=None)\n    for config in peers:",
+          "new": "    parser = configparser.ConfigParser()\n    for config in peers:"
+        }
+      ],
+      "expect": "invalid interpolation syntax"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "argv split on whitespace",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "tuple(shlex.split(section[\"argv\"]))",
+          "new": "tuple(section[\"argv\"].split())"
+        }
+      ],
+      "expect": "an operator's file loads as written, in file order"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "argv joined with spaces",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "shlex.join(config.argv)",
+          "new": "\" \".join(config.argv)"
+        }
+      ],
+      "expect": "every pinned peer comes back exactly, in the same order"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "bool() on the allow_legacy text",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "allow_legacy=section.getboolean(\"allow_legacy\", fallback=False)",
+          "new": "allow_legacy=bool(section.get(\"allow_legacy\", \"\"))"
+        }
+      ],
+      "expect": "allow_legacy needs at least one legacy revision"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "allow_legacy compared with the text 'true'",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "allow_legacy=section.getboolean(\"allow_legacy\", fallback=False)",
+          "new": "allow_legacy=section.get(\"allow_legacy\", \"false\") == \"true\""
+        }
+      ],
+      "expect": "an operator's file loads as written, in file order"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "probe_timeout_ms kept as text",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "probe_timeout_ms=section.getint(\"probe_timeout_ms\", fallback=DEFAULT_PROBE_TIMEOUT_MS)",
+          "new": "probe_timeout_ms=section.get(\"probe_timeout_ms\", str(DEFAULT_PROBE_TIMEOUT_MS))"
+        },
+        {
+          "file": "peerconf.py",
+          "old": "    if type(config.probe_timeout_ms) is not int or config.probe_timeout_ms <= 0:\n",
+          "new": "    if int(config.probe_timeout_ms) <= 0:\n"
+        }
+      ],
+      "expect": "an operator's file loads as written, in file order"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "legacy_revisions loaded as a list",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "legacy_revisions=tuple(section.get(\"legacy_revisions\", \"\").split())",
+          "new": "legacy_revisions=section.get(\"legacy_revisions\", \"\").split()"
+        }
+      ],
+      "expect": "an operator's file loads as written, in file order"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "[DEFAULT] values inherited by every peer",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "    if parser.defaults():\n        raise ValueError(\"a [DEFAULT] section would apply to every peer\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a [DEFAULT] section would grant legacy to every peer"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "duplicate peer sections merged (strict=False)",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "    parser = configparser.ConfigParser(interpolation=None)\n    with open(path, encoding=\"utf-8\") as fh:",
+          "new": "    parser = configparser.ConfigParser(interpolation=None, strict=False)\n    with open(path, encoding=\"utf-8\") as fh:"
+        }
+      ],
+      "expect": "a peer is pinned once, not merged from two sections"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "configparser errors not turned into ValueError",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "        try:\n            parser.read_file(fh)\n        except configparser.Error as exc:  # duplicate peers or keys, keys outside a section\n            raise ValueError(f\"{path}: {exc}\") from exc\n",
+          "new": "        parser.read_file(fh)\n"
+        }
+      ],
+      "expect": "DuplicateSectionError"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "ConfigParser.read() skips a missing file",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "    with open(path, encoding=\"utf-8\") as fh:  # read() would skip a missing file silently\n        try:\n            parser.read_file(fh)\n",
+          "new": "    if True:\n        try:\n            parser.read(path, encoding=\"utf-8\")\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "wildcard peer names accepted",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "    if not config.name or WILDCARD in config.name:\n",
+          "new": "    if not config.name:\n"
+        }
+      ],
+      "expect": "a wildcard peer pins nothing"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "probe_timeout_ms checked for zero only",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "if type(config.probe_timeout_ms) is not int or config.probe_timeout_ms <= 0:",
+          "new": "if not config.probe_timeout_ms:"
+        }
+      ],
+      "expect": "probe_timeout_ms is a positive integer"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "[DEFAULT] read as an ordinary peer (default_section renamed)",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "    parser = configparser.ConfigParser(interpolation=None)\n    with open(path",
+          "new": "    parser = configparser.ConfigParser(interpolation=None, default_section=\"\\u0000\")\n    with open(path"
+        }
+      ],
+      "expect": "a [DEFAULT] section would grant legacy to every peer"
+    },
+    {
+      "test": "test_peer_config_roundtrip",
+      "name": "legacy_revisions separated by commas",
+      "edits": [
+        {
+          "file": "peerconf.py",
+          "old": "\" \".join(config.legacy_revisions)",
+          "new": "\",\".join(config.legacy_revisions)"
+        },
+        {
+          "file": "peerconf.py",
+          "old": "section.get(\"legacy_revisions\", \"\").split()",
+          "new": "tuple(r for r in section.get(\"legacy_revisions\", \"\").split(\",\") if r)"
+        }
+      ],
+      "expect": "an operator's file loads as written, in file order"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "recognized modern errors fall back for an allowlisted peer",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "    if code not in RECOGNIZED_MODERN_ERRORS:\n",
+          "new": "    if code not in RECOGNIZED_MODERN_ERRORS or config.allow_legacy:\n"
+        }
+      ],
+      "expect": "-32022 means retry discovery, even for an allowlisted peer"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "only -32601 opens the legacy probe",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "    if code not in RECOGNIZED_MODERN_ERRORS:\n",
+          "new": "    if code == -32601:\n"
+        }
+      ],
+      "expect": "ProtocolError: archive: modern error -32602"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "-32022 retry reuses the request id",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "    retry = modern_request(next(ids), \"server/discover\", {}, version, capabilities)\n",
+          "new": "    retry = modern_request(probe[\"id\"], \"server/discover\", {}, version, capabilities)\n"
+        }
+      ],
+      "expect": "the retry is a new request with a new id"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "-32022 retry at the first entry of data.supported",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "    version = mutual_version(offered, modern_versions) if isinstance(offered, list) else None\n",
+          "new": "    version = offered[0] if isinstance(offered, list) and offered else None\n"
+        }
+      ],
+      "expect": "retry at the highest version in error.data.supported that we support"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "-32022 with nothing in common falls back to initialize",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "        raise ProtocolError(f\"{config.name}: no mutually supported modern version\")\n",
+          "new": "        return _legacy_probe(config, transport, ids, capabilities, \"no common version\")\n"
+        }
+      ],
+      "expect": "-32022 with no version in common fails"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "-32022 retried until discovery succeeds",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "    if outcome is None or outcome[0] != \"result\":\n        raise ProtocolError(f\"{config.name}: modern discovery at {version} failed\")\n",
+          "new": "    if outcome is not None and outcome[0] == \"error\" and outcome[1][\"code\"] == -32022:\n        return negotiate(config, transport, ids, modern_versions=(version,),\n                         capabilities=capabilities, discovery_timeout_ms=discovery_timeout_ms)\n    if outcome is None or outcome[0] != \"result\":\n        raise ProtocolError(f\"{config.name}: modern discovery at {version} failed\")\n"
+        }
+      ],
+      "expect": "the client keeps probing"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "initialize sent without the allowlist",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "    if not config.allow_legacy or not config.legacy_revisions:\n",
+          "new": "    if False:\n"
+        },
+        {
+          "file": "negotiate.py",
+          "old": "\"protocolVersion\": config.legacy_revisions[0],",
+          "new": "\"protocolVersion\": (config.legacy_revisions or (\"2025-11-25\",))[0],"
+        }
+      ],
+      "expect": "a peer that is not allowlisted never receives initialize"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "a discovery timeout escapes as TimeoutError",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "    except (TimeoutError, ConnectionError):\n",
+          "new": "    except ConnectionError:\n"
+        }
+      ],
+      "expect": "TimeoutError"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "an empty answer is not treated as silence",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "    if response is None:\n        return None\n",
+          "new": ""
+        }
+      ],
+      "expect": "carries another id"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "notifications/initialized sent before the checks",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "        raise ProtocolError(f\"{config.name}: initialize failed\")\n",
+          "new": "        raise ProtocolError(f\"{config.name}: initialize failed\")\n    transport(notification(\"notifications/initialized\"), None)\n"
+        },
+        {
+          "file": "negotiate.py",
+          "old": "    transport(notification(\"notifications/initialized\"), None)\n    return Selection(",
+          "new": "    return Selection("
+        }
+      ],
+      "expect": "no notifications/initialized, after"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "only protocolVersion checked",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "    if not isinstance(result.get(\"capabilities\"), dict):\n        raise ProtocolError(f\"{config.name}: initialize capabilities must be an object\")\n",
+          "new": ""
+        },
+        {
+          "file": "negotiate.py",
+          "old": "    if not (\n        isinstance(server_info, dict)\n",
+          "new": "    if False and not (\n        isinstance(server_info, dict)\n"
+        }
+      ],
+      "expect": "fail closed on capabilities that are not an object"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "legacy revision compared with the built-in 2025-11-25",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "    if not isinstance(version, str) or version not in config.legacy_revisions:\n",
+          "new": "    if version != \"2025-11-25\":\n"
+        }
+      ],
+      "expect": "unsupported legacy revision '2024-11-05'"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "initialize answer id not compared",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "    if not isinstance(response, dict) or not same_id(response.get(\"id\"), request[\"id\"]):\n",
+          "new": "    if not isinstance(response, dict):\n"
+        }
+      ],
+      "expect": "fail closed on an answer to another request"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "a response with both result and error accepted",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "    if has_result == has_error:\n",
+          "new": "    if not has_result and not has_error:\n"
+        }
+      ],
+      "expect": "fail closed on a result and an error together"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "an empty capabilities object refused",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "if not isinstance(result.get(\"capabilities\"), dict):",
+          "new": "if not isinstance(result.get(\"capabilities\"), dict) or not result[\"capabilities\"]:"
+        }
+      ],
+      "expect": "an empty capabilities object is still an object"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "serverInfo name checked for truthiness only",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "and all(isinstance(server_info.get(key), str) and server_info[key] for key in (\"name\", \"version\"))",
+          "new": "and bool(server_info.get(\"name\")) and isinstance(server_info.get(\"version\"), str) and bool(server_info[\"version\"])"
+        }
+      ],
+      "expect": "fail closed on a serverInfo name that is not a string"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "an initialize timeout escapes as TimeoutError",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "    outcome = _ask(transport, initialize, config.probe_timeout_ms)\n",
+          "new": "    response = transport(initialize, config.probe_timeout_ms)\n    if response is not None and not same_id(response.get(\"id\"), initialize[\"id\"]):\n        raise ProtocolError(\"id\")\n    outcome = None if response is None else decode_response(response)\n"
+        }
+      ],
+      "expect": "TimeoutError"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "-32022 retry at the newest entry of data.supported",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "version = mutual_version(offered, modern_versions) if isinstance(offered, list) else None",
+          "new": "version = max(offered) if offered else None"
+        }
+      ],
+      "expect": "-32022 with no version in common fails"
+    },
+    {
+      "test": "test_era_negotiation",
+      "name": "a failed -32022 retry falls back to initialize",
+      "edits": [
+        {
+          "file": "negotiate.py",
+          "old": "    if outcome is None or outcome[0] != \"result\":\n        raise ProtocolError(f\"{config.name}: modern discovery at {version} failed\")",
+          "new": "    if outcome is None or outcome[0] != \"result\":\n        return _legacy_probe(config, transport, ids, capabilities, \"retry failed\")"
+        }
+      ],
+      "expect": "one retry after -32022, then fail"
+    },
+    {
+      "test": "test_stdio_pool",
+      "name": "no newline after each frame",
+      "edits": [
+        {
+          "file": "pool.py",
+          "old": "json.dumps(request).encode(\"utf-8\") + b\"\\n\"",
+          "new": "json.dumps(request).encode(\"utf-8\")"
+        }
+      ],
+      "expect": "start() discovers and lists every peer"
+    },
+    {
+      "test": "test_stdio_pool",
+      "name": "pretty-printed frames",
+      "edits": [
+        {
+          "file": "pool.py",
+          "old": "json.dumps(request).encode(\"utf-8\")",
+          "new": "json.dumps(request, indent=2).encode(\"utf-8\")"
+        }
+      ],
+      "expect": "one JSON-RPC message per line"
+    },
+    {
+      "test": "test_stdio_pool",
+      "name": "calls serialized: each waits for the one before it",
+      "edits": [
+        {
+          "file": "pool.py",
+          "old": "    async def call(self, peer: str, tool: str, arguments: dict) -> dict:\n",
+          "new": "    async def call(self, peer: str, tool: str, arguments: dict) -> dict:\n        if not hasattr(self, \"_serial\"):\n            self._serial = asyncio.Lock()\n        async with self._serial:\n            return await self._call(peer, tool, arguments)\n\n    async def _call(self, peer: str, tool: str, arguments: dict) -> dict:\n"
+        }
+      ],
+      "expect": "a call must not wait for the one before it"
+    },
+    {
+      "test": "test_stdio_pool",
+      "name": "in-flight calls left waiting when the process dies",
+      "edits": [
+        {
+          "file": "pool.py",
+          "old": "            for request, answer in link.pending.drain():\n                if not answer.done():\n                    answer.set_exception(TransportLost(f\"{peer}: {request['method']} was in flight\"))\n",
+          "new": "            pass\n"
+        }
+      ],
+      "expect": "a peer that dies fails the calls it had in flight"
+    },
+    {
+      "test": "test_stdio_pool",
+      "name": "every lost call retried",
+      "edits": [
+        {
+          "file": "pool.py",
+          "old": "            if tool not in self.retry_safe.get(peer, ()):\n                raise\n",
+          "new": "            if False:\n                raise\n"
+        }
+      ],
+      "expect": "readOnlyHint is the server's claim, not the operator's"
+    },
+    {
+      "test": "test_stdio_pool",
+      "name": "readOnlyHint makes a call retry-safe",
+      "edits": [
+        {
+          "file": "pool.py",
+          "old": "            if tool not in self.retry_safe.get(peer, ()):\n",
+          "new": "            hinted = any(t[\"name\"] == tool and t.get(\"annotations\", {}).get(\"readOnlyHint\") for t in link.tools)\n            if tool not in self.retry_safe.get(peer, ()) and not hinted:\n"
+        }
+      ],
+      "expect": "readOnlyHint is the server's claim, not the operator's"
+    },
+    {
+      "test": "test_stdio_pool",
+      "name": "cached era kept across a restart",
+      "edits": [
+        {
+          "file": "pool.py",
+          "old": "            link = _Link(self.spawners[peer]())\n",
+          "new": "            cached = link.selection if link is not None else None\n            link = _Link(self.spawners[peer]())\n"
+        },
+        {
+          "file": "pool.py",
+          "old": "            link.selection = modern_selection(discovered, self.modern_versions)\n",
+          "new": "            link.selection = cached or modern_selection(discovered, self.modern_versions)\n"
+        }
+      ],
+      "expect": "a restart drops the cached era"
+    },
+    {
+      "test": "test_stdio_pool",
+      "name": "request ids counted per process",
+      "edits": [
+        {
+          "file": "pool.py",
+          "old": "    reader: asyncio.Task | None = None\n",
+          "new": "    reader: asyncio.Task | None = None\n    ids: Any = field(default_factory=lambda: itertools.count(1))\n"
+        },
+        {
+          "file": "pool.py",
+          "old": "request = modern_request(next(self.ids), method,",
+          "new": "request = modern_request(next(link.ids), method,"
+        }
+      ],
+      "expect": "a retried call gets a new JSON-RPC id"
+    },
+    {
+      "test": "test_stdio_pool",
+      "name": "safe calls retried until they succeed",
+      "edits": [
+        {
+          "file": "pool.py",
+          "old": "        link = await self._link(peer)\n        return await self._ask(peer, link, \"tools/call\", params)\n",
+          "new": "        while True:\n            link = await self._link(peer)\n            try:\n                return await self._ask(peer, link, \"tools/call\", params)\n            except TransportLost:\n                continue\n"
+        }
+      ],
+      "expect": "a safe call is retried once, not until it succeeds"
+    },
+    {
+      "test": "test_stdio_pool",
+      "name": "answers matched to the oldest pending call",
+      "edits": [
+        {
+          "file": "pool.py",
+          "old": "                    _, answer = link.pending.resolve(message)\n",
+          "new": "                    if not len(link.pending): raise ValueError\n                    request, answer = next(iter(link.pending._waiting.values()))\n                    link.pending._waiting.pop((type(request[\"id\"]), request[\"id\"]))\n"
+        }
+      ],
+      "expect": "each call gets its own answer, matched by id"
+    },
+    {
+      "test": "test_stdio_pool",
+      "name": "retry_safe merged across peers",
+      "edits": [
+        {
+          "file": "pool.py",
+          "old": "if tool not in self.retry_safe.get(peer, ()):",
+          "new": "if not any(tool in tools for tools in self.retry_safe.values()):"
+        }
+      ],
+      "expect": "for its own peer"
+    },
+    {
+      "test": "test_stdio_pool",
+      "name": "safe call resent without restarting the peer",
+      "edits": [
+        {
+          "file": "pool.py",
+          "old": "                raise\n        link = await self._link(peer)\n",
+          "new": "                raise\n"
+        }
+      ],
+      "expect": "sent again on the restarted peer"
+    },
+    {
+      "test": "test_namespace_merge",
+      "name": "names with '/' exposed bare (raises on the clash)",
+      "edits": [
+        {
+          "file": "namespace.py",
+          "old": "            if SEPARATOR not in local:\n                owner = routes.get(local)\n",
+          "new": "            if True:\n                owner = routes.get(local)\n"
+        }
+      ],
+      "expect": "canonical name 'notes/search' is taken"
+    },
+    {
+      "test": "test_namespace_merge",
+      "name": "names with '/' exposed bare, clashes overwritten",
+      "edits": [
+        {
+          "file": "namespace.py",
+          "old": "            if SEPARATOR not in local:\n                owner = routes.get(local)\n",
+          "new": "            if True:\n                owner = routes.get(local)\n"
+        },
+        {
+          "file": "namespace.py",
+          "old": "            if canonical in routes:  # cannot happen: peer names have no \"/\"\n                raise NamespaceError(f\"canonical name {canonical!r} is taken\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a local name that already contains '/' is always prefixed"
+    },
+    {
+      "test": "test_namespace_merge",
+      "name": "connection order decides who keeps the bare name",
+      "edits": [
+        {
+          "file": "namespace.py",
+          "old": "    for peer in sorted(catalogs):\n",
+          "new": "    for peer in catalogs:\n"
+        }
+      ],
+      "expect": "the first peer in sorted order keeps the bare name"
+    },
+    {
+      "test": "test_namespace_merge",
+      "name": "reject-on-collision silently skips the duplicate",
+      "edits": [
+        {
+          "file": "namespace.py",
+          "old": "                    collisions.append(f\"{local!r} is offered by {owner.peer} and {peer}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "reject-on-collision refuses a duplicated tool name"
+    },
+    {
+      "test": "test_namespace_merge",
+      "name": "collision error names only the newcomer",
+      "edits": [
+        {
+          "file": "namespace.py",
+          "old": "f\"{local!r} is offered by {owner.peer} and {peer}\"",
+          "new": "f\"{local!r} is offered again by {peer}\""
+        }
+      ],
+      "expect": "a collision error names both peers"
+    },
+    {
+      "test": "test_namespace_merge",
+      "name": "a name listed twice by one peer is prefixed instead of refused",
+      "edits": [
+        {
+          "file": "namespace.py",
+          "old": "        if twice:\n            raise NamespaceError(f\"{peer} lists {', '.join(twice)} more than once\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a peer that lists one name twice is a configuration error"
+    },
+    {
+      "test": "test_namespace_merge",
+      "name": "peer names with '/' accepted",
+      "edits": [
+        {
+          "file": "namespace.py",
+          "old": "        if not peer or SEPARATOR in peer:\n",
+          "new": "        if not peer:\n"
+        }
+      ],
+      "expect": "a peer name with '/' would make prefixed names ambiguous"
+    },
+    {
+      "test": "test_namespace_merge",
+      "name": "a '/' name prefixed only when it starts with a known peer",
+      "edits": [
+        {
+          "file": "namespace.py",
+          "old": "            if SEPARATOR not in local:",
+          "new": "            if SEPARATOR not in local or local.split(SEPARATOR)[0] not in catalogs:"
+        }
+      ],
+      "expect": "a canonical name splits back into its peer and its local name"
+    }
+  ]
+}

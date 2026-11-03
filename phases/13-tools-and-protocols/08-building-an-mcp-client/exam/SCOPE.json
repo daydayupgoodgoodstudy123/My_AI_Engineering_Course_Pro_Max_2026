@@ -1,0 +1,68 @@
+{
+  "lesson": "phases/13-tools-and-protocols/08-building-an-mcp-client",
+  "title": "Building an MCP Client: Discovery, Routing, and Dual-Era Fallback",
+  "format": "staged-brownfield",
+  "service": "multipeer: a multi-server MCP client host with routing and id correlation, an INI file of pinned peers, the stdio era probe, a crash-tolerant stdio pool and a collision-safe namespace merge",
+  "sources": {
+    "docs/en.md": "dc2ca4a30c21094e72f5e225724c5a6680119d65aa974e34d411be4ce458fc6d",
+    "code/main.py": "be18e2e7f801772c07c2af5ca81e86b7e6f18c0d5d838fd4487977efc761d4c4",
+    "code/tests/test_main.py": "52f507bf63888da261b924569867b9915c381a3135f5a22912c4f824f435dd71"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_route_calls",
+      "kind": "debug",
+      "lesson_anchor": "Modern discovery (highest mutually supported version); Routing a call (local name, matching response id); Discovering and caching tools (missing legacy resultType is complete); code/main.py _mutual_version, call, decode_rpc_response",
+      "planted_bugs": [
+        "protocol.mutual_version returns the first shared version in the peer's order, not the highest; discover succeeds and the wrong version shows up two calls later in a tools/call _meta",
+        "MultiServerClient.call sends the canonical name (notes/search) instead of the local name the owning peer declared; a gateway peer's local name notes/search also rules out cutting the canonical name at its last '/'",
+        "MultiServerClient._result demands resultType from every era, so a legacy peer's result raises ProtocolError",
+        "PendingCalls keeps a list: add scans it for duplicates and resolve scans it for the id, O(n) each"
+      ],
+      "timing_assert": "5000 adds plus 5000 shuffled resolves under 0.1 s (the scanning table takes about 1.5 s, the indexed one about 2 ms)",
+      "overfix_guard": "a modern result without resultType still raises, which rules out dropping the check or defaulting it for every era, and the legacy peer is on 2024-11-05, which rules out spotting legacy by the 2025-11-25 string; answers with id true, 1.0, null or [1] match nothing, the string '1' and the integer 1 stay apart, and a rejected answer leaves request 1 pending, which rules out a dict keyed by the bare id or by str(id) and popping before comparing types",
+      "deviation": "mutual_version lives in protocol.py, where the client's modern discovery, Part 3's negotiate and Part 4's pool all use it, and correlation is a PendingCalls class that the Part 4 pool reuses. The legacy peer gets its Selection directly, because choosing the era is Part 3's work and is not implemented in the starter. The bool-id guard also covers 1.0, null, an unhashable id, '1' against 1, and keeping the real request after a rejected answer."
+    },
+    {
+      "part": 2,
+      "test": "test_peer_config_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Allowlisting is operator intent, not evidence: allow_legacy bound to one pinned command or endpoint, no wildcard; Legacy is a compatibility branch: the era cache is discarded when the transport restarts; skill: pinned command or endpoint, arguments, explicit allow_legacy defaulting to false",
+      "exactness": "save then load returns the same PeerConfig list in the same order: argv with quotes, an empty argument, padded spaces, %, # and ; survives through shlex, % in endpoints stays literal, booleans and integers come back typed, tuples stay tuples; an operator-written file with yes/off, %PORT% and shell quoting loads as written",
+      "traps": ["BasicInterpolation on load (InterpolationSyntaxError) or on save (invalid interpolation syntax)", "argv split on whitespace or joined with spaces", "bool() on the text or == 'true'", "probe_timeout_ms kept as text", "lists instead of tuples", "[DEFAULT] values inherited by every peer", "duplicate sections merged with strict=False", "DuplicateSectionError not turned into ValueError", "ConfigParser.read() skipping a missing file", "wildcard peer names and endpoints", "allow_legacy without revisions", "both or neither of argv and endpoint", "zero or negative timeout", "[DEFAULT] sidestepped by renaming default_section, so it loads as a peer"],
+      "clarifying_questions": ["keeping comments", "argv quoting", "persisting the era", "validating on save"],
+      "deviation": "The suggested trap 'configparser lowercases keys' cannot fire here: every key is a fixed lowercase name and peer names sit in section headers, which configparser keeps as written. It became a follow-up question about storing an environment allowlist as keys. The DEFAULT-section wildcard, duplicate sections and the silently skipped missing file took its place. The era cache not being persisted is a clarifying question, not an assertion."
+    },
+    {
+      "part": 3,
+      "test": "test_era_negotiation",
+      "kind": "core algorithm",
+      "lesson_anchor": "The stdio compatibility probe (three outcome classes, -32020/-32021/-32022, -32601 is not evidence); Allowlisting is operator intent (one bounded initialize, five checks); Legacy is a compatibility branch (notifications/initialized only after every check)",
+      "traps": ["recognized modern error downgraded for an allowlisted peer", "-32022 retry with the same id", "-32022 retry at data.supported[0]", "-32022 with no common version falling back to initialize", "-32022 retried in a loop", "initialize without the allowlist", "only -32601 treated as ambiguous", "raw TimeoutError escaping", "empty answer not treated as silence", "notifications/initialized before the checks", "only protocolVersion checked", "revision compared with the built-in constant", "answer id not compared", "result and error together accepted", "initialize under the discovery timeout or with _meta", "an empty capabilities object refused", "serverInfo name checked for truthiness, not type"],
+      "clarifying_questions": ["retrying after -32020/-32021", "which revision initialize asks for", "a discovery answer with the wrong id"],
+      "deviation": "The bool-id trap is not repeated here, since Part 1 has it and lesson 07's exam has another; the initialize answer is checked against another request's id instead."
+    },
+    {
+      "part": 4,
+      "test": "test_stdio_pool",
+      "kind": "streaming",
+      "lesson_anchor": "Routing a call: do not send on an unavailable transport; reconnect or restart, re-run discovery and tools/list, retry with a new id when the safety policy permits; Legacy is a compatibility branch: discard the era cache when the transport restarts; skill: fail in-flight work, retry only operations allowed by the safety policy",
+      "wire_format": "newline-delimited JSON-RPC written to each peer's stdin, decided by the test's split(b'\\n') and json.loads per line; the fake peers also parse every line as it arrives",
+      "traps": ["missing newline", "pretty-printed frames", "calls serialized (write one, wait for its answer)", "in-flight calls left waiting when the process exits", "every lost call retried", "readOnlyHint trusted as retry-safe", "cached era kept across a restart", "no rediscovery or relisting before the retry", "per-process id counters reusing the lost call's id", "retrying until success", "a slow peer blocking the others", "answers matched to the oldest pending call instead of by id", "retry_safe merged across peers (restore is safe on files, not on notes)"],
+      "clarifying_questions": ["eager or lazy restart", "a retry that fails again", "legacy peers in the pool"],
+      "deviation": "Pool peers are modern only, because the legacy branch is Part 3's work. The dropped era cache shows up as a restarted process that supports a newer version. Added: one retry only (a peer that dies twice), and a call after a crash restarts the peer."
+    },
+    {
+      "part": 5,
+      "test": "test_namespace_merge",
+      "kind": "nested namespace",
+      "lesson_anchor": "Collision-safe namespace merge (prefix on collision, reject on collision, never silent overwrite, store canonical and local names); Discovering and caching tools: sort before merging so registry order does not depend on startup timing",
+      "traps": ["connection order decides the bare name", "a gateway's local names with '/' taken as bare names, so a prefixed name collides (the lesson code raises) or overwrites", "reject-on-collision silently skipping the duplicate", "an error naming only one peer", "a name listed twice by one peer prefixed or deduplicated", "peer names containing '/'", "a '/' name prefixed only when it starts with a known peer name"],
+      "integration": "300 seeded random catalogs: every (peer, tool) gets exactly one canonical name, and every canonical name splits back into its peer and local name",
+      "clarifying_questions": ["first or all collisions in the error", "sorting the result"],
+      "deviation": "Added the peer-name rule and the randomized injectivity check; the nesting is a gateway peer whose local names are themselves namespaced."
+    }
+  ]
+}
