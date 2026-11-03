@@ -1,0 +1,1244 @@
+{
+  "package": "notesrv",
+  "tests": [
+    "test_dispatch_contract",
+    "test_note_dir_roundtrip",
+    "test_tool_call_errors",
+    "test_stdio_loop",
+    "test_dual_era_connections"
+  ],
+  "layers": [
+    {
+      "test": "test_dispatch_contract",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "resources/read must find the note its URI names"
+        },
+        {
+          "name": "fix note_id_from_uri",
+          "edits": [
+            {
+              "file": "notes.py",
+              "old": "return uri.lstrip(NOTE_SCHEME)",
+              "new": "return uri.removeprefix(NOTE_SCHEME)"
+            }
+          ],
+          "expect": "a user's note may only be cached privately"
+        },
+        {
+          "name": "+ complete() defaults to private",
+          "edits": [
+            {
+              "file": "protocol.py",
+              "old": "cache_scope: str = \"public\",",
+              "new": "cache_scope: str = \"private\","
+            }
+          ],
+          "expect": "only discovery, list and read results carry cache hints"
+        },
+        {
+          "name": "+ no cache hints on prompts/get",
+          "edits": [
+            {
+              "file": "server.py",
+              "old": "            },\n            ttl_ms=60_000,\n            cache_scope=\"public\",\n        )\n",
+              "new": "            }\n        )\n"
+            }
+          ],
+          "expect": "is not a string or a safe integer"
+        },
+        {
+          "name": "+ a bool is not an id",
+          "edits": [
+            {
+              "file": "protocol.py",
+              "old": "    return isinstance(value, (int, str))\n",
+              "new": "    return isinstance(value, str) or type(value) is int\n"
+            }
+          ],
+          "expect": "is not a string or a safe integer"
+        },
+        {
+          "name": "+ safe-integer range",
+          "edits": [
+            {
+              "file": "protocol.py",
+              "old": "    return isinstance(value, str) or type(value) is int\n",
+              "new": "    return isinstance(value, str) or (type(value) is int and abs(value) <= MAX_SAFE_INTEGER)\n"
+            }
+          ],
+          "expect": "creating a note must not get slower as the store grows"
+        },
+        {
+          "name": "+ id counter",
+          "edits": [
+            {
+              "file": "notes.py",
+              "old": "        self._notes: dict[str, Note] = {}\n        for title",
+              "new": "        self._notes: dict[str, Note] = {}\n        self._next = 1\n        for title"
+            },
+            {
+              "file": "notes.py",
+              "old": "        number = 1 + max((int(note_id.removeprefix(\"note-\")) for note_id in self._notes), default=0)\n        note = Note(f\"note-{number}\", title, body, tag, owner)\n",
+              "new": "        note = Note(f\"note-{self._next}\", title, body, tag, owner)\n        self._next += 1\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_dispatch_contract",
+      "name": "next id is len(notes) + 1",
+      "edits": [
+        {
+          "file": "notes.py",
+          "old": "        note = Note(f\"note-{self._next}\", title, body, tag, owner)\n        self._next += 1\n",
+          "new": "        note = Note(f\"note-{len(self._notes) + 1}\", title, body, tag, owner)\n"
+        }
+      ],
+      "expect": "a deleted note's id is never handed out again"
+    },
+    {
+      "test": "test_dispatch_contract",
+      "name": "next id is the largest live id + 1, recomputed on delete",
+      "edits": [
+        {
+          "file": "notes.py",
+          "old": "        del self._notes[note_id]\n",
+          "new": "        del self._notes[note_id]\n        self._next = 1 + max((int(key.removeprefix(\"note-\")) for key in self._notes), default=0)\n"
+        }
+      ],
+      "expect": "a deleted note's id is never handed out again"
+    },
+    {
+      "test": "test_dispatch_contract",
+      "name": "range check leaves out ±(2**53 - 1)",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "-MAX_SAFE_INTEGER <= value <= MAX_SAFE_INTEGER",
+          "new": "-MAX_SAFE_INTEGER < value < MAX_SAFE_INTEGER"
+        }
+      ],
+      "expect": "is valid and comes back unchanged"
+    },
+    {
+      "test": "test_dispatch_contract",
+      "name": "id rejected inside validate_request only, so the error still echoes it",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "    if isinstance(value, str):\n        return True\n    return type(value) is int and -MAX_SAFE_INTEGER <= value <= MAX_SAFE_INTEGER\n",
+          "new": "    return isinstance(value, (int, str))\n"
+        },
+        {
+          "file": "protocol.py",
+          "old": "    if not valid_request_id(message.get(\"id\")):\n",
+          "new": "    request_id = message.get(\"id\")\n    if not (isinstance(request_id, str) or (type(request_id) is int and abs(request_id) <= MAX_SAFE_INTEGER)):\n"
+        }
+      ],
+      "expect": "is not a string or a safe integer"
+    },
+    {
+      "test": "test_dispatch_contract",
+      "name": "every result defaults to ttlMs 0",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "    ttl_ms: int | None = None,\n",
+          "new": "    ttl_ms: int | None = 0,\n"
+        }
+      ],
+      "expect": "only discovery, list and read results carry cache hints"
+    },
+    {
+      "test": "test_dispatch_contract",
+      "name": "random ids, as in the lesson's code",
+      "edits": [
+        {
+          "file": "notes.py",
+          "old": "        note = Note(f\"note-{self._next}\", title, body, tag, owner)\n",
+          "new": "        note = Note(f\"note-{__import__('uuid').uuid4().hex[:6]}\", title, body, tag, owner)\n"
+        }
+      ],
+      "expect": "ids count up after the three sample notes"
+    },
+    {
+      "test": "test_dispatch_contract",
+      "name": "resources/read without cache hints",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            {\"contents\": [{\"uri\": uri, \"mimeType\": \"text/markdown\", \"text\": text}]},\n            ttl_ms=5_000,\n",
+          "new": "            {\"contents\": [{\"uri\": uri, \"mimeType\": \"text/markdown\", \"text\": text}]},\n"
+        }
+      ],
+      "expect": "a resources/read result is cacheable, so it carries ttlMs"
+    },
+    {
+      "test": "test_dispatch_contract",
+      "name": "negative ids rejected",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "-MAX_SAFE_INTEGER <= value <= MAX_SAFE_INTEGER",
+          "new": "0 <= value <= MAX_SAFE_INTEGER"
+        }
+      ],
+      "expect": "is valid and comes back unchanged"
+    },
+    {
+      "test": "test_dispatch_contract",
+      "name": "the empty string rejected as an id",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "    if isinstance(value, str):\n        return True\n",
+          "new": "    if isinstance(value, str):\n        return bool(value)\n"
+        }
+      ],
+      "expect": "is valid and comes back unchanged"
+    },
+    {
+      "test": "test_dispatch_contract",
+      "name": "range check lets 2**53 through",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "-MAX_SAFE_INTEGER <= value <= MAX_SAFE_INTEGER",
+          "new": "abs(value) <= 2**53"
+        }
+      ],
+      "expect": "is not a string or a safe integer"
+    },
+    {
+      "test": "test_dispatch_contract",
+      "name": "every cacheable result made private",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "        result[\"cacheScope\"] = cache_scope\n",
+          "new": "        result[\"cacheScope\"] = \"private\"\n"
+        }
+      ],
+      "expect": "tool definitions are the same for everyone and stay public"
+    },
+    {
+      "test": "test_dispatch_contract",
+      "name": "every error sent with a null id",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        error_id = request_id if valid_request_id(request_id) else None\n",
+          "new": "        error_id = None\n"
+        }
+      ],
+      "expect": "an error answers a request with a valid id, so it carries that id"
+    },
+    {
+      "test": "test_dispatch_contract",
+      "name": "id checked inside validate_request only, then every error sent with a null id",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "    if isinstance(value, str):\n        return True\n    return type(value) is int and -MAX_SAFE_INTEGER <= value <= MAX_SAFE_INTEGER\n",
+          "new": "    return isinstance(value, (int, str))\n"
+        },
+        {
+          "file": "protocol.py",
+          "old": "    if not valid_request_id(message.get(\"id\")):\n",
+          "new": "    request_id = message.get(\"id\")\n    if not (isinstance(request_id, str) or (type(request_id) is int and abs(request_id) <= MAX_SAFE_INTEGER)):\n"
+        },
+        {
+          "file": "server.py",
+          "old": "        error_id = request_id if valid_request_id(request_id) else None\n",
+          "new": "        error_id = None\n"
+        }
+      ],
+      "expect": "an error answers a request with a valid id, so it carries that id"
+    },
+    {
+      "test": "test_dispatch_contract",
+      "name": "next id is the newest live id + 1",
+      "edits": [
+        {
+          "file": "notes.py",
+          "old": "        note = Note(f\"note-{self._next}\", title, body, tag, owner)\n        self._next += 1\n",
+          "new": "        last = next(reversed(self._notes), \"note-0\")\n        note = Note(f\"note-{int(last.removeprefix('note-')) + 1}\", title, body, tag, owner)\n"
+        }
+      ],
+      "expect": "a deleted note's id is never handed out again"
+    },
+    {
+      "test": "test_dispatch_contract",
+      "name": "range check without the lower bound",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "-MAX_SAFE_INTEGER <= value <= MAX_SAFE_INTEGER",
+          "new": "value <= MAX_SAFE_INTEGER"
+        }
+      ],
+      "expect": "is not a string or a safe integer"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "body read back in text mode",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": "            body = self._path(note_id, \".body\").read_bytes().decode(\"utf-8\")\n",
+          "new": "            body = self._path(note_id, \".body\").read_text(encoding=\"utf-8\")\n"
+        }
+      ],
+      "expect": "after a reopen every note comes back exactly"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "body stripped on the way back",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": ".read_bytes().decode(\"utf-8\")\n",
+          "new": ".read_bytes().decode(\"utf-8\").strip()\n"
+        }
+      ],
+      "expect": "after a reopen every note comes back exactly"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "newline added at the end of the body file",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": "write_bytes(body.encode(\"utf-8\"))",
+          "new": "write_bytes((body + \"\\n\").encode(\"utf-8\"))"
+        }
+      ],
+      "expect": "a body file holds exactly the body's UTF-8 bytes"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "empty body gets no file",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": "        self._path(note.id, \".body\").write_bytes(body.encode(\"utf-8\"))\n",
+          "new": "        if body:\n            self._path(note.id, \".body\").write_bytes(body.encode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "missing owner stored as an empty string",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": "\"owner\": owner}",
+          "new": "\"owner\": owner or \"\"}"
+        }
+      ],
+      "expect": "after a reopen every note comes back exactly"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "counter kept in memory only",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": "        self._counter = self.root / \"next_id\"\n",
+          "new": "        self._counter = self.root / \"next_id\"\n        self._next = 1\n"
+        },
+        {
+          "file": "notedir.py",
+          "old": "        number = int(self._counter.read_text(encoding=\"ascii\")) if self._counter.exists() else 1\n        self._counter.write_text(str(number + 1), encoding=\"ascii\")\n",
+          "new": "        number = self._next\n        self._next += 1\n"
+        }
+      ],
+      "expect": "a reopened store keeps counting where it left off"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "counter rebuilt from the notes left on disk",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": "        number = int(self._counter.read_text(encoding=\"ascii\")) if self._counter.exists() else 1\n",
+          "new": "        number = 1 + max((int(p.stem.removeprefix(\"note-\")) for p in self.root.glob(\"note-*.json\")), default=0)\n"
+        }
+      ],
+      "expect": "a deleted note's number is never handed out again"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "notes listed in file-name order",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": "        return [self.get(f\"note-{number}\") for number in sorted(numbers)]\n",
+          "new": "        return [self.get(path.stem) for path in sorted(self.root.glob(\"note-*.json\"))]\n"
+        }
+      ],
+      "expect": "oldest first, so note-2 comes before note-10"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "a missing note raises FileNotFoundError",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": "        except FileNotFoundError:\n            raise KeyError(note_id) from None\n        return Note(",
+          "new": "        except KeyError:\n            raise\n        return Note("
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "delete removes the body but leaves the metadata",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": "        try:\n            self._path(note_id, \".json\").unlink()\n        except FileNotFoundError:\n            raise KeyError(note_id) from None\n        self._path(note_id, \".body\").unlink(missing_ok=True)\n",
+          "new": "        if not self._path(note_id, \".json\").exists():\n            raise KeyError(note_id)\n        self._path(note_id, \".body\").unlink(missing_ok=True)\n"
+        }
+      ],
+      "expect": "delete removes both of the note's files"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "title stripped",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": "{\"title\": title,",
+          "new": "{\"title\": title.strip(),"
+        }
+      ],
+      "expect": "after a reopen every note comes back exactly"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "body file written with a BOM",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": "write_bytes(body.encode(\"utf-8\"))",
+          "new": "write_bytes(body.encode(\"utf-8-sig\"))"
+        }
+      ],
+      "expect": "a body file holds exactly the body's UTF-8 bytes"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "delete removes the metadata but leaves the body file",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": "        self._path(note_id, \".body\").unlink(missing_ok=True)\n",
+          "new": ""
+        }
+      ],
+      "expect": "delete removes both of the note's files"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "deleting an unknown id silently does nothing",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": "        try:\n            self._path(note_id, \".json\").unlink()\n        except FileNotFoundError:\n            raise KeyError(note_id) from None\n",
+          "new": "        self._path(note_id, \".json\").unlink(missing_ok=True)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_note_dir_roundtrip",
+      "name": "missing owner stored with str(), as \"None\"",
+      "edits": [
+        {
+          "file": "notedir.py",
+          "old": "\"owner\": owner}",
+          "new": "\"owner\": str(owner)}"
+        }
+      ],
+      "expect": "after a reopen every note comes back exactly"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "non-object arguments answered as a tool error",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "    if not isinstance(name, str) or not isinstance(arguments, dict):\n        raise RpcProblem(-32602, \"tools/call needs a string name and object arguments\")\n",
+          "new": "    if not isinstance(name, str):\n        raise RpcProblem(-32602, \"tools/call needs a string name\")\n    if not isinstance(arguments, dict):\n        return {\"content\": [text_block(\"arguments must be an object\")], \"isError\": True}\n"
+        }
+      ],
+      "expect": "arguments that are not an object are invalid params"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "arguments required, as in the TypeScript port",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "    arguments = params.get(\"arguments\", {})\n",
+          "new": "    arguments = params.get(\"arguments\")\n"
+        }
+      ],
+      "expect": "arguments may be left out"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "schema violations answered as invalid params",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "    try:\n        check_arguments(tool[\"inputSchema\"], arguments)\n        content = ",
+          "new": "    try:\n        check_arguments(tool[\"inputSchema\"], arguments)\n    except ToolError as exc:\n        raise RpcProblem(-32602, str(exc)) from None\n    try:\n        content = "
+        }
+      ],
+      "expect": "arguments that break the inputSchema are a tool error"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "no type check",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        if spec.get(\"type\") == \"string\" and not isinstance(value, str):\n            raise ToolError(f\"argument {name!r} must be a string\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a tool error that names 'query'"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "exclusive maximum",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "            if high is not None and value > high:\n",
+          "new": "            if high is not None and value >= high:\n"
+        }
+      ],
+      "expect": "a valid call runs the tool"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "exclusive minimum",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "            if low is not None and value < low:\n",
+          "new": "            if low is not None and value <= low:\n"
+        }
+      ],
+      "expect": "a valid call runs the tool"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "unknown tool answered as a protocol error",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        return {\"content\": [text_block(f\"Unknown tool: {name}\")], \"isError\": True}\n",
+          "new": "        raise RpcProblem(-32602, f\"Unknown tool: {name}\")\n"
+        }
+      ],
+      "expect": "an unknown tool is a tool error, not a protocol error"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "principal taken from clientInfo",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "    tool = TOOLS_BY_NAME.get(name)\n",
+          "new": "    principal = params.get(\"_meta\", {}).get(\"io.modelcontextprotocol/clientInfo\", {}).get(\"name\")\n    tool = TOOLS_BY_NAME.get(name)\n"
+        }
+      ],
+      "expect": "only the owner may delete a note, and clientInfo proves nothing"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "an anonymous caller matches a note nobody owns",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "    if principal is None or note.owner != principal:\n",
+          "new": "    if note.owner != principal:\n"
+        }
+      ],
+      "expect": "a note nobody owns cannot be deleted"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "owner checked after the delete",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "    if principal is None or note.owner != principal:\n        raise ToolError(f\"{note_id} can only be deleted by its owner\")\n    notes.delete(note_id)\n",
+          "new": "    notes.delete(note_id)\n    if principal is None or note.owner != principal:\n        raise ToolError(f\"{note_id} can only be deleted by its owner\")\n"
+        }
+      ],
+      "expect": "only the owner may delete a note"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "a missing note escapes as KeyError",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "    try:\n        note = notes.get(note_id)\n    except KeyError:\n        raise ToolError(f\"no note {note_id}\") from None\n",
+          "new": "    note = notes.get(note_id)\n"
+        }
+      ],
+      "expect": "deleting a note that is gone is a tool error"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "every executor exception becomes a tool error",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "    except ToolError as exc:\n        return {\"content\": [text_block(str(exc))], \"isError\": True}\n    return {\"content\": content",
+          "new": "    except Exception as exc:\n        return {\"content\": [text_block(str(exc))], \"isError\": True}\n    return {\"content\": content"
+        }
+      ],
+      "expect": "an executor that breaks is an internal error, not a tool result"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "internal error carries the exception text",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        return {\"content\": [text_block(str(exc))], \"isError\": True}\n    return {\"content\": content",
+          "new": "        return {\"content\": [text_block(str(exc))], \"isError\": True}\n    except Exception as exc:\n        raise RpcProblem(-32603, \"Internal error\", {\"detail\": str(exc)}) from None\n    return {\"content\": content"
+        }
+      ],
+      "expect": "the client learns nothing about the server's internals"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "internal error raised here, so nothing reaches the log",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        return {\"content\": [text_block(str(exc))], \"isError\": True}\n    return {\"content\": content",
+          "new": "        return {\"content\": [text_block(str(exc))], \"isError\": True}\n    except Exception:\n        raise RpcProblem(-32603, \"Internal error\") from None\n    return {\"content\": content"
+        }
+      ],
+      "expect": "the details go to the server log"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "arguments the schema does not list are rejected",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        if spec is None:\n            continue\n",
+          "new": "        if spec is None:\n            raise ToolError(f\"unknown argument {name!r}\")\n"
+        }
+      ],
+      "expect": "a valid call runs the tool"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "arguments: null treated like omitted arguments",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "    arguments = params.get(\"arguments\", {})\n",
+          "new": "    arguments = params.get(\"arguments\") or {}\n"
+        }
+      ],
+      "expect": "arguments that are not an object are invalid params"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "a signed-in caller may delete a note nobody owns",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "    if principal is None or note.owner != principal:\n",
+          "new": "    if principal is None or (note.owner is not None and note.owner != principal):\n"
+        }
+      ],
+      "expect": "a note nobody owns cannot be deleted by a signed-in caller either"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "range checked before the type, so \"5\" < 1 raises",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        if spec.get(\"type\") == \"integer\":\n            if type(value) is not int:\n                raise ToolError(f\"argument {name!r} must be an integer\")\n            low, high = spec.get(\"minimum\"), spec.get(\"maximum\")\n",
+          "new": "        if spec.get(\"type\") == \"integer\":\n            low, high = spec.get(\"minimum\"), spec.get(\"maximum\")\n            if low is not None and value < low:\n                raise ToolError(f\"argument {name!r} must be at least {low}\")\n            if type(value) is not int:\n                raise ToolError(f\"argument {name!r} must be an integer\")\n"
+        }
+      ],
+      "expect": "a tool error that names 'limit'"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "only required arguments type-checked",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "    for name, value in arguments.items():\n        spec = properties.get(name)\n",
+          "new": "    for name, value in arguments.items():\n        if name not in schema.get(\"required\", []):\n            continue\n        spec = properties.get(name)\n"
+        }
+      ],
+      "expect": "a tool error that names 'limit'"
+    },
+    {
+      "test": "test_tool_call_errors",
+      "name": "OSError turned into a tool error with a generic message",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "    except ToolError as exc:\n        return {\"content\": [text_block(str(exc))], \"isError\": True}\n",
+          "new": "    except ToolError as exc:\n        return {\"content\": [text_block(str(exc))], \"isError\": True}\n    except OSError:\n        return {\"content\": [text_block(\"storage is unavailable\")], \"isError\": True}\n"
+        }
+      ],
+      "expect": "an executor that breaks is an internal error, not a tool result"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "each chunk decoded on its own",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "        pending += chunk\n",
+          "new": "        pending += chunk.decode(\"utf-8\").encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "last line without a newline dropped",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "    if pending:\n        _answer(server, bytes(pending), stdout, stderr, principal)\n",
+          "new": ""
+        }
+      ],
+      "expect": "one response per message, in order"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "one line per chunk",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "        while (end := pending.find(b\"\\n\", start)) != -1:\n",
+          "new": "        if (end := pending.find(b\"\\n\", start)) != -1:\n"
+        }
+      ],
+      "expect": "one response per message, in order"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "an empty chunk taken as the end of input",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "    async for chunk in reader:\n        pending += chunk\n",
+          "new": "    async for chunk in reader:\n        if not chunk:\n            break\n        pending += chunk\n"
+        }
+      ],
+      "expect": "one response per message, in order"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "only JSONDecodeError caught",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "    except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError are both ValueErrors\n",
+          "new": "    except json.JSONDecodeError as exc:\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "undecodable bytes replaced",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "        message = json.loads(line.decode(\"utf-8\"))\n",
+          "new": "        message = json.loads(line.decode(\"utf-8\", \"replace\"))\n"
+        }
+      ],
+      "expect": "one response per message, in order"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "blank lines tested without strip()",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "    if not line.strip():\n",
+          "new": "    if not line:\n"
+        }
+      ],
+      "expect": "one response per message, in order"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "non-object JSON handed to the server",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "        if isinstance(message, dict):\n",
+          "new": "        if True:\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "pretty-printed responses",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "json.dumps(response, separators=(\",\", \":\"))",
+          "new": "json.dumps(response, indent=2)"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "diagnostics written to stdout",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "        _report(stderr, f\"parse error: {exc}\")\n",
+          "new": "        _report(stdout, f\"parse error: {exc}\")\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "nothing reported on stderr",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "    stderr.write(f\"notesrv: {text}\\n\".encode(\"utf-8\"))\n    stderr.flush()\n",
+          "new": "    pass\n"
+        }
+      ],
+      "expect": "lines that cannot be read are reported on stderr"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "flushed once, at the end",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": ".encode(\"utf-8\") + b\"\\n\")\n        stdout.flush()\n",
+          "new": ".encode(\"utf-8\") + b\"\\n\")\n"
+        },
+        {
+          "file": "stdio.py",
+          "old": "    if pending:\n        _answer(server, bytes(pending), stdout, stderr, principal)\n",
+          "new": "    if pending:\n        _answer(server, bytes(pending), stdout, stderr, principal)\n    stdout.flush()\n"
+        }
+      ],
+      "expect": "answer and flush each line before handling the next one"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "whole input read before answering",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "    async for chunk in reader:\n        pending += chunk\n",
+          "new": "    chunks = [chunk async for chunk in reader]\n    for chunk in chunks:\n        pending += chunk\n"
+        }
+      ],
+      "expect": "answer and flush each line before reading more input"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "keeps waiting after the input ends",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "    if pending:\n        _answer(server, bytes(pending), stdout, stderr, principal)\n",
+          "new": "    if pending:\n        _answer(server, bytes(pending), stdout, stderr, principal)\n    await __import__(\"asyncio\").Event().wait()\n"
+        }
+      ],
+      "expect": "TimeoutError"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "lines split with str.splitlines()",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "        start = 0\n        while (end := pending.find(b\"\\n\", start)) != -1:\n            _answer(server, bytes(pending[start:end]), stdout, stderr, principal)\n            start = end + 1\n        del pending[:start]\n",
+          "new": "        pieces = bytes(pending).decode(\"utf-8\", \"surrogateescape\").splitlines(keepends=True)\n        rest = pieces.pop() if pieces and pieces[-1] == pieces[-1].rstrip(\"\\n\\r\\u2028\\u2029\\x85\\x0b\\x0c\\x1c\\x1d\\x1e\") else \"\"\n        for piece in pieces:\n            _answer(server, piece.encode(\"utf-8\", \"surrogateescape\"), stdout, stderr, principal)\n        pending[:] = rest.encode(\"utf-8\", \"surrogateescape\")\n"
+        }
+      ],
+      "expect": "one response per message, in order"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "principal dropped on the way to the server",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "            response = server.handle(message, principal)\n",
+          "new": "            response = server.handle(message)\n"
+        }
+      ],
+      "expect": "each request reaches the server with the transport's principal"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "never flushed",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": ".encode(\"utf-8\") + b\"\\n\")\n        stdout.flush()\n",
+          "new": ".encode(\"utf-8\") + b\"\\n\")\n"
+        }
+      ],
+      "expect": "flush every response"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "flushed once per chunk instead of once per response",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "        stdout.write(json.dumps(response, separators=(\",\", \":\")).encode(\"utf-8\") + b\"\\n\")\n        stdout.flush()\n",
+          "new": "        stdout.write(json.dumps(response, separators=(\",\", \":\")).encode(\"utf-8\") + b\"\\n\")\n"
+        },
+        {
+          "file": "stdio.py",
+          "old": "        del pending[:start]\n",
+          "new": "        del pending[:start]\n        stdout.flush()\n"
+        },
+        {
+          "file": "stdio.py",
+          "old": "    if pending:\n        _answer(server, bytes(pending), stdout, stderr, principal)\n",
+          "new": "    if pending:\n        _answer(server, bytes(pending), stdout, stderr, principal)\n    stdout.flush()\n"
+        }
+      ],
+      "expect": "answer and flush each line before handling the next one"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "lines decoded as Latin-1",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "line.decode(\"utf-8\")",
+          "new": "line.decode(\"latin-1\")"
+        }
+      ],
+      "expect": "one response per message, in order"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "undecodable bytes kept as surrogates",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "line.decode(\"utf-8\")",
+          "new": "line.decode(\"utf-8\", \"surrogateescape\")"
+        }
+      ],
+      "expect": "one response per message, in order"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "blank lines tested with isspace(), which is False for an empty line",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "    if not line.strip():",
+          "new": "    if line.isspace():"
+        }
+      ],
+      "expect": "one response per message, in order"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "only arrays refused, so a number reaches the server",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "        if isinstance(message, dict):",
+          "new": "        if not isinstance(message, list):"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "blank lines tested after removing only CR and LF",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "    if not line.strip():",
+          "new": "    if not line.rstrip(b\"\\r\\n\"):"
+        }
+      ],
+      "expect": "one response per message, in order"
+    },
+    {
+      "test": "test_stdio_loop",
+      "name": "every line of a chunk handled before its responses are written",
+      "edits": [
+        {
+          "file": "stdio.py",
+          "old": "from .server import NotesServer\n",
+          "new": "from .server import NotesServer\n\n\nclass _Held:\n    def __init__(self):\n        self.pieces = []\n\n    def write(self, data):\n        self.pieces.append(data)\n\n    def flush(self):\n        pass\n"
+        },
+        {
+          "file": "stdio.py",
+          "old": "        start = 0\n        while (end := pending.find(b\"\\n\", start)) != -1:\n            _answer(server, bytes(pending[start:end]), stdout, stderr, principal)\n            start = end + 1\n        del pending[:start]\n",
+          "new": "        start = 0\n        held = _Held()\n        while (end := pending.find(b\"\\n\", start)) != -1:\n            _answer(server, bytes(pending[start:end]), held, stderr, principal)\n            start = end + 1\n        del pending[:start]\n        for piece in held.pieces:\n            stdout.write(piece)\n            stdout.flush()\n"
+        }
+      ],
+      "expect": "answer and flush each line before handling the next one"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "initialize checked before modern metadata",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "        if _is_modern(message):\n            return self.core.handle(message, principal)\n        if message.get(\"method\") == \"initialize\":\n            return self._initialize(connection, message)\n",
+          "new": "        if message.get(\"method\") == \"initialize\":\n            return self._initialize(connection, message)\n        if _is_modern(message):\n            return self.core.handle(message, principal)\n"
+        }
+      ],
+      "expect": "initialize with modern metadata is a modern request"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "connection state checked first",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "        if _is_modern(message):\n            return self.core.handle(message, principal)\n",
+          "new": "        if connection in self._handshakes and message.get(\"method\") != \"initialize\":\n            return self._legacy_request(message, principal)\n        if _is_modern(message):\n            return self.core.handle(message, principal)\n"
+        }
+      ],
+      "expect": "a modern request on a legacy connection is still a modern request"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "modern only when version and capabilities are both there",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "    return isinstance(meta, dict) and any(key in meta for key in MODERN_META_KEYS)\n",
+          "new": "    return isinstance(meta, dict) and VERSION_KEY in meta and CAPABILITIES_KEY in meta\n"
+        }
+      ],
+      "expect": "the handshake does not fill it in"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "missing capabilities filled in from the handshake",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "        if _is_modern(message):\n            return self.core.handle(message, principal)\n",
+          "new": "        if _is_modern(message):\n            if connection in self._handshakes:\n                message[\"params\"][\"_meta\"].setdefault(CAPABILITIES_KEY, self._handshakes[connection].client_capabilities)\n            return self.core.handle(message, principal)\n"
+        }
+      ],
+      "expect": "the handshake does not fill it in"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "legacy results keep the modern fields",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "\"result\": _legacy_shape(result)}",
+          "new": "\"result\": result}"
+        }
+      ],
+      "expect": "legacy results carry no modern fields"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "only resultType stripped",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "    plain = {key: value for key, value in result.items() if key not in MODERN_RESULT_FIELDS and key != \"_meta\"}\n",
+          "new": "    return {key: value for key, value in result.items() if key != \"resultType\"}\n"
+        }
+      ],
+      "expect": "legacy results carry no modern fields"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "one handshake for the whole server",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "        self._handshakes[connection] = LegacyHandshake(",
+          "new": "        self._handshakes[\"*\"] = LegacyHandshake("
+        },
+        {
+          "file": "dualera.py",
+          "old": "        if connection in self._handshakes:\n",
+          "new": "        if self._handshakes:\n"
+        }
+      ],
+      "expect": "a handshake on A means nothing on B"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "initialize echoes the version the client asked for",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "            \"protocolVersion\": LEGACY_VERSION,\n",
+          "new": "            \"protocolVersion\": params[\"protocolVersion\"],\n"
+        }
+      ],
+      "expect": "the legacy door speaks only 2025-11-25"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "handshake recorded before its params are checked",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "        params = message.get(\"params\")\n",
+          "new": "        params = message.get(\"params\")\n        self._handshakes[connection] = LegacyHandshake({}, {})\n"
+        }
+      ],
+      "expect": "a failed handshake leaves nothing behind"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "close() keeps the handshake",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "        self._handshakes.pop(connection, None)\n",
+          "new": "        pass\n"
+        }
+      ],
+      "expect": "close() forgets the connection's handshake"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "legacy door serves every core method",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "            if method not in LEGACY_METHODS:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "server/discover is modern only"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "legacy initialize stamped with resultType",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "        result = {\n            \"protocolVersion\": LEGACY_VERSION,\n",
+          "new": "        result = {\n            \"resultType\": \"complete\",\n            \"protocolVersion\": LEGACY_VERSION,\n"
+        }
+      ],
+      "expect": "a legacy initialize result has no modern fields"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "legacy initialize stamped with serverInfo in _meta",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "            \"instructions\": INSTRUCTIONS,\n        }\n",
+          "new": "            \"instructions\": INSTRUCTIONS,\n            \"_meta\": {SERVER_INFO_KEY: dict(SERVER_INFO)},\n        }\n"
+        }
+      ],
+      "expect": "a legacy initialize result has no modern fields"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "initialize refuses versions other than 2025-11-25",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "        self._handshakes[connection] = LegacyHandshake(",
+          "new": "        if params[\"protocolVersion\"] != LEGACY_VERSION:\n            return rpc_error(request_id, -32602, \"Unsupported protocol version\")\n        self._handshakes[connection] = LegacyHandshake("
+        }
+      ],
+      "expect": "the legacy door speaks only 2025-11-25"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "close() forgets every connection",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "        self._handshakes.pop(connection, None)\n",
+          "new": "        self._handshakes.clear()\n"
+        }
+      ],
+      "expect": "closing A leaves D's handshake alone"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "any _meta makes a request modern, so a legacy progressToken breaks it",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "    return isinstance(meta, dict) and any(key in meta for key in MODERN_META_KEYS)\n",
+          "new": "    return isinstance(meta, dict)\n"
+        }
+      ],
+      "expect": "only the modern keys make a request modern"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "close() with del raises for a connection that never shook hands",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "        self._handshakes.pop(connection, None)\n",
+          "new": "        del self._handshakes[connection]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_dual_era_connections",
+      "name": "modern only when the version key is there",
+      "edits": [
+        {
+          "file": "dualera.py",
+          "old": "    return isinstance(meta, dict) and any(key in meta for key in MODERN_META_KEYS)\n",
+          "new": "    return isinstance(meta, dict) and VERSION_KEY in meta\n"
+        }
+      ],
+      "expect": "the handshake does not fill it in"
+    }
+  ]
+}
