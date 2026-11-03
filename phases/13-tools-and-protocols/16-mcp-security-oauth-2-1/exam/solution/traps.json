@@ -1,0 +1,1463 @@
+{
+  "package": "oauthflow",
+  "tests": [
+    "test_discovery_and_code_flow",
+    "test_vault_snapshot",
+    "test_step_up_and_enrollment",
+    "test_loopback_redirects",
+    "test_guarded_fetch"
+  ],
+  "layers": [
+    {
+      "test": "test_discovery_and_code_flow",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "HttpError: 404 for https://notes.example.com/.well-known/oauth-protected-resource"
+        },
+        {
+          "name": "keep the resource path in the metadata URL",
+          "edits": [
+            {
+              "file": "discovery.py",
+              "old": "    return urljoin(resource, RESOURCE_WELL_KNOWN)\n",
+              "new": "    parts = urlsplit(resource)\n    path = \"\" if parts.path == \"/\" else parts.path\n    return urlunsplit((parts.scheme, parts.netloc, RESOURCE_WELL_KNOWN + path, parts.query, \"\"))\n"
+            }
+          ],
+          "expect": "PKCE verification failed"
+        },
+        {
+          "name": "+ S256 without padding",
+          "edits": [
+            {
+              "file": "pkce.py",
+              "old": "    return base64.urlsafe_b64encode(digest).decode(\"ascii\")\n",
+              "new": "    return base64.urlsafe_b64encode(digest).decode(\"ascii\").rstrip(\"=\")\n"
+            }
+          ],
+          "expect": "iss is compared exactly"
+        },
+        {
+          "name": "+ compare iss exactly",
+          "edits": [
+            {
+              "file": "client.py",
+              "old": "    if iss is not None and iss.rstrip(\"/\").lower() != pending.issuer.rstrip(\"/\").lower():\n",
+              "new": "    if iss is not None and iss != pending.issuer:\n"
+            }
+          ],
+          "expect": "discovery runs once per resource, not before every request"
+        },
+        {
+          "name": "+ discover each resource once",
+          "edits": [
+            {
+              "file": "client.py",
+              "old": "        self._next_id = 1\n",
+              "new": "        self._discovered: dict[str, Discovery] = {}\n        self._next_id = 1\n"
+            },
+            {
+              "file": "client.py",
+              "old": "        return discover(self.net, resource)\n",
+              "new": "        found = self._discovered.get(resource)\n        if found is None:\n            found = self._discovered[resource] = discover(self.net, resource)\n        return found\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_discovery_and_code_flow",
+      "name": "well-known path appended after the resource path",
+      "edits": [
+        {
+          "file": "discovery.py",
+          "old": "    return urlunsplit((parts.scheme, parts.netloc, RESOURCE_WELL_KNOWN + path, parts.query, \"\"))\n",
+          "new": "    return resource.rstrip(\"/\") + RESOURCE_WELL_KNOWN\n"
+        }
+      ],
+      "expect": "HttpError: 404 for https://notes.example.com/mcp/.well-known/oauth-protected-resource"
+    },
+    {
+      "test": "test_discovery_and_code_flow",
+      "name": "only the last path segment kept",
+      "edits": [
+        {
+          "file": "discovery.py",
+          "old": "    path = \"\" if parts.path == \"/\" else parts.path\n",
+          "new": "    path = \"/\" + parts.path.rstrip(\"/\").rsplit(\"/\", 1)[-1] if parts.path not in (\"\", \"/\") else \"\"\n"
+        }
+      ],
+      "expect": "DiscoveryError: the metadata is for 'https://notes.example.com/mcp', not 'https://notes.example.com/archive/mcp'"
+    },
+    {
+      "test": "test_discovery_and_code_flow",
+      "name": "PKCE switched to plain",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            \"code_challenge\": challenge,\n",
+          "new": "            \"code_challenge\": verifier,\n"
+        },
+        {
+          "file": "client.py",
+          "old": "            \"code_challenge_method\": \"S256\",\n",
+          "new": "            \"code_challenge_method\": \"plain\",\n"
+        }
+      ],
+      "expect": "PKCE with S256 is required"
+    },
+    {
+      "test": "test_discovery_and_code_flow",
+      "name": "challenge as a hex digest",
+      "edits": [
+        {
+          "file": "pkce.py",
+          "old": "    return base64.urlsafe_b64encode(digest).decode(\"ascii\").rstrip(\"=\")\n",
+          "new": "    return hashlib.sha256(verifier.encode(\"ascii\")).hexdigest()\n"
+        }
+      ],
+      "expect": "PKCE verification failed"
+    },
+    {
+      "test": "test_discovery_and_code_flow",
+      "name": "iss compared without a trailing slash",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "    if iss is not None and iss != pending.issuer:\n",
+          "new": "    if iss is not None and iss.rstrip(\"/\") != pending.issuer.rstrip(\"/\"):\n"
+        }
+      ],
+      "expect": "iss is compared exactly: 'https://auth.example.com/'"
+    },
+    {
+      "test": "test_discovery_and_code_flow",
+      "name": "iss compared case-insensitively",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "    if iss is not None and iss != pending.issuer:\n",
+          "new": "    if iss is not None and iss.lower() != pending.issuer.lower():\n"
+        }
+      ],
+      "expect": "iss is compared exactly: 'https://AUTH.example.com'"
+    },
+    {
+      "test": "test_discovery_and_code_flow",
+      "name": "iss compared without the default port",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "    if iss is not None and iss != pending.issuer:\n",
+          "new": "    if iss is not None and iss.replace(\":443\", \"\") != pending.issuer:\n"
+        }
+      ],
+      "expect": "iss is compared exactly: 'https://auth.example.com:443'"
+    },
+    {
+      "test": "test_discovery_and_code_flow",
+      "name": "iss percent-decoded first",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "    if iss is not None and iss != pending.issuer:\n",
+          "new": "    if iss is not None and __import__(\"urllib.parse\").parse.unquote(iss) != pending.issuer:\n"
+        }
+      ],
+      "expect": "iss is compared exactly: 'https://auth.example%2Ecom'"
+    },
+    {
+      "test": "test_discovery_and_code_flow",
+      "name": "iss checked only when the server advertises it",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        response = self.net.authorize(pending.authorization_endpoint, params)\n",
+          "new": "        response = self.net.authorize(pending.authorization_endpoint, params)\n        if not self.discovery(resource).server_metadata.get(\"authorization_response_iss_parameter_supported\"):\n            response = {k: v for k, v in response.items() if k != \"iss\"}\n"
+        }
+      ],
+      "expect": "a present iss is checked even when the server does not advertise"
+    },
+    {
+      "test": "test_discovery_and_code_flow",
+      "name": "iss required in every response",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "    if iss is not None and iss != pending.issuer:\n",
+          "new": "    if iss != pending.issuer:\n"
+        }
+      ],
+      "expect": "a response without iss is fine when the server never sends one"
+    },
+    {
+      "test": "test_discovery_and_code_flow",
+      "name": "discovery cached per origin (over-fix)",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        found = self._discovered.get(resource)\n        if found is None:\n            found = self._discovered[resource] = discover(self.net, resource)\n",
+          "new": "        origin = resource.split(\"/\", 3)[2]\n        found = self._discovered.get(origin)\n        if found is None:\n            found = self._discovered[origin] = discover(self.net, resource)\n"
+        }
+      ],
+      "expect": "two resources on one origin are discovered separately"
+    },
+    {
+      "test": "test_discovery_and_code_flow",
+      "name": "protected-resource metadata fetched again on every call",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        found = self._discovered.get(resource)\n        if found is None:\n",
+          "new": "        from .discovery import protected_resource_metadata_url\n        self.net.get_json(protected_resource_metadata_url(resource))\n        found = self._discovered.get(resource)\n        if found is None:\n"
+        }
+      ],
+      "expect": "discovery runs once per resource, not before every request"
+    },
+    {
+      "test": "test_discovery_and_code_flow",
+      "name": "an empty iss treated as absent",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "    if iss is not None and iss != pending.issuer:\n",
+          "new": "    if iss and iss != pending.issuer:\n"
+        }
+      ],
+      "expect": "iss is compared exactly: ''"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "file written with write_bytes (mode 0644)",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        handle, temp = tempfile.mkstemp(prefix=\".vault-\", suffix=\".tmp\", dir=self.path.parent)\n        try:\n            with os.fdopen(handle, \"wb\") as out:\n                out.write(data)\n                out.flush()\n                os.fsync(out.fileno())\n            os.replace(temp, self.path)\n        except BaseException:\n            with contextlib.suppress(FileNotFoundError):\n                os.unlink(temp)\n            raise\n",
+          "new": "        self.path.write_bytes(data)\n"
+        }
+      ],
+      "expect": "only the owner can read or write the vault file"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "written first, chmod 0600 afterwards",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        handle, temp = tempfile.mkstemp(prefix=\".vault-\", suffix=\".tmp\", dir=self.path.parent)\n        try:\n            with os.fdopen(handle, \"wb\") as out:\n                out.write(data)\n                out.flush()\n                os.fsync(out.fileno())\n            os.replace(temp, self.path)\n        except BaseException:\n            with contextlib.suppress(FileNotFoundError):\n                os.unlink(temp)\n            raise\n",
+          "new": "        self.path.write_bytes(data)\n        os.chmod(self.path, 0o600)\n"
+        }
+      ],
+      "expect": "the vault file is private from the moment it is created, never chmod-ed later"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "temp file chmod-ed before the rename",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        handle, temp = tempfile.mkstemp(prefix=\".vault-\", suffix=\".tmp\", dir=self.path.parent)\n        try:\n            with os.fdopen(handle, \"wb\") as out:\n                out.write(data)\n                out.flush()\n                os.fsync(out.fileno())\n            os.replace(temp, self.path)\n        except BaseException:\n            with contextlib.suppress(FileNotFoundError):\n                os.unlink(temp)\n            raise\n",
+          "new": "        temp = str(self.path) + \".tmp\"\n        with open(temp, \"wb\") as out:\n            out.write(data)\n        os.chmod(temp, 0o600)\n        os.replace(temp, self.path)\n"
+        }
+      ],
+      "expect": "the vault file is private from the moment it is created, never chmod-ed later"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "issuer keys without a trailing slash",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        self._clients[record.issuer] = dataclasses.asdict(record)\n",
+          "new": "        self._clients[record.issuer.rstrip(\"/\")] = dataclasses.asdict(record)\n"
+        },
+        {
+          "file": "vault.py",
+          "old": "        data = self._clients.get(issuer)\n",
+          "new": "        data = self._clients.get(issuer.rstrip(\"/\"))\n"
+        }
+      ],
+      "expect": "a client record reads back exactly"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "issuer keys lowercased",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        self._clients[record.issuer] = dataclasses.asdict(record)\n",
+          "new": "        self._clients[record.issuer.lower()] = dataclasses.asdict(record)\n"
+        },
+        {
+          "file": "vault.py",
+          "old": "        data = self._clients.get(issuer)\n",
+          "new": "        data = self._clients.get(issuer.lower())\n"
+        }
+      ],
+      "expect": "issuers are exact strings"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "tokens keyed by resource only",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        self._tokens.setdefault(record.issuer, {})[record.resource] = dataclasses.asdict(record)\n",
+          "new": "        self._tokens.setdefault(\"*\", {})[record.resource] = dataclasses.asdict(record)\n"
+        },
+        {
+          "file": "vault.py",
+          "old": "        data = self._tokens.get(issuer, {}).get(resource)\n",
+          "new": "        data = self._tokens.get(\"*\", {}).get(resource)\n"
+        }
+      ],
+      "expect": "a token record reads back exactly"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "another issuer's token offered for the same resource",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        data = self._tokens.get(issuer, {}).get(resource)\n",
+          "new": "        data = self._tokens.get(issuer, {}).get(resource) or next(\n            (by_resource[resource] for by_resource in self._tokens.values() if resource in by_resource), None)\n"
+        }
+      ],
+      "expect": "after the resource moves to another issuer, nothing minted by the first one is offered"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "tokens keyed by issuer only",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        self._tokens.setdefault(record.issuer, {})[record.resource] = dataclasses.asdict(record)\n",
+          "new": "        self._tokens.setdefault(record.issuer, {})[\"*\"] = dataclasses.asdict(record)\n"
+        },
+        {
+          "file": "vault.py",
+          "old": "        data = self._tokens.get(issuer, {}).get(resource)\n",
+          "new": "        data = self._tokens.get(issuer, {}).get(\"*\")\n"
+        }
+      ],
+      "expect": "a token record reads back exactly"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "scope stored sorted",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        self._tokens.setdefault(record.issuer, {})[record.resource] = dataclasses.asdict(record)\n",
+          "new": "        self._tokens.setdefault(record.issuer, {})[record.resource] = {\n            **dataclasses.asdict(record), \"scope\": \" \".join(sorted(record.scope.split()))}\n"
+        }
+      ],
+      "expect": "a token record reads back exactly, scope string as granted"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "put_token not written to the file",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        self._tokens.setdefault(record.issuer, {})[record.resource] = dataclasses.asdict(record)\n        self._save()\n",
+          "new": "        self._tokens.setdefault(record.issuer, {})[record.resource] = dataclasses.asdict(record)\n"
+        }
+      ],
+      "expect": "a token record reads back exactly"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "expires_at stored as a float",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        self._tokens.setdefault(record.issuer, {})[record.resource] = dataclasses.asdict(record)\n",
+          "new": "        self._tokens.setdefault(record.issuer, {})[record.resource] = {\n            **dataclasses.asdict(record), \"expires_at\": float(record.expires_at)}\n"
+        }
+      ],
+      "expect": "expires_at stays whole seconds"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "used refresh tokens kept in memory only",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        snapshot = {\"clients\": self._clients, \"tokens\": self._tokens, \"used_refresh_tokens\": self._used}\n",
+          "new": "        snapshot = {\"clients\": self._clients, \"tokens\": self._tokens}\n"
+        }
+      ],
+      "expect": "ValueError: presented is not the current refresh token"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "reuse raises without dropping the record",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "            self._tokens.get(issuer, {}).pop(resource, None)\n            self._save()\n",
+          "new": ""
+        }
+      ],
+      "expect": "reuse of a rotated refresh token drops the record"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "any presented refresh token accepted",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        if current is None or current.refresh_token != presented:\n",
+          "new": "        if current is None:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE ValueError"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "refresh token looked up in every record",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        current = self.token(issuer, resource)\n",
+          "new": "        current = next((TokenRecord(**data) for by_resource in self._tokens.values()\n                        for data in by_resource.values() if data.get(\"refresh_token\") == presented), None)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE ValueError"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "a refresh token the server kept is marked used",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        if fresh.refresh_token is None:\n            fresh = dataclasses.replace(fresh, refresh_token=presented)\n        elif fresh.refresh_token != presented:\n            self._used.setdefault(issuer, {}).setdefault(resource, []).append(_fingerprint(presented))\n",
+          "new": "        self._used.setdefault(issuer, {}).setdefault(resource, []).append(_fingerprint(presented))\n        if fresh.refresh_token is None:\n            fresh = dataclasses.replace(fresh, refresh_token=presented)\n"
+        }
+      ],
+      "expect": "RefreshReuse: a rotated refresh token"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "no new refresh token stored as None",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        if fresh.refresh_token is None:\n            fresh = dataclasses.replace(fresh, refresh_token=presented)\n        elif fresh.refresh_token != presented:\n",
+          "new": "        if fresh.refresh_token is not None and fresh.refresh_token != presented:\n"
+        }
+      ],
+      "expect": "when the server issues no new refresh token, the current one stays"
+    },
+    {
+      "test": "test_vault_snapshot",
+      "name": "a refresh token sent back unchanged marked used",
+      "edits": [
+        {
+          "file": "vault.py",
+          "old": "        elif fresh.refresh_token != presented:\n",
+          "new": "        else:\n"
+        }
+      ],
+      "expect": "a refresh token that the server sent back unchanged is still the current one"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "challenge split on every comma",
+      "edits": [
+        {
+          "file": "stepup.py",
+          "old": "    for scheme, params in _challenges(header):\n        if scheme.lower() == \"bearer\":\n            return params\n    return {}\n",
+          "new": "    scheme, _, rest = header.partition(\" \")\n    if scheme.lower() != \"bearer\":\n        return {}\n    params = {}\n    for part in rest.split(\",\"):\n        name, _, value = part.strip().partition(\"=\")\n        params[name.lower()] = value.strip('\"')\n    return params\n"
+        }
+      ],
+      "expect": "only the Bearer challenge counts"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "quoted values found with a regex",
+      "edits": [
+        {
+          "file": "stepup.py",
+          "old": "    for scheme, params in _challenges(header):\n        if scheme.lower() == \"bearer\":\n            return params\n    return {}\n",
+          "new": "    at = header.lower().find(\"bearer \")\n    if at < 0:\n        return {}\n    pairs = __import__(\"re\").findall(r'(\\w+)=\"([^\"]*)\"', header[at:])\n    return {name.lower(): value for name, value in pairs}\n"
+        }
+      ],
+      "expect": "only the Bearer challenge counts"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "backslashes kept in quoted strings",
+      "edits": [
+        {
+          "file": "stepup.py",
+          "old": "            out.append(text[i + 1])\n",
+          "new": "            out.append(text[i : i + 2])\n"
+        }
+      ],
+      "expect": "only the Bearer challenge counts"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "scheme compared case-sensitively",
+      "edits": [
+        {
+          "file": "stepup.py",
+          "old": "        if scheme.lower() == \"bearer\":\n",
+          "new": "        if scheme == \"Bearer\":\n"
+        }
+      ],
+      "expect": "scheme names compare case-insensitively"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "parameters of every challenge merged",
+      "edits": [
+        {
+          "file": "stepup.py",
+          "old": "    for scheme, params in _challenges(header):\n        if scheme.lower() == \"bearer\":\n            return params\n    return {}\n",
+          "new": "    merged = {}\n    for scheme, params in _challenges(header):\n        merged.update(params)\n    return merged\n"
+        }
+      ],
+      "expect": "no Bearer challenge, no parameters"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "scopes in insertion order",
+      "edits": [
+        {
+          "file": "stepup.py",
+          "old": "    return \" \".join(sorted(set(granted.split()) | set(challenged.split())))\n",
+          "new": "    return \" \".join(dict.fromkeys(granted.split() + challenged.split()))\n"
+        }
+      ],
+      "expect": "in sorted order"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "scopes in set order",
+      "edits": [
+        {
+          "file": "stepup.py",
+          "old": "    return \" \".join(sorted(set(granted.split()) | set(challenged.split())))\n",
+          "new": "    return \" \".join(set(granted.split()) | set(challenged.split()))\n"
+        }
+      ],
+      "expect": "in sorted order"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "parameter values lowercased",
+      "edits": [
+        {
+          "file": "stepup.py",
+          "old": "            challenges[-1][1][name.lower()] = value\n",
+          "new": "            challenges[-1][1][name.lower()] = value.lower()\n"
+        }
+      ],
+      "expect": "quoted strings keep their commas and case"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "step-up asks for the challenged scope alone",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            self.login(resource, step_up_scope(current.scope, challenge[\"scope\"]))\n",
+          "new": "            self.login(resource, step_up_scope(\"\", challenge[\"scope\"]))\n"
+        }
+      ],
+      "expect": "step-up asks for every scope granted so far plus the challenged one"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "an earlier DCR client ahead of CIMD",
+      "edits": [
+        {
+          "file": "register.py",
+          "old": "        if record is not None and record.method == \"preregistered\":\n",
+          "new": "        if record is not None and record.method in (\"preregistered\", \"dcr\"):\n"
+        }
+      ],
+      "expect": "once the server supports CIMD, CIMD comes before the DCR client registered earlier"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "scope strings split on single spaces",
+      "edits": [
+        {
+          "file": "stepup.py",
+          "old": "    return \" \".join(sorted(set(granted.split()) | set(challenged.split())))\n",
+          "new": "    return \" \".join(sorted(set(granted.split(\" \")) | set(challenged.split(\" \"))))\n"
+        }
+      ],
+      "expect": "each scope once, and an empty scope adds nothing"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "the requested scope kept instead of the granted one",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            scope=answer.get(\"scope\", pending.scope),\n",
+          "new": "            scope=pending.scope,\n"
+        }
+      ],
+      "expect": "a token keeps the scope the server granted"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "challenged scopes filtered by scopes_supported",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            self.login(resource, step_up_scope(current.scope, challenge[\"scope\"]))\n",
+          "new": "            supported = self.discovery(resource).resource_metadata.get(\"scopes_supported\", [])\n            wanted = \" \".join(s for s in challenge[\"scope\"].split() if s in supported)\n            self.login(resource, step_up_scope(current.scope, wanted))\n"
+        }
+      ],
+      "expect": "a challenged scope is asked for even when scopes_supported does not list it"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "the refused token kept through a 401",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            del self.tokens[key]\n",
+          "new": ""
+        }
+      ],
+      "expect": "a token the server no longer accepts is dropped before the new flow"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "the token dropped before a step-up",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            self.login(resource, step_up_scope(current.scope, challenge[\"scope\"]))\n",
+          "new": "            del self.tokens[key]\n            self.login(resource, step_up_scope(current.scope, challenge[\"scope\"]))\n"
+        }
+      ],
+      "expect": "a declined step-up keeps the token"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "any 403 taken as a step-up",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if (\n            current is not None\n            and refusal.status == 403\n            and challenge.get(\"error\") == \"insufficient_scope\"\n            and challenge.get(\"scope\")\n        ):\n            self.login(resource, step_up_scope(current.scope, challenge[\"scope\"]))\n",
+          "new": "        if current is not None and refusal.status == 403:\n            self.login(resource, step_up_scope(current.scope, challenge.get(\"scope\", \"\")))\n"
+        }
+      ],
+      "expect": "a 403 without a scope challenge is not a step-up"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "a second step-up when the retry fails",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            raise refusal\n        return self.call(resource, tool, arguments)\n",
+          "new": "            raise refusal\n        try:\n            return self.call(resource, tool, arguments)\n        except McpError:\n            self.login(resource, step_up_scope(self.tokens[key].scope, challenge.get(\"scope\", \"\")))\n            return self.call(resource, tool, arguments)\n"
+        }
+      ],
+      "expect": "one step-up per call"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "CIMD ahead of a pre-registered client",
+      "edits": [
+        {
+          "file": "register.py",
+          "old": "        if record is not None and record.method == \"preregistered\":\n            return record.client_id\n        if self.cimd_url and metadata.get(\"client_id_metadata_document_supported\") is True:\n            return self.cimd_url\n",
+          "new": "        if self.cimd_url and metadata.get(\"client_id_metadata_document_supported\") is True:\n            return self.cimd_url\n        if record is not None and record.method == \"preregistered\":\n            return record.client_id\n"
+        }
+      ],
+      "expect": "a client pre-registered with the issuer comes first"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "pre-registration looked up without the trailing slash",
+      "edits": [
+        {
+          "file": "register.py",
+          "old": "        record = self.vault.client(issuer)\n",
+          "new": "        record = self.vault.client(issuer.rstrip(\"/\"))\n"
+        }
+      ],
+      "expect": "a pre-registration belongs to one exact issuer string"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "DCR ahead of CIMD",
+      "edits": [
+        {
+          "file": "register.py",
+          "old": "        if self.cimd_url and metadata.get(\"client_id_metadata_document_supported\") is True:\n",
+          "new": "        if (self.cimd_url and metadata.get(\"client_id_metadata_document_supported\") is True\n                and not (self.allow_dcr and metadata.get(\"registration_endpoint\"))):\n"
+        }
+      ],
+      "expect": "CIMD comes before DCR"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "a new DCR registration every time",
+      "edits": [
+        {
+          "file": "register.py",
+          "old": "            if record is not None and record.method == \"dcr\":\n                return record.client_id\n",
+          "new": ""
+        }
+      ],
+      "expect": "a DCR client is registered once per issuer and reused"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "DCR clients kept in memory only",
+      "edits": [
+        {
+          "file": "register.py",
+          "old": "            if record is not None and record.method == \"dcr\":\n",
+          "new": "            record = self.__dict__.setdefault(\"_dcr\", {}).get(issuer, record)\n            if record is not None and record.method == \"dcr\":\n"
+        },
+        {
+          "file": "register.py",
+          "old": "            self.vault.put_client(record)\n",
+          "new": "            self._dcr[issuer] = record\n"
+        }
+      ],
+      "expect": "a DCR registration is kept in the vault under the exact issuer"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "one DCR client for every issuer",
+      "edits": [
+        {
+          "file": "register.py",
+          "old": "            if record is not None and record.method == \"dcr\":\n                return record.client_id\n",
+          "new": "            if record is not None and record.method == \"dcr\":\n                return record.client_id\n            if getattr(self, \"_last_dcr\", None):\n                return self._last_dcr\n"
+        },
+        {
+          "file": "register.py",
+          "old": "            self.vault.put_client(record)\n",
+          "new": "            self.vault.put_client(record)\n            self._last_dcr = record.client_id\n"
+        }
+      ],
+      "expect": "a DCR client id is never offered to another issuer"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "DCR without allow_dcr",
+      "edits": [
+        {
+          "file": "register.py",
+          "old": "        if self.allow_dcr and endpoint:\n",
+          "new": "        if endpoint:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE NeedClientInfo"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "the CIMD URL offered when nothing else is",
+      "edits": [
+        {
+          "file": "register.py",
+          "old": "        raise NeedClientInfo(f\"no way to identify this client to {issuer}\")\n",
+          "new": "        return self.cimd_url\n"
+        }
+      ],
+      "expect": "DID NOT RAISE NeedClientInfo"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "falls back to DCR after a CIMD failure",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        response = self.net.authorize(pending.authorization_endpoint, params)\n",
+          "new": "        try:\n            response = self.net.authorize(pending.authorization_endpoint, params)\n        except AuthorizationError as failure:\n            endpoint = self.discovery(resource).server_metadata.get(\"registration_endpoint\")\n            if failure.error != \"invalid_client\" or not endpoint:\n                raise\n            from .register import dcr_metadata\n            client_id = self.net.register(endpoint, dcr_metadata(\"Notes desktop\", self.redirect_uri))[\"client_id\"]\n            pending = __import__(\"dataclasses\").replace(pending, client_id=client_id)\n            response = self.net.authorize(pending.authorization_endpoint, {**params, \"client_id\": client_id})\n"
+        }
+      ],
+      "expect": "a CIMD client id the server rejects is an error"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "DCR metadata without application_type",
+      "edits": [
+        {
+          "file": "register.py",
+          "old": "        \"application_type\": \"web\" if remote_https else \"native\",\n",
+          "new": ""
+        }
+      ],
+      "expect": "invalid_redirect_uri"
+    },
+    {
+      "test": "test_step_up_and_enrollment",
+      "name": "parameters read from the word Bearer to the end",
+      "edits": [
+        {
+          "file": "stepup.py",
+          "old": "    for scheme, params in _challenges(header):\n        if scheme.lower() == \"bearer\":\n            return params\n    return {}\n",
+          "new": "    import re\n    at = header.lower().find(\"bearer\")\n    if at < 0:\n        return {}\n    out = {}\n    for name, quoted, token in re.findall(r'(\\w+)=(?:\"((?:[^\"\\\\]|\\\\.)*)\"|([^,\\s]+))', header[at:]):\n        out[name.lower()] = token if token else re.sub(r'\\\\(.)', r'\\1', quoted)\n    return out\n"
+        }
+      ],
+      "expect": "the Bearer challenge ends where the next challenge's scheme starts"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "form body joined by hand",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        body = urlencode(self.client.token_form(pending, code)).encode(\"ascii\")\n",
+          "new": "        body = \"&\".join(f\"{k}={v}\" for k, v in self.client.token_form(pending, code).items()).encode(\"ascii\")\n"
+        }
+      ],
+      "expect": "a token request body is form-encoded bytes"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "token request sent as JSON",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        body = urlencode(self.client.token_form(pending, code)).encode(\"ascii\")\n",
+          "new": "        body = __import__(\"json\").dumps(self.client.token_form(pending, code)).encode(\"ascii\")\n"
+        },
+        {
+          "file": "loopback.py",
+          "old": "        headers = {\"Content-Type\": FORM, \"Accept\": \"application/json\"}\n",
+          "new": "        headers = {\"Content-Type\": \"application/json\", \"Accept\": \"application/json\"}\n"
+        }
+      ],
+      "expect": "a token request is sent as application/x-www-form-urlencoded"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "body sent as str",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        body = urlencode(self.client.token_form(pending, code)).encode(\"ascii\")\n",
+          "new": "        body = urlencode(self.client.token_form(pending, code))\n"
+        }
+      ],
+      "expect": "a token request body is form-encoded bytes"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "code_verifier left out",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        body = urlencode(self.client.token_form(pending, code)).encode(\"ascii\")\n",
+          "new": "        fields = self.client.token_form(pending, code)\n        del fields[\"code_verifier\"]\n        body = urlencode(fields).encode(\"ascii\")\n"
+        }
+      ],
+      "expect": "a token request carries grant_type, code, redirect_uri, client_id, code_verifier and resource"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "resource left out",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        body = urlencode(self.client.token_form(pending, code)).encode(\"ascii\")\n",
+          "new": "        fields = self.client.token_form(pending, code)\n        del fields[\"resource\"]\n        body = urlencode(fields).encode(\"ascii\")\n"
+        }
+      ],
+      "expect": "a token request carries grant_type, code, redirect_uri, client_id, code_verifier and resource"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "the redirect URL sent as redirect_uri",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        return self._exchange(pending, code)\n",
+          "new": "        return self._exchange(__import__(\"dataclasses\").replace(pending, redirect_uri=url), code)\n"
+        }
+      ],
+      "expect": "the same redirect_uri and client_id as the authorization request"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "token requests awaited one at a time",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "                            exchanges.add(asyncio.ensure_future(step))\n",
+          "new": "                            yield await step\n"
+        }
+      ],
+      "expect": "the archive flow gets its token while the notes token request is still waiting"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "a flow closed only after its token request",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        entry = self._flows.pop(params.get(\"state\", \"\"), None)\n",
+          "new": "        entry = self._flows.get(params.get(\"state\", \"\"))\n"
+        },
+        {
+          "file": "loopback.py",
+          "old": "        self.client.store(pending, answer)\n",
+          "new": "        self.client.store(pending, answer)\n        self._flows.pop(pending.state, None)\n"
+        }
+      ],
+      "expect": "a flow takes one redirect"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "error read before iss",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        iss = params.get(\"iss\")\n        if iss is not None and iss != pending.issuer:\n            return Outcome(\"rejected\", pending.resource, \"issuer_mismatch\")\n        if \"error\" in params:\n            return Outcome(\"denied\", pending.resource, params[\"error\"], params.get(\"error_description\", \"\"))\n",
+          "new": "        if \"error\" in params:\n            return Outcome(\"denied\", pending.resource, params[\"error\"], params.get(\"error_description\", \"\"))\n        iss = params.get(\"iss\")\n        if iss is not None and iss != pending.issuer:\n            return Outcome(\"rejected\", pending.resource, \"issuer_mismatch\")\n"
+        }
+      ],
+      "expect": "a redirect whose iss is not the flow's issuer is rejected before its error is read"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "the rejection repeats error_description",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "            return Outcome(\"rejected\", pending.resource, \"issuer_mismatch\")\n",
+          "new": "            return Outcome(\"rejected\", pending.resource, \"issuer_mismatch\", params.get(\"error_description\", \"\"))\n"
+        }
+      ],
+      "expect": "a redirect whose iss is not the flow's issuer is rejected"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "iss checked against every issuer the client knows",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        if iss is not None and iss != pending.issuer:\n",
+          "new": "        if iss is not None and iss not in {flow.issuer for flow, _ in self._flows.values()} | {pending.issuer}:\n"
+        }
+      ],
+      "expect": "a redirect whose iss is not the flow's issuer is rejected"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "no expiry check",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        if self.clock() - opened > self.ttl:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "a flow opened more than ttl seconds ago is rejected as expired"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "redirect parameters not percent-decoded",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        params = {name: values[0] for name, values in parse_qs(urlsplit(url).query).items()}\n",
+          "new": "        params = dict(pair.split(\"=\", 1) for pair in urlsplit(url).query.split(\"&\"))\n"
+        }
+      ],
+      "expect": "the archive flow gets its token while the notes token request is still waiting"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "every redirect read before any flow finishes",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        source = redirects.__aiter__()\n",
+          "new": "        collected = [url async for url in redirects]\n\n        async def replay():\n            for url in collected:\n                yield url\n\n        source = replay().__aiter__()\n"
+        }
+      ],
+      "expect": "the archive flow gets its token while the notes token request is still waiting"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "the endpoint's own query dropped",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        if parts.query:\n            query = f\"{parts.query}&{query}\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "a query that the authorization endpoint already has is kept"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "a second '?' after the endpoint's query",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        return urlunsplit((parts.scheme, parts.netloc, parts.path, query, \"\"))\n",
+          "new": "        return pending.authorization_endpoint + \"?\" + urlencode(params)\n"
+        }
+      ],
+      "expect": "a query that the authorization endpoint already has is kept"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "authorization query joined by hand",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        query = urlencode(params)\n",
+          "new": "        query = \"&\".join(f\"{k}={v}\" for k, v in params.items())\n"
+        }
+      ],
+      "expect": "the authorization URL is form-encoded: no raw spaces"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "serve stops as soon as the redirects end",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "                    if url is _END:\n                        reading = None\n",
+          "new": "                    if url is _END:\n                        return\n"
+        }
+      ],
+      "expect": "the slow exchange finishes after the redirects have ended"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "the token not kept",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        self.client.store(pending, answer)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a token is kept under (issuer, resource)"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "a flow closed only when its code goes to the token endpoint",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        entry = self._flows.pop(params.get(\"state\", \"\"), None)\n",
+          "new": "        entry = self._flows.get(params.get(\"state\", \"\"))\n"
+        },
+        {
+          "file": "loopback.py",
+          "old": "        return self._exchange(pending, code)\n",
+          "new": "        self._flows.pop(params[\"state\"])\n        return self._exchange(pending, code)\n"
+        }
+      ],
+      "expect": "the first redirect that matches a flow closes it, even when that redirect is rejected"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "an expired flow left open",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        entry = self._flows.pop(params.get(\"state\", \"\"), None)\n",
+          "new": "        entry = self._flows.get(params.get(\"state\", \"\"))\n"
+        },
+        {
+          "file": "loopback.py",
+          "old": "            return Outcome(\"rejected\", pending.resource, \"expired\")\n",
+          "new": "            return Outcome(\"rejected\", pending.resource, \"expired\")\n        self._flows.pop(params[\"state\"])\n"
+        }
+      ],
+      "expect": "an expired flow is closed by the redirect that found it"
+    },
+    {
+      "test": "test_loopback_redirects",
+      "name": "a token endpoint error passed to client.store",
+      "edits": [
+        {
+          "file": "loopback.py",
+          "old": "        if status != 200 or \"error\" in answer:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "an error answer from the token endpoint is reported as a denial"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "public_address as not is_private",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "    return ip.is_global and not ip.is_multicast\n",
+          "new": "    return not ip.is_private\n"
+        }
+      ],
+      "expect": "only global unicast addresses may be fetched"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "public_address as is_global alone",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "    return ip.is_global and not ip.is_multicast\n",
+          "new": "    return ip.is_global\n"
+        }
+      ],
+      "expect": "only global unicast addresses may be fetched"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "only loopback, private and link-local refused",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "    return ip.is_global and not ip.is_multicast\n",
+          "new": "    return not (ip.is_loopback or ip.is_private or ip.is_link_local)\n"
+        }
+      ],
+      "expect": "only global unicast addresses may be fetched"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "redirect targets not checked",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "            address = self._checked_address(url)\n",
+          "new": "            address = self._checked_address(url) if redirects == 0 else self._first_answer(url)\n"
+        },
+        {
+          "file": "fetch.py",
+          "old": "    def _checked_address(self, url: str) -> str:\n",
+          "new": "    def _first_answer(self, url: str) -> str:\n        host = urlsplit(url).hostname\n        try:\n            ipaddress.ip_address(host)\n        except ValueError:\n            return self.resolve(host)[0]\n        return host\n\n    def _checked_address(self, url: str) -> str:\n"
+        }
+      ],
+      "expect": "a name that resolves to 10.0.0.7 on the next hop"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "only the first DNS answer checked",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "        if not all(public_address(address) for address in addresses):\n",
+          "new": "        if not public_address(addresses[0]):\n"
+        }
+      ],
+      "expect": "a name with a private address among its answers"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "DNS answers cached per host",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "            addresses = list(self.resolve(host))\n",
+          "new": "            cache = self.__dict__.setdefault(\"_dns\", {})\n            if host not in cache:\n                cache[host] = list(self.resolve(host))\n            addresses = cache[host]\n"
+        }
+      ],
+      "expect": "a name that resolves to 10.0.0.7 on the next hop"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "resolved again to connect",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "                response = self.transport.get(url, connect_to=address, timeout=remaining)\n",
+          "new": "                try:\n                    ipaddress.ip_address(urlsplit(url).hostname)\n                except ValueError:\n                    address = self.resolve(urlsplit(url).hostname)[0]\n                response = self.transport.get(url, connect_to=address, timeout=remaining)\n"
+        }
+      ],
+      "expect": "a hop resolves its host once and connects to the address it checked"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "redirects allowed to drop to http",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "            address = self._checked_address(url)\n",
+          "new": "            address = self._checked_address(url.replace(\"http://\", \"https://\", 1) if redirects else url)\n"
+        }
+      ],
+      "expect": "a redirect from https to http"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "four redirects followed",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "            if redirects == self.max_redirects:\n",
+          "new": "            if redirects > self.max_redirects:\n"
+        }
+      ],
+      "expect": "a fourth redirect"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "no loop check",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "            if url in visited:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "a redirect back to a URL already visited is refused at once"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "Location taken as an absolute URL",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "            url = urljoin(url, location)\n",
+          "new": "            url = location\n"
+        }
+      ],
+      "expect": "a relative Location is resolved against the URL that sent it"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "media type compared with its parameters",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "        media = _header(response.headers, \"Content-Type\").split(\";\")[0].strip().lower()\n",
+          "new": "        media = _header(response.headers, \"Content-Type\")\n"
+        }
+      ],
+      "expect": "media type parameters are fine"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "media type compared case-sensitively",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "        media = _header(response.headers, \"Content-Type\").split(\";\")[0].strip().lower()\n",
+          "new": "        media = _header(response.headers, \"Content-Type\").split(\";\")[0].strip()\n"
+        }
+      ],
+      "expect": "the media type is compared case-insensitively"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "media type checked with startswith",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "        if media != \"application/json\":\n",
+          "new": "        if not media.startswith(\"application/json\"):\n"
+        }
+      ],
+      "expect": "application/jsonp is refused"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "body read whole before the size check",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "        data = bytearray()\n        for chunk in response.body:\n            data += chunk\n            if len(data) > self.max_bytes:\n                raise FetchBlocked(f\"{url} is longer than {self.max_bytes} bytes\")\n",
+          "new": "        data = b\"\".join(response.body)\n        if len(data) > self.max_bytes:\n            raise FetchBlocked(f\"{url} is longer than {self.max_bytes} bytes\")\n"
+        }
+      ],
+      "expect": "an oversized body is abandoned as soon as it is too long"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "each hop given the whole timeout",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "                response = self.transport.get(url, connect_to=address, timeout=remaining)\n",
+          "new": "                response = self.transport.get(url, connect_to=address, timeout=self.timeout)\n"
+        }
+      ],
+      "expect": "a chain that runs out of time"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "TimeoutError passed through",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "            try:\n                response = self.transport.get(url, connect_to=address, timeout=remaining)\n            except TimeoutError as exc:\n                raise FetchBlocked(f\"no answer from {url} in time\") from exc\n",
+          "new": "            response = self.transport.get(url, connect_to=address, timeout=remaining)\n"
+        }
+      ],
+      "expect": "TimeoutError: https://slow.example.com/2"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "a JSON array accepted",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "        if not isinstance(document, dict):\n",
+          "new": "        if document is None:\n"
+        }
+      ],
+      "expect": "a JSON array is refused"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "client_id compared without a trailing slash",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "    if document.get(\"client_id\") != client_id:\n",
+          "new": "    if str(document.get(\"client_id\")).rstrip(\"/\") != client_id.rstrip(\"/\"):\n"
+        }
+      ],
+      "expect": "a document whose client_id has an extra trailing slash"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "the URL it was redirected to accepted as client_id",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "                return self._document(url, response)\n",
+          "new": "                self.final_url = url\n                return self._document(url, response)\n"
+        },
+        {
+          "file": "fetch.py",
+          "old": "    if document.get(\"client_id\") != client_id:\n",
+          "new": "    if document.get(\"client_id\") not in (client_id, fetcher.final_url):\n"
+        }
+      ],
+      "expect": "a document that names the URL it was redirected to"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "a client_id without a path fetched",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "    if parts.scheme != \"https\" or not parts.hostname or parts.path in (\"\", \"/\"):\n",
+          "new": "    if parts.scheme != \"https\" or not parts.hostname:\n"
+        }
+      ],
+      "expect": "FetchBlocked: HTTP 404 from https://client.example.com"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "document client_id read with []",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "    if document.get(\"client_id\") != client_id:\n",
+          "new": "    if document[\"client_id\"] != client_id:\n"
+        }
+      ],
+      "expect": "KeyError: 'client_id'"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "client_name not required",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "    if not isinstance(name, str) or not name:\n",
+          "new": "    if name is not None and not isinstance(name, str):\n"
+        }
+      ],
+      "expect": "a document without client_name"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "redirect_uris may be empty",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "    if not isinstance(uris, list) or not uris or not all(isinstance(u, str) and u for u in uris):\n",
+          "new": "    if not isinstance(uris, list) or not all(isinstance(u, str) and u for u in uris):\n"
+        }
+      ],
+      "expect": "a document with no redirect_uris"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "an empty DNS answer not refused",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "        if not addresses:\n            raise FetchBlocked(f\"{host} does not resolve\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "invalid JSON passed through",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "        try:\n            document = json.loads(bytes(data))\n        except ValueError as exc:\n            raise FetchBlocked(f\"{url} is not valid JSON\") from exc\n",
+          "new": "        document = json.loads(bytes(data))\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "redirect_uris accepted as a string",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "    if not isinstance(uris, list) or not uris or not all(isinstance(u, str) and u for u in uris):\n",
+          "new": "    if not uris:\n"
+        }
+      ],
+      "expect": "a document whose redirect_uris is a string, not a list"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "a relative Location joined against the first URL",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "        deadline = self.clock() + self.timeout\n",
+          "new": "        deadline = self.clock() + self.timeout\n        first = url\n"
+        },
+        {
+          "file": "fetch.py",
+          "old": "            url = urljoin(url, location)\n",
+          "new": "            url = urljoin(first, location)\n"
+        }
+      ],
+      "expect": "a relative Location is resolved against the URL that sent it"
+    },
+    {
+      "test": "test_guarded_fetch",
+      "name": "a body of exactly max_bytes refused",
+      "edits": [
+        {
+          "file": "fetch.py",
+          "old": "            if len(data) > self.max_bytes:\n",
+          "new": "            if len(data) >= self.max_bytes:\n"
+        }
+      ],
+      "expect": "a body of exactly max_bytes is not too long"
+    }
+  ]
+}

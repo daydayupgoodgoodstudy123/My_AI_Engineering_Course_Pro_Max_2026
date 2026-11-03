@@ -1,0 +1,113 @@
+{
+  "lesson": "phases/13-tools-and-protocols/16-mcp-security-oauth-2-1",
+  "title": "MCP Authorization: CIMD, Issuer Binding, PKCE, and Step-Up",
+  "format": "staged-brownfield",
+  "service": "oauthflow: the client side of MCP 2026-07-28 authorization: RFC 9728 discovery, the PKCE code flow with exact iss checks, an issuer-bound JSON credential vault, step-up and the registration priority, loopback redirects with form-encoded token requests, and an SSRF-guarded metadata fetcher",
+  "sources": {
+    "docs/en.md": "74e8633388346ce360cc53b8aca33dcf3be056362c1111c54c367c257a32dde0",
+    "code/main.py": "f0bd98ea1011d461b38ebef4ef99e74826cf98dad40db1e9de084e08e77759ff",
+    "code/tests/test_main.py": "7b2c9fa4debf714e7318a5162776643149ac786e22e702312382388e2c084cbc"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_discovery_and_code_flow",
+      "kind": "debug",
+      "lesson_anchor": "Start with protected-resource metadata (keep the resource path in the RFC 9728 URL); Authorization code with PKCE (steps 1-7); Validate iss exactly (no case folding, trailing-slash, default-port or percent-encoding changes; a present iss is checked without the advertisement); code/main.py pkce_pair and Client.authorize",
+      "planted_bugs": [
+        "protected_resource_metadata_url joins an absolute well-known path, dropping /mcp: HttpError 404 for the root well-known URL",
+        "s256 keeps the '=' padding of base64url; the authorize step accepts it and the failure surfaces two steps later at the fake token endpoint as invalid_grant: PKCE verification failed",
+        "check_response compares iss and the recorded issuer after rstrip('/') and lower(), so https://auth.example.com/ and https://AUTH.example.com pass",
+        "McpClient.discovery fetches protected-resource and authorization-server metadata before every call"
+      ],
+      "timing_assert": "200 calls under 0.15 s with 4 ms fake metadata latency: the version that rediscovers on every call takes 1.9-2.3 s on this machine (each 4 ms sleep takes 5-6 ms under load; 1.6 s with no overshoot at all), the version that discovers once per resource about 1 ms",
+      "overfix_guard": "a discovery cache keyed by origin is caught: https://notes.example.com/archive/mcp shares the origin of /mcp but has another issuer and its own token (the two-segment path also catches keeping only the last segment). The forged iss values also catch URL normalization, default-port removal and unquote, and an empty iss catches treating an empty value as absent; a server that never sends iss catches requiring iss; a forged iss from a server that does not advertise the parameter catches checking it only when advertised; plain PKCE is refused by the fake server.",
+      "deviation": "The second resource is /archive/mcp rather than /other, so the shortcut of keeping only the last path segment fetches the wrong document and is caught. The padding variant of the PKCE bug is planted (not hexdigest); the RFC 7636 Appendix B vector is checked after the first login so the planted bug still surfaces at the token endpoint."
+    },
+    {
+      "part": 2,
+      "test": "test_vault_snapshot",
+      "kind": "model and persistence",
+      "lesson_anchor": "Bind credentials to the issuer (issuer_credentials[issuer], tokens[(issuer, resource)], nothing from one issuer sent to another after an issuer change); Refresh tokens (store confidentially, key by issuer and resource, rotate, detect reuse of invalidated values); Exercises 1 and 2",
+      "exactness": "client and token records read back from a reopened vault as equal frozen dataclasses: issuer strings exact (a trailing slash and the case are significant), the granted scope string in the server's order, expires_at an int, a missing refresh token None",
+      "traps": [
+        "file created 0644 by open() or write_text under umask 022",
+        "written first and chmod-ed to 0600 afterwards, on the file or on a temp file (os.chmod and os.fchmod are replaced by the test)",
+        "issuer keys stripped of a trailing slash or lowercased",
+        "tokens keyed by resource only, by issuer only, or a lookup that falls back to another issuer's token for the same resource",
+        "scope normalized, expires_at stored as a float",
+        "a change not written before the method returns",
+        "used refresh tokens kept in memory only, so reuse is missed after a reopen",
+        "reuse that raises without dropping the (issuer, resource) record, or drops more",
+        "a refresh token accepted that is neither current nor used, including one found in another (issuer, resource) record",
+        "a refresh token the server kept marked as used, or stored as None",
+        "a refresh token that the server sent back unchanged marked as used"
+      ],
+      "clarifying_questions": ["two processes at once", "used refresh tokens in clear", "the same refresh token returned again", "loading a vault with loose permissions"],
+      "deviation": "The vault stores only issuer-minted material, so the portability of the CIMD client_id is tested in Part 3, where Registrar offers the same CIMD URL to every issuer that supports it. The reference writes through a temp file and os.replace, but atomicity is not tested because lesson 13's exam owns atomic JSON writes; mode 0600 from creation is the trap here."
+    },
+    {
+      "part": 3,
+      "test": "test_step_up_and_enrollment",
+      "kind": "core algorithm",
+      "lesson_anchor": "Request the smallest current scope (403 insufficient_scope challenge, the combined scope set, the challenge is authoritative even outside scopes_supported); Invalid tokens receive 401; Follow the registration priority (pre-registered, CIMD when advertised, DCR only as an explicit fallback, then ask); DCR is a compatibility path (no silent fallback after a CIMD failure, application_type)",
+      "traps": [
+        "WWW-Authenticate split on commas or read with a regex: quoted commas, \\\" escapes, unquoted token values, a Basic challenge before Bearer; parameters read from the word Bearer to the end of the value, swallowing a later challenge",
+        "scheme compared case-sensitively, values lowercased, parameters of every challenge merged",
+        "step-up scope in insertion or set order, empty strings from split(' '), the challenged scope alone",
+        "the requested scope used instead of the granted one",
+        "challenged scopes filtered by scopes_supported",
+        "a second step-up when the retry fails; a 403 without a scope challenge taken as a step-up",
+        "the refused token kept through a 401, or the token dropped before a step-up the user may decline",
+        "registration order wrong: CIMD ahead of a pre-registered client, DCR ahead of CIMD, an earlier DCR client ahead of CIMD",
+        "pre-registration looked up without the trailing slash; DCR repeated, kept in memory only, shared across issuers, or used without allow_dcr; the CIMD URL offered when nothing else is",
+        "a silent fallback to DCR after the server rejects the CIMD client id"
+      ],
+      "integration": "the step-up runs end to end through Part 1's client against a fake authorization server that grants more than was asked and never grants notes:purge; Registrar keeps DCR clients in Part 2's vault and a restarted Registrar reuses them; a CIMD rejection goes through McpClient.login",
+      "clarifying_questions": ["a challenge without scope", "refresh before a new flow on 401", "an issuer that later supports CIMD", "allow_dcr and pre-registration"],
+      "deviation": "dcr_metadata (application_type native for a loopback redirect) is given working code; the fake server refuses a loopback redirect without it, as the lesson describes. Using a token only for its own resource is checked by keeping the archive token untouched through every notes step-up. Retrying with a new JSON-RPC id is not a trap here (lessons 08 and 11)."
+    },
+    {
+      "part": 4,
+      "test": "test_loopback_redirects",
+      "kind": "streaming",
+      "lesson_anchor": "Authorization code with PKCE, steps 3-7 on the wire (exact client_id, redirect_uri, scope, code_challenge and resource; validate iss before any response field; exchange with code_verifier, the same redirect URI and resource; store under (issuer, resource)); Validate iss exactly (do not show attacker-controlled error details); Exercise 3 (late redirects)",
+      "wire_format": "application/x-www-form-urlencoded: the authorization URL's query and every token request body, decided by the test's urlsplit and parse_qs(strict_parsing=True) after body.decode('ascii'); exactly the six token fields",
+      "traps": [
+        "a form body joined by hand, sent as JSON or as str, or missing code_verifier or resource; the redirect URL sent as redirect_uri",
+        "the endpoint's own ?tenant= query dropped or followed by a second '?'; the authorization query joined by hand with raw spaces",
+        "redirect parameters split by hand without percent-decoding",
+        "token requests awaited one at a time, or every redirect read before any flow finishes",
+        "a flow closed only after its token request, so a copy of the redirect is exchanged again",
+        "error read before iss, the rejection carrying error_description, or iss checked against every known issuer",
+        "no expiry, or an expiry measured with a wall clock instead of the injected one",
+        "serve stopping when the redirects end while a token request is still running",
+        "the token not kept",
+        "a rejected or expired redirect that leaves its flow open, so the real redirect for that flow is still exchanged",
+        "a token endpoint error handed to client.store, which raises out of serve instead of yielding a denial"
+      ],
+      "clarifying_questions": ["the same redirect twice", "outcome order", "keeping a flow open after a wrong iss", "a consumer that stops reading"],
+      "deviation": "Late redirects are a flow older than ttl by the injected clock and copies of a redirect that already closed its flow. The expiry boundary is not tested because lessons 09 and 12 already test expiry boundaries. Time-dependent concurrency is driven by an asyncio.Event that holds one token endpoint, never by sleeps."
+    },
+    {
+      "part": 5,
+      "test": "test_guarded_fetch",
+      "kind": "nested structure: the redirect chain",
+      "lesson_anchor": "Prefer Client ID Metadata Documents: an HTTPS URL with a path whose document's client_id equals it exactly; fetching is SSRF-sensitive (resolve and validate the destination, reject loopback, private, link-local and otherwise disallowed addresses, re-check after redirects and DNS changes, limit redirects, bytes and time, require JSON)",
+      "traps": [
+        "public_address as not is_private (misses 100.64.0.0/10) or as is_global alone (lets multicast through)",
+        "redirect targets not checked; only the first DNS answer checked; DNS answers cached across hops; the host resolved again to connect",
+        "redirects allowed to drop to http; four redirects followed; loops caught only by the redirect limit; a relative Location taken as absolute",
+        "the media type compared with its parameters, case-sensitively, or with startswith",
+        "the body read whole before the size check",
+        "every hop given the whole timeout; TimeoutError passed through",
+        "a JSON array accepted",
+        "client_id compared without a trailing slash or against the URL it was redirected to; a client_id without a path fetched; client_name or redirect_uris not required, or redirect_uris accepted as a string; a missing client_id raising KeyError",
+        "an empty DNS answer or a body that is not valid JSON raising something other than FetchBlocked; a relative Location joined against the first URL instead of the hop that sent it; a body of exactly max_bytes refused"
+      ],
+      "clarifying_questions": ["ports other than 443", "reusing DNS answers", "an early Content-Length refusal", "IPv4-mapped IPv6 addresses"],
+      "deviation": "The lesson has no tree or DAG, so Part 5's structure is the redirect chain: a sequence of hops, each with its own URL, fresh DNS answer and address, walked with a visited set, a redirect limit and one shared time budget. Caching by HTTP cache controls is a follow-up. Display fields as untrusted text are discussed, not tested."
+    }
+  ]
+}
