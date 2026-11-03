@@ -1,0 +1,1417 @@
+{
+  "package": "genaitrace",
+  "tests": [
+    "test_agent_trace",
+    "test_span_log_roundtrip",
+    "test_conventions_and_metrics",
+    "test_propagation_and_export",
+    "test_where_the_time_went"
+  ],
+  "layers": [
+    {
+      "test": "test_agent_trace",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "one agent run is one trace"
+        },
+        {
+          "name": "fix start_span: a child joins its parent's trace",
+          "edits": [
+            {
+              "file": "tracer.py",
+              "old": "            trace_id=self.ids.trace_id(),\n",
+              "new": "            trace_id=context.trace_id if context is not None else self.ids.trace_id(),\n"
+            }
+          ],
+          "expect": "a call into another process is a CLIENT span"
+        },
+        {
+          "name": "+ mcp.call is a CLIENT span",
+          "edits": [
+            {
+              "file": "agent.py",
+              "old": "        \"mcp.call\",\n        \"INTERNAL\",",
+              "new": "        \"mcp.call\",\n        \"CLIENT\","
+            }
+          ],
+          "expect": "prompts and completions stay out of spans unless content capture is turned on"
+        },
+        {
+          "name": "+ content capture only for OTEL_CAPTURE_CONTENT=1",
+          "edits": [
+            {
+              "file": "tracer.py",
+              "old": "return env.get(\"OTEL_CAPTURE_CONTENT\") != \"0\"",
+              "new": "return env.get(\"OTEL_CAPTURE_CONTENT\") == \"1\""
+            }
+          ],
+          "expect": "linking should stay fast for a session with thousands of tool calls"
+        },
+        {
+          "name": "+ index the spans by (trace id, span id)",
+          "edits": [
+            {
+              "file": "traces.py",
+              "old": "    spans = list(spans)\n    traces: dict[str, Trace] = {}\n",
+              "new": "    spans = list(spans)\n    by_id = {(s.trace_id, s.span_id): s for s in spans}\n    traces: dict[str, Trace] = {}\n"
+            },
+            {
+              "file": "traces.py",
+              "old": "        parent = _find(spans, span.trace_id, span.parent_span_id)\n",
+              "new": "        parent = by_id.get((span.trace_id, span.parent_span_id)) if span.parent_span_id else None\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_agent_trace",
+      "name": "index lookup fails for a parent outside the batch",
+      "edits": [
+        {
+          "file": "traces.py",
+          "old": "by_id.get((span.trace_id, span.parent_span_id)) if span.parent_span_id else None",
+          "new": "by_id[(span.trace_id, span.parent_span_id)] if span.parent_span_id else None"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_agent_trace",
+      "name": "spans whose parent is not in the batch are dropped",
+      "edits": [
+        {
+          "file": "traces.py",
+          "old": "        trace.spans.append(span)\n        parent = by_id.get((span.trace_id, span.parent_span_id)) if span.parent_span_id else None\n        if parent is None:\n",
+          "new": "        parent = by_id.get((span.trace_id, span.parent_span_id)) if span.parent_span_id else None\n        if span.parent_span_id and parent is None:\n            continue\n        trace.spans.append(span)\n        if parent is None:\n"
+        }
+      ],
+      "expect": "a span whose parent ran in another process is a root of its trace and keeps its parent's id"
+    },
+    {
+      "test": "test_agent_trace",
+      "name": "a remote parent's id is cleared",
+      "edits": [
+        {
+          "file": "traces.py",
+          "old": "        if parent is None:\n            trace.roots.append(span)\n",
+          "new": "        if parent is None:\n            span.parent_span_id = None\n            trace.roots.append(span)\n"
+        }
+      ],
+      "expect": "keeps its parent's id"
+    },
+    {
+      "test": "test_agent_trace",
+      "name": "spans linked by span id alone",
+      "edits": [
+        {
+          "file": "traces.py",
+          "old": "    by_id = {(span.trace_id, span.span_id): span for span in spans}",
+          "new": "    by_id = {span.span_id: span for span in spans}"
+        },
+        {
+          "file": "traces.py",
+          "old": "by_id.get((span.trace_id, span.parent_span_id))",
+          "new": "by_id.get(span.parent_span_id)"
+        }
+      ],
+      "expect": "a span links only to a parent in its own trace"
+    },
+    {
+      "test": "test_agent_trace",
+      "name": "a span-id index that checks the trace afterwards",
+      "edits": [
+        {
+          "file": "traces.py",
+          "old": "    by_id = {(span.trace_id, span.span_id): span for span in spans}",
+          "new": "    by_id = {span.span_id: span for span in spans}"
+        },
+        {
+          "file": "traces.py",
+          "old": "by_id.get((span.trace_id, span.parent_span_id)) if span.parent_span_id else None",
+          "new": "(lambda p: p if p is not None and p.trace_id == span.trace_id else None)(by_id.get(span.parent_span_id)) if span.parent_span_id else None"
+        }
+      ],
+      "expect": "a span links only to a parent in its own trace"
+    },
+    {
+      "test": "test_agent_trace",
+      "name": "a parent looked up among the spans seen so far",
+      "edits": [
+        {
+          "file": "traces.py",
+          "old": "by_id.get((span.trace_id, span.parent_span_id)) if span.parent_span_id else None",
+          "new": "next((p for p in trace.spans if p.span_id == span.parent_span_id), None) if span.parent_span_id else None"
+        }
+      ],
+      "expect": "every span hangs under the span that started it"
+    },
+    {
+      "test": "test_agent_trace",
+      "name": "one trace id for every root a tracer starts",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "trace_id=context.trace_id if context is not None else self.ids.trace_id(),",
+          "new": "trace_id=context.trace_id if context is not None else self.__dict__.setdefault(\"_trace_id\", self.ids.trace_id()),"
+        }
+      ],
+      "expect": "every run without a parent starts its own trace"
+    },
+    {
+      "test": "test_agent_trace",
+      "name": "a remote SpanContext is not a parent",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        context = parent.context if isinstance(parent, Span) else parent\n",
+          "new": "        context = parent.context if isinstance(parent, Span) else None\n"
+        }
+      ],
+      "expect": "a sub-agent continues its caller's trace"
+    },
+    {
+      "test": "test_agent_trace",
+      "name": "content capture on for any non-empty value",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "return env.get(\"OTEL_CAPTURE_CONTENT\") == \"1\"",
+          "new": "return bool(env.get(\"OTEL_CAPTURE_CONTENT\"))"
+        }
+      ],
+      "expect": "only OTEL_CAPTURE_CONTENT=1 turns content capture on, not '0'"
+    },
+    {
+      "test": "test_agent_trace",
+      "name": "content capture on for \"true\" too",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "return env.get(\"OTEL_CAPTURE_CONTENT\") == \"1\"",
+          "new": "return env.get(\"OTEL_CAPTURE_CONTENT\") in (\"1\", \"true\")"
+        }
+      ],
+      "expect": "only OTEL_CAPTURE_CONTENT=1 turns content capture on, not 'true'"
+    },
+    {
+      "test": "test_agent_trace",
+      "name": "content capture never on",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "return env.get(\"OTEL_CAPTURE_CONTENT\") == \"1\"",
+          "new": "return False"
+        }
+      ],
+      "expect": "OTEL_CAPTURE_CONTENT=1 turns content capture on"
+    },
+    {
+      "test": "test_agent_trace",
+      "name": "every execute_tool span made CLIENT",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "        \"tool.execute\",\n        \"INTERNAL\",",
+          "new": "        \"tool.execute\",\n        \"CLIENT\","
+        }
+      ],
+      "expect": "a call into another process is a CLIENT span; the agent's own steps are INTERNAL"
+    },
+    {
+      "test": "test_agent_trace",
+      "name": "traces sorted by trace id",
+      "edits": [
+        {
+          "file": "traces.py",
+          "old": "    return list(traces.values())",
+          "new": "    return sorted(traces.values(), key=lambda t: t.trace_id)"
+        }
+      ],
+      "expect": "traces come in the order their first span appears"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "True written as an intValue",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "    if isinstance(value, bool):\n        return {\"boolValue\": value}\n    if isinstance(value, int):\n",
+          "new": "    if isinstance(value, int):\n"
+        },
+        {
+          "file": "otlp.py",
+          "old": "        return {\"intValue\": str(value)}",
+          "new": "        return {\"intValue\": str(int(value))}"
+        }
+      ],
+      "expect": "spans read back exactly as they were appended"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "integers written as JSON numbers",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "        return {\"intValue\": str(value)}",
+          "new": "        return {\"intValue\": value}"
+        }
+      ],
+      "expect": "bad AnyValue"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "integers as JSON numbers, and the reader loosened to match",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "        return {\"intValue\": str(value)}",
+          "new": "        return {\"intValue\": value}"
+        },
+        {
+          "file": "otlp.py",
+          "old": "    if tag == \"intValue\" and isinstance(raw, str) and _DECIMAL.fullmatch(raw):",
+          "new": "    if tag == \"intValue\" and isinstance(raw, int) and not isinstance(raw, bool):"
+        }
+      ],
+      "expect": "64-bit integers survive a reader whose numbers are doubles"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "timestamps written as JSON numbers",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "        \"startTimeUnixNano\": str(span.start_ns),\n        \"endTimeUnixNano\": str(span.end_ns),\n",
+          "new": "        \"startTimeUnixNano\": span.start_ns,\n        \"endTimeUnixNano\": span.end_ns,\n"
+        }
+      ],
+      "expect": "a timestamp is a decimal string of nanoseconds"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "timestamps as JSON numbers, and the reader loosened to match",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "        \"startTimeUnixNano\": str(span.start_ns),\n        \"endTimeUnixNano\": str(span.end_ns),\n",
+          "new": "        \"startTimeUnixNano\": span.start_ns,\n        \"endTimeUnixNano\": span.end_ns,\n"
+        },
+        {
+          "file": "otlp.py",
+          "old": "    if not isinstance(raw, str) or not _DECIMAL.fullmatch(raw):\n",
+          "new": "    if isinstance(raw, int):\n        return raw\n    if not isinstance(raw, str) or not _DECIMAL.fullmatch(raw):\n"
+        }
+      ],
+      "expect": "nanosecond timestamps survive a reader whose numbers are doubles"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "event times as JSON numbers, and the reader loosened to match",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "                \"timeUnixNano\": str(event.time_ns),",
+          "new": "                \"timeUnixNano\": event.time_ns,"
+        },
+        {
+          "file": "otlp.py",
+          "old": "    if not isinstance(raw, str) or not _DECIMAL.fullmatch(raw):\n",
+          "new": "    if isinstance(raw, int):\n        return raw\n    if not isinstance(raw, str) or not _DECIMAL.fullmatch(raw):\n"
+        }
+      ],
+      "expect": "nanosecond timestamps survive a reader whose numbers are doubles"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "whole floats written as integers",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "        return {\"doubleValue\": value}",
+          "new": "        return {\"intValue\": str(int(value))} if value.is_integer() else {\"doubleValue\": value}"
+        }
+      ],
+      "expect": "spans read back exactly as they were appended"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "no 64-bit range check",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "        if not INT64_MIN <= value <= INT64_MAX:\n            raise ValueError(f\"{value} does not fit in a signed 64-bit integer\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "an attribute value of 9223372036854775808 cannot be logged"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "64-bit range off by one",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "if not INT64_MIN <= value <= INT64_MAX:",
+          "new": "if not INT64_MIN < value < INT64_MAX:"
+        }
+      ],
+      "expect": "does not fit in a signed 64-bit integer"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "bool and int mixed in one array",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "        types = {type(item) for item in value}",
+          "new": "        types = {int if isinstance(item, int) else type(item) for item in value}"
+        }
+      ],
+      "expect": "an attribute value of [True, 1] cannot be logged"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "int and float mixed in one array",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "        types = {type(item) for item in value}",
+          "new": "        types = {float if type(item) is int else type(item) for item in value}"
+        }
+      ],
+      "expect": "an attribute value of [1, 2.5] cannot be logged"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "array items checked against the first item's type",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "        types = {type(item) for item in value}\n        if len(types) > 1 or not types <= {str, bool, int, float}:\n",
+          "new": "        if value and (type(value[0]) not in (str, bool, int, float)\n                      or not all(isinstance(item, type(value[0])) for item in value)):\n"
+        }
+      ],
+      "expect": "an attribute value of [1, True] cannot be logged"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "nested arrays accepted",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "not types <= {str, bool, int, float}",
+          "new": "not types <= {str, bool, int, float, list}"
+        }
+      ],
+      "expect": "an attribute value of [['Tokyo']] cannot be logged"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "anything else written as a string",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "    raise ValueError(f\"cannot encode attribute value {value!r}\")",
+          "new": "    return {\"stringValue\": str(value)}"
+        }
+      ],
+      "expect": "an attribute value of None cannot be logged"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "events keyed by name",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "            for event in span.events\n",
+          "new": "            for event in {ev.name: ev for ev in span.events}.values()\n"
+        }
+      ],
+      "expect": "spans read back exactly as they were appended"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "the log opened for writing",
+      "edits": [
+        {
+          "file": "spanlog.py",
+          "old": "self._file = open(self.path, \"a\", encoding=\"utf-8\")",
+          "new": "self._file = open(self.path, \"w\", encoding=\"utf-8\")"
+        }
+      ],
+      "expect": "spans read back exactly as they were appended, across reopens"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "a span that has not ended is written",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "    if span.end_ns is None:\n        raise ValueError(f\"span {span.name} has not ended\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "the file appears only on the first append",
+      "edits": [
+        {
+          "file": "spanlog.py",
+          "old": "        self._file = open(self.path, \"a\", encoding=\"utf-8\")\n",
+          "new": "        self._file = None\n"
+        },
+        {
+          "file": "spanlog.py",
+          "old": "        self._file.write(line)\n",
+          "new": "        if self._file is None:\n            self._file = open(self.path, \"a\", encoding=\"utf-8\")\n        self._file.write(line)\n"
+        },
+        {
+          "file": "spanlog.py",
+          "old": "    def close(self) -> None:\n        self._file.close()\n",
+          "new": "    def close(self) -> None:\n        if self._file is not None:\n            self._file.close()\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "the span kind written as its name",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "        \"kind\": SPAN_KIND[span.kind],",
+          "new": "        \"kind\": span.kind,"
+        }
+      ],
+      "expect": "unknown span kind"
+    },
+    {
+      "test": "test_span_log_roundtrip",
+      "name": "a span with no parent written with parentSpanId null",
+      "edits": [
+        {
+          "file": "otlp.py",
+          "old": "        \"parentSpanId\": span.parent_span_id or \"\",",
+          "new": "        \"parentSpanId\": span.parent_span_id,"
+        }
+      ],
+      "expect": "a span with no parent has an empty parentSpanId"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "0 counted as missing",
+      "edits": [
+        {
+          "file": "semconv.py",
+          "old": "            if key not in span.attrs or span.attrs[key] == \"\":\n",
+          "new": "            if not span.attrs.get(key):\n"
+        }
+      ],
+      "expect": "0 output tokens is a value"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "an empty string counts as present",
+      "edits": [
+        {
+          "file": "semconv.py",
+          "old": "            if key not in span.attrs or span.attrs[key] == \"\":\n",
+          "new": "            if key not in span.attrs:\n"
+        }
+      ],
+      "expect": "an empty string counts as missing"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "a served model that differs is reported",
+      "edits": [
+        {
+          "file": "semconv.py",
+          "old": "        if span.kind not in ALLOWED_KINDS[op]:\n            problems.append((span.span_id, f\"kind {span.kind} not allowed for {op}\"))\n        for key in REQUIRED[op]:\n            if key not in span.attrs or span.attrs[key] == \"\":\n                problems.append((span.span_id, f\"missing {key}\"))\n",
+          "new": "        if span.kind not in ALLOWED_KINDS[op]:\n            problems.append((span.span_id, f\"kind {span.kind} not allowed for {op}\"))\n        for key in REQUIRED[op]:\n            if key not in span.attrs or span.attrs[key] == \"\":\n                problems.append((span.span_id, f\"missing {key}\"))\n        if op == \"chat\" and span.attrs.get(\"gen_ai.response.model\") != span.attrs.get(\"gen_ai.request.model\"):\n            problems.append((span.span_id, \"response model differs from request model\"))\n"
+        }
+      ],
+      "expect": "the lesson's agent follows the conventions"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "execute_tool spans must be INTERNAL",
+      "edits": [
+        {
+          "file": "semconv.py",
+          "old": "    \"execute_tool\": (\"INTERNAL\", \"CLIENT\"),",
+          "new": "    \"execute_tool\": (\"INTERNAL\",),"
+        }
+      ],
+      "expect": "the lesson's agent follows the conventions"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "spans without an operation are checked",
+      "edits": [
+        {
+          "file": "semconv.py",
+          "old": "        if op is None:\n            continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "a span without gen_ai.operation.name is not a GenAI span"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "unknown operations pass silently",
+      "edits": [
+        {
+          "file": "semconv.py",
+          "old": "            problems.append((span.span_id, f\"unknown operation {op}\"))\n",
+          "new": ""
+        }
+      ],
+      "expect": "an operation without rules is reported"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "an unknown operation is checked further",
+      "edits": [
+        {
+          "file": "semconv.py",
+          "old": "            problems.append((span.span_id, f\"unknown operation {op}\"))\n            continue\n",
+          "new": "            problems.append((span.span_id, f\"unknown operation {op}\"))\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "missing attributes in name order",
+      "edits": [
+        {
+          "file": "semconv.py",
+          "old": "        for key in REQUIRED[op]:",
+          "new": "        for key in sorted(REQUIRED[op]):"
+        }
+      ],
+      "expect": "missing attributes come in REQUIRED order"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "the kind reported after the missing attributes",
+      "edits": [
+        {
+          "file": "semconv.py",
+          "old": "        if span.kind not in ALLOWED_KINDS[op]:\n            problems.append((span.span_id, f\"kind {span.kind} not allowed for {op}\"))\n        for key in REQUIRED[op]:\n            if key not in span.attrs or span.attrs[key] == \"\":\n                problems.append((span.span_id, f\"missing {key}\"))\n",
+          "new": "        for key in REQUIRED[op]:\n            if key not in span.attrs or span.attrs[key] == \"\":\n                problems.append((span.span_id, f\"missing {key}\"))\n        if span.kind not in ALLOWED_KINDS[op]:\n            problems.append((span.span_id, f\"kind {span.kind} not allowed for {op}\"))\n"
+        }
+      ],
+      "expect": "a wrong span kind is reported before the missing attributes"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "scrub drops every event",
+      "edits": [
+        {
+          "file": "semconv.py",
+          "old": "        events = [e for e in span.events if capture_content or e.name not in CONTENT_EVENTS]",
+          "new": "        events = [e for e in span.events if capture_content]"
+        }
+      ],
+      "expect": "with content capture off only the content events are dropped"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "scrub edits the spans it is given",
+      "edits": [
+        {
+          "file": "semconv.py",
+          "old": "        out.append(dataclasses.replace(span, attrs=dict(span.attrs), events=events))",
+          "new": "        span.events[:] = events\n        out.append(span)"
+        }
+      ],
+      "expect": "scrub leaves the spans it was given as they were"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "content dropped even with capture on",
+      "edits": [
+        {
+          "file": "semconv.py",
+          "old": "        events = [e for e in span.events if capture_content or e.name not in CONTENT_EVENTS]",
+          "new": "        events = [e for e in span.events if e.name not in CONTENT_EVENTS]"
+        }
+      ],
+      "expect": "with content capture on, content may leave"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "a value on a bound goes to the next bucket",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "bisect.bisect_left(self.bounds, value)",
+          "new": "bisect.bisect_right(self.bounds, value)"
+        }
+      ],
+      "expect": "a value on a bound goes in the bucket that bound closes"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "a scan that compares with <",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "bisect.bisect_left(self.bounds, value)",
+          "new": "next((i for i, bound in enumerate(self.bounds) if value < bound), len(self.bounds))"
+        }
+      ],
+      "expect": "a value on a bound goes in the bucket that bound closes"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "no slot above the last bound",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "bisect.bisect_left(self.bounds, value)",
+          "new": "min(bisect.bisect_left(self.bounds, value), len(self.bounds) - 1)"
+        }
+      ],
+      "expect": "a value on a bound goes in the bucket that bound closes"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "count not kept",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "        self.count += 1\n",
+          "new": ""
+        }
+      ],
+      "expect": "a value on a bound goes in the bucket that bound closes"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "input and output tokens in one histogram",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "tokens.setdefault(token_type, Histogram(TOKEN_BOUNDS))",
+          "new": "tokens.setdefault(\"total\", Histogram(TOKEN_BOUNDS))"
+        }
+      ],
+      "expect": "token usage is split into input and output"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "0 tokens not recorded",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "                if value is not None:\n                    tokens",
+          "new": "                if value:\n                    tokens"
+        }
+      ],
+      "expect": "0 tokens is a sample too"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "a missing token count raises",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "value = span.attrs.get(f\"gen_ai.usage.{token_type}_tokens\")",
+          "new": "value = span.attrs[f\"gen_ai.usage.{token_type}_tokens\"]"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "the MCP round trip counted as a tool call",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "        elif op == \"execute_tool\" and span.kind == \"INTERNAL\":",
+          "new": "        elif op == \"execute_tool\":"
+        }
+      ],
+      "expect": "one sample per tool call, by tool name: the MCP round trip inside it is not a second call"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "tool durations keyed by call id",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "tool = span.attrs.get(\"gen_ai.tool.name\")",
+          "new": "tool = span.attrs.get(\"gen_ai.tool.call.id\")"
+        }
+      ],
+      "expect": "one sample per tool call, by tool name: the MCP round trip inside it is not a second call"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "chat durations keyed by the served model",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "model = span.attrs.get(\"gen_ai.request.model\")",
+          "new": "model = span.attrs.get(\"gen_ai.response.model\")"
+        }
+      ],
+      "expect": "chat durations in seconds, by requested model"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "durations scaled with * 1e-9",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "seconds = (span.end_ns - span.start_ns) / 1e9",
+          "new": "seconds = (span.end_ns - span.start_ns) * 1e-9"
+        }
+      ],
+      "expect": "a duration exactly on a bound stays in the bucket that bound closes"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "chat spans picked by span name",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "        if op == \"chat\":",
+          "new": "        if span.name == \"llm.chat\":"
+        }
+      ],
+      "expect": "token usage is split into input and output"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "tool calls picked by span name",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "        elif op == \"execute_tool\" and span.kind == \"INTERNAL\":",
+          "new": "        elif span.name == \"tool.execute\":"
+        }
+      ],
+      "expect": "one sample per tool call, by tool name: the MCP round trip inside it is not a second call"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "durations in milliseconds",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "seconds = (span.end_ns - span.start_ns) / 1e9",
+          "new": "seconds = (span.end_ns - span.start_ns) / 1e6"
+        }
+      ],
+      "expect": "chat durations in seconds, by requested model"
+    },
+    {
+      "test": "test_conventions_and_metrics",
+      "name": "token samples only from spans that have both counts",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "            for token_type in (\"input\", \"output\"):\n                value = span.attrs.get(f\"gen_ai.usage.{token_type}_tokens\")\n                if value is not None:",
+          "new": "            both = all(span.attrs.get(f\"gen_ai.usage.{t}_tokens\") is not None for t in (\"input\", \"output\"))\n            for token_type in (\"input\", \"output\"):\n                value = span.attrs.get(f\"gen_ai.usage.{token_type}_tokens\")\n                if both:"
+        }
+      ],
+      "expect": "each count is a sample of its own"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "upper-case hex accepted",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "_TRACEPARENT = re.compile(r\"00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}\")",
+          "new": "_TRACEPARENT = re.compile(r\"00-([0-9a-fA-F]{32})-([0-9a-fA-F]{16})-[0-9a-fA-F]{2}\")"
+        }
+      ],
+      "expect": "not a usable traceparent: '00-4BF92F3577B34DA6A3CE929D0E0E4736"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "the quiz's ^...$ pattern with re.match",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "    match = _TRACEPARENT.fullmatch(value)\n",
+          "new": "    match = re.match(r\"^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$\", value)\n"
+        }
+      ],
+      "expect": "-01\\n'"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "match instead of fullmatch",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "    match = _TRACEPARENT.fullmatch(value)\n",
+          "new": "    match = _TRACEPARENT.match(value)\n"
+        }
+      ],
+      "expect": "-01\\n'"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "all-zero ids accepted",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "    if trace_id == \"0\" * 32 or span_id == \"0\" * 16:\n        return None\n",
+          "new": ""
+        }
+      ],
+      "expect": "not a usable traceparent: '00-00000000000000000000000000000000"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "only the trace id checked for zeros",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "    if trace_id == \"0\" * 32 or span_id == \"0\" * 16:",
+          "new": "    if trace_id == \"0\" * 32:"
+        }
+      ],
+      "expect": "0000000000000000-01'"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "hex checked with int()",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "    match = _TRACEPARENT.fullmatch(value)\n    if match is None:\n        return None\n    trace_id, span_id = match.groups()\n    if trace_id == \"0\" * 32 or span_id == \"0\" * 16:\n        return None\n    return SpanContext(trace_id, span_id)\n",
+          "new": "    parts = value.split(\"-\")\n    if len(parts) != 4 or parts[0] != \"00\" or [len(p) for p in parts[1:]] != [32, 16, 2]:\n        return None\n    try:\n        if int(parts[1], 16) == 0 or int(parts[2], 16) == 0:\n            return None\n        int(parts[3], 16)\n    except ValueError:\n        return None\n    return SpanContext(parts[1], parts[2])\n"
+        }
+      ],
+      "expect": "not a usable traceparent: '00-4BF92F3577B34DA6A3CE929D0E0E4736"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "hex checked with int() after a lower-case check",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "    match = _TRACEPARENT.fullmatch(value)\n    if match is None:\n        return None\n    trace_id, span_id = match.groups()\n    if trace_id == \"0\" * 32 or span_id == \"0\" * 16:\n        return None\n    return SpanContext(trace_id, span_id)\n",
+          "new": "    if value != value.lower():\n        return None\n    parts = value.split(\"-\")\n    if len(parts) != 4 or parts[0] != \"00\" or [len(p) for p in parts[1:]] != [32, 16, 2]:\n        return None\n    try:\n        if int(parts[1], 16) == 0 or int(parts[2], 16) == 0:\n            return None\n        int(parts[3], 16)\n    except ValueError:\n        return None\n    return SpanContext(parts[1], parts[2])\n"
+        }
+      ],
+      "expect": "not a usable traceparent: '00-0x4bf92f3577b34da6a3ce929d0e0e47"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "a traceparent that is not a string raises",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "    if not isinstance(value, str):\n        return None\n",
+          "new": ""
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "any version accepted",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "_TRACEPARENT = re.compile(r\"00-(",
+          "new": "_TRACEPARENT = re.compile(r\"[0-9a-f]{2}-("
+        }
+      ],
+      "expect": "not a usable traceparent: '01-4bf92f3577b34da6a3ce929d0e0e4736"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "a malformed traceparent raises",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "    if match is None:\n        return None\n",
+          "new": "    if match is None:\n        raise ValueError(f\"malformed traceparent {value!r}\")\n"
+        }
+      ],
+      "expect": "malformed traceparent"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "inject replaces _meta",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "        params.setdefault(\"_meta\", {})[\"traceparent\"] = traceparent",
+          "new": "        params[\"_meta\"] = {\"traceparent\": traceparent}"
+        }
+      ],
+      "expect": "next to what is already there"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "inject copies only the top level",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "    message = copy.deepcopy(request.message)",
+          "new": "    message = dict(request.message)"
+        }
+      ],
+      "expect": "the caller's request is left as it was"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "the traceparent also written into the HTTP body",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "        headers[\"traceparent\"] = traceparent\n",
+          "new": "        headers[\"traceparent\"] = traceparent\n        message.setdefault(\"params\", {}).setdefault(\"_meta\", {})[\"traceparent\"] = traceparent\n"
+        }
+      ],
+      "expect": "over HTTP the message is not touched"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "a traceparent header over stdio too",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "        params = message.setdefault(\"params\", {})\n",
+          "new": "        headers[\"traceparent\"] = traceparent\n        params = message.setdefault(\"params\", {})\n"
+        }
+      ],
+      "expect": "stdio has no headers"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "the tool span sent as the parent",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "        return server.handle(inject(request, span))[\"result\"]",
+          "new": "        return server.handle(inject(request, parent))[\"result\"]"
+        }
+      ],
+      "expect": "every tools/call over stdio carries its mcp.call span as the parent"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "the agent never injects",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "        return server.handle(inject(request, span))[\"result\"]",
+          "new": "        return server.handle(request)[\"result\"]"
+        }
+      ],
+      "expect": "every tools/call over stdio carries its mcp.call span as the parent"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "a full batch waits for tick",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "        if len(self._queue) >= self.max_batch:\n            self._flush()\n",
+          "new": ""
+        }
+      ],
+      "expect": "a full batch goes out at once"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "a batch goes out only when it overflows",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "        if len(self._queue) >= self.max_batch:",
+          "new": "        if len(self._queue) > self.max_batch:"
+        }
+      ],
+      "expect": "a full batch goes out at once"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "every span sent on its own",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "        if len(self._queue) >= self.max_batch:",
+          "new": "        if self._queue:"
+        }
+      ],
+      "expect": "a full batch goes out at once"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "tick waits strictly longer than max_delay_ns",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "self.clock() - self._oldest_ns >= self.max_delay_ns",
+          "new": "self.clock() - self._oldest_ns > self.max_delay_ns"
+        }
+      ],
+      "expect": "tick sends the waiting spans once the oldest has waited max_delay_ns"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "the wait counts from the last request",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "        if not self._queue:\n            self._oldest_ns = self.clock()\n",
+          "new": "        if self._oldest_ns is None:\n            self._oldest_ns = self.clock()\n"
+        },
+        {
+          "file": "export.py",
+          "old": "        self._oldest_ns = None\n",
+          "new": "        self._oldest_ns = self.clock()\n"
+        }
+      ],
+      "expect": "the wait starts when a span is queued, not at the last request"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "the wait counts from the newest span",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "        if not self._queue:\n            self._oldest_ns = self.clock()\n",
+          "new": "        self._oldest_ns = self.clock()\n"
+        }
+      ],
+      "expect": "tick sends the waiting spans once the oldest has waited max_delay_ns"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "shutdown sends nothing",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "        if not self._closed:\n            self._flush()\n            self._closed = True\n",
+          "new": "        self._closed = True\n"
+        }
+      ],
+      "expect": "every agent span is exported once"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "spans that end after shutdown are queued",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "        if self._closed:\n            return\n",
+          "new": ""
+        }
+      ],
+      "expect": "shutdown sends what is left, and spans that end after it are dropped"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "tick with nothing waiting raises",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "        if self._queue and self.clock() - self._oldest_ns >= self.max_delay_ns:",
+          "new": "        if self.clock() - self._oldest_ns >= self.max_delay_ns:"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "a span that ends after shutdown raises",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "        if self._closed:\n            return\n",
+          "new": "        if self._closed:\n            raise RuntimeError(\"the exporter is shut down\")\n"
+        }
+      ],
+      "expect": "the exporter is shut down"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "the request sent as a str",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "            self._send(json.dumps(request).encode(\"utf-8\"))",
+          "new": "            self._send(json.dumps(request))"
+        }
+      ],
+      "expect": "send() gets each request as UTF-8 bytes"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "resource attributes written as a plain object",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "\"resource\": {\"attributes\": encode_attributes({\"service.name\": self.service_name})},",
+          "new": "\"resource\": {\"attributes\": {\"service.name\": self.service_name}},"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "a batch sorted by start time",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "\"spans\": [to_otlp(span) for span in batch]",
+          "new": "\"spans\": [to_otlp(span) for span in sorted(batch, key=lambda s: s.start_ns)]"
+        }
+      ],
+      "expect": "every agent span is exported once, in the order the spans ended"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "one resourceSpans entry per span",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "            request = {\n                \"resourceSpans\": [\n                    {\n                        \"resource\": {\"attributes\": encode_attributes({\"service.name\": self.service_name})},\n                        \"scopeSpans\": [{\"scope\": dict(SCOPE), \"spans\": [to_otlp(span) for span in batch]}],\n                    }\n                ]\n            }\n",
+          "new": "            request = {\n                \"resourceSpans\": [\n                    {\n                        \"resource\": {\"attributes\": encode_attributes({\"service.name\": self.service_name})},\n                        \"scopeSpans\": [{\"scope\": dict(SCOPE), \"spans\": [to_otlp(span)]}],\n                    }\n                    for span in batch\n                ]\n            }\n"
+        }
+      ],
+      "expect": "too many values to unpack"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "the wait counts from the span's end time",
+      "edits": [
+        {
+          "file": "export.py",
+          "old": "            self._oldest_ns = self.clock()",
+          "new": "            self._oldest_ns = span.end_ns"
+        }
+      ],
+      "expect": "nothing goes out before the oldest span has waited max_delay_ns since it was queued"
+    },
+    {
+      "test": "test_propagation_and_export",
+      "name": "flags checked with int()",
+      "edits": [
+        {
+          "file": "propagate.py",
+          "old": "-[0-9a-f]{2}\")",
+          "new": "-(..)\")"
+        },
+        {
+          "file": "propagate.py",
+          "old": "    trace_id, span_id = match.groups()",
+          "new": "    trace_id, span_id, flags = match.groups()\n    try:\n        int(flags, 16)\n    except ValueError:\n        return None"
+        }
+      ],
+      "expect": "-0A'"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "children's durations summed",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "        covered = 0\n        run_start = run_end = None\n        for start, end in pieces:\n            if end <= start:\n                continue\n            if run_end is None or start > run_end:\n                if run_end is not None:\n                    covered += run_end - run_start\n                run_start, run_end = start, end\n            else:\n                run_end = max(run_end, end)\n        if run_end is not None:\n            covered += run_end - run_start\n",
+          "new": "        covered = sum(max(0, end - start) for start, end in pieces)\n"
+        }
+      ],
+      "expect": "self time is the time no child covers"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "intervals merged in the order given",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "        pieces = sorted(\n",
+          "new": "        pieces = list(\n"
+        }
+      ],
+      "expect": "self time is the time no child covers"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "covered taken as first start to last end",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "        covered = 0\n        run_start = run_end = None\n        for start, end in pieces:\n            if end <= start:\n                continue\n            if run_end is None or start > run_end:\n                if run_end is not None:\n                    covered += run_end - run_start\n                run_start, run_end = start, end\n            else:\n                run_end = max(run_end, end)\n        if run_end is not None:\n            covered += run_end - run_start\n",
+          "new": "        covered = max(end for _, end in pieces) - min(start for start, _ in pieces) if pieces else 0\n"
+        }
+      ],
+      "expect": "self time is the time no child covers"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "children not clipped",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "            (max(child.start_ns, span.start_ns), min(child.end_ns, span.end_ns))",
+          "new": "            (child.start_ns, child.end_ns)"
+        }
+      ],
+      "expect": "a child that sticks out of its parent covers only the part inside it"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "only the end clipped",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "            (max(child.start_ns, span.start_ns), min(child.end_ns, span.end_ns))",
+          "new": "            (child.start_ns, min(child.end_ns, span.end_ns))"
+        }
+      ],
+      "expect": "a child that sticks out of its parent covers only the part inside it"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "only the start clipped",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "            (max(child.start_ns, span.start_ns), min(child.end_ns, span.end_ns))",
+          "new": "            (max(child.start_ns, span.start_ns), child.end_ns)"
+        }
+      ],
+      "expect": "a child that sticks out of its parent covers only the part inside it"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "a child outside its parent covers a negative length",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "            if end <= start:\n                continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "a child entirely outside its parent covers none of it"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "self times only for spans with children",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "    for span in trace.spans:\n        pieces",
+          "new": "    for span in trace.spans:\n        if not trace.children_of(span):\n            continue\n        pieces"
+        }
+      ],
+      "expect": "every span has a self time"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "the chain follows the child with the most self time",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "        path.append(min(trace.children_of(path[-1]), key=lambda child: (-weight(child), child.span_id)))",
+          "new": "        path.append(min(trace.children_of(path[-1]), key=lambda child: (-own[child.span_id], child.span_id)))"
+        }
+      ],
+      "expect": "the heaviest chain runs through the Tokyo call"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "the chain follows the longest child",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "        path.append(min(trace.children_of(path[-1]), key=lambda child: (-weight(child), child.span_id)))",
+          "new": "        path.append(min(trace.children_of(path[-1]), key=lambda child: (child.start_ns - child.end_ns, child.span_id)))"
+        }
+      ],
+      "expect": "not by its duration"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "a subtree weighs its heaviest span, not the sum",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "            heaviest[span.span_id] = own[span.span_id] + below",
+          "new": "            heaviest[span.span_id] = max(own[span.span_id], below)"
+        }
+      ],
+      "expect": "the chain adds up self times along the way"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "ties go to the first child",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "        path.append(min(trace.children_of(path[-1]), key=lambda child: (-weight(child), child.span_id)))",
+          "new": "        path.append(min(trace.children_of(path[-1]), key=lambda child: -weight(child)))"
+        }
+      ],
+      "expect": "children that tie go to the smaller span id"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "ties go to the larger span id",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "        path.append(min(trace.children_of(path[-1]), key=lambda child: (-weight(child), child.span_id)))",
+          "new": "        path.append(max(trace.children_of(path[-1]), key=lambda child: (weight(child), child.span_id)))"
+        }
+      ],
+      "expect": "children that tie go to the smaller span id"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "subtree weights memoized by span name",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "        if span.span_id not in heaviest:",
+          "new": "        if span.name not in heaviest:"
+        },
+        {
+          "file": "waterfall.py",
+          "old": "            heaviest[span.span_id] = own[span.span_id] + below",
+          "new": "            heaviest[span.name] = own[span.span_id] + below"
+        },
+        {
+          "file": "waterfall.py",
+          "old": "        return heaviest[span.span_id]",
+          "new": "        return heaviest[span.name]"
+        }
+      ],
+      "expect": "the heaviest chain runs through the Tokyo call"
+    },
+    {
+      "test": "test_where_the_time_went",
+      "name": "the chain stops one level down",
+      "edits": [
+        {
+          "file": "waterfall.py",
+          "old": "    while trace.children_of(path[-1]):",
+          "new": "    if trace.children_of(path[-1]):"
+        }
+      ],
+      "expect": "the heaviest chain runs through the Tokyo call"
+    }
+  ]
+}

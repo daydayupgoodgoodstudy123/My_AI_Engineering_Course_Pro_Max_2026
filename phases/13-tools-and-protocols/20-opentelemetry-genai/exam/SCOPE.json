@@ -1,0 +1,119 @@
+{
+  "lesson": "phases/13-tools-and-protocols/20-opentelemetry-genai",
+  "title": "OpenTelemetry GenAI — Tracing Tool Calls End-to-End",
+  "format": "staged-brownfield",
+  "service": "GenAITrace: OTel GenAI spans for a tool-calling agent with a scripted model and MCP server; a trace linker, an OTLP/JSON span log, semconv checks and GenAI histograms, traceparent propagation over stdio and HTTP with batched OTLP/JSON export, and self time with the heaviest chain",
+  "sources": {
+    "docs/en.md": "473d0c4210eddf4b2ae01ce38d1b5a997e75fab66b4be17c32b319c666d88dbb",
+    "code/main.py": "93ac6540cf23c67eacb07a78eeb4aa102d44acdae3978b41627121a0a984f150",
+    "quiz/quiz.md": "e2d510806669807816319553e0356e57c0f6809bf5bad7a9c412440a411f964b"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_agent_trace",
+      "kind": "debug",
+      "lesson_anchor": "Span hierarchy (one trace id for agent -> LLM -> tool -> MCP); Span kinds (CLIENT across a process boundary, INTERNAL for the agent's own steps); Opt-in content capture; code/main.py start_span, fake_mcp_call, fake_llm_call; Use It: 'Trace id is shared across all spans. Parent-child links are encoded via parentSpanId.'",
+      "planted_bugs": [
+        "Tracer.start_span mints a new trace id even when it has a parent; the failure surfaces in traces.link, which splits one run into 9 traces (assert 9 == 1)",
+        "fake_mcp_call starts mcp.call as INTERNAL, although its docstring and the lesson make a call into the MCP server CLIENT",
+        "content_capture_enabled returns env.get('OTEL_CAPTURE_CONTENT') != '0', so an unset variable (None) turns capture on and prompts, completions and tool arguments land in span events by default; the events are added in fake_llm_call and fake_tool_execute, the root cause is the helper Tracer.__init__ calls",
+        "traces.link scans every span to find each parent, O(n^2)"
+      ],
+      "timing_assert": "link() on a 6,500-tool-call session (13,003 spans) under 0.12 s; the linear scan takes 1.05-2.4 s on this machine depending on load, the (trace id, span id) index 5-13 ms",
+      "overfix_guard": "a span whose parent is not among the spans (a sub-agent's root, its parent in the calling process) stays in its trace as a root and keeps parent_span_id: an index lookup that raises, a continue that drops it, and clearing the id are caught; the index is keyed by trace id too (a parent span id that equals another trace's root, and replayed spans with the same span ids under another trace id); every run without a parent starts its own trace; only OTEL_CAPTURE_CONTENT=1 turns capture on ('0' and 'true' do not) and =1 does; tool.execute stays INTERNAL; traces come in the order their first span appears (sorting by trace id before grouping is caught)",
+      "deviation": "The suggested exporter-side parent lookup sits in the trace linker (traces.link), which Part 5 builds on; OTLP export needs no parent lookup. The remote mark is the parent_span_id the root keeps: the lesson names no OTLP field for it. The timing case is 13,003 spans instead of 20,000, so that the quadratic version stays near 1-2 s. Span.to_otlp moved to Part 2, where the value encoding and its precision traps belong."
+    },
+    {
+      "part": 2,
+      "test": "test_span_log_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Exporters: OTLP as the wire; the OTLP/JSON shape the quiz (Q9) and the code walkthrough describe (attributes as key/value lists, kind as an enum); Events on spans",
+      "exactness": "spans read back field for field across two reopens: nanosecond timestamps far above 2**53 (start, end and event times), 32- and 16-character lowercase hex ids, int vs float vs bool attribute types, int64 bounds, arrays of each scalar type and the empty array, two events with the same name in order; the raw file is also read with json.loads(parse_int=float), the way JavaScript or jq would, and timestamps and 2**53 + 1 must survive it",
+      "traps": [
+        "64-bit integers written as JSON numbers (timestamps, event times, intValue)",
+        "loosening the given strict reader instead of fixing the writer",
+        "isinstance(True, int): True written as an intValue",
+        "1.0 written as an intValue",
+        "no int64 range check, or an off-by-one range",
+        "bool and int, or int and float, mixed in one array; checking items only against the first item's type",
+        "nested lists, None and dicts accepted",
+        "events keyed by name",
+        "the log opened with 'w'; a new log raising FileNotFoundError",
+        "an unfinished span written; a root's parentSpanId written as null; the kind written as its name"
+      ],
+      "clarifying_questions": ["changing the reader", "NaN", "tuples", "fsync", "a torn last line"],
+      "deviation": "The candidate writes encode_value, to_otlp and SpanLog; the reader (from_otlp, decode_value) is given and strict. The 64-bit-as-decimal-string rule is stated in the otlp.py docstring with its reason (readers whose numbers are doubles). Torn lines, flush and U+2028 traps are left out: 13/01's session log has them."
+    },
+    {
+      "part": 3,
+      "test": "test_conventions_and_metrics",
+      "kind": "core algorithm",
+      "lesson_anchor": "Required attributes (LLM, tool and agent spans); Span kinds; Opt-in content capture; Metrics (gen_ai.client.token.usage, gen_ai.client.operation.duration, gen_ai.tool.execution.duration); quiz Q11 bucket bounds",
+      "traps": [
+        "0 tokens counted as missing; an empty string counted as present",
+        "response.model differing from request.model reported",
+        "execute_tool allowed only as INTERNAL (the agent's own mcp.call is execute_tool and CLIENT)",
+        "spans without gen_ai.operation.name checked; an unknown operation not reported, or checked further (KeyError)",
+        "a span's problems out of order: kind first, then missing attributes in REQUIRED order",
+        "scrub dropping every event, editing the spans it is given, or dropping content with capture on",
+        "a value on a bound put in the next bucket (bisect_right, <); no slot above the last bound",
+        "input and output tokens merged; 0 tokens not recorded; a missing token count raising; token samples taken only from spans that have both counts (a cut-off stream has input tokens only)",
+        "chat and tool spans picked by span name instead of gen_ai.operation.name and kind",
+        "the MCP round trip (CLIENT execute_tool) counted as a second tool call",
+        "tool durations keyed by call id; chat durations keyed by the served model",
+        "durations scaled with * 1e-9: 75 ms becomes 0.07500000000000001 and crosses the 0.075 bound"
+      ],
+      "integration": "the agent run from Part 1 (with content capture on) must pass check() with no problems and gives the gpt-4o and get_weather samples",
+      "clarifying_questions": ["served model differs", "empty string", "unknown operations", "mcp.call in tool duration", "metrics for spans that failed the checks"],
+      "deviation": "execute_tool spans may be INTERNAL or CLIENT, because the lesson's own mcp.call span is execute_tool and CLIENT. gen_ai.tool.execution.duration counts only the INTERNAL span of each tool call. The lesson gives no required attributes for text_completion or embeddings, so the checker has rules for the three operations the agent emits and reports any other value as an unknown operation. Dimensions: token usage by token type, operation duration by request model, tool duration by tool name. The bucket rule (a value on a bound belongs to the bucket it closes) is in the Histogram docstring; the duration bounds are quiz Q11's."
+    },
+    {
+      "part": 4,
+      "test": "test_propagation_and_export",
+      "kind": "streaming",
+      "lesson_anchor": "Propagation across MCP (traceparent header over Streamable HTTP, _meta.traceparent over stdio); Exercise 4; quiz Q3 and Q10 (traceparent layout, all-zero ids invalid, a bad traceparent starts a new trace); Exporters (OTLP); the walkthrough's batch span processor",
+      "wire_format": "one OTLP/JSON export request per batch, as UTF-8 bytes: resourceSpans -> scopeSpans -> spans, service.name as an OTLP attribute, spans as Part 2's to_otlp, decided by the test's json.loads and unpack()",
+      "traps": [
+        "upper-case hex, other versions, wrong lengths, extra fields and all-zero ids accepted",
+        "re.match with ^...$ (the quiz's pattern) accepts a trailing newline; match instead of fullmatch",
+        "int(x, 16) accepts upper case, 0x, + and underscores (flags too: 0A)",
+        "a non-string traceparent raising TypeError; a malformed one raising instead of starting a new trace",
+        "inject dropping other _meta keys, changing the caller's request (shallow copy), writing the body over HTTP, or a header over stdio",
+        "the agent not injecting, or injecting the tool span instead of the mcp.call span",
+        "a full batch not sent from the on_end that fills it (only on tick, > instead of >=, one request per span)",
+        "tick with > instead of >=; the wait counted from the last request, from the newest span, or from the span's own end_ns instead of the on_end call; tick on an empty queue raising",
+        "shutdown not flushing; spans that end after shutdown queued, or raising",
+        "requests as str; resource attributes as a plain object; one resourceSpans per span; a batch sorted by start time"
+      ],
+      "clarifying_questions": ["upper-case hex", "failing the request on a bad traceparent", "keeping _meta keys", "_meta over HTTP", "background thread", "spans after shutdown"],
+      "deviation": "'Unfinished spans are not exported' follows from the on_end design: spans reach the exporter only when they end, and a span still running at shutdown is dropped when it ends; the test checks both. 'In end order within a batch' holds by construction and is checked by decoding every request. The time trigger is an explicit tick() on the exporter's clock instead of a timer thread, so the test needs no real time. Wiring inject into the agent's fake_mcp_call (Exercise 4) is part of this part."
+    },
+    {
+      "part": 5,
+      "test": "test_where_the_time_went",
+      "kind": "tree",
+      "lesson_anchor": "The Problem (sometimes 30 s: an MCP server's cold start); Span hierarchy; the span waterfall figure; the walkthrough's waterfall (a parent's duration contains its children)",
+      "traps": [
+        "child durations summed instead of the union of their intervals (parallel tools)",
+        "intervals merged in the order given (link keeps the end order a collector delivers)",
+        "covered time taken as first start to last end (a 50 ms gap between children)",
+        "children not clipped, or clipped at one end only (a SERVER span that ends after, and one that starts before, its mcp.call)",
+        "a child entirely outside its parent subtracting a negative length",
+        "self times only for spans with children",
+        "the chain following the child with the most self time, or the longest child, or weighing a subtree by its heaviest span instead of the sum",
+        "ties not going to the smaller span id",
+        "weights memoized by span name",
+        "the chain stopping one level down"
+      ],
+      "clarifying_questions": ["children longer than the parent", "what the critical path is", "ties"],
+      "deviation": "The critical path is defined as the heaviest self-time chain from a root to a leaf, ties to the smaller span id. Part 5 uses Part 1's link, which already makes a span whose parent never arrived a root of its own, so that case is checked here as a chain of its own rather than as a separate tree-building trap."
+    }
+  ],
+  "deviations": [
+    "Part 1's parent lookup is in the trace linker rather than the OTLP exporter, and Span.to_otlp moved to Part 2 (see the Part 1 and Part 2 notes).",
+    "Part 4 keeps the suggested traps that a push-based exporter can still get wrong (a full batch sent at once, end order, a malformed traceparent starting a new trace); 'unfinished spans are not exported' is checked through a span that ends after shutdown.",
+    "Part 3's checker has rules only for chat, execute_tool and invoke_agent, the operations the lesson's agent emits."
+  ]
+}
