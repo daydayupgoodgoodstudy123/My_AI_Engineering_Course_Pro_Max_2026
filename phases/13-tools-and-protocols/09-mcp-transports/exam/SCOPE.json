@@ -1,0 +1,129 @@
+{
+  "lesson": "phases/13-tools-and-protocols/09-mcp-transports",
+  "title": "MCP Transports: stdio and Stateless Streamable HTTP",
+  "format": "staged-brownfield",
+  "service": "streamhttp: a stateless MCP 2026-07-28 Streamable HTTP endpoint with a shared SQLite draft store, request-scoped SSE and a layered client-side reader",
+  "sources": {
+    "docs/en.md": "8b35336a155283e509f16008a3acd65caedd87c443bde2c86c7836d615f6bb4e",
+    "code/main.py": "21d7f10f37eb2a95089f87404feb4fdb662ef461ebaa0f5be3c3b01c1527996a",
+    "code/tests/test_main.py": "2a9ad8ecd6f24a8c22ce8a38207ae682e8790bdbec2c55fdbde2ebb2dde57de0"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_read_post",
+      "kind": "debug",
+      "lesson_anchor": "Required HTTP metadata headers (names case-insensitive, values case-sensitive, Mcp-Name mirrors params.uri for resources/read, Exercise 3 with a Base64 sentinel URI); the Content-Length rules in code/tests/test_main.py",
+      "planted_bugs": [
+        "Headers.get_all compares header names exactly, so the lowercase names of an HTTP/2 hop are not found; the error surfaces one call up as FramingError: Content-Length is required",
+        "_expect lowercases both the header value and the body value, so Mcp-Method: Tools/Call passes for tools/call",
+        "body_name always mirrors params.name, so a resources/read whose Mcp-Name mirrors params.uri is rejected",
+        "read_body accumulates the body with bytes +=, which copies everything read so far on every chunk, O(n^2)"
+      ],
+      "timing_assert": "a 12 MiB body read in 4 KiB pieces under 0.1 s (the bytes += version takes 1.1-1.5 s on a quiet machine and up to about 3.5 s under heavy load; bytearray takes 2-3 ms, 4-6 ms under load)",
+      "overfix_guard": "the strict Content-Length rules survive the faster read: a missing, conflicting, signed, zero, over-limit or non-ASCII-digit length and a Content-Length beside a lowercase transfer-encoding are refused before any read; a short body is refused; exactly Content-Length bytes are consumed and the rest stays in the stream. Lowercasing the values along with the names, stripping values, and lowercasing only one side of the comparison are caught too.",
+      "deviation": "The suggested timing case was 1 MB read 1 KB at a time. On this machine the quadratic copy of 1 MiB takes about 10 ms against 0.3 ms for the fix, too close for an 8x margin on both sides; the gap grows with the body size, not the read size, so the test reads 12 MiB in 4 KiB pieces with limit=16 MiB. The planted line is body += chunk on bytes, the same copy as body = body + chunk. Base64 sentinel decoding is working code inside the mirrored-header check, where the comparison happens; Part 1 covers it through Exercise 3, and Part 3 checks its effect at the HTTP layer."
+    },
+    {
+      "part": 2,
+      "test": "test_shared_drafts",
+      "kind": "model and persistence",
+      "lesson_anchor": "Explicit application state: the five-step replica failure; a server-minted opaque handle bound to principal and tenant, unguessable, expiring, with concurrency control; durable state in a shared store",
+      "exactness": "a draft written through one replica's connection loads through another's as an identical Draft: text with CRLF, trailing spaces and a tab, U+2028 and an emoji, an integer version, and expires_at_ms as integer milliseconds from the injected clock",
+      "traps": [
+        "missing commit",
+        "a replica-local cache",
+        "per-replica counter or seeded random handles collide",
+        "handles shorter than 128 bits, including 96-bit hex handles",
+        "wall clock instead of the injected clock",
+        "a REAL expiry column reads back a float",
+        "expiry boundary written as >=",
+        "save extends the expiry",
+        "expected version left out of the UPDATE",
+        "VersionConflict reporting the expected version instead of the stored one",
+        "owner or tenant not checked",
+        "a distinguishable error for someone else's handle",
+        "PermissionError for someone else's handle",
+        "version checked before ownership",
+        "text stripped"
+      ],
+      "clarifying_questions": ["does save extend the expiry", "deleting expired drafts", "replica caches", "handle format", "error for a foreign handle"],
+      "deviation": "Expiry is fixed at creation and save does not extend it. The race between two replicas that read the version and then update unconditionally cannot be interleaved deterministically in a single-threaded test, so it is an interviewer follow-up."
+    },
+    {
+      "part": 3,
+      "test": "test_http_responses",
+      "kind": "core algorithm",
+      "lesson_anchor": "POST-only means POST-only (405, Mcp-Session-Id and Last-Event-ID ignored); Origin validation (present and not allowed is 403, absent passes, exact matching); Required HTTP metadata headers (-32020 before -32022 with exact data, 404 with a -32601 body); 202 for an accepted notification; HTTP dual-era compatibility",
+      "traps": [
+        "version support checked before the mirrored headers, by body or by header",
+        "-32022 without its exact data",
+        "a 202 with a JSON null body",
+        "a notification for an unknown method answered 404",
+        "a notification accepted before its headers or version are checked",
+        "an unknown method answered 200 or with an empty 404, or every dispatch error answered 404",
+        "a missing endpoint answered with a JSON-RPC error",
+        "only GET and DELETE refused, or 405 without Allow",
+        "Origin matched by prefix, the empty Origin taken as absent, the default allowlist used, a missing Origin refused, or Origin checked after the method",
+        "FramingError or UnicodeDecodeError escaping, or -32600 for an unreadable body",
+        "Mcp-Session-Id echoed, or requests carrying it refused",
+        "the principal not passed to dispatch"
+      ],
+      "integration": "two StreamableServer replicas share one SQLite file: replica 1 mints a draft handle, a fresh POST to replica 2 saves through it, and another principal gets a tool error; a Base64 Mcp-Name passes and malformed, raw non-ASCII or missing ones are -32020",
+      "clarifying_questions": ["Content-Type and Accept checks", "HTTP status for other JSON-RPC errors", "body of a rejected notification", "two Origin headers", "origin normalization"],
+      "deviation": "Sentinel decoding stays in Part 1's code, so this part checks it only at the HTTP layer. The lesson code's 415 and 406 checks are left out because the lesson text does not define them. A path other than /mcp (a 404 without a JSON-RPC body) and PUT (405) are added so that both kinds of 404 and POST-only are exercised."
+    },
+    {
+      "part": 4,
+      "test": "test_request_scoped_sse",
+      "kind": "streaming",
+      "lesson_anchor": "Request-scoped SSE: notifications related to the request, then the final response, then the stream closes; no SSE event ids; closing the response stream cancels the request; SSE comments as keepalives",
+      "wire_format": "text/event-stream bytes: each event is one line, a ':' comment or a single 'data: ' line of compact JSON, followed by a blank line, decided by the test's strict parser",
+      "traps": [
+        "pretty-printed JSON",
+        "id: lines for replay",
+        "an event: line",
+        "str instead of bytes",
+        "a single newline or CRLF after an event",
+        "the keepalive as an empty data event or without its blank line",
+        "a heartbeat sent as progress",
+        "progress without a progress token, or a falsy token such as 0 taken as none",
+        "total and message sent as null",
+        "the result not wrapped by complete()",
+        "the stream going on after the final response",
+        "every step read before anything is written",
+        "steps not closed when the stream is closed, including except Exception missing GeneratorExit"
+      ],
+      "clarifying_questions": ["keepalive comment text", "heartbeats without a progress token", "a tool that ends without a result"],
+      "deviation": "Keepalives come from Heartbeat steps that the tool yields rather than from a timer, which keeps the test deterministic and the part on framing; the timer version and its asyncio.wait_for cancellation pitfall are a follow-up, and timing and backpressure belong to lesson 29. This lesson does not define the progress fields, so the notification uses the params of lesson 29's code (progressToken, progress, optional total and message) and the token is passed in."
+    },
+    {
+      "part": 5,
+      "test": "test_layered_decoding",
+      "kind": "nested framing",
+      "lesson_anchor": "Streamable HTTP responses: application/json with one response, or text/event-stream with related notifications and then the final response; no server requests on the stream (sampling, elicitation and roots use MRTR); a stream that breaks before its final response loses the request",
+      "traps": [
+        "each chunk decoded on its own, strictly or with errors='replace'",
+        "a JSON body decoded chunk by chunk",
+        "lines split with str.splitlines()",
+        "the CR of a CRLF kept, or a CR taken as a line end before its LF arrives",
+        "the value sliced after 'data: '",
+        "every field taken as data",
+        "an event without data dispatched",
+        "data lines carried over or only the last one kept",
+        "an unfinished event dispatched at the end",
+        "messages after the final response ignored",
+        "a server request kept as a notification",
+        "ids compared as text, or responses to other ids skipped",
+        "a JSON body taken as the response whatever its id",
+        "no final response accepted, or reported as a plain ProtocolError",
+        "an error response not accepted as the final response",
+        "Content-Type compared exactly, without lowercasing, or looked up case-sensitively"
+      ],
+      "integration": "the reader decodes what Part 4's stream_tool_call writes",
+      "clarifying_questions": ["a lone CR", "non-200 responses", "a BOM"],
+      "deviation": "The lesson has no tree or DAG, so Part 5 is the client's three nested framings, HTTP Content-Type, SSE events and JSON-RPC messages, as the chapter plan assigns. Only LF and CRLF line ends are required; a lone CR is a follow-up."
+    }
+  ]
+}

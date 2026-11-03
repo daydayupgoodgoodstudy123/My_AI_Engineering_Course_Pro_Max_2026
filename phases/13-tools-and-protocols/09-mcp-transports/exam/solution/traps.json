@@ -1,0 +1,1335 @@
+{
+  "package": "streamhttp",
+  "tests": [
+    "test_read_post",
+    "test_shared_drafts",
+    "test_http_responses",
+    "test_request_scoped_sse",
+    "test_layered_decoding"
+  ],
+  "layers": [
+    {
+      "test": "test_read_post",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "Content-Length is required"
+        },
+        {
+          "name": "fix the header-name lookup",
+          "edits": [
+            {
+              "file": "wire.py",
+              "old": "        return [value for key, value in self._pairs if key == name]\n",
+              "new": "        wanted = name.lower()\n        return [value for key, value in self._pairs if key.lower() == wanted]\n"
+            }
+          ],
+          "expect": "header values are case-sensitive"
+        },
+        {
+          "name": "+ compare values exactly",
+          "edits": [
+            {
+              "file": "wire.py",
+              "old": "    if expected is None or value.lower() != expected.lower():\n",
+              "new": "    if expected is None or value != expected:\n"
+            }
+          ],
+          "expect": "Mcp-Name mirrors params.uri for resources/read"
+        },
+        {
+          "name": "+ params.uri for resources/read",
+          "edits": [
+            {
+              "file": "wire.py",
+              "old": "    value = message.get(\"params\", {}).get(\"name\")\n",
+              "new": "    key = \"uri\" if message.get(\"method\") == \"resources/read\" else \"name\"\n    value = message.get(\"params\", {}).get(key)\n"
+            }
+          ],
+          "expect": "reading a body must take time linear in its size"
+        },
+        {
+          "name": "+ bytearray body",
+          "edits": [
+            {
+              "file": "wire.py",
+              "old": "    body = b\"\"\n",
+              "new": "    body = bytearray()\n"
+            },
+            {
+              "file": "wire.py",
+              "old": "    return body\n",
+              "new": "    return bytes(body)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_read_post",
+      "name": "Headers lowercases values as well as names",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "        self._pairs = list(pairs)\n",
+          "new": "        self._pairs = [(key, value.lower()) for key, value in pairs]\n"
+        }
+      ],
+      "expect": "headers that mirror the body pass"
+    },
+    {
+      "test": "test_read_post",
+      "name": "names lowercased when stored but not when looked up",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "        self._pairs = list(pairs)\n",
+          "new": "        self._pairs = [(key.lower(), value) for key, value in pairs]\n"
+        },
+        {
+          "file": "wire.py",
+          "old": "        wanted = name.lower()\n",
+          "new": "        wanted = name\n"
+        }
+      ],
+      "expect": "Content-Length is required"
+    },
+    {
+      "test": "test_read_post",
+      "name": "body read with a single read() call",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "    body = bytearray()\n    while len(body) < length:\n        chunk = stream.read(min(READ_SIZE, length - len(body)))\n        if not chunk:\n            raise FramingError(\"the body ended before Content-Length bytes arrived\")\n        body += chunk\n    return bytes(body)\n",
+          "new": "    body = stream.read(length)\n    if len(body) != length:\n        raise FramingError(\"the body ended before Content-Length bytes arrived\")\n    return body\n"
+        }
+      ],
+      "expect": "the body ended before Content-Length bytes arrived"
+    },
+    {
+      "test": "test_read_post",
+      "name": "read until the connection is empty, then cut",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "    body = bytearray()\n    while len(body) < length:\n        chunk = stream.read(min(READ_SIZE, length - len(body)))\n        if not chunk:\n            raise FramingError(\"the body ended before Content-Length bytes arrived\")\n        body += chunk\n    return bytes(body)\n",
+          "new": "    body = bytearray()\n    while chunk := stream.read(READ_SIZE):\n        body += chunk\n    if len(body) < length:\n        raise FramingError(\"the body ended before Content-Length bytes arrived\")\n    return bytes(body[:length])\n"
+        }
+      ],
+      "expect": "bytes after the body stay in the stream"
+    },
+    {
+      "test": "test_read_post",
+      "name": "reads READ_SIZE at a time, past the end of the body",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "        chunk = stream.read(min(READ_SIZE, length - len(body)))\n",
+          "new": "        chunk = stream.read(READ_SIZE)\n"
+        }
+      ],
+      "expect": "the body is exactly Content-Length bytes"
+    },
+    {
+      "test": "test_read_post",
+      "name": "a body that ends early is returned as it is",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "        if not chunk:\n            raise FramingError(\"the body ended before Content-Length bytes arrived\")\n",
+          "new": "        if not chunk:\n            break\n"
+        }
+      ],
+      "expect": "a body shorter than Content-Length is refused"
+    },
+    {
+      "test": "test_read_post",
+      "name": "only the body's value lowercased",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "    if expected is None or value != expected:\n",
+          "new": "    if expected is None or value != expected.lower():\n"
+        }
+      ],
+      "expect": "headers that mirror the body pass"
+    },
+    {
+      "test": "test_read_post",
+      "name": "values stripped before they are compared",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "    if expected is None or value != expected:\n",
+          "new": "    if expected is None or value.strip() != expected.strip():\n"
+        }
+      ],
+      "expect": "decoded values are compared exactly"
+    },
+    {
+      "test": "test_read_post",
+      "name": "Transfer-Encoding check dropped",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "    if headers.get_all(\"Transfer-Encoding\"):\n        raise FramingError(\"Transfer-Encoding is not supported\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "Content-Length with Transfer-Encoding is refused before the body is read"
+    },
+    {
+      "test": "test_read_post",
+      "name": "Content-Length parsed with int() alone",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "    if not (raw.isascii() and raw.isdigit()):\n        raise FramingError(\"Content-Length must be ASCII decimal digits\")\n    length = int(raw)\n",
+          "new": "    try:\n        length = int(raw)\n    except ValueError:\n        raise FramingError(\"Content-Length must be a number\") from None\n"
+        }
+      ],
+      "expect": "a length in non-ASCII digits is refused before the body is read"
+    },
+    {
+      "test": "test_read_post",
+      "name": "str.isdigit() without isascii()",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "    if not (raw.isascii() and raw.isdigit()):\n",
+          "new": "    if not raw.isdigit():\n"
+        }
+      ],
+      "expect": "a length in non-ASCII digits is refused before the body is read"
+    },
+    {
+      "test": "test_read_post",
+      "name": "the first of two Content-Length headers wins",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "    if len(lengths) > 1:\n        raise FramingError(\"Content-Length must be sent once\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "conflicting Content-Length headers is refused before the body is read"
+    },
+    {
+      "test": "test_read_post",
+      "name": "an empty body allowed",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "    if not 1 <= length <= limit:\n",
+          "new": "    if not 0 <= length <= limit:\n"
+        }
+      ],
+      "expect": "an empty body is refused before the body is read"
+    },
+    {
+      "test": "test_read_post",
+      "name": "the size limit dropped",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "    if not 1 <= length <= limit:\n",
+          "new": "    if length < 1:\n"
+        }
+      ],
+      "expect": "a body over the limit is refused before the body is read"
+    },
+    {
+      "test": "test_read_post",
+      "name": "params.uri for every named method",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "    key = \"uri\" if message.get(\"method\") == \"resources/read\" else \"name\"\n",
+          "new": "    key = \"uri\"\n"
+        }
+      ],
+      "expect": "headers that mirror the body pass"
+    },
+    {
+      "test": "test_read_post",
+      "name": "Mcp-Name compared before Base64 decoding",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "        _expect(headers, \"Mcp-Name\", body_name(message), decode=decode_header_value)\n",
+          "new": "        _expect(headers, \"Mcp-Name\", body_name(message))\n"
+        }
+      ],
+      "expect": "compared after Base64 decoding"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "no commit after the insert",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "        with self._db:\n            self._db.execute(\n                \"INSERT INTO drafts",
+          "new": "        if True:\n            self._db.execute(\n                \"INSERT INTO drafts"
+        }
+      ],
+      "expect": "UnknownHandle"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "no commit after the update",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "        with self._db:\n            updated = self._db.execute(",
+          "new": "        if True:\n            updated = self._db.execute("
+        }
+      ],
+      "expect": "every replica reads the latest save"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "each replica serves drafts from its own memory",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "        self._ttl_ms = ttl_ms\n",
+          "new": "        self._ttl_ms = ttl_ms\n        self._cache: dict[str, Draft] = {}\n"
+        },
+        {
+          "file": "drafts.py",
+          "old": "        return draft\n\n    def get(",
+          "new": "        self._cache[draft.handle] = draft\n        return draft\n\n    def get("
+        },
+        {
+          "file": "drafts.py",
+          "old": "        row = self._db.execute(\n            \"SELECT version",
+          "new": "        if handle in self._cache:\n            return self._cache[handle]\n        row = self._db.execute(\n            \"SELECT version"
+        }
+      ],
+      "expect": "every replica reads the latest save"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "handles from a per-replica counter",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "        draft = Draft(secrets.token_urlsafe(32), owner, 1, text, self._clock() + self._ttl_ms)\n",
+          "new": "        self._minted = getattr(self, \"_minted\", 0) + 1\n        draft = Draft(f\"draft-{self._minted}\", owner, 1, text, self._clock() + self._ttl_ms)\n"
+        }
+      ],
+      "expect": "UNIQUE constraint failed"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "handles from a seeded random generator",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "        draft = Draft(secrets.token_urlsafe(32), owner, 1, text, self._clock() + self._ttl_ms)\n",
+          "new": "        self._rng = getattr(self, \"_rng\", None) or __import__(\"random\").Random(2026)\n        draft = Draft(\"%032x\" % self._rng.getrandbits(128), owner, 1, text, self._clock() + self._ttl_ms)\n"
+        }
+      ],
+      "expect": "UNIQUE constraint failed"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "32-bit handles",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "        draft = Draft(secrets.token_urlsafe(32), owner, 1, text, self._clock() + self._ttl_ms)\n",
+          "new": "        draft = Draft(secrets.token_hex(4), owner, 1, text, self._clock() + self._ttl_ms)\n"
+        }
+      ],
+      "expect": "a handle carries at least 128 random bits"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "expiry from the wall clock",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "        draft = Draft(secrets.token_urlsafe(32), owner, 1, text, self._clock() + self._ttl_ms)\n",
+          "new": "        draft = Draft(secrets.token_urlsafe(32), owner, 1, text, int(__import__(\"time\").time() * 1000) + self._ttl_ms)\n"
+        }
+      ],
+      "expect": "a new draft is version 1 and expires ttl_ms after it is created"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "expiry stored as REAL",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "    expires_at_ms INTEGER NOT NULL\n",
+          "new": "    expires_at_ms REAL NOT NULL\n"
+        }
+      ],
+      "expect": "times are integer milliseconds"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "text stripped before it is stored",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "(draft.handle, owner.subject, owner.tenant, draft.version, text, draft.expires_at_ms)",
+          "new": "(draft.handle, owner.subject, owner.tenant, draft.version, text.strip(), draft.expires_at_ms)"
+        }
+      ],
+      "expect": "a draft written by one replica loads exactly on another"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "a save extends the expiry",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "                \"UPDATE drafts SET text = ?, version = ? WHERE handle = ? AND version = ?\",\n                (text, expected_version + 1, handle, expected_version),\n",
+          "new": "                \"UPDATE drafts SET text = ?, version = ?, expires_at_ms = ? WHERE handle = ? AND version = ?\",\n                (text, expected_version + 1, self._clock() + self._ttl_ms, handle, expected_version),\n"
+        },
+        {
+          "file": "drafts.py",
+          "old": "        return Draft(handle, owner, expected_version + 1, text, current.expires_at_ms)\n",
+          "new": "        return Draft(handle, owner, expected_version + 1, text, self._clock() + self._ttl_ms)\n"
+        }
+      ],
+      "expect": "a save bumps the version and keeps the expiry"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "the update ignores the expected version",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "                \"UPDATE drafts SET text = ?, version = ? WHERE handle = ? AND version = ?\",\n                (text, expected_version + 1, handle, expected_version),\n",
+          "new": "                \"UPDATE drafts SET text = ?, version = version + 1 WHERE handle = ?\",\n                (text, handle),\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "the owner is never checked",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "            \" WHERE handle = ? AND subject = ? AND tenant = ? AND expires_at_ms > ?\",\n            (handle, owner.subject, owner.tenant, self._clock()),\n",
+          "new": "            \" WHERE handle = ? AND expires_at_ms > ?\",\n            (handle, self._clock()),\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "the tenant is never checked",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "            \" WHERE handle = ? AND subject = ? AND tenant = ? AND expires_at_ms > ?\",\n            (handle, owner.subject, owner.tenant, self._clock()),\n",
+          "new": "            \" WHERE handle = ? AND subject = ? AND expires_at_ms > ?\",\n            (handle, owner.subject, self._clock()),\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "someone else's draft gets its own message",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "        row = self._db.execute(\n            \"SELECT version, text, expires_at_ms FROM drafts\"\n            \" WHERE handle = ? AND subject = ? AND tenant = ? AND expires_at_ms > ?\",\n            (handle, owner.subject, owner.tenant, self._clock()),\n        ).fetchone()\n        if row is None:\n            raise UnknownHandle(\"unknown or expired draft handle\")\n        version, text, expires_at_ms = row\n",
+          "new": "        row = self._db.execute(\n            \"SELECT version, text, expires_at_ms, subject, tenant FROM drafts\"\n            \" WHERE handle = ? AND expires_at_ms > ?\",\n            (handle, self._clock()),\n        ).fetchone()\n        if row is None:\n            raise UnknownHandle(\"unknown or expired draft handle\")\n        version, text, expires_at_ms, subject, tenant = row\n        if (subject, tenant) != (owner.subject, owner.tenant):\n            raise UnknownHandle(\"this draft belongs to someone else\")\n"
+        }
+      ],
+      "expect": "someone else's handle fails exactly like one never issued"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "PermissionError for someone else's draft",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "        row = self._db.execute(\n            \"SELECT version, text, expires_at_ms FROM drafts\"\n            \" WHERE handle = ? AND subject = ? AND tenant = ? AND expires_at_ms > ?\",\n            (handle, owner.subject, owner.tenant, self._clock()),\n        ).fetchone()\n        if row is None:\n            raise UnknownHandle(\"unknown or expired draft handle\")\n        version, text, expires_at_ms = row\n",
+          "new": "        row = self._db.execute(\n            \"SELECT version, text, expires_at_ms, subject, tenant FROM drafts\"\n            \" WHERE handle = ? AND expires_at_ms > ?\",\n            (handle, self._clock()),\n        ).fetchone()\n        if row is None:\n            raise UnknownHandle(\"unknown or expired draft handle\")\n        version, text, expires_at_ms, subject, tenant = row\n        if (subject, tenant) != (owner.subject, owner.tenant):\n            raise PermissionError(\"this draft belongs to someone else\")\n"
+        }
+      ],
+      "expect": "PermissionError"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "the version is checked before the owner",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "        current = self.get(owner, handle)\n        with self._db:\n",
+          "new": "        row = self._db.execute(\"SELECT version FROM drafts WHERE handle = ?\", (handle,)).fetchone()\n        if row is not None and row[0] != expected_version:\n            raise VersionConflict(row[0])\n        current = self.get(owner, handle)\n        with self._db:\n"
+        }
+      ],
+      "expect": "VersionConflict"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "a draft is still live at its expiry instant",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": " AND expires_at_ms > ?\",\n",
+          "new": " AND expires_at_ms >= ?\",\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "96-bit hex handles",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "secrets.token_urlsafe(32)",
+          "new": "secrets.token_hex(12)"
+        }
+      ],
+      "expect": "a handle carries at least 128 random bits"
+    },
+    {
+      "test": "test_shared_drafts",
+      "name": "VersionConflict reports the expected version",
+      "edits": [
+        {
+          "file": "drafts.py",
+          "old": "            raise VersionConflict(current.version)\n",
+          "new": "            raise VersionConflict(expected_version)\n"
+        }
+      ],
+      "expect": "a conflict reports the version now stored"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "version support checked before the mirrored headers",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            version = validate_structure(message)\n            check_mirrored_headers(headers, message)\n            if version not in SUPPORTED_VERSIONS:\n                raise RpcFault(\n                    UNSUPPORTED_VERSION,\n                    \"Unsupported protocol version\",\n                    {\"supported\": list(SUPPORTED_VERSIONS), \"requested\": version},\n                )\n",
+          "new": "            version = validate_structure(message)\n            if version not in SUPPORTED_VERSIONS:\n                raise RpcFault(\n                    UNSUPPORTED_VERSION,\n                    \"Unsupported protocol version\",\n                    {\"supported\": list(SUPPORTED_VERSIONS), \"requested\": version},\n                )\n            check_mirrored_headers(headers, message)\n"
+        }
+      ],
+      "expect": "even when one of the versions is unsupported"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "the header's version checked for support first",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            version = validate_structure(message)\n            check_mirrored_headers(headers, message)\n",
+          "new": "            version = validate_structure(message)\n            claimed = headers.get(\"MCP-Protocol-Version\")\n            if claimed not in SUPPORTED_VERSIONS:\n                raise RpcFault(UNSUPPORTED_VERSION, \"Unsupported protocol version\",\n                               {\"supported\": list(SUPPORTED_VERSIONS), \"requested\": claimed})\n            check_mirrored_headers(headers, message)\n"
+        }
+      ],
+      "expect": "even when one of the versions is unsupported"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "-32022 without data",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "                    {\"supported\": list(SUPPORTED_VERSIONS), \"requested\": version},\n",
+          "new": "                    None,\n"
+        }
+      ],
+      "expect": "-32022 names the supported versions and the requested one"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "-32022 data names one supported version as a string",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "                    {\"supported\": list(SUPPORTED_VERSIONS), \"requested\": version},\n",
+          "new": "                    {\"supported\": SUPPORTED_VERSIONS[0], \"requested\": version},\n"
+        }
+      ],
+      "expect": "-32022 names the supported versions and the requested one"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "202 with a JSON null body",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if \"id\" not in message:\n            return HttpResponse(202)\n",
+          "new": "        if \"id\" not in message:\n            return HttpResponse(202, [(\"Content-Type\", \"application/json\")], b\"null\")\n"
+        }
+      ],
+      "expect": "an accepted notification (tools/list) is 202 with no body"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "a notification for an unknown method gets 404",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if \"id\" not in message:\n            return HttpResponse(202)\n",
+          "new": "        if \"id\" not in message:\n            if message[\"method\"] not in (\"server/discover\", \"tools/list\", \"tools/call\"):\n                return json_response(404, rpc_error(None, METHOD_NOT_FOUND, \"Method not found\"))\n            return HttpResponse(202)\n"
+        }
+      ],
+      "expect": "an accepted notification (prompts/list) is 202 with no body"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "a notification accepted before its headers are checked",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        request_id = message.get(\"id\")\n        try:\n",
+          "new": "        if \"id\" not in message:\n            return HttpResponse(202)\n        request_id = message.get(\"id\")\n        try:\n"
+        }
+      ],
+      "expect": "a notification is checked like a request before it is accepted"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "a notification accepted before its version is checked",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            version = validate_structure(message)\n            check_mirrored_headers(headers, message)\n            if version not in SUPPORTED_VERSIONS:\n                raise RpcFault(\n                    UNSUPPORTED_VERSION,\n                    \"Unsupported protocol version\",\n                    {\"supported\": list(SUPPORTED_VERSIONS), \"requested\": version},\n                )\n",
+          "new": "            version = validate_structure(message)\n            check_mirrored_headers(headers, message)\n            if \"id\" not in message:\n                return HttpResponse(202)\n            if version not in SUPPORTED_VERSIONS:\n                raise RpcFault(\n                    UNSUPPORTED_VERSION,\n                    \"Unsupported protocol version\",\n                    {\"supported\": list(SUPPORTED_VERSIONS), \"requested\": version},\n                )\n"
+        }
+      ],
+      "expect": "a notification's version is checked before it is accepted"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "an unknown method answered with 200",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        status = 404 if response.get(\"error\", {}).get(\"code\") == METHOD_NOT_FOUND else 200\n",
+          "new": "        status = 200\n"
+        }
+      ],
+      "expect": "an unknown method is 404 with a JSON-RPC -32601 body"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "an unknown method answered with an empty 404",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        status = 404 if response.get(\"error\", {}).get(\"code\") == METHOD_NOT_FOUND else 200\n",
+          "new": "        if response.get(\"error\", {}).get(\"code\") == METHOD_NOT_FOUND:\n            return HttpResponse(404)\n        status = 200\n"
+        }
+      ],
+      "expect": "a JSON-RPC body goes out as application/json: 404"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "a missing endpoint answered with a JSON-RPC error",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if request.path != ENDPOINT:\n            return HttpResponse(404)\n",
+          "new": "        if request.path != ENDPOINT:\n            return json_response(404, rpc_error(None, METHOD_NOT_FOUND, \"Not found\"))\n"
+        }
+      ],
+      "expect": "a missing endpoint is a plain 404, never a JSON-RPC error"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "GET answered with 404",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if request.method != \"POST\":\n            return HttpResponse(405, [(\"Allow\", \"POST\")])\n",
+          "new": "        if request.method != \"POST\":\n            return HttpResponse(404)\n"
+        }
+      ],
+      "expect": "GET is not part of the modern transport: 405 with Allow: POST"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "only GET and DELETE refused",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if request.method != \"POST\":\n            return HttpResponse(405, [(\"Allow\", \"POST\")])\n",
+          "new": "        if request.method in (\"GET\", \"DELETE\"):\n            return HttpResponse(405, [(\"Allow\", \"POST\")])\n"
+        }
+      ],
+      "expect": "PUT is not part of the modern transport: 405 with Allow: POST"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "405 without an Allow header",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if request.method != \"POST\":\n            return HttpResponse(405, [(\"Allow\", \"POST\")])\n",
+          "new": "        if request.method != \"POST\":\n            return HttpResponse(405)\n"
+        }
+      ],
+      "expect": "GET is not part of the modern transport: 405 with Allow: POST"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "Origin matched by prefix",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if origins and (len(origins) > 1 or origins[0] not in self.allowed_origins):\n",
+          "new": "        if origins and not any(origins[0].startswith(allowed) for allowed in self.allowed_origins):\n"
+        }
+      ],
+      "expect": "Origin 'https://client.example.attacker.net' is present and not exactly an allowed origin"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "the default allowlist instead of the configured one",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if origins and (len(origins) > 1 or origins[0] not in self.allowed_origins):\n",
+          "new": "        if origins and (len(origins) > 1 or origins[0] not in DEFAULT_ORIGINS):\n"
+        }
+      ],
+      "expect": "Origin 'http://127.0.0.1' is present and not exactly an allowed origin"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "an empty Origin treated as no Origin",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        origins = headers.get_all(\"Origin\")\n        if origins and (len(origins) > 1 or origins[0] not in self.allowed_origins):\n            return HttpResponse(403)\n",
+          "new": "        origin = headers.get(\"Origin\")\n        if origin and origin not in self.allowed_origins:\n            return HttpResponse(403)\n"
+        }
+      ],
+      "expect": "an empty Origin header is present, not missing"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "a request without Origin refused",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if origins and (len(origins) > 1 or origins[0] not in self.allowed_origins):\n",
+          "new": "        if len(origins) != 1 or origins[0] not in self.allowed_origins:\n"
+        }
+      ],
+      "expect": "a valid POST gets its JSON-RPC response"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "Origin checked only after the method",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        origins = headers.get_all(\"Origin\")\n        if origins and (len(origins) > 1 or origins[0] not in self.allowed_origins):\n            return HttpResponse(403)\n        if request.method != \"POST\":\n            return HttpResponse(405, [(\"Allow\", \"POST\")])\n",
+          "new": "        if request.method != \"POST\":\n            return HttpResponse(405, [(\"Allow\", \"POST\")])\n        origins = headers.get_all(\"Origin\")\n        if origins and (len(origins) > 1 or origins[0] not in self.allowed_origins):\n            return HttpResponse(403)\n"
+        }
+      ],
+      "expect": "Origin is checked before the method"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "framing errors escape as exceptions",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        except ValueError as exc:  # FramingError, JSONDecodeError and UnicodeDecodeError\n",
+          "new": "        except json.JSONDecodeError as exc:\n"
+        }
+      ],
+      "expect": "FramingError"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "only FramingError and JSONDecodeError caught",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        except ValueError as exc:  # FramingError, JSONDecodeError and UnicodeDecodeError\n",
+          "new": "        except (FramingError, json.JSONDecodeError) as exc:\n"
+        },
+        {
+          "file": "server.py",
+          "old": "from .wire import Headers, Readable, check_mirrored_headers, read_body\n",
+          "new": "from .wire import FramingError, Headers, Readable, check_mirrored_headers, read_body\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "an unframeable body answered with -32600",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "rpc_error(None, PARSE_ERROR, \"Parse error\", {\"detail\": str(exc)})",
+          "new": "rpc_error(None, INVALID_REQUEST, \"Invalid Request\", {\"detail\": str(exc)})"
+        }
+      ],
+      "expect": "a body that cannot be framed is -32700"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "Mcp-Session-Id echoed back",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        return json_response(status, response)\n",
+          "new": "        answer = json_response(status, response)\n        if headers.get(\"Mcp-Session-Id\"):\n            answer.headers.append((\"Mcp-Session-Id\", headers.get(\"Mcp-Session-Id\")))\n        return answer\n"
+        }
+      ],
+      "expect": "no session id is minted or echoed"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "requests that carry Mcp-Session-Id refused",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if request.method != \"POST\":\n            return HttpResponse(405, [(\"Allow\", \"POST\")])\n",
+          "new": "        if request.method != \"POST\":\n            return HttpResponse(405, [(\"Allow\", \"POST\")])\n        if headers.get_all(\"Mcp-Session-Id\"):\n            return json_response(400, rpc_error(None, INVALID_REQUEST, \"sessions are not supported\"))\n"
+        }
+      ],
+      "expect": "no session id is minted or echoed"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "the principal is not passed to dispatch",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        response = self.dispatch(message, request.principal)\n",
+          "new": "        response = self.dispatch(message, None)\n"
+        }
+      ],
+      "expect": "the tool call succeeds"
+    },
+    {
+      "test": "test_http_responses",
+      "name": "every error from dispatch answered 404",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        status = 404 if response.get(\"error\", {}).get(\"code\") == METHOD_NOT_FOUND else 200\n",
+          "new": "        status = 404 if \"error\" in response else 200\n"
+        }
+      ],
+      "expect": "only -32601 is a 404"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "pretty-printed JSON",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "    data = json.dumps(message, separators=(\",\", \":\"), ensure_ascii=False)\n",
+          "new": "    data = json.dumps(message, indent=2, ensure_ascii=False)\n"
+        }
+      ],
+      "expect": "each event is one line"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "events numbered with id: for replay",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "import json\n",
+          "new": "import itertools\nimport json\n"
+        },
+        {
+          "file": "sse.py",
+          "old": "KEEPALIVE = b\":\\n\\n\"\n",
+          "new": "KEEPALIVE = b\":\\n\\n\"\n_EVENT_IDS = itertools.count(1)\n"
+        },
+        {
+          "file": "sse.py",
+          "old": "    return b\"data: \" + data.encode(\"utf-8\") + b\"\\n\\n\"\n",
+          "new": "    return b\"id: %d\\ndata: \" % next(_EVENT_IDS) + data.encode(\"utf-8\") + b\"\\n\\n\"\n"
+        }
+      ],
+      "expect": "no SSE event ids"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "an event: line before each data line",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "    return b\"data: \" + data.encode(\"utf-8\") + b\"\\n\\n\"\n",
+          "new": "    return b\"event: message\\ndata: \" + data.encode(\"utf-8\") + b\"\\n\\n\"\n"
+        }
+      ],
+      "expect": "each event is one line"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "text instead of bytes",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "KEEPALIVE = b\":\\n\\n\"\n",
+          "new": "KEEPALIVE = \":\\n\\n\"\n"
+        },
+        {
+          "file": "sse.py",
+          "old": "    return b\"data: \" + data.encode(\"utf-8\") + b\"\\n\\n\"\n",
+          "new": "    return \"data: \" + data + \"\\n\\n\"\n"
+        }
+      ],
+      "expect": "the stream is written as UTF-8 bytes"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "events end with a single newline",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "    return b\"data: \" + data.encode(\"utf-8\") + b\"\\n\\n\"\n",
+          "new": "    return b\"data: \" + data.encode(\"utf-8\") + b\"\\n\"\n"
+        }
+      ],
+      "expect": "every event ends with a blank line"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "CRLF line endings",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "KEEPALIVE = b\":\\n\\n\"\n",
+          "new": "KEEPALIVE = b\":\\r\\n\\r\\n\"\n"
+        },
+        {
+          "file": "sse.py",
+          "old": "    return b\"data: \" + data.encode(\"utf-8\") + b\"\\n\\n\"\n",
+          "new": "    return b\"data: \" + data.encode(\"utf-8\") + b\"\\r\\n\\r\\n\"\n"
+        }
+      ],
+      "expect": "every event ends with a blank line"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "the keepalive as an empty data event",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "KEEPALIVE = b\":\\n\\n\"\n",
+          "new": "KEEPALIVE = b\"data: \\n\\n\"\n"
+        }
+      ],
+      "expect": "Expecting value"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "the keepalive comment without its blank line",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "KEEPALIVE = b\":\\n\\n\"\n",
+          "new": "KEEPALIVE = b\":\\n\"\n"
+        }
+      ],
+      "expect": "each event is one line"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "a heartbeat sent as progress",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "            if isinstance(step, Heartbeat):\n                yield KEEPALIVE\n",
+          "new": "            if isinstance(step, Heartbeat):\n                yield _event({\"jsonrpc\": \"2.0\", \"method\": \"notifications/progress\",\n                              \"params\": {\"progressToken\": progress_token}})\n"
+        }
+      ],
+      "expect": "progress notifications, a keepalive comment, then the final response"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "progress sent without a progress token",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "            elif progress_token is not None:\n",
+          "new": "            else:\n"
+        }
+      ],
+      "expect": "without a progress token there are no progress notifications"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "total and message sent as null",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "                params: dict[str, Any] = {\"progressToken\": progress_token, \"progress\": step.progress}\n                if step.total is not None:\n                    params[\"total\"] = step.total\n                if step.message is not None:\n                    params[\"message\"] = step.message\n",
+          "new": "                params: dict[str, Any] = {\"progressToken\": progress_token, \"progress\": step.progress,\n                                          \"total\": step.total, \"message\": step.message}\n"
+        }
+      ],
+      "expect": "progress notifications, a keepalive comment, then the final response"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "the final result not wrapped by complete()",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "                result = complete({\"content\": step.content, \"isError\": step.is_error})\n",
+          "new": "                result = {\"content\": step.content, \"isError\": step.is_error}\n"
+        }
+      ],
+      "expect": "progress notifications, a keepalive comment, then the final response"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "the stream goes on after the final response",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "                yield _event({\"jsonrpc\": \"2.0\", \"id\": request_id, \"result\": result})\n                return\n",
+          "new": "                yield _event({\"jsonrpc\": \"2.0\", \"id\": request_id, \"result\": result})\n                continue\n"
+        }
+      ],
+      "expect": "progress notifications, a keepalive comment, then the final response"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "every step collected before anything is written",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "        async for step in steps:\n",
+          "new": "        for step in [step async for step in steps]:\n"
+        }
+      ],
+      "expect": "the tool is not read any further"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "steps never closed",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "    finally:\n        await steps.aclose()\n",
+          "new": "    finally:\n        pass\n"
+        }
+      ],
+      "expect": "closing the response stream cancels the call"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "steps closed under except Exception, which GeneratorExit skips",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "    finally:\n        await steps.aclose()\n",
+          "new": "    except Exception:\n        await steps.aclose()\n        raise\n"
+        }
+      ],
+      "expect": "closing the response stream cancels the call"
+    },
+    {
+      "test": "test_request_scoped_sse",
+      "name": "a falsy progress token taken as no token",
+      "edits": [
+        {
+          "file": "sse.py",
+          "old": "            elif progress_token is not None:\n",
+          "new": "            elif progress_token:\n"
+        }
+      ],
+      "expect": "progress notifications, a keepalive comment, then the final response"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "each chunk decoded on its own",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        self._buffer += chunk\n        if not self._sse:\n            return []\n        *lines, rest = self._buffer.split(b\"\\n\")\n        self._buffer = bytearray(rest)\n        messages = []\n        for raw in lines:\n            line = raw.decode(\"utf-8\")\n            if line.endswith(\"\\r\"):\n                line = line[:-1]\n            data = self._line(line)\n            if data is not None:\n                messages.append(self._accept(_parse(data)))\n",
+          "new": "        if not self._sse:\n            self._buffer += chunk\n            return []\n        self._text = getattr(self, \"_text\", \"\") + chunk.decode(\"utf-8\")\n        *lines, self._text = self._text.split(\"\\n\")\n        messages = []\n        for line in lines:\n            if line.endswith(\"\\r\"):\n                line = line[:-1]\n            data = self._line(line)\n            if data is not None:\n                messages.append(self._accept(_parse(data)))\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "each chunk decoded with errors='replace'",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            line = raw.decode(\"utf-8\")\n",
+          "new": "            line = raw.decode(\"utf-8\", errors=\"replace\")\n"
+        },
+        {
+          "file": "client.py",
+          "old": "        self._buffer += chunk\n        if not self._sse:\n            return []\n",
+          "new": "        if not self._sse:\n            self._buffer += chunk\n            return []\n        self._buffer += chunk.decode(\"utf-8\", errors=\"replace\").encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "one byte at a time, splitting characters and CRLF"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "a JSON body decoded chunk by chunk",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        self._buffer += chunk\n        if not self._sse:\n            return []\n",
+          "new": "        if not self._sse:\n            self._buffer += chunk.decode(\"utf-8\").encode(\"utf-8\")\n            return []\n        self._buffer += chunk\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "lines split with str.splitlines()",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        for raw in lines:\n            line = raw.decode(\"utf-8\")\n            if line.endswith(\"\\r\"):\n                line = line[:-1]\n            data = self._line(line)\n            if data is not None:\n                messages.append(self._accept(_parse(data)))\n",
+          "new": "        for raw in lines:\n            for line in raw.decode(\"utf-8\").splitlines() or [\"\"]:\n                data = self._line(line)\n                if data is not None:\n                    messages.append(self._accept(_parse(data)))\n"
+        }
+      ],
+      "expect": "event data is not JSON"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "the CR of a CRLF kept on the line",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            if line.endswith(\"\\r\"):\n                line = line[:-1]\n",
+          "new": ""
+        }
+      ],
+      "expect": "event data is not JSON"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "a CR taken as a line end before its LF arrives",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        *lines, rest = self._buffer.split(b\"\\n\")\n",
+          "new": "        *lines, rest = __import__(\"re\").split(rb\"\\r\\n|\\r|\\n\", bytes(self._buffer))\n"
+        }
+      ],
+      "expect": "event data is not JSON"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "the value sliced after \"data: \"",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        field, _, value = line.partition(\":\")\n        if value.startswith(\" \"):\n            value = value[1:]\n",
+          "new": "        field, _, value = line.partition(\":\")\n        value = line[len(\"data: \"):]\n"
+        }
+      ],
+      "expect": "event data is not JSON"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "every field taken as data",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if field == \"data\":\n",
+          "new": "        if field:\n"
+        }
+      ],
+      "expect": "event data is not JSON"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "an event without data dispatched",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            return None if data is None else \"\\n\".join(data)\n",
+          "new": "            return \"\\n\".join(data or [])\n"
+        }
+      ],
+      "expect": "event data is not JSON"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "data lines carried over to the next event",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            data, self._data = self._data, None\n",
+          "new": "            data = self._data\n"
+        }
+      ],
+      "expect": "event data is not JSON"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "only the last data line kept",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            self._data.append(value)\n",
+          "new": "            self._data[:] = [value]\n"
+        }
+      ],
+      "expect": "event data is not JSON"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "an unfinished event dispatched when the body ends",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if not self._sse:\n            self._accept(_parse(self._buffer.decode(\"utf-8\")))\n",
+          "new": "        if not self._sse:\n            self._accept(_parse(self._buffer.decode(\"utf-8\")))\n        else:\n            for line in (self._buffer.decode(\"utf-8\").rstrip(\"\\r\"), \"\"):\n                data = self._line(line)\n                if data is not None:\n                    self._accept(_parse(data))\n"
+        }
+      ],
+      "expect": "an event that the body ends in the middle of is dropped"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "messages after the final response ignored",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if self._response is not None:\n            raise ProtocolError(\"a message arrived after the final response\")\n",
+          "new": "        if self._response is not None:\n            return message\n"
+        }
+      ],
+      "expect": "nothing may follow the final response"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "a server request kept as a notification",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            if \"id\" in message:\n                raise ProtocolError(\"the server sent a request on a request-scoped stream\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a server must not send requests on a request-scoped stream"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "ids compared as text",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if type(response_id) is not type(self._request_id) or response_id != self._request_id:\n",
+          "new": "        if str(response_id) != str(self._request_id):\n"
+        }
+      ],
+      "expect": "is not the response to 41"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "responses to other ids skipped",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            raise ProtocolError(f\"a response to another request: {response_id!r}\")\n",
+          "new": "            return message\n"
+        }
+      ],
+      "expect": "a JSON body that answers another request is a ProtocolError"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "a JSON body taken as the response whatever its id",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if not self._sse:\n            self._accept(_parse(self._buffer.decode(\"utf-8\")))\n",
+          "new": "        if not self._sse:\n            self._response = _parse(self._buffer.decode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "a JSON body that answers another request is a ProtocolError"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "a body without a final response accepted",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if self._response is None:\n            raise StreamLost(\"the body ended before the final response\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a stream that ends before its final response is lost"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "a lost stream raised as a plain ProtocolError",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            raise StreamLost(\"the body ended before the final response\")\n",
+          "new": "            raise ProtocolError(\"the body ended before the final response\")\n"
+        }
+      ],
+      "expect": "a stream that ends before its final response is lost"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "Content-Type compared exactly",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        media_type = content_type.split(\";\", 1)[0].strip().lower()\n",
+          "new": "        media_type = content_type\n"
+        }
+      ],
+      "expect": "unexpected Content-Type"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "media type compared without lowercasing",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        media_type = content_type.split(\";\", 1)[0].strip().lower()\n",
+          "new": "        media_type = content_type.split(\";\", 1)[0].strip()\n"
+        }
+      ],
+      "expect": "unexpected Content-Type"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "Content-Type looked up with a case-sensitive dict",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        content_type = Headers(headers).get(\"Content-Type\") or \"\"\n",
+          "new": "        content_type = dict(headers).get(\"Content-Type\") or \"\"\n"
+        }
+      ],
+      "expect": "unexpected Content-Type"
+    },
+    {
+      "test": "test_layered_decoding",
+      "name": "only a result taken as the final response",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if \"result\" not in message and \"error\" not in message:\n",
+          "new": "        if \"result\" not in message:\n"
+        }
+      ],
+      "expect": "a response carries result or error"
+    }
+  ]
+}
