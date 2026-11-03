@@ -1,0 +1,154 @@
+{
+  "lesson": "phases/13-tools-and-protocols/10-mcp-resources-and-prompts",
+  "title": "MCP Resources and Prompts: Addressable Context for Stateless Servers",
+  "format": "staged-brownfield",
+  "service": "uricatalog: an MCP 2026-07-28 notes catalog (resources, prompts, subscriptions/listen) with a host-side dbm response cache, a shared-channel client and a resource-template router",
+  "sources": {
+    "docs/en.md": "fc4d77f598eca44d493dd1cb765d2355a739577a65387a4a1a7e0e1d55946579",
+    "code/main.py": "612f2fec4892cc7b9d60708e185496e339724eff3afdc5c4832670f36e77e611"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_reads_prompts_and_subscriptions",
+      "kind": "debug",
+      "lesson_anchor": "Resources Are Stable URI Contracts (-32602 with data.uri); Prompts Are User-Controlled Templates (a prompt is no side channel around resource access); Subscriptions (accepted subset, subscription ID on every event); code/main.py resources_read, prompts_get, subscriptions_listen, SubscriptionStream",
+      "planted_bugs": [
+        "handle_prompts_get looks the note up in the catalog itself and only checks that it exists, so bob gets alice's private note through review_note",
+        "readable_contents returns an empty list for an unknown or unreadable URI, so resources/read answers with empty contents; after routing the prompt through it, the failure surfaces one call up as an IndexError on contents[0]",
+        "accept_filter keeps every truthy field of the request, so unknown fields, \"promptsListChanged\": \"yes\" and a flag of 1 reach the acknowledgment (value == True still lets 1 and 1.0 through)",
+        "SubscriptionHub.resource_updated scans every stream's URI list on every update, O(streams x URIs)"
+      ],
+      "timing_assert": "100 streams x 3000 URIs, 1200 updates under 0.1 s after gc.collect(): the scan takes 1.1 to 2.2 s, the URI index about 1 ms (at most 1.5 ms in 15 runs)",
+      "overfix_guard": "the index delivers notes://note-1 only to exact subscribers (not notes://note-10), keeps two clients that both listen with id 17 apart, builds each event with its own stream's id, stops delivering after close(), sends list_changed only to streams that accepted it (including a stream with no URIs), and accept_filter still answers a malformed filter with -32602",
+      "deviation": "review_note embeds the note's text (the lesson's prompt only names the URI), so the missing authorization leaks content instead of only existence. The timing uses 100 streams x 3000 URIs and 1200 updates instead of 2000 x 2000: a 4-million-entry index takes about 2 s to build, and this size already makes the scan 1.1 to 2.2 s. The accepted subset is protocol-level (fields, exact true, deduplicated sorted URIs), as suggested; filtering out URIs the caller cannot read is a follow-up question."
+    },
+    {
+      "part": 2,
+      "test": "test_response_cache_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Cache Hints Are Part of Correctness: ttlMs, cacheScope public/private only, a cache key with every dimension that changes visibility; Exercise 6: a cache entry cannot cross subjects",
+      "storage": "dbm.dumb file, JSON array keys, JSON values with an absolute expiresAt",
+      "exactness": "a result comes back exactly as put, across a close and reopen: CRLF, U+2028, NUL, emoji and a lone surrogate left by a JavaScript server that cut an emoji in half; put leaves the caller's dict unchanged",
+      "traps": [
+        "separator-joined key lets tenant a|b + user c collide with tenant a + user b|c (every ASCII character and several multi-character separators are tried)",
+        "str() on every field makes cursor None collide with \"None\"",
+        "private key without the tenant",
+        "locale left out",
+        "public results keyed by user",
+        "private results stored as public",
+        "ttlMs 0, no hints or cacheScope no-store stored",
+        "<= instead of < at t + ttlMs",
+        "wall clock instead of the injected clock",
+        "ensure_ascii=False plus UTF-8 fails on the lone surrogate",
+        "expiry stamped into the caller's result",
+        "in-memory store",
+        "close() that never commits the dbm index reads a truncated value after the overwrite",
+        "dbm keys are bytes: str startswith raises TypeError",
+        "invalidate by substring removes notes://note-10",
+        "invalidate by searching stored results removes list pages",
+        "invalidate removes public entries only"
+      ],
+      "clarifying_questions": [
+        "which params form the key",
+        "a ttlMs 0 result over a fresh entry",
+        "deleting expired entries",
+        "one file for many users",
+        "pickle"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_resources_list_pages",
+      "kind": "core algorithm",
+      "lesson_anchor": "resources/list returns what the caller may see, sorted by a stable key such as URI; Exercise 2: pagination with deterministic order; a list cannot depend on a prior call on one connection; lesson 28: the server picks page size and cursor format, invalid cursors are -32602",
+      "traps": [
+        "offset cursor repeats n02 after two inserts and one delete before the cursor",
+        "index() of the cursor's own URI fails once that note is deleted",
+        "cursor state kept in the issuing instance",
+        "unsigned cursor",
+        "cursor signed with a fixed key",
+        "cursor not bound to the caller, or bound to the user name only",
+        "nextCursor on a full last page, or nextCursor null",
+        "page sliced before the authorization filter",
+        "sorted by name instead of URI",
+        "an empty-string cursor treated as the first page",
+        "unsorted or unfiltered listing",
+        "time or randomness in the cursor breaks determinism",
+        "non-string cursor raises AttributeError",
+        "hmac.compare_digest on non-ASCII str raises TypeError"
+      ],
+      "deviation": "The cursor records the last URI and the caller, not a catalog version. Keyset paging by URI already stays correct when notes are added or removed between pages, so a version check would either do nothing or force every listing to restart after any change. Lesson 28 lists binding to a catalog version as one choice a server may make.",
+      "clarifying_questions": [
+        "page size",
+        "a cursor after notes change",
+        "cursor format",
+        "cursor expiry",
+        "an empty listing"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_shared_channel",
+      "kind": "streaming",
+      "lesson_anchor": "Subscriptions Use a Client-Opened Response Stream: acknowledgment before any event, the event carries no document so the client reads again, a graceful end is a complete response to the original listen request, several subscriptions share one stdio channel and the subscription ID demultiplexes them",
+      "wire_format": "NDJSON action log, one record per action, decided by the test's endswith, splitlines and json.loads per line",
+      "traps": [
+        "missing newline",
+        "blank line",
+        "pretty-printed record",
+        "response taken as the next message instead of by id",
+        "re-read through a stale cache entry",
+        "the event taken as the document",
+        "fresh read written over the cache instead of invalidating first",
+        "requested filter logged instead of the acknowledged one",
+        "event before the acknowledgment handled",
+        "event after the final response handled",
+        "closed logged before the subscription's earlier events",
+        "one worker or one lock for every subscription (head-of-line probe)",
+        "a task per update reorders one subscription's events",
+        "the reader loop awaiting a re-read deadlocks",
+        "final response popped from pending raises KeyError",
+        "log written at the end"
+      ],
+      "deviation": "The channel carries decoded JSON-RPC messages, not bytes, because lessons 07 and 09 cover stdio framing. request(), read() and listen() are provided; run() is the work.",
+      "clarifying_questions": [
+        "request ids",
+        "a final response during a re-read",
+        "list_changed",
+        "a read in flight when the channel closes",
+        "an error response to listen",
+        "two updates for one URI"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_template_routes",
+      "kind": "tree",
+      "lesson_anchor": "Resource templates: notes://projects/{project}/decisions/{decision}; parse variables, enforce length and character limits, never concatenate an arbitrary URI tail; Exercise 1: notes://projects/{project}/notes/{id}",
+      "traps": [
+        "variable tried before a literal",
+        "priority by literal count instead of the first differing segment",
+        "no backtracking after a literal branch fails",
+        "one variable name per tree position",
+        "whole URI decoded before splitting lets %2F cross segments",
+        "segments decoded twice",
+        "segments not decoded",
+        "re.match with $ accepts a trailing newline",
+        "\\w accepts non-ASCII letters",
+        "65 characters or empty values accepted",
+        "trailing slash stripped",
+        "same-shape template accepted or allowed to overwrite",
+        "ambiguity judged by template text",
+        "literal beside a variable rejected as ambiguous",
+        "partial-segment or repeated variables accepted"
+      ],
+      "clarifying_questions": [
+        "percent-encoded literal segments",
+        "query parts in templates",
+        "templates without variables"
+      ]
+    }
+  ]
+}

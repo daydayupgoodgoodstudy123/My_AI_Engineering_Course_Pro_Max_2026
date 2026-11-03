@@ -1,0 +1,1141 @@
+{
+  "package": "uricatalog",
+  "tests": [
+    "test_reads_prompts_and_subscriptions",
+    "test_response_cache_roundtrip",
+    "test_resources_list_pages",
+    "test_shared_channel",
+    "test_template_routes"
+  ],
+  "layers": [
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a prompt is no side channel around resources/read"
+        },
+        {
+          "name": "review_note reads through readable_contents",
+          "edits": [
+            {
+              "file": "server.py",
+              "old": "            note = self.catalog.get(uri) if isinstance(uri, str) else None\n            if note is None:\n                raise RpcError(INVALID_PARAMS, UNKNOWN_URI, {\"uri\": uri})\n            text = f\"Review the resource {uri} for {focus}. Cite the URI in every finding.\\n\\n{note.text}\"\n",
+              "new": "            contents = self.readable_contents(uri, caller)\n            text = f\"Review the resource {uri} for {focus}. Cite the URI in every finding.\\n\\n{contents[0]['text']}\"\n"
+            }
+          ],
+          "expect": "IndexError"
+        },
+        {
+          "name": "+ readable_contents raises for absence",
+          "edits": [
+            {
+              "file": "server.py",
+              "old": "            return []\n",
+              "new": "            raise RpcError(INVALID_PARAMS, UNKNOWN_URI, {\"uri\": uri})\n"
+            }
+          ],
+          "expect": "the acknowledgment lists only what the server accepted"
+        },
+        {
+          "name": "+ accept only the supported fields",
+          "edits": [
+            {
+              "file": "subscriptions.py",
+              "old": "    accepted = {field: value for field, value in requested.items() if value}\n    if \"resourceSubscriptions\" in accepted:\n        accepted[\"resourceSubscriptions\"] = sorted(set(accepted[\"resourceSubscriptions\"]))\n",
+              "new": "    accepted: dict[str, Any] = {\n        field: True for field in (\"promptsListChanged\", \"resourcesListChanged\") if requested.get(field) is True\n    }\n    if uris is not None:\n        accepted[\"resourceSubscriptions\"] = sorted(set(uris))\n"
+            }
+          ],
+          "expect": "delivering an update should stay fast with many subscriptions"
+        },
+        {
+          "name": "+ index streams by URI",
+          "edits": [
+            {
+              "file": "subscriptions.py",
+              "old": "        self._streams: list[SubscriptionStream] = []\n",
+              "new": "        self._streams: list[SubscriptionStream] = []\n        self._by_uri: dict[str, list[SubscriptionStream]] = {}\n"
+            },
+            {
+              "file": "subscriptions.py",
+              "old": "        self._streams.append(stream)\n        return stream\n",
+              "new": "        self._streams.append(stream)\n        for uri in accepted.get(\"resourceSubscriptions\", ()):\n            self._by_uri.setdefault(uri, []).append(stream)\n        return stream\n"
+            },
+            {
+              "file": "subscriptions.py",
+              "old": "        for stream in self._streams:\n            if not stream.closed and uri in stream.accepted.get(\"resourceSubscriptions\", []):\n",
+              "new": "        for stream in self._by_uri.get(uri, []):\n            if not stream.closed:\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "index keyed by subscription id",
+      "edits": [
+        {
+          "file": "subscriptions.py",
+          "old": "            self._by_uri.setdefault(uri, {})[stream] = None\n",
+          "new": "            self._by_uri.setdefault(uri, {})[stream.subscription_id] = stream\n"
+        },
+        {
+          "file": "subscriptions.py",
+          "old": "        streams = self._by_uri.get(uri, {})\n        for stream in streams:\n",
+          "new": "        streams = self._by_uri.get(uri, {})\n        for stream in streams.values():\n"
+        },
+        {
+          "file": "subscriptions.py",
+          "old": "                watchers.pop(stream, None)\n",
+          "new": "                watchers.pop(stream.subscription_id, None)\n"
+        }
+      ],
+      "expect": "two clients may both listen with id 17"
+    },
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "the index assumes every filter lists URIs",
+      "edits": [
+        {
+          "file": "subscriptions.py",
+          "old": "        for uri in accepted.get(\"resourceSubscriptions\", ()):\n            self._by_uri.setdefault(uri, {})[stream] = None\n",
+          "new": "        for uri in accepted[\"resourceSubscriptions\"]:\n            self._by_uri.setdefault(uri, {})[stream] = None\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "close() leaves the stream in the URI index",
+      "edits": [
+        {
+          "file": "subscriptions.py",
+          "old": "        for uri in stream.accepted.get(\"resourceSubscriptions\", ()):\n            watchers = self._by_uri.get(uri)\n",
+          "new": "        for uri in ():\n            watchers = self._by_uri.get(uri)\n"
+        }
+      ],
+      "expect": "a closed subscription hears nothing more"
+    },
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "an update reaches every URI it prefixes",
+      "edits": [
+        {
+          "file": "subscriptions.py",
+          "old": "        streams = self._by_uri.get(uri, {})\n",
+          "new": "        streams = {s: None for key, watchers in self._by_uri.items() if key.startswith(uri) for s in watchers}\n"
+        }
+      ],
+      "expect": "notes://note-1 is not notes://note-10"
+    },
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "one event object for every stream",
+      "edits": [
+        {
+          "file": "subscriptions.py",
+          "old": "        for stream in streams:\n            stream.send(stream.resource_updated(uri))\n",
+          "new": "        event = None\n        for stream in streams:\n            event = event or stream.resource_updated(uri)\n            stream.send(event)\n"
+        }
+      ],
+      "expect": "each event carries its own stream's subscription id"
+    },
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "list_changed for every stream that subscribed to anything",
+      "edits": [
+        {
+          "file": "subscriptions.py",
+          "old": "        streams = self._by_flag[LIST_FLAGS[which]]\n",
+          "new": "        streams = {s: None for watchers in [*self._by_uri.values(), *self._by_flag.values()] for s in watchers}\n"
+        }
+      ],
+      "expect": "list_changed goes only to streams that accepted it"
+    },
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "a flag is accepted when it is truthy",
+      "edits": [
+        {
+          "file": "subscriptions.py",
+          "old": "        elif value is True:\n",
+          "new": "        elif value:\n"
+        }
+      ],
+      "expect": "the acknowledgment lists only what the server accepted"
+    },
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "accepted URIs keep the request's order",
+      "edits": [
+        {
+          "file": "subscriptions.py",
+          "old": "                accepted[field] = sorted(set(value))\n",
+          "new": "                accepted[field] = list(dict.fromkeys(value))\n"
+        }
+      ],
+      "expect": "the acknowledgment lists only what the server accepted"
+    },
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "unknown fields are acknowledged",
+      "edits": [
+        {
+          "file": "subscriptions.py",
+          "old": "    for field in SUPPORTED_NOTIFICATIONS:\n",
+          "new": "    for field in requested:\n"
+        }
+      ],
+      "expect": "the acknowledgment lists only what the server accepted"
+    },
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "filter accepted without checking resourceSubscriptions",
+      "edits": [
+        {
+          "file": "subscriptions.py",
+          "old": "    uris = requested.get(\"resourceSubscriptions\")\n    if uris is not None and (not isinstance(uris, list) or not all(isinstance(uri, str) for uri in uris)):\n        raise RpcError(INVALID_PARAMS, \"resourceSubscriptions must be an array of URIs\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a malformed filter is invalid params"
+    },
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "absence answered with a separate not-found code",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            raise RpcError(INVALID_PARAMS, UNKNOWN_URI, {\"uri\": uri})\n        return [content_item(note)]\n",
+          "new": "            raise RpcError(-32002, \"Resource not found\", {\"uri\": uri})\n        return [content_item(note)]\n"
+        }
+      ],
+      "expect": "a prompt is no side channel around resources/read"
+    },
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "a hidden note gets its own error",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if note is None or not note.readable_by(caller):\n            raise RpcError(INVALID_PARAMS, UNKNOWN_URI, {\"uri\": uri})\n",
+          "new": "        if note is None:\n            raise RpcError(INVALID_PARAMS, UNKNOWN_URI, {\"uri\": uri})\n        if not note.readable_by(caller):\n            raise RpcError(INVALID_PARAMS, \"Not allowed to read this resource\", {\"uri\": uri})\n"
+        }
+      ],
+      "expect": "a prompt is no side channel around resources/read"
+    },
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "the error leaves out data.uri",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            raise RpcError(INVALID_PARAMS, UNKNOWN_URI, {\"uri\": uri})\n        return [content_item(note)]\n",
+          "new": "            raise RpcError(INVALID_PARAMS, UNKNOWN_URI)\n        return [content_item(note)]\n"
+        }
+      ],
+      "expect": "a prompt is no side channel around resources/read"
+    },
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "the prompt checks existence only",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            contents = self.readable_contents(uri, caller)\n",
+          "new": "            note = self.catalog.get(uri) if isinstance(uri, str) else None\n            if note is None:\n                raise RpcError(INVALID_PARAMS, UNKNOWN_URI, {\"uri\": uri})\n            contents = [content_item(note)]\n"
+        }
+      ],
+      "expect": "a prompt is no side channel around resources/read"
+    },
+    {
+      "test": "test_reads_prompts_and_subscriptions",
+      "name": "a flag is accepted when it equals true",
+      "edits": [
+        {
+          "file": "subscriptions.py",
+          "old": "        elif value is True:\n",
+          "new": "        elif value == True:  # noqa: E712\n"
+        }
+      ],
+      "expect": "a list-changed flag is accepted only when it is exactly true"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "fields joined with a separator",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "    return json.dumps(fields).encode(\"ascii\")\n",
+          "new": "    return \"|\".join(\"null\" if f is None else str(f) for f in fields).encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "two callers never share a key"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "fields joined with the unit separator",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "    return json.dumps(fields).encode(\"ascii\")\n",
+          "new": "    return \"\\x1f\".join(\"null\" if f is None else str(f) for f in fields).encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "two callers never share a key"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "every field passed through str()",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "    return json.dumps(fields).encode(\"ascii\")\n",
+          "new": "    return json.dumps([str(f) for f in fields]).encode(\"ascii\")\n"
+        }
+      ],
+      "expect": "a cursor that reads \"None\" is not a missing cursor"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "private key without the tenant",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        fields += [caller.tenant, caller.user]\n",
+          "new": "        fields += [caller.user]\n"
+        }
+      ],
+      "expect": "nor with a user of the same name in another tenant"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "locale left out of the key",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "    fields = [scope, method, params.get(\"uri\"), params.get(\"cursor\"), locale]\n",
+          "new": "    fields = [scope, method, params.get(\"uri\"), params.get(\"cursor\")]\n"
+        }
+      ],
+      "expect": "the locale is part of the key"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "public results keyed by caller too",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "    if scope == \"private\":\n        fields += [caller.tenant, caller.user]\n",
+          "new": "    if True:\n        fields += [caller.tenant, caller.user]\n"
+        }
+      ],
+      "expect": "a public result may be reused for any caller"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "every result stored as public",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        self._db[_key(scope, method, params, caller, locale)] =",
+          "new": "        self._db[_key(\"public\", method, params, caller, locale)] ="
+        }
+      ],
+      "expect": "a private result is never shared with another user"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "fresh through t + ttlMs inclusive",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "                if now < entry[\"expiresAt\"]:\n",
+          "new": "                if now <= entry[\"expiresAt\"]:\n"
+        }
+      ],
+      "expect": "stale once ttlMs has passed, on the injected clock"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "ttlMs 0 stored",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "ttl <= 0 or",
+          "new": "ttl < 0 or"
+        }
+      ],
+      "expect": "only a positive ttlMs with a public or private scope is stored"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "any cacheScope stored",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": " or scope not in SCOPES:\n",
+          "new": " or scope is None:\n"
+        }
+      ],
+      "expect": "only a positive ttlMs with a public or private scope is stored"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "UTF-8 JSON without escapes",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "json.dumps(entry).encode(\"ascii\")",
+          "new": "json.dumps(entry, ensure_ascii=False).encode(\"utf-8\")"
+        }
+      ],
+      "expect": "UnicodeEncodeError"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "expiry taken from the wall clock",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        entry = {\"expiresAt\": self._clock() + ttl, \"result\": result}\n",
+          "new": "        entry = {\"expiresAt\": int(__import__(\"time\").time() * 1000) + ttl, \"result\": result}\n"
+        }
+      ],
+      "expect": "stale once ttlMs has passed, on the injected clock"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "kept in memory only",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        self._db = dbm.dumb.open(path, \"c\")\n",
+          "new": "        self._db = {}\n"
+        },
+        {
+          "file": "cache.py",
+          "old": "    def close(self) -> None:\n        self._db.close()\n",
+          "new": "    def close(self) -> None:\n        pass\n"
+        }
+      ],
+      "expect": "a reopened cache still has its entries"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "close() leaves the dbm open",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "    def close(self) -> None:\n        self._db.close()\n",
+          "new": "    def close(self) -> None:\n        pass\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "invalidate matches the URI as a substring",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "            if method == \"resources/read\" and key_uri == uri:\n",
+          "new": "            if uri.encode() in key:\n"
+        }
+      ],
+      "expect": "invalidate forgets that URI only"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "invalidate looks for the URI in stored results",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "            if method == \"resources/read\" and key_uri == uri:\n",
+          "new": "            stored = json.loads(self._db[key])[\"result\"]\n            if any(item.get(\"uri\") == uri for item in stored.get(\"contents\", []) + stored.get(\"resources\", [])):\n"
+        }
+      ],
+      "expect": "invalidate forgets cached reads only"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "invalidate forgets public entries only",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "            if method == \"resources/read\" and key_uri == uri:\n",
+          "new": "            if method == \"resources/read\" and key_uri == uri and scope == \"public\":\n"
+        }
+      ],
+      "expect": "invalidate forgets every cached read of that URI, for every caller"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "dbm keys treated as str",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "            scope, method, key_uri, *_ = json.loads(key)\n            if method == \"resources/read\" and key_uri == uri:\n",
+          "new": "            if key.startswith('[\"private\", \"resources/read\", ' + json.dumps(uri)) or key.startswith('[\"public\", \"resources/read\", ' + json.dumps(uri)):\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_response_cache_roundtrip",
+      "name": "put stamps the expiry into the result",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        entry = {\"expiresAt\": self._clock() + ttl, \"result\": result}\n",
+          "new": "        result[\"expiresAt\"] = self._clock() + ttl\n        entry = {\"expiresAt\": result[\"expiresAt\"], \"result\": result}\n"
+        }
+      ],
+      "expect": "put leaves the result it was given unchanged"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "offset in the cursor instead of the last URI",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "    if cursor is not None:\n        after = open_cursor(cursor, caller, secret)\n        visible = [note for note in visible if note.uri > after]\n    page = visible[:page_size]\n",
+          "new": "    start = 0 if cursor is None else int(open_cursor(cursor, caller, secret))\n    visible = visible[start:]\n    page = visible[:page_size]\n"
+        },
+        {
+          "file": "paging.py",
+          "old": "sign_cursor({\"after\": page[-1].uri,",
+          "new": "sign_cursor({\"after\": str(start + page_size),"
+        }
+      ],
+      "expect": "a resource added or removed between pages never makes another repeat or go missing"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "continues after the position of the last URI",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "        visible = [note for note in visible if note.uri > after]\n",
+          "new": "        uris = [note.uri for note in visible]\n        visible = visible[uris.index(after) + 1:]\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "unsigned cursor",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "    return f\"{body}.{tag}\"\n",
+          "new": "    return body\n"
+        },
+        {
+          "file": "paging.py",
+          "old": "        body, tag = cursor.split(\".\")\n        expected = hmac.new(secret, body.encode(\"ascii\"), hashlib.sha256).hexdigest()\n        if not hmac.compare_digest(tag.encode(\"ascii\"), expected.encode(\"ascii\")):\n            raise ValueError(\"signature mismatch\")\n",
+          "new": "        body = cursor\n"
+        }
+      ],
+      "expect": "a cursor cannot be changed without the server's secret"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "signed with a fixed key",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "    tag = hmac.new(secret, body.encode(\"ascii\"), hashlib.sha256).hexdigest()\n",
+          "new": "    tag = hmac.new(b\"uricatalog\", body.encode(\"ascii\"), hashlib.sha256).hexdigest()\n"
+        },
+        {
+          "file": "paging.py",
+          "old": "        expected = hmac.new(secret, body.encode(\"ascii\"), hashlib.sha256).hexdigest()\n",
+          "new": "        expected = hmac.new(b\"uricatalog\", body.encode(\"ascii\"), hashlib.sha256).hexdigest()\n"
+        }
+      ],
+      "expect": "only a server with the same secret accepts a cursor"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "cursor not bound to its caller",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "        or payload.get(\"tenant\") != caller.tenant\n        or payload.get(\"user\") != caller.user\n",
+          "new": ""
+        }
+      ],
+      "expect": "a cursor works only for the caller it was issued to"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "cursor bound to the user name only",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "        or payload.get(\"tenant\") != caller.tenant\n",
+          "new": ""
+        }
+      ],
+      "expect": "a cursor works only for the caller it was issued to"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "nextCursor whenever the page is full",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "    if len(visible) > page_size:\n",
+          "new": "    if len(page) == page_size:\n"
+        }
+      ],
+      "expect": "the last page has no nextCursor"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "nextCursor null on the last page",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "    return result\n\n\ndef sign_cursor",
+          "new": "    result.setdefault(\"nextCursor\", None)\n    return result\n\n\ndef sign_cursor"
+        }
+      ],
+      "expect": "the last page has no nextCursor"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "page sliced before the authorization filter",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "    visible = sorted((note for note in notes if note.readable_by(caller)), key=lambda note: note.uri)\n",
+          "new": "    visible = sorted(notes, key=lambda note: note.uri)\n"
+        },
+        {
+          "file": "paging.py",
+          "old": "    page = visible[:page_size]\n",
+          "new": "    page = [note for note in visible[:page_size] if note.readable_by(caller)]\n"
+        }
+      ],
+      "expect": "the caller's resources, sorted by URI, three to a page"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "listed in catalog order",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "    visible = sorted((note for note in notes if note.readable_by(caller)), key=lambda note: note.uri)\n",
+          "new": "    visible = [note for note in notes if note.readable_by(caller)]\n"
+        }
+      ],
+      "expect": "the caller's resources, sorted by URI, three to a page"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "every note listed",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "(note for note in notes if note.readable_by(caller))",
+          "new": "(note for note in notes)"
+        }
+      ],
+      "expect": "the caller's resources, sorted by URI, three to a page"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "cursors remembered by the instance that issued them",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        page = list_page(self.catalog.notes(), caller, params.get(\"cursor\"), self.page_size, self.secret)\n",
+          "new": "        issued = self.__dict__.setdefault(\"_issued\", {})\n        cursor = params.get(\"cursor\")\n        notes = self.catalog.notes()\n        if cursor is not None:\n            if not isinstance(cursor, str) or cursor not in issued:\n                raise RpcError(INVALID_PARAMS, \"Invalid cursor\")\n            if issued[cursor][1] != caller:\n                raise RpcError(INVALID_PARAMS, \"Invalid cursor\")\n            notes = [note for note in notes if note.uri > issued[cursor][0]]\n        page = list_page(notes, caller, None, self.page_size, self.secret)\n        if \"nextCursor\" in page:\n            last = page[\"resources\"][-1][\"uri\"]\n            token = __import__(\"hashlib\").sha256(f\"{last}|{caller}\".encode()).hexdigest()\n            issued[token] = (last, caller)\n            page[\"nextCursor\"] = token\n"
+        }
+      ],
+      "expect": "any instance with the same secret continues a listing"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "cursor stamped with the time",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "{\"after\": page[-1].uri, \"tenant\": caller.tenant, \"user\": caller.user}",
+          "new": "{\"after\": page[-1].uri, \"tenant\": caller.tenant, \"user\": caller.user, \"at\": __import__(\"time\").time_ns()}"
+        }
+      ],
+      "expect": "the same request gets the same page, cursor and all"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "a cursor that is not a string crashes",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "        if not isinstance(cursor, str):\n            raise ValueError(\"a cursor is a string\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "signatures compared as str",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "        expected = hmac.new(secret, body.encode(\"ascii\"), hashlib.sha256).hexdigest()\n        if not hmac.compare_digest(tag.encode(\"ascii\"), expected.encode(\"ascii\")):\n",
+          "new": "        expected = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()\n        if not hmac.compare_digest(tag, expected):\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "sorted by name instead of URI",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "key=lambda note: note.uri)",
+          "new": "key=lambda note: note.name)"
+        }
+      ],
+      "expect": "a resource added or removed between pages never makes another repeat or go missing"
+    },
+    {
+      "test": "test_resources_list_pages",
+      "name": "an empty cursor treated as the first page",
+      "edits": [
+        {
+          "file": "paging.py",
+          "old": "    if cursor is not None:\n",
+          "new": "    if cursor:\n"
+        }
+      ],
+      "expect": "'' is not a cursor: invalid params"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "no newline after a record",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        self.log.write(json.dumps(record) + \"\\n\")\n",
+          "new": "        self.log.write(json.dumps(record))\n"
+        }
+      ],
+      "expect": "every action is one line ending in a newline"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "blank line after each record",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        self.log.write(json.dumps(record) + \"\\n\")\n",
+          "new": "        self.log.write(json.dumps(record) + \"\\n\\n\")\n"
+        }
+      ],
+      "expect": "Expecting value"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "pretty-printed records",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        self.log.write(json.dumps(record) + \"\\n\")\n",
+          "new": "        self.log.write(json.dumps(record, indent=2) + \"\\n\")\n"
+        }
+      ],
+      "expect": "Expecting property name"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "re-read without forgetting the cached copy",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "                self.cache.invalidate(uri)\n",
+          "new": ""
+        }
+      ],
+      "expect": "an update carries no document: forget the cached copy and read it again"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "the event taken as the document",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "                    result = await self.read(uri)\n",
+          "new": "                    result = {\"contents\": [{\"uri\": uri, \"text\": params.get(\"text\")}]}\n"
+        }
+      ],
+      "expect": "an update carries no document: forget the cached copy and read it again"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "fresh read written over the cached copy",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "                self.cache.invalidate(uri)\n                try:\n                    result = await self.read(uri)\n",
+          "new": "                try:\n                    result = await self.request(\"resources/read\", {\"uri\": uri})\n                    self.cache.put(\"resources/read\", {\"uri\": uri}, self.caller, self.locale, result)\n"
+        }
+      ],
+      "expect": "an unreadable note leaves nothing cached"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "the requested filter logged",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "\"notifications\": params.get(\"notifications\")}",
+          "new": "\"notifications\": self._subscriptions[subscription_id]}"
+        }
+      ],
+      "expect": "log the filter the server acknowledged"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "an event before the acknowledgment opens the subscription",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            if method == ACKNOWLEDGED and subscription_id in self._subscriptions and subscription_id not in state:\n",
+          "new": "            if subscription_id in self._subscriptions and subscription_id not in state:\n"
+        }
+      ],
+      "expect": "an event counts only between its subscription's acknowledgment and final response"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "events after the final response still handled",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "                self._write({\"subscription\": request_id, \"action\": \"closed\"})\n            state[request_id] = \"ended\"\n",
+          "new": "                self._write({\"subscription\": request_id, \"action\": \"closed\"})\n                state[request_id] = \"ended\"\n"
+        }
+      ],
+      "expect": "an event counts only between its subscription's acknowledgment and final response"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "closed logged when the final response arrives",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            if state.get(request_id) == \"open\":\n                queues[request_id].put_nowait(_END)\n",
+          "new": "            if state.get(request_id) == \"open\":\n                self._write({\"subscription\": request_id, \"action\": \"closed\"})\n                queues[request_id].put_nowait(None)\n"
+        },
+        {
+          "file": "client.py",
+          "old": "            if message is _END:\n                self._write({\"subscription\": subscription_id, \"action\": \"closed\"})\n                return\n",
+          "new": "            if message is None:\n                return\n            if message is _END:\n                self._write({\"subscription\": subscription_id, \"action\": \"closed\"})\n                return\n"
+        }
+      ],
+      "expect": "each subscription logs its acknowledgment, then its events in order, then closed"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "one lock around every re-read",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        self._pending: dict[int, asyncio.Future] = {}\n",
+          "new": "        self._pending: dict[int, asyncio.Future] = {}\n        self._lock = asyncio.Lock()\n"
+        },
+        {
+          "file": "client.py",
+          "old": "                try:\n                    result = await self.read(uri)\n",
+          "new": "                try:\n                    async with self._lock:\n                        result = await self.read(uri)\n"
+        }
+      ],
+      "expect": "a slow re-read on one subscription must not hold up the others"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "the reader waits for each message to be handled",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            if state.get(subscription_id) == \"open\":\n                queues[subscription_id].put_nowait(message)\n",
+          "new": "            if state.get(subscription_id) == \"open\":\n                queues[subscription_id].put_nowait(message)\n                await queues[subscription_id].join()\n"
+        }
+      ],
+      "expect": "run() stalled"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "every response taken for a pending request",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        request_id = message.get(\"id\")\n        if request_id in self._subscriptions:\n",
+          "new": "        request_id = message.get(\"id\")\n        self._pending.pop(request_id).set_result(message)\n        if False:\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "the log written once the channel closes",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        self.log.write(json.dumps(record) + \"\\n\")\n",
+          "new": "        self.__dict__.setdefault(\"_lines\", []).append(json.dumps(record) + \"\\n\")\n"
+        },
+        {
+          "file": "client.py",
+          "old": "        await asyncio.gather(*workers)\n",
+          "new": "        await asyncio.gather(*workers)\n        self.log.write(\"\".join(self.__dict__.get(\"_lines\", [])))\n"
+        }
+      ],
+      "expect": "write each action as it happens"
+    },
+    {
+      "test": "test_shared_channel",
+      "name": "a task per update, closed after all of them",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "    async def _follow(self, subscription_id: int, queue: asyncio.Queue) -> None:\n        while True:\n            message = await queue.get()\n            if message is _END:\n                self._write({\"subscription\": subscription_id, \"action\": \"closed\"})\n                return\n            params = message.get(\"params\") or {}\n            if message[\"method\"] == ACKNOWLEDGED:\n                record = {\"action\": \"acknowledged\", \"notifications\": params.get(\"notifications\")}\n            elif message[\"method\"] == UPDATED:\n                uri = params.get(\"uri\")\n                self.cache.invalidate(uri)\n                try:\n                    result = await self.read(uri)\n                except RpcError as exc:\n                    record = {\"action\": \"unreadable\", \"uri\": uri, \"code\": exc.code}\n                except ConnectionError:  # the channel closed while the read was in flight\n                    self._write({\"subscription\": subscription_id, \"action\": \"closed\"})\n                    return\n                else:\n                    record = {\"action\": \"reread\", \"uri\": uri, \"text\": result[\"contents\"][0][\"text\"]}\n            else:\n                continue\n            self._write({\"subscription\": subscription_id, **record})\n\n    def _write(",
+          "new": "    async def _follow(self, subscription_id: int, queue: asyncio.Queue) -> None:\n        tasks = []\n        while True:\n            message = await queue.get()\n            if message is _END:\n                await asyncio.gather(*tasks)\n                self._write({\"subscription\": subscription_id, \"action\": \"closed\"})\n                return\n            params = message.get(\"params\") or {}\n            if message[\"method\"] == ACKNOWLEDGED:\n                self._write({\"subscription\": subscription_id, \"action\": \"acknowledged\", \"notifications\": params.get(\"notifications\")})\n            elif message[\"method\"] == UPDATED:\n                tasks.append(asyncio.create_task(self._reread(subscription_id, params.get(\"uri\"))))\n\n    async def _reread(self, subscription_id, uri):\n        self.cache.invalidate(uri)\n        try:\n            result = await self.read(uri)\n        except RpcError as exc:\n            record = {\"action\": \"unreadable\", \"uri\": uri, \"code\": exc.code}\n        else:\n            record = {\"action\": \"reread\", \"uri\": uri, \"text\": result[\"contents\"][0][\"text\"]}\n        self._write({\"subscription\": subscription_id, **record})\n\n    def _write("
+        }
+      ],
+      "expect": "each subscription logs its acknowledgment, then its events in order, then closed"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "no backtracking after a literal",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "        if child is not None:\n            found = self._walk(child, segments, i + 1)\n            if found is not None:\n                return found\n",
+          "new": "        if child is not None:\n            return self._walk(child, segments, i + 1)\n"
+        }
+      ],
+      "expect": "a literal that leads nowhere does not hide a variable that matches"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "variable tried before literal",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "        child = node.literals.get(segment)\n        if child is not None:\n            found = self._walk(child, segments, i + 1)\n            if found is not None:\n                return found\n        if node.variable is not None and _VALUE.fullmatch(segment):\n            found = self._walk(node.variable, segments, i + 1)\n            if found is not None:\n                template, values = found\n                return template, [segment, *values]\n",
+          "new": "        if node.variable is not None and _VALUE.fullmatch(segment):\n            found = self._walk(node.variable, segments, i + 1)\n            if found is not None:\n                template, values = found\n                return template, [segment, *values]\n        child = node.literals.get(segment)\n        if child is not None:\n            found = self._walk(child, segments, i + 1)\n            if found is not None:\n                return found\n"
+        }
+      ],
+      "expect": "a literal segment beats a variable"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "the whole URI decoded before splitting",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "            segments = [unquote(raw, errors=\"strict\") for raw in uri[len(SCHEME):].split(\"/\")]\n",
+          "new": "            segments = unquote(uri[len(SCHEME):], errors=\"strict\").split(\"/\")\n"
+        }
+      ],
+      "expect": "an encoded / stays inside its segment"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "each segment decoded twice",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "[unquote(raw, errors=\"strict\") for raw",
+          "new": "[unquote(unquote(raw, errors=\"strict\"), errors=\"strict\") for raw"
+        }
+      ],
+      "expect": "a segment is percent-decoded exactly once"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "segments not decoded",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "[unquote(raw, errors=\"strict\") for raw",
+          "new": "[raw for raw"
+        }
+      ],
+      "expect": "each segment is percent-decoded"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "value checked with re.match and $",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": " and _VALUE.fullmatch(segment):\n",
+          "new": " and re.match(r\"^[A-Za-z0-9_-]{1,64}$\", segment):\n"
+        }
+      ],
+      "expect": "a variable is 1 to 64 ASCII letters"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "value checked with \\w",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "_VALUE = re.compile(r\"[A-Za-z0-9_-]{1,64}\")\n",
+          "new": "_VALUE = re.compile(r\"[\\w-]{1,64}\")\n"
+        }
+      ],
+      "expect": "a variable is 1 to 64 ASCII letters"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "trailing slash ignored",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "for raw in uri[len(SCHEME):].split(\"/\")]",
+          "new": "for raw in uri[len(SCHEME):].rstrip(\"/\").split(\"/\")]"
+        }
+      ],
+      "expect": "extra or missing segments match nothing"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "65 characters allowed",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "_VALUE = re.compile(r\"[A-Za-z0-9_-]{1,64}\")\n",
+          "new": "_VALUE = re.compile(r\"[A-Za-z0-9_-]{1,65}\")\n"
+        }
+      ],
+      "expect": "a variable is 1 to 64 ASCII letters"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "empty values allowed",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "_VALUE = re.compile(r\"[A-Za-z0-9_-]{1,64}\")\n",
+          "new": "_VALUE = re.compile(r\"[A-Za-z0-9_-]{0,64}\")\n"
+        }
+      ],
+      "expect": "extra or missing segments match nothing"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "a template with the same shape replaces the first",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "        if existing is not None and existing.template is not None:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "ambiguity judged by the template text",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "        existing = self._find(shape)\n        if existing is not None and existing.template is not None:\n            raise ValueError(f\"{template!r} matches exactly the URIs of {existing.template[0]!r}\")\n",
+          "new": "        seen = self.__dict__.setdefault(\"_seen\", set())\n        if template in seen:\n            raise ValueError(f\"{template!r} was already added\")\n        seen.add(template)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "a rejected template replaces the first anyway",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "        existing = self._find(shape)\n        if existing is not None and existing.template is not None:\n            raise ValueError(f\"{template!r} matches exactly the URIs of {existing.template[0]!r}\")\n",
+          "new": "        existing = self._find(shape)\n        if existing is not None and existing.template is not None:\n            first = existing.template[0]\n            existing.template = (name, tuple(variables))\n            raise ValueError(f\"{template!r} matches exactly the URIs of {first!r}\")\n"
+        }
+      ],
+      "expect": "a rejected template changes nothing"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "a literal beside a variable rejected as ambiguous",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "            if part is None:\n                if node.variable is None:\n",
+          "new": "            if part is None and node.literals or part is not None and node.variable is not None:\n                raise ValueError(f\"{template!r} overlaps another template\")\n            if part is None:\n                if node.variable is None:\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "one variable name per tree position",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "        node = self._root\n        for part in shape:\n            if part is None:\n",
+          "new": "        node = self._root\n        names = iter(variables)\n        for part in shape:\n            if part is None:\n                label = next(names)\n                if self.__dict__.setdefault(\"_labels\", {}).setdefault(id(node), label) != label:\n                    raise ValueError(f\"{template!r} renames a variable another template already named\")\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "a literal may hold any character but /",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "_LITERAL = re.compile(r\"[A-Za-z0-9_-]+\")\n",
+          "new": "_LITERAL = re.compile(r\"[^/]+\")\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "a variable may repeat",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "                if variable.group(1) in variables:\n                    raise ValueError(f\"{template!r} names {{{variable.group(1)}}} twice\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_template_routes",
+      "name": "the template with the most literals wins",
+      "edits": [
+        {
+          "file": "templates.py",
+          "old": "        found = self._walk(self._root, segments, 0)\n",
+          "new": "        found = self._best(self._root, segments, 0)\n"
+        },
+        {
+          "file": "templates.py",
+          "old": "\n    def _find(",
+          "new": "\n    def _best(self, node, segments, i):\n        matches = []\n        def go(node, i, values, lits):\n            if i == len(segments):\n                if node.template is not None:\n                    matches.append((lits, node.template, values))\n                return\n            child = node.literals.get(segments[i])\n            if child is not None:\n                go(child, i + 1, values, lits + 1)\n            if node.variable is not None and _VALUE.fullmatch(segments[i]):\n                go(node.variable, i + 1, values + [segments[i]], lits)\n        go(node, 0, [], 0)\n        if not matches:\n            return None\n        lits, template, values = max(matches, key=lambda m: m[0])\n        return template, values\n\n    def _find("
+        }
+      ],
+      "expect": "the template with a literal at the first segment where they differ wins"
+    }
+  ]
+}
