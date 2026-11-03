@@ -1,0 +1,142 @@
+{
+  "lesson": "phases/13-tools-and-protocols/23-capstone-tool-ecosystem",
+  "title": "Capstone: Stateless Tool Ecosystem",
+  "format": "staged-brownfield",
+  "service": "ResearchOps: the capstone's research-and-report system in process: an agent that discovers a simulated research MCP server and calls it through a scope-checking gateway with fresh _meta on every request, delegates summaries to a writer agent over A2A, polls the report task with tasks/get and keeps in-memory spans; a CSV paper fixture; a research job under hard limits; a Markdown report streamed in paper order; and a claim graph that decides what a run proves",
+  "sources": {
+    "docs/en.md": "8502c8512390067ef4d8bad0dcafcf1cfe9f3a40d6f24e71b9d54939f13ab4c4",
+    "code/main.py": "1b6570628ccd12f5f6ebac3af3009529c68d6f93afb1c6ab33d3daa4d5ea3ee9"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "deviations": [
+    "Part 1, defect 2: the suggestion hung the A2A delegation span under the root instead of under the tool span that issued it. In this exam the agent itself delegates the summaries, as in the lesson's Target trace (agent.invoke_agent --> A2A SendMessage), because Part 3 needs the delegations on the client side (delegation budget, missing papers), so a SendMessage span under the root is correct here. The planted parentage defect is the other edge the Target trace draws: tasks/get polls hung under the root instead of under the tools/call generate_report span that returned the handle.",
+    "Part 1, defect 1: the server refuses the undeclared tools/call itself, as the lesson says it must, so the -32021 cannot come from a tasks/get; it is raised one call later, in the polling step (_settle), which is where the candidate first looks at the polls' _meta.",
+    "Part 1, defect 3: generate_report needs research:read and research:write (the lesson's table names research:write only), so that 'any scope' and 'every scope' give different answers; a write-only token closes the 'check write alone' fix.",
+    "Part 1, defect 4: the 20 polls wait 40, 80 and then 40 ms again (1.08 s of sleeping) instead of 20 x 50 ms, so the overfix guard also catches waits that never get shorter. The guard requires every wait to equal the server's current pollIntervalMs, which is both 'not less than the current interval' and 'follows the server's changes'.",
+    "Part 3: no resources/read of the ui:// resource. The lesson says only that the completed task's final result contains text and a ui:// reference, and Lesson 14 gates resources/read of a UI behind the Apps extension, so the job returns the final result with its ui:// reference instead of inventing that call.",
+    "Part 3: 'total polling time' is the client's own budget.wait_ms, kept separate from the ttlMs backstop; ttl counts from when the handle arrived, on the agent's clock (Lesson 13: ttlMs is measured from creation and a client can treat it as a backstop). The retry that counts against the tool-call budget is one retry of a tools/call answered with isError: true.",
+    "The simulated server also answers tasks/cancel with an acknowledgement (Lesson 13's shape), so a job that cancels when it gives up is not punished; the tests do not require it.",
+    "Part 4: the summaries arrive as an async iterator of Summary(arxiv_id, text or None), so the part does not depend on Part 3. One trap is added: whitespace in titles is folded to single spaces, because arXiv titles carry line breaks (Part 2's fixture has them) and a heading must stay on one line.",
+    "Part 5: trace-parent evidence is computed from the spans the collector received (Use It step 6: assert parentage at the receiver), not taken from an evidence item, so the 'shared trace id' trap lives in code. Evidence names come from the Required evidence column of the Simulation versus production table."
+  ],
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_research_run",
+      "kind": "debug",
+      "lesson_anchor": "Stateless MCP changes the integration boundary (advertise io.modelcontextprotocol/tasks in the same request that may receive a task handle, or the server returns -32021 with requiredCapabilities); Target trace (tools/call: generate_report --> tasks/get polling; a shared trace identifier alone does not prove correct parentage); Security posture (gateway RBAC that checks the requested tool and scope); Exercise 4 (respect pollIntervalMs); code/main.py orchestrator, gateway_call and tasks_get",
+      "planted_bugs": [
+        "Agent.request declares the Tasks extension only for tasks/* methods, so the tools/call for generate_report gets -32021; the ProtocolError surfaces one call later, in _settle, the polling step, before any tasks/get was sent",
+        "call_tool hands _settle the caller's span instead of its own, so the 20 tasks/get spans hang under agent.invoke_agent; every span still shares one trace id",
+        "Gateway.handle lets a call through when the token holds any of the required scopes (required & grant.scopes), so a research:read token can call generate_report",
+        "_settle waits with time.sleep instead of the injected self.sleep, blocking the event loop and taking about 1.2 s for 20 polls"
+      ],
+      "timing_assert": "a research run with 20 polls (7 x 40, 7 x 80, 6 x 40 ms) under 0.1 s with the injected sleep. Measured on this machine under load (load average 5 to 8): the time.sleep version 1.15 to 1.28 s (11x the limit or more); the fixed version 0.49 ms median, 1.2 ms at p99 and 5.6 ms at worst over 2000 runs (17x under the limit or more), with one scheduling spike of 32.7 ms in 1200 earlier runs",
+      "overfix_guard": "every wait must equal the server's current pollIntervalMs while the interval goes 40 -> 80 -> 40 ms, so removing the wait, keeping the handle's interval, never waiting less than before, passing milliseconds, polling before the first wait and a sleep that is never awaited all fail; asyncio.sleep and asyncio.to_thread(time.sleep) still take wall-clock time; polling once, as code/main.py does, raises TaskFailed; the server must still refuse an undeclared generate_report with -32021 and the lesson's requiredCapabilities, so deleting its check fails; declaring the extension for generate_report only fails the every-tools/call check; a write-only token closes the 'check write alone' fix; a refused call must not reach the server and must be audited"
+    },
+    {
+      "part": 2,
+      "test": "test_catalog_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Simulation versus production: Search | Static paper fixtures (Required evidence: source provenance); Exercise 2 (a second static backend); code/main.py PAPERS and research_arxiv_search",
+      "storage": "CSV file: one header row, then one row per paper, appended one paper at a time",
+      "exactness": "every Paper reads back equal, with an int year, after a reopen and a later append; the file stays plain CSV with the id and year cells as written",
+      "traps": [
+        "reading without newline='' turns \\r\\n and a lone \\r in a title into \\n",
+        "author lists joined with ', ', '; ' or '|' (names hold commas and semicolons; an empty list comes back as one empty name)",
+        "arXiv ids through float or json.loads per cell (2401.01230 -> 2401.0123, 0912.0410 -> 912.041)",
+        "year left as text, or read back as a float through QUOTE_NONNUMERIC (2024.0 == 2024 hides it)",
+        "header written on every add, or by every new Catalog object; duplicate headers skipped on read",
+        "duplicate ids checked only within one object, or by comparing whole papers",
+        "titles stripped or read with skipinitialspace, authors read back as a list",
+        "a missing file raising instead of reading as empty",
+        "ids written as spreadsheet text formulas",
+        "rows joined by hand without quoting"
+      ],
+      "clarifying_questions": [
+        "how to store the author list",
+        "trimming titles",
+        "an existing empty file",
+        "a duplicate id with identical content"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_bounded_job",
+      "kind": "core algorithm",
+      "lesson_anchor": "Target architecture and Target trace (server/discover, arxiv_search, A2A SendMessage, generate_report as a task, tasks/get polling, completed task with the final result and a ui:// reference); Exercise 4 (respect pollIntervalMs, read the final result without tasks/result); Use It step 3 (timeout and TTL; do not add tasks/result); Simulation versus production: Delegation (timeout and retry tests); The Concept: production tests must exercise timeouts and retries",
+      "traps": [
+        "a retry not counted against budget.tool_calls, or sent without a budget check (budgets 1 and 2)",
+        "retrying until the budget runs out instead of once",
+        "delegations awaited one at a time (the writer records its peak concurrency)",
+        "gather without return_exceptions or a TaskGroup: one DelegationFailed fails the job",
+        "return_exceptions=True with the exception kept as a summary",
+        "hits past budget.delegations delegated, or not counted as missing",
+        "summaries in completion order (as_completed) instead of search order",
+        "missing left out of the generate_report arguments",
+        "tasks/result called after completion (-32601)",
+        "no ttl backstop, ttl compared in seconds or with >, counted from the start of the job, checked against the end of the next wait, or checked after the wait budget",
+        "the wait budget checked after waiting, with >=, read off the clock, or missing (649, 650 and 700 ms budgets)",
+        "the handle's pollIntervalMs kept for every poll"
+      ],
+      "integration": "runs on Part 1's Agent (request, get_task, delegate, sleep, clock) through the gateway and the simulated server, with a scripted writer agent that spends fake time",
+      "clarifying_questions": [
+        "whether server/discover counts as a tool call",
+        "retrying delegations",
+        "a retry that fails again",
+        "sending tasks/cancel when giving up",
+        "exactly ttlMs, and ttlMs null",
+        "checking the budget before delegating"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_report_stream",
+      "kind": "streaming",
+      "lesson_anchor": "The Problem (the system delegates summarization and generates a report); Target trace (delegated work finishes independently); Key Terms: Opacity boundary (the caller sees only the returned artifacts)",
+      "wire_format": "Markdown text; the test joins the chunks and splits them at CommonMark ATX headings (up to three spaces, one to six #, then a space or the end of the line), and records how many summaries had been pulled when each heading went out",
+      "traps": [
+        "summaries not escaped, only lines that start exactly with # escaped, or every # escaped",
+        "sections in arrival order",
+        "everything held until the stream ends, or every summary read first",
+        "the search results sent only with the first summary",
+        "one buffered section released per summary instead of every section that is ready",
+        "failed or never-arrived papers left out, not counted as missing in the conclusion, or listed there in arrival order",
+        "titles with line breaks written as they are, or with only the line breaks replaced",
+        "sections glued together without a line break",
+        "a plain async function instead of an async generator"
+      ],
+      "clarifying_questions": [
+        "yielding line by line",
+        "a summary for an unknown paper",
+        "two summaries for one paper",
+        "an empty summary",
+        "a tab before #"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_evidence_claims",
+      "kind": "recursive structure",
+      "lesson_anchor": "Simulation versus production (the Required evidence column; a green local run validates the simulation only); Target trace (a shared trace identifier alone does not prove correct parentage, export, or backend ingestion); Use It step 6 (export spans to a test collector and assert parentage at the receiver); Exercise 1; Key Terms: Integration evidence",
+      "traps": [
+        "parentage taken from the shared trace id, or without looking parents up",
+        "a second root in the same trace, or a span with another trace id, accepted",
+        "collector receipt assumed without any span",
+        "telemetry read from a self-reported evidence list",
+        "a simulated boundary's evidence counted, or a simulated collector's received spans judged",
+        "missing evidence repeated, or in dependency or alphabetical order instead of BOUNDARIES order",
+        "only the boundaries a claim names directly",
+        "no cycle check (RecursionError), or a global visited set that takes a claim reached twice for a cycle",
+        "unknown names or unknown boundaries in the run ignored",
+        "claims sorted instead of returned in the order given"
+      ],
+      "clarifying_questions": [
+        "evidence the table does not ask for",
+        "telemetry with an evidence list",
+        "a boundary missing from the run",
+        "a claim with no dependencies"
+      ]
+    }
+  ]
+}
