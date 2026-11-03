@@ -1,0 +1,143 @@
+{
+  "lesson": "phases/13-tools-and-protocols/18-mcp-auth-production",
+  "title": "MCP Auth in Production: Issuer-Bound Enrollment and Tokens",
+  "format": "staged-brownfield",
+  "service": "tokengate: the resource-server side of MCP 2026-07-28 authorization: an issuer allow-list from protected-resource metadata, exact audience, a JWKS cache that refreshes but never rotates, a SQLite introspection cache keyed by token digest, a gate that pins the validation mode per issuer and declares every dependency failure, an incident replay logged as CSV, and the DCR redirect URI rules",
+  "sources": {
+    "docs/en.md": "da053b84576ba4daba8561f51966376185fd250bcb8792830a9ca043845d5f4b",
+    "code/main.py": "21a9e5511f0426680c508ae4d126567456746e009be7f3f4b2ca752becbb443b"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_jwks_and_audience",
+      "kind": "debug",
+      "lesson_anchor": "JWKS refresh pattern (rotate at the AS, refresh at the resource server); The validation routine; Failure modes (Stale JWKS, Rotate-as-fall-back, Missing aud claim, iss not pinned); Exercise 6; code/main.py ResourceServer.validate and refresh_jwks",
+      "planted_bugs": [
+        "validate never checks iss against prm.authorization_servers; the KeyError surfaces one call down, in refresh_jwks, for an issuer the server cannot reach, and a reachable but unlisted issuer is trusted",
+        "a token without aud is read as a token for this server: claims.get('aud', self.prm.resource)",
+        "refresh_jwks stores the cache entry under the jwks_uri while validate reads it by issuer, so every request fetches the JWKS",
+        "a cache miss calls rotate_key on the authorization server instead of refreshing, so a newly published kid is never found and random kids make the issuer mint keys"
+      ],
+      "timing_assert": "200 validations of a token with cached keys under 0.1 s. The fake JWKS endpoint sleeps 5 ms per call (about 6 ms in practice), so the never-hitting cache took 1.21 to 1.46 s over 32 runs and the fixed cache 1.2 to 3.2 ms, at load averages of 6.5 to 8.9",
+      "overfix_guard": "a token signed by a newly published key validates after exactly one refresh, which rules out a permanent or time-based cache; each random kid costs at most one fetch, refreshes only its own issuer and never changes the issuer's keys, which rules out retry loops, refresh-all and rotate-then-refresh; a second issuer's rotation is picked up too, which rules out refreshing the first listed issuer; a refresh replaces the key set (a retired key stops working) and records fetched_at, and the cache stays keyed by issuer with a k1 in two issuers; aud is compared exactly, so prefix, substring and trailing-slash matching fail; the issuer is checked before the kid, so an unlisted issuer's non-string kid is still iss not allowed"
+    },
+    {
+      "part": 2,
+      "test": "test_introspection_cache",
+      "kind": "model and persistence",
+      "lesson_anchor": "Opaque tokens use introspection, not guesswork (cache by issuer, one-way token digest and resource; positive entry bounded by exp, issuer guidance and the revocation freshness objective; short negative caching); Revocation is a freshness contract",
+      "exactness": "an RFC 7662 response comes back as the same JSON, compared as sort_keys JSON text so types count: integer exp and iat stay integers, active stays true, the scope string keeps its order, auth_time 1699999990.125 and the extension members cnf and ext (with 9007199254740993) survive, at another replica and after a reopen",
+      "traps": [
+        "the token, a token prefix or Python hash() used as the key; every column and the raw file are scanned",
+        "key without the resource or without the issuer",
+        "positive entry kept until exp, or without max_age, or without the revocation window",
+        "negative results cached like positive ones, for the revocation window, or not at all",
+        "an already expired answer stored",
+        "members dropped, scope sorted, integers read back as floats, active read back as 1, expiry stamped into the response",
+        "put mutating the caller's dict",
+        "CREATE TABLE without IF NOT EXISTS; plain INSERT; no primary key",
+        "entries served past their expiry",
+        "lookup that always introspects, ignores max_age, re-asks for negative answers, or caches or swallows a failure",
+        "max_age or active read by truthiness: max_age 0 reused, \"active\": \"false\" cached as positive",
+        "lookup storing again on a hit, so reads extend the entry"
+      ],
+      "clarifying_questions": [
+        "token prefix for debugging",
+        "which digest",
+        "negative answers",
+        "no max_age",
+        "shared file and commits"
+      ],
+      "deviation": "The connection is given in autocommit mode, so the missing-commit trap (already used twice in this chapter, in 02 and 09) does not appear. The injected clock is required but not listed as a trap, because 09, 10, 11 and 13 already have the wall-clock trap. Expiry is tested well inside and well outside the boundary, never at the instant, since the expiry-instant trap is already used in 09, 11, 12 and 13."
+    },
+    {
+      "part": 3,
+      "test": "test_gate_decisions",
+      "kind": "core algorithm",
+      "lesson_anchor": "Opaque tokens use introspection, not guesswork (do not choose validation mode from token contents; pin accepted algorithms); Dependency failure needs a declared decision (the whole table); Classify failures separately from invalid credentials; MCP 2026-07-28 authorization profile (WWW-Authenticate with error and resource_metadata, scope on 403)",
+      "traps": [
+        "no clock check, a type-only check, or a check on the JWT path only: a NaN clock lets expired tokens through",
+        "an unreadable clock reported as a 401",
+        "alg not checked, only none refused, or checked after keys were fetched",
+        "exp checked with isinstance(int) so true passes; exp, scope or iss types unchecked",
+        "validation path picked by the token's shape, so a revoked JWT from an introspection issuer passes",
+        "introspection without the cache or without the issuer's max_age",
+        "introspection outage read as inactive, as active, or not caught",
+        "introspected aud (missing included), exp (the issuer's clock runs 90 s behind), types or scope not checked",
+        "no stale window, stale keys used forever, an inline refresh on every degraded request, or a refresh past the window reported as unavailable",
+        "health never degraded, judged before validate refreshed, or only on allowed requests",
+        "JWKS outage reported as unknown kid or not caught; operational errors carrying a challenge",
+        "the clock checked with math.isnan only, so an infinite clock reads as expired",
+        "the algorithm pinned to HS256 instead of the issuer's policy",
+        "the introspected scope matched as a substring",
+        "the stale window counted from the fetch instead of from the missed refresh"
+      ],
+      "clarifying_questions": [
+        "status for an outage",
+        "refresh past the stale window",
+        "which issuer for opaque tokens",
+        "float or missing exp",
+        "health on refusals"
+      ],
+      "deviation": "The suggested exact-exp boundary trap is left out: the expiry-instant trap already appears in 09, 11, 12 and 13, so exp is tested away from the boundary and the docstring still states it. The JWT path reuses Part 1's validate, so the gate adds what the lesson's code lacks: mode pinning, the algorithm pin, claim types, the clock check, the stale-on-error window and the two outcome classes. Outcome.error is given, so the class decision is the candidate's and the 503 shape is not."
+    },
+    {
+      "part": 4,
+      "test": "test_incident_replay",
+      "kind": "streaming",
+      "lesson_anchor": "JWKS refresh pattern (overlap window, scheduled refresh, retirement); Revocation is a freshness contract (RFC 7009 does not erase cached copies; every cache honors the declared window); Dependency failure needs a declared decision (stale-on-error with degraded health); evidence without the token",
+      "wire_format": "CSV, header t_ms,kid,decision,reason,health in its own chunk, then one record per yielded chunk; decided by the test's csv.reader over the joined chunks and over each chunk",
+      "traps": [
+        "rows held back, or every event read first (probe: one event pulled for the first row)",
+        "rows joined with commas, so an attacker's kid with a comma, a quote and a newline forges an allow row",
+        "kid cleaned up, None for opaque tokens, a non-string kid written as text",
+        "no header, a blank line after every record, records without line endings, one buffer reused",
+        "clock never moved, moved after the event, set in milliseconds, or set only for requests",
+        "t_ms written from the clock as a float",
+        "a failed refresh stops the replay or is logged as a row; every refresh logged",
+        "requests decided by validate instead of the gate, or all with mcp:tools.invoke",
+        "an unknown event type skipped",
+        "the clock set with t_ms // 1000",
+        "a refresh event refreshing every issuer"
+      ],
+      "integration": "overlap (old and new tokens both pass), retirement after the next scheduled refresh, degraded then jwks stale during an outage, recovery, and an opaque token revoked at the issuer that is refused once its cached answer (60 s window) expires",
+      "clarifying_questions": [
+        "a failed refresh",
+        "header row",
+        "odd characters in the kid",
+        "kid of an opaque token",
+        "equal t_ms"
+      ],
+      "deviation": "The suggested denylist event is replaced by revocation at the issuer seen through the introspection cache, which is where the lesson's freshness window lives; a denylist applied on arrival would make the window trivial. Key rotation, retirement, outages and revocation happen in the test's event source between yields, because they are the authorization server's actions and the resource server is never told."
+    },
+    {
+      "part": 5,
+      "test": "test_dcr_redirects",
+      "kind": "structured parsing (replaces the tree part)",
+      "lesson_anchor": "RFC 7591: deprecated compatibility enrollment (application_type is not decorative); Deployment capability checklist (DCR compatibility: reject redirect URIs that do not fit the declared application type); Exercise 7; code/main.py parsed_absolute_redirect_uri, valid_native_redirect_uri, valid_private_use_scheme",
+      "traps": [
+        "no whitespace or control check, only a strip comparison, or DEL missed (urlsplit drops tabs and newlines)",
+        "empty fragment, empty userinfo or empty port allowed because the parsed field is falsy",
+        "port digits checked with str.isdigit, port range unchecked",
+        "loopback by prefix or by ipaddress.is_loopback",
+        "https without a host",
+        "private-use scheme of one label, with empty labels, edge hyphens or underscores",
+        "scheme or host compared case-sensitively; a query or an @ in the query refused",
+        "IPv6 host split at its first colon; an unclosed bracket raising",
+        "web clients allowed native redirects; an unknown application_type treated as native",
+        "application_type defaulting to web, checked after the URIs, an empty list accepted, only the first URI checked",
+        "whitespace checked with str.isprintable, so an inner space passes",
+        "the authority ended only at a slash, so a query right after the port breaks it"
+      ],
+      "clarifying_questions": [
+        "default application_type",
+        "127.0.0.2",
+        "query strings",
+        "raise or return False"
+      ],
+      "deviation": "The lesson has no natural tree or graph on the resource-server side, so Part 5 is Exercise 7's DCR redirect rules, as the chapter plan suggests: a structured parse of the URI (scheme, authority, userinfo, host, port) and of the reverse-domain scheme labels. The rules follow code/main.py, made explicit where urlsplit is lenient: an empty port and a scheme that starts with a digit are rejected, and the cases avoid inputs that urlsplit treats differently between Python 3.10 and 3.12."
+    }
+  ]
+}

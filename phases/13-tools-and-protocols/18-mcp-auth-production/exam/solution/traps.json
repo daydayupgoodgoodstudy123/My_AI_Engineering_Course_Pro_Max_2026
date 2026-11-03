@@ -1,0 +1,1865 @@
+{
+  "package": "tokengate",
+  "tests": [
+    "test_jwks_and_audience",
+    "test_introspection_cache",
+    "test_gate_decisions",
+    "test_incident_replay",
+    "test_dcr_redirects"
+  ],
+  "layers": [
+    {
+      "test": "test_jwks_and_audience",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "KeyError"
+        },
+        {
+          "name": "+ issuer allow-list before any fetch",
+          "edits": [
+            {
+              "file": "resource.py",
+              "old": "        issuer = claims.get(\"iss\")\n",
+              "new": "        issuer = claims.get(\"iss\")\n        if not isinstance(issuer, str) or issuer not in self.prm.authorization_servers:\n            return self.prm.refuse(401, \"iss not allowed\")\n"
+            }
+          ],
+          "expect": "a token without aud is not for this server"
+        },
+        {
+          "name": "+ aud required",
+          "edits": [
+            {
+              "file": "resource.py",
+              "old": "claims.get(\"aud\", self.prm.resource)",
+              "new": "claims.get(\"aud\")"
+            }
+          ],
+          "expect": "validating with warm keys must not wait on the JWKS endpoint"
+        },
+        {
+          "name": "+ cache entry stored under the issuer",
+          "edits": [
+            {
+              "file": "resource.py",
+              "old": "self.jwks_cache[source.jwks_uri] = entry",
+              "new": "self.jwks_cache[issuer] = entry"
+            }
+          ],
+          "expect": "a token signed by a newly published key validates after one refresh"
+        },
+        {
+          "name": "+ a miss refreshes instead of rotating",
+          "edits": [
+            {
+              "file": "resource.py",
+              "old": "            self.idps[issuer].rotate_key()\n            entry = self.jwks_cache.get(issuer, entry)\n",
+              "new": "            entry = self.refresh_jwks(issuer)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_jwks_and_audience",
+      "name": "keys fetched once and never refreshed on a miss",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "        if key is None:\n            # The authorization server may have published a key after our last refresh.\n            entry = self.refresh_jwks(issuer)\n            key = entry[\"keys\"].get(kid)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a token signed by a newly published key validates after one refresh"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "a miss retries the refresh until the kid shows up, three tries",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "        if key is None:\n            # The authorization server may have published a key after our last refresh.\n            entry = self.refresh_jwks(issuer)\n            key = entry[\"keys\"].get(kid)\n",
+          "new": "        if key is None:\n            for _ in range(3):\n                entry = self.refresh_jwks(issuer)\n                key = entry[\"keys\"].get(kid)\n                if key is not None:\n                    break\n"
+        }
+      ],
+      "expect": "an unknown kid costs at most one JWKS fetch"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "a miss asks the issuer to rotate, then refreshes (overfix of the rotate bug)",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "            entry = self.refresh_jwks(issuer)\n            key",
+          "new": "            self.idps[issuer].rotate_key()\n            entry = self.refresh_jwks(issuer)\n            key"
+        }
+      ],
+      "expect": "validating never makes the authorization server mint keys"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "a miss refreshes every trusted issuer",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "            entry = self.refresh_jwks(issuer)\n            key",
+          "new": "            for other in self.prm.authorization_servers:\n                self.refresh_jwks(other)\n            entry = self.jwks_cache[issuer]\n            key"
+        }
+      ],
+      "expect": "a miss refreshes only the token's own issuer"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "a miss refreshes only when the cached keys are older than five minutes",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "        if key is None:\n            # The",
+          "new": "        if key is None and self.clock() - entry[\"fetched_at\"] > 300:\n            # The"
+        }
+      ],
+      "expect": "a token signed by a newly published key validates after one refresh"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "keys refetched on every request",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "        entry = self.jwks_cache.get(issuer) or self.refresh_jwks(issuer)\n",
+          "new": "        entry = self.refresh_jwks(issuer)\n"
+        }
+      ],
+      "expect": "validating with warm keys must not wait on the JWKS endpoint"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "the cache entry stored under the jwks_uri (the planted bug)",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "self.jwks_cache[issuer] = entry",
+          "new": "self.jwks_cache[source.jwks_uri] = entry"
+        }
+      ],
+      "expect": "validating with warm keys must not wait on the JWKS endpoint"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "a refresh merges the new key set into the cached one",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "        entry = {\"keys\": {jwk[\"kid\"]: jwk for jwk in published[\"keys\"]}, \"fetched_at\": self.clock()}\n",
+          "new": "        keys = dict(self.jwks_cache.get(issuer, {\"keys\": {}})[\"keys\"])\n        keys.update({jwk[\"kid\"]: jwk for jwk in published[\"keys\"]})\n        entry = {\"keys\": keys, \"fetched_at\": self.clock()}\n"
+        }
+      ],
+      "expect": "a retired key stops working after the next refresh"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "a kid looked up across every issuer's cached keys",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "        key = entry[\"keys\"].get(kid)\n        if key is None:\n            # The",
+          "new": "        key = {k: v for e in self.jwks_cache.values() for k, v in e[\"keys\"].items()}.get(kid)\n        if key is None:\n            # The"
+        }
+      ],
+      "expect": "a token for another MCP server is refused"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "the allow-list checked after the issuer's keys are fetched",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "        issuer = claims.get(\"iss\")\n        if not isinstance(issuer, str) or issuer not in self.prm.authorization_servers:\n            return self.prm.refuse(401, \"iss not allowed\")\n        kid = header.get(\"kid\")\n        if not isinstance(kid, str):\n            return self.prm.refuse(401, \"unknown kid\")\n        entry = self.jwks_cache.get(issuer) or self.refresh_jwks(issuer)\n",
+          "new": "        issuer = claims.get(\"iss\")\n        kid = header.get(\"kid\")\n        if not isinstance(kid, str):\n            return self.prm.refuse(401, \"unknown kid\")\n        if issuer not in self.idps:\n            return self.prm.refuse(401, \"iss not allowed\")\n        entry = self.jwks_cache.get(issuer) or self.refresh_jwks(issuer)\n        if issuer not in self.prm.authorization_servers:\n            return self.prm.refuse(401, \"iss not allowed\")\n"
+        }
+      ],
+      "expect": "an issuer that is not listed never costs a JWKS fetch"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "an issuer trusted whenever the server can reach it",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "issuer not in self.prm.authorization_servers:\n",
+          "new": "issuer not in self.idps:\n"
+        }
+      ],
+      "expect": "only issuers in the protected-resource metadata are trusted"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "a missing aud read as this resource (the planted bug)",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "        if claims.get(\"aud\") != self.prm.resource:\n",
+          "new": "        if claims.get(\"aud\", self.prm.resource) != self.prm.resource:\n"
+        }
+      ],
+      "expect": "a token without aud is not for this server"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "aud accepted when it starts with this resource",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "        if claims.get(\"aud\") != self.prm.resource:\n",
+          "new": "        if not str(claims.get(\"aud\")).startswith(self.prm.resource):\n"
+        }
+      ],
+      "expect": "aud must equal this server's resource exactly"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "aud compared without its trailing slash",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "        if claims.get(\"aud\") != self.prm.resource:\n",
+          "new": "        if str(claims.get(\"aud\")).rstrip(\"/\") != self.prm.resource:\n"
+        }
+      ],
+      "expect": "aud must equal this server's resource exactly"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "aud matched as a substring",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "        if claims.get(\"aud\") != self.prm.resource:\n",
+          "new": "        if self.prm.resource not in str(claims.get(\"aud\", \"\")):\n"
+        }
+      ],
+      "expect": "aud must equal this server's resource exactly"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "the cache read and written under the jwks_uri, consistently",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "self.jwks_cache[issuer] = entry",
+          "new": "self.jwks_cache[source.jwks_uri] = entry"
+        },
+        {
+          "file": "resource.py",
+          "old": "        entry = self.jwks_cache.get(issuer) or self.refresh_jwks(issuer)\n",
+          "new": "        entry = self.jwks_cache.get(self.idps[issuer].jwks_uri) or self.refresh_jwks(issuer)\n"
+        }
+      ],
+      "expect": "jwks_cache is keyed by issuer"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "an unreachable issuer answered with an empty key set instead of an allow-list",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "        if not isinstance(issuer, str) or issuer not in self.prm.authorization_servers:\n            return self.prm.refuse(401, \"iss not allowed\")\n",
+          "new": ""
+        },
+        {
+          "file": "resource.py",
+          "old": "        source = self.idps[issuer]\n",
+          "new": "        source = self.idps.get(issuer)\n        if source is None:\n            return {\"keys\": {}, \"fetched_at\": self.clock()}\n"
+        }
+      ],
+      "expect": "only issuers in the protected-resource metadata are trusted"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "a miss refreshes but looks in the old entry",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "            entry = self.refresh_jwks(issuer)\n            key",
+          "new": "            self.refresh_jwks(issuer)\n            key"
+        }
+      ],
+      "expect": "a token signed by a newly published key validates after one refresh"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "a miss refreshes the first listed issuer, as the lesson's refresh_jwks does",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "            entry = self.refresh_jwks(issuer)\n            key",
+          "new": "            entry = self.refresh_jwks(self.prm.authorization_servers[0])\n            key"
+        }
+      ],
+      "expect": "every issuer's keys refresh on their own"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "fetched_at kept from the first fetch",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "\"fetched_at\": self.clock()}",
+          "new": "\"fetched_at\": self.jwks_cache.get(issuer, {}).get(\"fetched_at\", self.clock())}"
+        }
+      ],
+      "expect": "a refresh records when the keys were fetched"
+    },
+    {
+      "test": "test_jwks_and_audience",
+      "name": "the kid type checked before the allow-list",
+      "edits": [
+        {
+          "file": "resource.py",
+          "old": "        if not isinstance(issuer, str) or issuer not in self.prm.authorization_servers:\n            return self.prm.refuse(401, \"iss not allowed\")\n        kid = header.get(\"kid\")\n        if not isinstance(kid, str):\n            return self.prm.refuse(401, \"unknown kid\")\n",
+          "new": "        kid = header.get(\"kid\")\n        if not isinstance(kid, str):\n            return self.prm.refuse(401, \"unknown kid\")\n        if not isinstance(issuer, str) or issuer not in self.prm.authorization_servers:\n            return self.prm.refuse(401, \"iss not allowed\")\n"
+        }
+      ],
+      "expect": "the issuer is checked before anything else in the token"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "the token itself used as the key",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "    return hashlib.sha256(token.encode(\"utf-8\")).hexdigest()\n",
+          "new": "    return token\n"
+        }
+      ],
+      "expect": "entries are keyed by the token's SHA-256 hex digest"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "Python's hash() as a quick digest",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "    return hashlib.sha256(token.encode(\"utf-8\")).hexdigest()\n",
+          "new": "    return str(hash(token))\n"
+        }
+      ],
+      "expect": "entries are keyed by the token's SHA-256 hex digest"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "a token prefix kept next to the digest as a readable label",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "    return hashlib.sha256(token.encode(\"utf-8\")).hexdigest()\n",
+          "new": "    return token[:8] + \"...\" + hashlib.sha256(token.encode(\"utf-8\")).hexdigest()\n"
+        }
+      ],
+      "expect": "the token never appears in the cache, not even in part"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "keyed by issuer and digest, without the resource",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        key = (issuer, _digest(token), resource)\n",
+          "new": "        key = (issuer, _digest(token), \"\")\n"
+        },
+        {
+          "file": "introspection.py",
+          "old": "            (issuer, _digest(token), resource, self.clock()),\n",
+          "new": "            (issuer, _digest(token), \"\", self.clock()),\n"
+        }
+      ],
+      "expect": "a result for one resource never answers for another"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "keyed by digest and resource, without the issuer",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        key = (issuer, _digest(token), resource)\n",
+          "new": "        key = (\"\", _digest(token), resource)\n"
+        },
+        {
+          "file": "introspection.py",
+          "old": "            (issuer, _digest(token), resource, self.clock()),\n",
+          "new": "            (\"\", _digest(token), resource, self.clock()),\n"
+        }
+      ],
+      "expect": "nor for another issuer"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "a positive entry kept until the token's exp",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "            expires_at = min(ends)\n",
+          "new": "            expires_at = exp if isinstance(exp, (int, float)) else min(ends)\n"
+        }
+      ],
+      "expect": "a positive entry lives until the earliest of exp, max_age and the revocation window"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "the issuer's max_age ignored",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "            if max_age is not None:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "never past the issuer's max_age"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "the revocation window ignored",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "            ends = [now + self.revocation_window]\n",
+          "new": "            ends = [float(\"inf\")]\n"
+        }
+      ],
+      "expect": "a positive entry lives until the earliest of exp, max_age and the revocation window"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "negative results cached like positive ones",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        if response.get(\"active\") is True:\n",
+          "new": "        if True:\n"
+        }
+      ],
+      "expect": "a negative result is cached briefly"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "negative results kept for the revocation window",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "            expires_at = now + self.negative_ttl\n",
+          "new": "            expires_at = now + self.revocation_window\n"
+        }
+      ],
+      "expect": "a negative result is cached briefly"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "negative results never cached",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "            expires_at = now + self.negative_ttl\n",
+          "new": "            return None\n"
+        }
+      ],
+      "expect": "a negative result is cached briefly"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "an answer that is already expired stored anyway",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        if expires_at <= now:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "a result that is already expired is not stored"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "put returns the time to live instead of the expiry",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        return expires_at\n",
+          "new": "        return expires_at - now\n"
+        }
+      ],
+      "expect": "a positive entry lives until the earliest of exp, max_age and the revocation window"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "only the RFC 7662 members stored",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "            (*key, json.dumps(response), expires_at),\n",
+          "new": "            (*key, json.dumps({k: response[k] for k in ('active', 'scope', 'client_id', 'sub', 'aud', 'iss', 'exp', 'iat', 'token_type') if k in response}), expires_at),\n"
+        }
+      ],
+      "expect": "a cached response comes back exactly, at every replica"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "scope normalized into sorted order",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "            (*key, json.dumps(response), expires_at),\n",
+          "new": "            (*key, json.dumps({**response, 'scope': ' '.join(sorted(str(response.get('scope', '')).split()))} if 'scope' in response else response), expires_at),\n"
+        }
+      ],
+      "expect": "a cached response comes back exactly, at every replica"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "numbers stored as REAL, so integers come back as floats",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        return None if row is None else json.loads(row[0])\n",
+          "new": "        return None if row is None else json.loads(row[0], parse_int=float)\n"
+        }
+      ],
+      "expect": "a cached response comes back exactly, at every replica"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "active stored as an INTEGER column",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        return None if row is None else json.loads(row[0])\n",
+          "new": "        return None if row is None else {**json.loads(row[0]), 'active': int(json.loads(row[0])['active'])}\n"
+        }
+      ],
+      "expect": "a cached response comes back exactly, at every replica"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "the expiry stamped into the cached response",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "            (*key, json.dumps(response), expires_at),\n",
+          "new": "            (*key, json.dumps({**response, 'expires_at': expires_at}), expires_at),\n"
+        }
+      ],
+      "expect": "a cached response comes back exactly, at every replica"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "CREATE TABLE IF NOT EXISTS",
+          "new": "CREATE TABLE"
+        }
+      ],
+      "expect": "table introspection already exists"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "a plain INSERT, so storing again fails",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "INSERT OR REPLACE INTO",
+          "new": "INSERT INTO"
+        }
+      ],
+      "expect": "UNIQUE constraint failed"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "no primary key, so storing again adds a second row",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "    expires_at REAL NOT NULL,\n    PRIMARY KEY (issuer, token_sha256, resource)\n",
+          "new": "    expires_at REAL NOT NULL\n"
+        }
+      ],
+      "expect": "storing again replaces the entry"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "entries served past their expiry",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "            \" WHERE issuer = ? AND token_sha256 = ? AND resource = ? AND expires_at > ?\",\n            (issuer, _digest(token), resource, self.clock()),\n",
+          "new": "            \" WHERE issuer = ? AND token_sha256 = ? AND resource = ? AND ? IS NOT NULL\",\n            (issuer, _digest(token), resource, self.clock()),\n"
+        }
+      ],
+      "expect": "an entry is not served past its expiry"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "the clock read once, when the cache opens",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        self.clock = clock\n",
+          "new": "        self.clock = (lambda opened: lambda: opened)(clock())\n"
+        }
+      ],
+      "expect": "an entry is not served past its expiry"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "lookup introspects every time",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        cached = self.get(issuer, token, resource)\n        if cached is not None:\n            return cached\n        response = introspect()\n",
+          "new": "        response = introspect()\n"
+        }
+      ],
+      "expect": "a live entry answers without introspecting"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "lookup stores without the issuer's max_age",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        self.put(issuer, token, resource, response, max_age=max_age)\n",
+          "new": "        self.put(issuer, token, resource, response)\n"
+        }
+      ],
+      "expect": "lookup stores with the issuer's max_age"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "a failed introspection cached as inactive",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        response = introspect()\n        self.put",
+          "new": "        try:\n            response = introspect()\n        except Exception:\n            self.put(issuer, token, resource, {'active': False})\n            raise\n        self.put"
+        }
+      ],
+      "expect": "a failed introspection stores nothing"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "a failed introspection answered as inactive",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        response = introspect()\n        self.put",
+          "new": "        try:\n            response = introspect()\n        except Exception:\n            return {'active': False}\n        self.put"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "put stamps the expiry into the caller's dict",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        key = (issuer, _digest(token), resource)\n",
+          "new": "        response['cached_until'] = expires_at\n        key = (issuer, _digest(token), resource)\n"
+        }
+      ],
+      "expect": "put leaves the caller's response alone"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "lookup introspects again when the cached answer is negative",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        if cached is not None:\n            return cached\n",
+          "new": "        if cached is not None and cached.get('active') is True:\n            return cached\n"
+        }
+      ],
+      "expect": "a negative answer is reused too"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "get treats a negative entry as a miss",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        return None if row is None else json.loads(row[0])\n",
+          "new": "        return None if row is None or json.loads(row[0]).get('active') is not True else json.loads(row[0])\n"
+        }
+      ],
+      "expect": "a negative result is served while it lives"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "max_age read by truthiness, so max_age 0 counts as no guidance",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "if max_age is not None:",
+          "new": "if max_age:"
+        }
+      ],
+      "expect": "max_age 0 means the answer is not reused"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "active read by truthiness, so \"false\" counts as positive",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "if response.get(\"active\") is True:",
+          "new": "if response.get(\"active\"):"
+        }
+      ],
+      "expect": "only \"active\": true is a positive answer"
+    },
+    {
+      "test": "test_introspection_cache",
+      "name": "lookup stores every answer again, so a hit extends the entry",
+      "edits": [
+        {
+          "file": "introspection.py",
+          "old": "        cached = self.get(issuer, token, resource)\n        if cached is not None:\n            return cached\n        response = introspect()\n        self.put(issuer, token, resource, response, max_age=max_age)\n        return response",
+          "new": "        response = self.get(issuer, token, resource)\n        if response is None:\n            response = introspect()\n        self.put(issuer, token, resource, response, max_age=max_age)\n        return response"
+        }
+      ],
+      "expect": "reading an entry does not extend it"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "no clock check, so a NaN clock never expires anything",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(now):\n",
+          "new": "        if now is None:\n"
+        }
+      ],
+      "expect": "a clock that cannot be read is an operational error"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "the clock checked for its type only",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(now):\n",
+          "new": "        if isinstance(now, bool) or not isinstance(now, (int, float)):\n"
+        }
+      ],
+      "expect": "a clock that cannot be read is an operational error"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "an unreadable clock refused as a bad token",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            return Outcome.error(\"clock unavailable\")\n",
+          "new": "            return self.server.prm.refuse(401, \"clock unavailable\")\n"
+        }
+      ],
+      "expect": "a clock that cannot be read is an operational error"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "no algorithm check",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if header.get(\"alg\") not in policy.algorithms:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "an unsigned token is refused for its algorithm"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "only alg none refused",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if header.get(\"alg\") not in policy.algorithms:\n",
+          "new": "        if header.get(\"alg\") == \"none\":\n"
+        }
+      ],
+      "expect": "the issuer's configured algorithms decide, not the token header"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "the algorithm checked after validate has fetched keys",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if header.get(\"alg\") not in policy.algorithms:\n            return self.server.prm.refuse(401, \"alg not allowed\")\n",
+          "new": ""
+        },
+        {
+          "file": "gate.py",
+          "old": "        try:\n            outcome = self.server.validate(token, required_scope)\n        except Unavailable:\n            return Outcome.error(\"jwks unavailable\")\n",
+          "new": "        try:\n            outcome = self.server.validate(token, required_scope)\n        except Unavailable:\n            return Outcome.error(\"jwks unavailable\")\n        if header.get(\"alg\") not in policy.algorithms:\n            return self.server.prm.refuse(401, \"alg not allowed\")\n"
+        }
+      ],
+      "expect": "an algorithm the issuer does not use costs no JWKS fetch"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "exp checked with isinstance(exp, int), which lets True through",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    return type(claims.get(\"exp\")) is int and",
+          "new": "    return isinstance(claims.get(\"exp\"), int) and"
+        }
+      ],
+      "expect": "a claim of the wrong type is malformed"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "exp type never checked",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    return type(claims.get(\"exp\")) is int and",
+          "new": "    return"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "scope type never checked",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": " and isinstance(claims.get(\"scope\", \"\"), str)\n",
+          "new": "\n"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "iss used as a dictionary key unchecked",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        policy = self.policies.get(issuer) if isinstance(issuer, str) else None\n",
+          "new": "        policy = self.policies.get(issuer)\n"
+        }
+      ],
+      "expect": "unhashable"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "a JWT validated locally whatever its issuer's policy says",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if policy.mode == \"introspection\":\n            return self._introspect(issuer, token, required_scope, now)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a partners token is introspected, even when it looks like a JWT"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "an opaque token refused as malformed although there is an opaque issuer",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        except TokenError:\n            if self.opaque_issuer is None:\n",
+          "new": "        except TokenError:\n            if True:\n"
+        }
+      ],
+      "expect": "an opaque token is introspected at the opaque issuer"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "a JWT from an issuer without a policy sent to the opaque issuer",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if policy is None:\n            return self.server.prm.refuse(401, \"iss not allowed\")\n",
+          "new": "        if policy is None:\n            return self._introspect(self.opaque_issuer, token, required_scope, now)\n"
+        }
+      ],
+      "expect": "iss must be a string"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "introspection without the cache",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            response = self.introspection.lookup(\n                issuer, token, prm.resource, lambda: idp.introspect(token), max_age=self.policies[issuer].cache_max_age\n            )\n",
+          "new": "            response = idp.introspect(token)\n"
+        }
+      ],
+      "expect": "introspection results are cached"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "the issuer's cache guidance not passed to the cache",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "max_age=self.policies[issuer].cache_max_age",
+          "new": "max_age=None"
+        }
+      ],
+      "expect": "the issuer's cache guidance bounds how long an answer is reused"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "an introspection outage read as an inactive token",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        except Unavailable:\n            return Outcome.error(\"introspection unavailable\")\n",
+          "new": "        except Unavailable:\n            return prm.refuse(401, \"inactive\")\n"
+        }
+      ],
+      "expect": "an introspection outage fails closed, as an operational error"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "an introspection outage read as an active token",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        except Unavailable:\n            return Outcome.error(\"introspection unavailable\")\n",
+          "new": "        except Unavailable:\n            response = {\"active\": True, \"aud\": prm.resource, \"exp\": 2**31, \"scope\": required_scope}\n"
+        }
+      ],
+      "expect": "an introspection outage fails closed, as an operational error"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "an introspection outage not caught",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        try:\n            response = self.introspection.lookup(\n                issuer, token, prm.resource, lambda: idp.introspect(token), max_age=self.policies[issuer].cache_max_age\n            )\n        except Unavailable:\n            return Outcome.error(\"introspection unavailable\")\n",
+          "new": "        response = self.introspection.lookup(\n                issuer, token, prm.resource, lambda: idp.introspect(token), max_age=self.policies[issuer].cache_max_age\n            )\n"
+        }
+      ],
+      "expect": "Unavailable"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "the introspected aud not checked",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if response.get(\"aud\") != prm.resource:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "an introspected token must be for this resource"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "an introspected answer without aud taken as this resource",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if response.get(\"aud\") != prm.resource:\n",
+          "new": "        if response.get(\"aud\", prm.resource) != prm.resource:\n"
+        }
+      ],
+      "expect": "an introspected token without aud is not for this resource either"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "the introspected aud read with response['aud']",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if response.get(\"aud\") != prm.resource:\n",
+          "new": "        if response[\"aud\"] != prm.resource:\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "the introspected exp not checked against our clock",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if now >= response[\"exp\"]:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "an active answer is still checked against our clock"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "the introspected claim types not checked",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if not _well_formed(response):\n            return prm.refuse(401, \"malformed\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "the introspected scope not checked",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if required_scope not in response.get(\"scope\", \"\").split():\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "an introspected token needs the scope too"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "no stale window: keys are unusable once the refresh interval passes",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "policy.refresh_interval + policy.stale_window:\n",
+          "new": "policy.refresh_interval:\n"
+        }
+      ],
+      "expect": "a refresh that succeeds while deciding leaves health ok"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "stale keys used however old they are",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            return Outcome.error(\"jwks stale\")\n",
+          "new": "            pass\n"
+        }
+      ],
+      "expect": "past the stale window even known keys are not used"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "keys past the window refreshed inline, and the failure reported as unavailable",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            return Outcome.error(\"jwks stale\")\n",
+          "new": "            try:\n                self.server.refresh_jwks(issuer)\n            except Unavailable:\n                return Outcome.error(\"jwks unavailable\")\n"
+        }
+      ],
+      "expect": "past the stale window even known keys are not used"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "an error past the window built as a 503 refusal with a challenge",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            return Outcome.error(\"jwks stale\")\n",
+          "new": "            return self.server.prm.refuse(503, \"jwks stale\", health=\"degraded\")\n"
+        }
+      ],
+      "expect": "past the stale window even known keys are not used"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "health never degraded",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            return replace(outcome, health=\"degraded\")\n",
+          "new": "            return outcome\n"
+        }
+      ],
+      "expect": "known keys stay usable within the stale window, reported as degraded"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "health judged from the keys as they were before validate",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            return Outcome.error(\"jwks unavailable\")\n        entry = self.server.jwks_cache.get(issuer)\n",
+          "new": "            return Outcome.error(\"jwks unavailable\")\n"
+        }
+      ],
+      "expect": "a refresh that succeeds while deciding leaves health ok"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "only an allowed request reported as degraded",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if entry is not None and now - entry[\"fetched_at\"] > policy.refresh_interval:\n",
+          "new": "        if entry is not None and now - entry[\"fetched_at\"] > policy.refresh_interval and outcome.decision == \"allow\":\n"
+        }
+      ],
+      "expect": "a refusal made with stale keys is degraded too"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "a JWKS outage refused as an unknown kid",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        try:\n            outcome = self.server.validate(token, required_scope)\n        except Unavailable:\n            return Outcome.error(\"jwks unavailable\")\n",
+          "new": "        try:\n            outcome = self.server.validate(token, required_scope)\n        except Unavailable:\n            return self.server.prm.refuse(401, \"unknown kid\", health=\"degraded\")\n"
+        }
+      ],
+      "expect": "an unknown kid whose one refresh fails is an outage, never accepted"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "a JWKS outage inside validate not caught",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        try:\n            outcome = self.server.validate(token, required_scope)\n        except Unavailable:\n            return Outcome.error(\"jwks unavailable\")\n",
+          "new": "        outcome = self.server.validate(token, required_scope)\n"
+        }
+      ],
+      "expect": "Unavailable"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "keys refreshed inline whenever they are past the refresh interval",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        try:\n            outcome = self.server.validate(token, required_scope)\n",
+          "new": "        if entry is not None and now - entry[\"fetched_at\"] > policy.refresh_interval:\n            try:\n                self.server.refresh_jwks(issuer)\n            except Unavailable:\n                pass\n        try:\n            outcome = self.server.validate(token, required_scope)\n"
+        }
+      ],
+      "expect": "keys within the stale window are used without asking the issuer again"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "the clock checked only on the JWT path",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(now):\n            return Outcome.error(\"clock unavailable\")\n",
+          "new": ""
+        },
+        {
+          "file": "gate.py",
+          "old": "        if header.get(\"alg\") not in policy.algorithms:\n",
+          "new": "        if not math.isfinite(now):\n            return Outcome.error(\"clock unavailable\")\n        if header.get(\"alg\") not in policy.algorithms:\n"
+        }
+      ],
+      "expect": "NOT NULL constraint failed"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "stale window counted from the fetch, without the refresh interval",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "now - entry[\"fetched_at\"] > policy.refresh_interval + policy.stale_window",
+          "new": "now - entry[\"fetched_at\"] > policy.stale_window"
+        }
+      ],
+      "expect": "the stale window starts when the missed refresh was due"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "clock checked with math.isnan only",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(now):",
+          "new": "if not isinstance(now, (int, float)) or math.isnan(now):"
+        }
+      ],
+      "expect": "a clock that cannot be read is an operational error"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "introspected scope matched as a substring",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "if required_scope not in response.get(\"scope\", \"\").split():",
+          "new": "if required_scope not in response.get(\"scope\", \"\"):"
+        }
+      ],
+      "expect": "an introspected token needs the scope too"
+    },
+    {
+      "test": "test_gate_decisions",
+      "name": "algorithm pinned to HS256 instead of the policy",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "if header.get(\"alg\") not in policy.algorithms:",
+          "new": "if header.get(\"alg\") != \"HS256\":"
+        }
+      ],
+      "expect": "each issuer's policy names its algorithms"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "rows held back and yielded at the end",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    yield _record(COLUMNS)\n",
+          "new": "    yield _record(COLUMNS)\n    held = []\n"
+        },
+        {
+          "file": "timeline.py",
+          "old": "            yield _record((event[\"t_ms\"], _kid(event[\"token\"]), outcome.decision, outcome.reason, outcome.health))\n        else:\n            raise ValueError(f\"unknown event type {kind!r}\")\n",
+          "new": "            held.append(_record((event[\"t_ms\"], _kid(event[\"token\"]), outcome.decision, outcome.reason, outcome.health)))\n        else:\n            raise ValueError(f\"unknown event type {kind!r}\")\n    for row in held:\n        yield row\n"
+        }
+      ],
+      "expect": "decide each request as soon as it arrives"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "every event read before the first decision",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    async for event in events:\n",
+          "new": "    for event in [event async for event in events]:\n"
+        }
+      ],
+      "expect": "decide each request as soon as it arrives"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "rows joined with commas, so a kid with a comma or a newline forges rows",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    buffer = io.StringIO()\n    csv.writer(buffer).writerow(fields)\n    return buffer.getvalue()\n",
+          "new": "    return \",\".join(str(field) for field in fields) + \"\\r\\n\"\n"
+        }
+      ],
+      "expect": "one row per request, decided at its own time"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "the kid cleaned up before it is logged",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    return kid if isinstance(kid, str) else \"\"\n",
+          "new": "    return kid.replace(\"\\n\", \" \").replace('\"', \"'\") if isinstance(kid, str) else \"\"\n"
+        }
+      ],
+      "expect": "one row per request, decided at its own time"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "an opaque token's kid written as None",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    except TokenError:\n        return \"\"\n",
+          "new": "    except TokenError:\n        return \"None\"\n"
+        }
+      ],
+      "expect": "one row per request, decided at its own time"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "no header row",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    yield _record(COLUMNS)\n",
+          "new": ""
+        }
+      ],
+      "expect": "the header comes first, then one row per decision"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "a blank line after every record",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    return buffer.getvalue()\n",
+          "new": "    return buffer.getvalue() + \"\\r\\n\"\n"
+        }
+      ],
+      "expect": "the header comes first, then one row per decision"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "the clock never moved",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "        clock.now = event[\"t_ms\"] / 1000\n",
+          "new": ""
+        }
+      ],
+      "expect": "one row per request, decided at its own time"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "the clock moved after the event is handled",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "        clock.now = event[\"t_ms\"] / 1000\n        kind",
+          "new": "        kind"
+        },
+        {
+          "file": "timeline.py",
+          "old": "        else:\n            raise ValueError(f\"unknown event type {kind!r}\")\n",
+          "new": "        else:\n            raise ValueError(f\"unknown event type {kind!r}\")\n        clock.now = event[\"t_ms\"] / 1000\n"
+        }
+      ],
+      "expect": "one row per request, decided at its own time"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "the clock set to milliseconds",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "        clock.now = event[\"t_ms\"] / 1000\n",
+          "new": "        clock.now = event[\"t_ms\"]\n"
+        }
+      ],
+      "expect": "the header comes first, then one row per decision"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "t_ms written from the clock as a float",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "_record((event[\"t_ms\"], _kid",
+          "new": "_record((clock.now * 1000, _kid"
+        }
+      ],
+      "expect": "the header comes first, then one row per decision"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "a failed refresh stops the replay",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "            try:\n                gate.server.refresh_jwks(event[\"issuer\"])\n            except Unavailable:\n                pass\n",
+          "new": "            gate.server.refresh_jwks(event[\"issuer\"])\n"
+        }
+      ],
+      "expect": "Unavailable"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "a failed refresh logged as a row",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "            except Unavailable:\n                pass\n",
+          "new": "            except Unavailable:\n                yield _record((event[\"t_ms\"], \"\", \"error\", \"jwks unavailable\", \"degraded\"))\n"
+        }
+      ],
+      "expect": "one row per request, decided at its own time"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "every refresh logged as a row",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "                gate.server.refresh_jwks(event[\"issuer\"])\n",
+          "new": "                gate.server.refresh_jwks(event[\"issuer\"])\n                yield _record((event[\"t_ms\"], \"\", \"refresh\", \"ok\", \"ok\"))\n"
+        }
+      ],
+      "expect": "one row per request, decided at its own time"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "requests decided by validate instead of the gate",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "            outcome = gate.check(event[\"token\"], event[\"scope\"])\n",
+          "new": "            outcome = gate.server.validate(event[\"token\"], event[\"scope\"])\n"
+        }
+      ],
+      "expect": "one row per request, decided at its own time"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "one CSV buffer reused without being cleared",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "def _record(fields) -> str:\n    buffer = io.StringIO()\n    csv.writer(buffer).writerow(fields)\n    return buffer.getvalue()\n",
+          "new": "_BUFFER = io.StringIO()\n\n\ndef _record(fields) -> str:\n    csv.writer(_BUFFER).writerow(fields)\n    return _BUFFER.getvalue()\n"
+        }
+      ],
+      "expect": "the header comes first, then one row per decision"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "records yielded without their line ending",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    return buffer.getvalue()\n",
+          "new": "    return buffer.getvalue().rstrip(\"\\r\\n\")\n"
+        }
+      ],
+      "expect": "the header comes first, then one row per decision"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "every request checked for mcp:tools.invoke",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "gate.check(event[\"token\"], event[\"scope\"])",
+          "new": "gate.check(event[\"token\"], \"mcp:tools.invoke\")"
+        }
+      ],
+      "expect": "one row per request, decided at its own time"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "the clock set only for requests",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "        clock.now = event[\"t_ms\"] / 1000\n        kind = event.get(\"type\")\n",
+          "new": "        kind = event.get(\"type\")\n        if kind == \"request\":\n            clock.now = event[\"t_ms\"] / 1000\n"
+        }
+      ],
+      "expect": "one row per request, decided at its own time"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "a kid that is not a string written as text",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    return kid if isinstance(kid, str) else \"\"\n",
+          "new": "    return \"\" if kid is None else str(kid)\n"
+        }
+      ],
+      "expect": "one row per request, decided at its own time"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "an unknown event type skipped",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "        else:\n            raise ValueError(f\"unknown event type {kind!r}\")\n",
+          "new": "        else:\n            continue\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "the clock set with t_ms // 1000",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "clock.now = event[\"t_ms\"] / 1000",
+          "new": "clock.now = event[\"t_ms\"] // 1000"
+        }
+      ],
+      "expect": "one row per request, decided at its own time"
+    },
+    {
+      "test": "test_incident_replay",
+      "name": "a refresh event refreshes every trusted issuer",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "gate.server.refresh_jwks(event[\"issuer\"])",
+          "new": "for iss in gate.server.prm.authorization_servers:\n                    gate.server.refresh_jwks(iss)"
+        }
+      ],
+      "expect": "a refresh event refreshes only its own issuer"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "no whitespace or control check, as when urlsplit silently drops tabs",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if not isinstance(uri, str) or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in uri):\n",
+          "new": "    if not isinstance(uri, str):\n"
+        }
+      ],
+      "expect": "'http://127.0.0.1:7333/call\\tback' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "only leading and trailing whitespace checked",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if not isinstance(uri, str) or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in uri):\n",
+          "new": "    if not isinstance(uri, str) or uri != uri.strip():\n"
+        }
+      ],
+      "expect": "'http://127.0.0.1:7333/call\\tback' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "control characters checked, but not DEL",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if not isinstance(uri, str) or any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in uri):\n",
+          "new": "    if not isinstance(uri, str) or any(ch.isspace() or ord(ch) < 0x20 for ch in uri):\n"
+        }
+      ],
+      "expect": "'http://127.0.0.1:7333/callback\\x7f' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "an empty fragment allowed, as parsed.fragment reads it",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if \"#\" in uri:\n",
+          "new": "    if \"#\" in uri and not uri.endswith(\"#\"):\n"
+        }
+      ],
+      "expect": "'http://127.0.0.1:7333/callback#' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "empty userinfo allowed, as `if parsed.username:` reads it",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if \"@\" in authority:\n        return None\n",
+          "new": "    userinfo, _, authority = authority.rpartition(\"@\")\n    if userinfo:\n        return None\n"
+        }
+      ],
+      "expect": "'http://@127.0.0.1:7333/callback' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "userinfo dropped instead of refused",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if \"@\" in authority:\n        return None\n",
+          "new": "    authority = authority.rpartition(\"@\")[2]\n"
+        }
+      ],
+      "expect": "'http://@127.0.0.1:7333/callback' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "an empty port allowed, as parsed.port reads it",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if port is not None and not",
+          "new": "    if port and not"
+        }
+      ],
+      "expect": "'http://127.0.0.1:/callback' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "the port range not checked",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": " and int(port) <= 65535)",
+          "new": ")"
+        }
+      ],
+      "expect": "'http://127.0.0.1:65536/callback' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "port digits checked with str.isdigit, which takes any Unicode digit",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "_PORT.fullmatch(port) and int(port) <= 65535",
+          "new": "port.isdigit() and int(port) <= 65535"
+        }
+      ],
+      "expect": "/callback' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "loopback matched by prefix",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if scheme == \"http\":\n        return host in LOOPBACK_HOSTS\n",
+          "new": "    if scheme == \"http\":\n        return host is not None and host.startswith((\"localhost\", \"127.\", \"::1\"))\n"
+        }
+      ],
+      "expect": "'http://localhost.evil.example/callback' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "any loopback address accepted (ipaddress.is_loopback)",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if scheme == \"http\":\n        return host in LOOPBACK_HOSTS\n",
+          "new": "    if scheme == \"http\":\n        try:\n            return host == \"localhost\" or __import__(\"ipaddress\").ip_address(host).is_loopback\n        except ValueError:\n            return False\n"
+        }
+      ],
+      "expect": "'http://127.0.0.2:7333/callback' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "https accepted without a host",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "        return bool(host)\n",
+          "new": "        return host is not None\n"
+        }
+      ],
+      "expect": "'https:///callback' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "a private-use scheme of one label accepted",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    return len(labels) >= 2 and all(",
+          "new": "    return all("
+        }
+      ],
+      "expect": "'myapp:/callback' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "empty labels accepted",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "_LABEL = re.compile(r\"[A-Za-z0-9](?:[A-Za-z0-9\\-]*[A-Za-z0-9])?\")",
+          "new": "_LABEL = re.compile(r\"(?:[A-Za-z0-9](?:[A-Za-z0-9\\-]*[A-Za-z0-9])?)?\")"
+        }
+      ],
+      "expect": "'com..example:/callback' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "labels may start or end with a hyphen",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "_LABEL = re.compile(r\"[A-Za-z0-9](?:[A-Za-z0-9\\-]*[A-Za-z0-9])?\")",
+          "new": "_LABEL = re.compile(r\"[A-Za-z0-9\\-]+\")"
+        }
+      ],
+      "expect": "'com.example-:/callback' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "underscores accepted in a private-use scheme",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "_SCHEME = re.compile(r\"[A-Za-z][A-Za-z0-9+.\\-]*\")",
+          "new": "_SCHEME = re.compile(r\"[A-Za-z][A-Za-z0-9+._\\-]*\")"
+        },
+        {
+          "file": "redirects.py",
+          "old": "_LABEL = re.compile(r\"[A-Za-z0-9](?:[A-Za-z0-9\\-]*[A-Za-z0-9])?\")",
+          "new": "_LABEL = re.compile(r\"[A-Za-z0-9](?:[A-Za-z0-9_\\-]*[A-Za-z0-9])?\")"
+        }
+      ],
+      "expect": "'com.exam_ple:/callback' is not a native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "the scheme compared as written",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    scheme = scheme.lower()\n",
+          "new": ""
+        }
+      ],
+      "expect": "'HTTP://LOCALHOST:7333/callback' is a valid native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "the host compared as written",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    return host.lower()\n",
+          "new": "    return host\n"
+        }
+      ],
+      "expect": "'HTTP://LOCALHOST:7333/callback' is a valid native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "a query refused",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if \"#\" in uri:\n",
+          "new": "    if \"#\" in uri or \"?\" in uri:\n"
+        }
+      ],
+      "expect": "'https://app.example.com/callback?next=a@b' is a valid native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "an @ refused anywhere in the URI",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if \"#\" in uri:\n",
+          "new": "    if \"#\" in uri or \"@\" in uri:\n"
+        }
+      ],
+      "expect": "'https://app.example.com/callback?next=a@b' is a valid native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "an IPv6 host split at its first colon",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if authority.startswith(\"[\"):\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "'http://[::1]:7333/callback' is a valid native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "an unclosed IPv6 bracket raises, as urlsplit does",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "        if end == -1:\n            return None\n",
+          "new": "        if end == -1:\n            raise ValueError(\"Invalid IPv6 URL\")\n"
+        }
+      ],
+      "expect": "Invalid IPv6 URL"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "web clients allowed native redirects",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if application_type == \"web\":\n        return False\n",
+          "new": ""
+        }
+      ],
+      "expect": "'http://127.0.0.1:7333/callback' is not a web redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "an unknown application_type treated as native",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "        raise ValueError(f\"application_type must be native or web, not {application_type!r}\")\n",
+          "new": "        application_type = \"native\"\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "application_type defaults to web, as in OpenID Connect registration",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    application_type = body.get(\"application_type\")\n",
+          "new": "    application_type = body.get(\"application_type\", \"web\")\n"
+        }
+      ],
+      "expect": "DCR requires application_type, with no default"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "redirect_uris checked before application_type",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    application_type = body.get(\"application_type\")\n    if application_type not in (\"native\", \"web\"):\n        return \"invalid_client_metadata\"\n    uris = body.get(\"redirect_uris\")\n    if not isinstance(uris, list) or not uris:\n        return \"invalid_redirect_uri\"\n",
+          "new": "    uris = body.get(\"redirect_uris\")\n    if not isinstance(uris, list) or not uris:\n        return \"invalid_redirect_uri\"\n    application_type = body.get(\"application_type\")\n    if application_type not in (\"native\", \"web\"):\n        return \"invalid_client_metadata\"\n"
+        }
+      ],
+      "expect": "application_type is checked first"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "an empty redirect_uris list accepted",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if not isinstance(uris, list) or not uris:\n",
+          "new": "    if not isinstance(uris, list):\n"
+        }
+      ],
+      "expect": "redirect_uris must be a non-empty list of fitting URIs: []"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "only the first redirect URI checked",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "    if not all(redirect_uri_fits(uri, application_type) for uri in uris):\n",
+          "new": "    if not redirect_uri_fits(uris[0], application_type):\n"
+        }
+      ],
+      "expect": "redirect_uris must be a non-empty list of fitting URIs"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "authority ended only at a slash",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "re.split(r\"[/?]\", rest[2:], maxsplit=1)[0]",
+          "new": "rest[2:].split(\"/\", 1)[0]"
+        }
+      ],
+      "expect": "'http://127.0.0.1:7333?flow=desktop' is a valid native redirect"
+    },
+    {
+      "test": "test_dcr_redirects",
+      "name": "whitespace checked with str.isprintable",
+      "edits": [
+        {
+          "file": "redirects.py",
+          "old": "any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in uri)",
+          "new": "not uri.isprintable()"
+        }
+      ],
+      "expect": "'http://127.0.0.1:7333/call back' is not a native redirect"
+    }
+  ]
+}
