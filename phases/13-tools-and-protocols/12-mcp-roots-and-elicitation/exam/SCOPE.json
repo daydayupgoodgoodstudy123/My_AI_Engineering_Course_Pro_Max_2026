@@ -1,0 +1,141 @@
+{
+  "lesson": "phases/13-tools-and-protocols/12-mcp-roots-and-elicitation",
+  "title": "Explicit Scope and Stateless Elicitation",
+  "format": "staged-brownfield",
+  "service": "scopegate: a stateless MCP 2026-07-28 notes server with explicit workspace scope, a form-confirmed notes_delete, one-time nonces in memory and in SQLite, a URL-mode connector and nested workspace grants",
+  "sources": {
+    "docs/en.md": "5b061e2bec0962f9a1bcf881f7886fbe16426236f428311f30199f398c1af6bd",
+    "code/main.py": "d6baa51b6c4ec61e32be7670da27e930b87e21703f7ba11fecbdb9841f0d6ee2"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_scope_and_replay",
+      "kind": "debug",
+      "lesson_anchor": "The three-layer rule (prefix confusion and encoded traversal); Capability Negotiation Is Per Request; Protecting Destructive MRTR State (bounded, TTL-pruned replay store); code/main.py uri_within_workspace, supports_form_elicitation, ReplayStore",
+      "planted_bugs": [
+        "uri_within_workspace compares paths with str.startswith, so file:///work/notes-evil/q3-report.md is inside file:///work/notes; it surfaces two calls up, as an extra candidate from NoteBook.matching",
+        "file_uri_parts normalizes before it percent-decodes, so %2e%2e and %2f only become .. and / after normpath has run, and /work/notes/../private.md counts as inside",
+        "supports_form_elicitation reads elicitation.get('form', {}), so the default makes a URL-only declaration look like form support",
+        "ReplayStore.claim_and_consume rebuilds the whole consumed dict on every claim to drop expired nonces, O(n) per claim and quadratic over many live nonces"
+      ],
+      "timing_assert": "10000 claims with every nonce still live, under 0.12 s (the rebuilding version takes 1.4 to 2.4 s on a loaded machine, the expiry heap 3 to 11 ms)",
+      "overfix_guard": "a full store refuses a new nonce and still refuses a replay of a live one, which rules out evicting the oldest entry; a nonce claimed first but expiring later must not block one claimed later that expires first, which rules out pruning in insertion order; expiry at exactly now frees the slot; a claim whose operation fails stays unconsumed; containment must decode exactly once (%252e%252e), accept %20, accept a .. that stays inside, keep the workspace itself and the root workspace inside, and compare hosts; form support keeps the empty declaration and does not let a declared url cancel form; a full store refuses exactly at max_entries, and a replay of a live nonce is reported as a replay even when the store is full",
+      "deviation": "The suggested 20000 claims would make the quadratic version run 5 s or more, past the 3 s ceiling, so the timing uses 10000 live nonces. The first failure surfaces through NoteBook.matching (the in-memory candidate search), not through the server, because the server's notes_delete is Part 3's work."
+    },
+    {
+      "part": 2,
+      "test": "test_replay_db_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Protecting Destructive MRTR State: a production database should couple the nonce claim and mutation in one transaction; Exercises 1 and 3 (SQLite replay store, re-check containment inside the mutation transaction, two processes cannot both commit)",
+      "exactness": "claims come back as {nonce: expires_at} exactly, including 1290.123456789 and 1000.5, from the other process and after a reopen; a claim kept to the sub-second is still refused at 1000.0 when its state expires at 1000.5",
+      "traps": [
+        "check-then-insert race, exposed by a third connection holding BEGIN IMMEDIATE while both retries arrive",
+        "INSERT OR IGNORE without the row count, or INSERT OR REPLACE",
+        "nonces remembered in process memory",
+        "claim committed before the deletion, including through a nested with-block that commits on its inner exit",
+        "no existence or containment re-check inside the transaction, or containment checked with SQL LIKE",
+        "expiry at exactly now accepted, also on the decline path",
+        "decline not committed",
+        "prune keeps rows that expire exactly now, or drops live rows",
+        "expiry stored as whole seconds or as text",
+        "note looked up before the claim takes the write lock (a used nonce naming a deleted note must still be reported as consumed)",
+        "autocommit connection, lastrowid instead of rowcount, busy timeout 0"
+      ],
+      "clarifying_questions": [
+        "nonces in memory",
+        "simultaneous retries",
+        "prune inside claim",
+        "expiry precision",
+        "busy timeout",
+        "claim before the re-check"
+      ],
+      "deviation": "The notes table and its accessors are given, so the part is about the claimed-nonce table and the shared transaction. Two server processes are simulated by NoteDB instances on their own connections, two of them in worker threads."
+    },
+    {
+      "part": 3,
+      "test": "test_delete_confirmation",
+      "kind": "core algorithm",
+      "lesson_anchor": "Elicitation Still Exists, but Delivery Changed; Form Mode; Response Branches; Protecting Destructive MRTR State (signed candidate set, live re-check before mutation, decline terminal, cancel and malformed answers retryable); code/main.py tools_call and _delete_note_once",
+      "traps": [
+        "candidates by title only, outside the workspace, sorted instead of NoteBook order, or matched case-sensitively",
+        "no match answered as a protocol error",
+        "answer not validated by the server: missing content, confirm 'true', 1 or false, note_id outside the signed set or not a string, unknown or missing action",
+        "confirm false taken as a decline",
+        "candidates searched again on the retry, or the state decoded without its signature",
+        "invalid answers or a cancel consume the nonce",
+        "no live re-check of existence or containment before the deletion",
+        "decline that consumes nothing, asks again, or reports an error",
+        "nonce derived from the arguments",
+        "deletion before the claim",
+        "live re-checks in the wrong order (authorization before containment), the workspace re-authorized instead of the note"
+      ],
+      "integration": "a note moved to file:///work/notes/%2e%2e/outbox/ after the form was shown needs Part 1's decoding to be refused; two NotesServer objects share the NoteBook and the ReplayStore",
+      "clarifying_questions": [
+        "extra content fields",
+        "confirm false",
+        "enum order",
+        "after a decline",
+        "note gone or moved"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_url_mode_flow",
+      "kind": "streaming",
+      "lesson_anchor": "URL Mode (show the full destination, consent before opening, no prefetch, accept does not prove completion, bind the browser user to the principal); Response Branches; Exercise 2",
+      "wire_format": "NDJSON client action log (show_url, open, retry, complete, refused), decided by the test's join, endswith('\\n'), splitlines and json.loads; the test also records how many ticks were pulled when each line arrived",
+      "traps": [
+        "open before asking, or open after a decline",
+        "accept taken as completion",
+        "retry without waiting for a tick",
+        "ask and open again for the same URL",
+        "consent shown a shortened URL",
+        "decline or cancel followed by more retries or ticks; cancel turned into decline",
+        "running out of ticks raises StopAsyncIteration inside the async generator",
+        "lines buffered until the end",
+        "missing newline or blank lines",
+        "retry ids reused, _meta dropped, content sent with the answer",
+        "error responses read as results",
+        "browser_callback without the principal check, for unknown flows (KeyError), or for finished and declined flows, or without connecting the principal",
+        "retries echo the first requestState instead of the latest (the test moves the connector clock on every tick, so each state differs)"
+      ],
+      "clarifying_questions": [
+        "when to retry",
+        "asking again",
+        "ticks run out",
+        "error responses",
+        "another browser user",
+        "which requestState"
+      ],
+      "deviation": "The URL-mode server (ReportConnector) is given except browser_callback, which carries the browser-user binding. Out-of-band completion is simulated by the test calling browser_callback between ticks; ticks stand for the moments the user says they are back. The -32021 data for a missing URL capability, {'elicitation': {'url': {}}}, follows the shape the lesson gives for form mode."
+    },
+    {
+      "part": 5,
+      "test": "test_nested_grants",
+      "kind": "tree",
+      "lesson_anchor": "The three-layer rule, Authorization layer (is this principal allowed to use this workspace); Two Problems That Look Similar (a client-provided folder is not proof the caller may delete everything inside it)",
+      "traps": [
+        "string-prefix matching",
+        "least specific grant wins, or any deny above wins",
+        "deepest node with any grant decides regardless of principal, or grants not kept per principal",
+        "last grant on a workspace replaces earlier ones; read plus delete taken as read",
+        "read allows deleting, delete does not allow reading, deny blocks only deleting",
+        "no grant means allowed; hosts ignored",
+        "grant or target URIs used as written, or normalized before decoding",
+        "invalid permissions, grant URIs or actions not rejected",
+        "server offers notes the principal may not delete, or does not re-authorize before the deletion",
+        "a grant on the root workspace file:/// ignored by an ancestor walk that stops at /",
+        "an invalid target URI raises instead of returning False"
+      ],
+      "clarifying_questions": [
+        "read and delete on one workspace",
+        "deny above, delete below",
+        "unknown action",
+        "other principals"
+      ],
+      "deviation": "Same-workspace allows add up (read plus delete is delete) and only deny overrides; the lesson does not name this, so it is stated in the GrantTree docstring and the clarifying answers. The tree is plugged into the Part 3 server at the end."
+    }
+  ]
+}

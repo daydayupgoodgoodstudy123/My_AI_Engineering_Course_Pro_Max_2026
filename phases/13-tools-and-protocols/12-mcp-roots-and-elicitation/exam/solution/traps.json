@@ -1,0 +1,1470 @@
+{
+  "package": "scopegate",
+  "tests": [
+    "test_scope_and_replay",
+    "test_replay_db_roundtrip",
+    "test_delete_confirmation",
+    "test_url_mode_flow",
+    "test_nested_grants"
+  ],
+  "layers": [
+    {
+      "test": "test_scope_and_replay",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "only notes inside the workspace are candidates"
+        },
+        {
+          "name": "compare path components",
+          "edits": [
+            {
+              "file": "scope.py",
+              "old": "    return candidate_path.startswith(workspace_path)\n",
+              "new": "    return posixpath.commonpath([workspace_path, candidate_path]) == workspace_path\n"
+            }
+          ],
+          "expect": "leaves the workspace once it is decoded"
+        },
+        {
+          "name": "+ decode before normalizing",
+          "edits": [
+            {
+              "file": "scope.py",
+              "old": "    path = unquote(posixpath.normpath(parsed.path))\n",
+              "new": "    path = posixpath.normpath(unquote(parsed.path))\n"
+            }
+          ],
+          "expect": "a URL-only client does not support form mode"
+        },
+        {
+          "name": "+ URL-only is not form",
+          "edits": [
+            {
+              "file": "protocol.py",
+              "old": "    return isinstance(elicitation.get(\"form\", {}), dict)\n",
+              "new": "    if not elicitation:\n        return True\n    return isinstance(elicitation.get(\"form\"), dict)\n"
+            }
+          ],
+          "expect": "claiming a nonce must not rescan every stored nonce"
+        },
+        {
+          "name": "+ expiry heap instead of a rebuild per claim",
+          "edits": [
+            {
+              "file": "replay.py",
+              "old": "import threading\n",
+              "new": "import heapq\nimport threading\n"
+            },
+            {
+              "file": "replay.py",
+              "old": "        self._consumed: dict[str, float] = {}\n",
+              "new": "        self._consumed: dict[str, float] = {}\n        self._expiries: list[tuple[float, str]] = []  # min-heap of (expires_at, nonce)\n"
+            },
+            {
+              "file": "replay.py",
+              "old": "            self._consumed = {\n                key: expiry\n                for key, expiry in self._consumed.items()\n                if expiry > now\n            }\n",
+              "new": "            while self._expiries and self._expiries[0][0] <= now:\n                expiry, old = heapq.heappop(self._expiries)\n                if self._consumed.get(old) == expiry:\n                    del self._consumed[old]\n"
+            },
+            {
+              "file": "replay.py",
+              "old": "            self._consumed[nonce] = expires_at\n            return result\n",
+              "new": "            self._consumed[nonce] = expires_at\n            heapq.heappush(self._expiries, (expires_at, nonce))\n            return result\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_scope_and_replay",
+      "name": "evict the oldest nonce when the store is full",
+      "edits": [
+        {
+          "file": "replay.py",
+          "old": "            if len(self._consumed) >= self.max_entries:\n                raise McpError(-32023, \"replay protection capacity exhausted\")\n",
+          "new": "            if len(self._consumed) >= self.max_entries:\n                del self._consumed[next(iter(self._consumed))]\n"
+        }
+      ],
+      "expect": "a full store refuses new nonces and never forgets a live one"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "never prune, so the store only fills up",
+      "edits": [
+        {
+          "file": "replay.py",
+          "old": "            while self._expiries and self._expiries[0][0] <= now:\n",
+          "new": "            while False:\n"
+        }
+      ],
+      "expect": "a nonce frees its slot when its state expires"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "prune from the front of the insertion order",
+      "edits": [
+        {
+          "file": "replay.py",
+          "old": "            while self._expiries and self._expiries[0][0] <= now:\n                expiry, old = heapq.heappop(self._expiries)\n                if self._consumed.get(old) == expiry:\n                    del self._consumed[old]\n",
+          "new": "            while self._consumed and next(iter(self._consumed.values())) <= now:\n                del self._consumed[next(iter(self._consumed))]\n"
+        }
+      ],
+      "expect": "a nonce frees its slot when its state expires"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "a nonce that expires exactly now is kept",
+      "edits": [
+        {
+          "file": "replay.py",
+          "old": "self._expiries[0][0] <= now:",
+          "new": "self._expiries[0][0] < now:"
+        }
+      ],
+      "expect": "a nonce frees its slot when its state expires"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "consume the nonce before running the operation",
+      "edits": [
+        {
+          "file": "replay.py",
+          "old": "            result = operation()\n            self._consumed[nonce] = expires_at\n",
+          "new": "            self._consumed[nonce] = expires_at\n            result = operation()\n"
+        }
+      ],
+      "expect": "a claim whose operation fails is not consumed"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "percent-decode until nothing changes",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "    path = posixpath.normpath(unquote(parsed.path))\n",
+          "new": "    path = parsed.path\n    while unquote(path) != path:\n        path = unquote(path)\n    path = posixpath.normpath(path)\n"
+        }
+      ],
+      "expect": "%252e%252e/raw.md is inside the workspace: decode once, then normalize"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "refuse every percent-encoded path",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "    if parsed.scheme != \"file\" or parsed.query or parsed.fragment:\n",
+          "new": "    if parsed.scheme != \"file\" or parsed.query or parsed.fragment or \"%\" in parsed.path:\n"
+        }
+      ],
+      "expect": "q3%20plan.md is inside the workspace: decode once, then normalize"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "only paths strictly below the workspace count",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "    return posixpath.commonpath([workspace_path, candidate_path]) == workspace_path\n",
+          "new": "    return candidate_path.startswith(workspace_path + \"/\")\n"
+        }
+      ],
+      "expect": "file:///work/notes is inside the workspace"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "equal, or a string prefix plus a slash",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "    return posixpath.commonpath([workspace_path, candidate_path]) == workspace_path\n",
+          "new": "    return candidate_path == workspace_path or candidate_path.startswith(workspace_path + \"/\")\n"
+        }
+      ],
+      "expect": "everything is inside the root workspace"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "hosts are not compared",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "    if workspace_host != candidate_host:\n        return False\n",
+          "new": ""
+        }
+      ],
+      "expect": "file://nas/work/notes/q3.md is outside the workspace"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "an empty elicitation declaration no longer means form",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "    if not elicitation:\n        return True\n    return isinstance(elicitation.get(\"form\"), dict)\n",
+          "new": "    return isinstance(elicitation.get(\"form\"), dict)\n"
+        }
+      ],
+      "expect": "{'elicitation': {}} supports form mode"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "a declared URL mode cancels form support",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "    return isinstance(elicitation.get(\"form\"), dict)\n",
+          "new": "    return isinstance(elicitation.get(\"form\"), dict) and \"url\" not in elicitation\n"
+        }
+      ],
+      "expect": "'url': {}}} supports form mode"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "the emptiness test runs before the type test",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "    if not isinstance(elicitation, dict):\n        return False\n    if not elicitation:\n        return True\n",
+          "new": "    if not elicitation:\n        return True\n    if not isinstance(elicitation, dict):\n        return False\n"
+        }
+      ],
+      "expect": "{} does not support form mode"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "check for the nonce, then insert it",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "        inserted = self._db.execute(\n            \"INSERT INTO claims (nonce, expires_at) VALUES (?, ?) ON CONFLICT (nonce) DO NOTHING\",\n            (nonce, expires_at),\n        ).rowcount\n        if inserted != 1:\n            raise McpError(-32602, \"requestState was already consumed\")\n",
+          "new": "        if self._db.execute(\"SELECT 1 FROM claims WHERE nonce = ?\", (nonce,)).fetchone():\n            raise McpError(-32602, \"requestState was already consumed\")\n        self._db.execute(\"INSERT INTO claims (nonce, expires_at) VALUES (?, ?)\", (nonce, expires_at))\n"
+        }
+      ],
+      "expect": "of two simultaneous retries exactly one deletes"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "check for the nonce, then INSERT OR IGNORE",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "        inserted = self._db.execute(\n            \"INSERT INTO claims (nonce, expires_at) VALUES (?, ?) ON CONFLICT (nonce) DO NOTHING\",\n            (nonce, expires_at),\n        ).rowcount\n        if inserted != 1:\n            raise McpError(-32602, \"requestState was already consumed\")\n",
+          "new": "        if self._db.execute(\"SELECT 1 FROM claims WHERE nonce = ?\", (nonce,)).fetchone():\n            raise McpError(-32602, \"requestState was already consumed\")\n        self._db.execute(\"INSERT OR IGNORE INTO claims (nonce, expires_at) VALUES (?, ?)\", (nonce, expires_at))\n"
+        }
+      ],
+      "expect": "of two simultaneous retries exactly one deletes"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "conditional insert without looking at the row count",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "        if inserted != 1:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "a confirmation is claimed once across processes"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "INSERT OR REPLACE re-claims a used nonce",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "\"INSERT INTO claims (nonce, expires_at) VALUES (?, ?) ON CONFLICT (nonce) DO NOTHING\"",
+          "new": "\"INSERT OR REPLACE INTO claims (nonce, expires_at) VALUES (?, ?)\""
+        }
+      ],
+      "expect": "a confirmation is claimed once across processes"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "nonces remembered in this process only",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "        inserted = self._db.execute(\n            \"INSERT INTO claims (nonce, expires_at) VALUES (?, ?) ON CONFLICT (nonce) DO NOTHING\",\n            (nonce, expires_at),\n        ).rowcount\n        if inserted != 1:\n            raise McpError(-32602, \"requestState was already consumed\")\n",
+          "new": "        if nonce in self.__dict__.setdefault(\"_seen\", set()):\n            raise McpError(-32602, \"requestState was already consumed\")\n        self._seen.add(nonce)\n        self._db.execute(\"INSERT OR REPLACE INTO claims (nonce, expires_at) VALUES (?, ?)\", (nonce, expires_at))\n"
+        }
+      ],
+      "expect": "a confirmation is claimed once across processes"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "the claim commits before the deletion runs",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "            self._claim(nonce, expires_at)\n            row = self._db.execute(",
+          "new": "            self._claim(nonce, expires_at)\n        with self._db:\n            row = self._db.execute("
+        }
+      ],
+      "expect": "a refused deletion rolls its claim back"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "no containment re-check inside the claim",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "            if not uri_within_workspace(workspace_uri, row[0]):\n                raise McpError(-32602, \"selected note is outside workspace\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "the live note must still be inside the workspace"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "no existence re-check inside the claim",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "            if row is None:\n                raise McpError(-32602, \"selected note no longer exists\")\n            if not uri_within_workspace(workspace_uri, row[0]):",
+          "new": "            if row is not None and not uri_within_workspace(workspace_uri, row[0]):"
+        }
+      ],
+      "expect": "the live note is checked inside the claim"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "a state that expires exactly now is still accepted",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "        if expires_at <= self._clock():\n",
+          "new": "        if expires_at < self._clock():\n"
+        }
+      ],
+      "expect": "a state that expires now is expired"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "a decline is never committed",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "        with self._db:\n            self._claim(nonce, expires_at)\n\n",
+          "new": "        self._claim(nonce, expires_at)\n\n"
+        }
+      ],
+      "expect": "a decline reaches the other process as soon as it returns"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "prune keeps a claim that expires exactly now",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "\"DELETE FROM claims WHERE expires_at <= ?\"",
+          "new": "\"DELETE FROM claims WHERE expires_at < ?\""
+        }
+      ],
+      "expect": "prune drops exactly the claims whose state has expired"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "prune clears every claim",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "            return self._db.execute(\"DELETE FROM claims WHERE expires_at <= ?\", (self._clock(),)).rowcount\n",
+          "new": "            return self._db.execute(\"DELETE FROM claims\").rowcount\n"
+        }
+      ],
+      "expect": "prune drops exactly the claims whose state has expired"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "expiry stored as whole seconds",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "            (nonce, expires_at),\n        ).rowcount\n",
+          "new": "            (nonce, int(expires_at)),\n        ).rowcount\n"
+        }
+      ],
+      "expect": "a claim keeps its expiry exactly"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "expiry stored as text",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "\" expires_at REAL NOT NULL)\"",
+          "new": "\" expires_at TEXT NOT NULL)\""
+        }
+      ],
+      "expect": "a claim keeps its expiry exactly"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "confirm compared with == True",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "content.get(\"confirm\") is not True",
+          "new": "content.get(\"confirm\") != True"
+        }
+      ],
+      "expect": "the server checks the answer itself"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "confirm checked for truthiness",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "content.get(\"confirm\") is not True",
+          "new": "not content.get(\"confirm\")"
+        }
+      ],
+      "expect": "the server checks the answer itself"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "missing content filled in as consent",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        content = answer.get(\"content\")\n",
+          "new": "        content = answer.get(\"content\") or {\"note_id\": state[\"candidateIds\"][0], \"confirm\": True}\n"
+        }
+      ],
+      "expect": "the server checks the answer itself"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "unknown actions treated as a cancel",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if action == \"cancel\":\n",
+          "new": "        if action not in (\"accept\", \"decline\"):\n"
+        }
+      ],
+      "expect": "the server checks the answer itself"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "invalid answers claim the nonce first",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        content = answer.get(\"content\")\n        if action != \"accept\" or not isinstance(content, dict):\n",
+          "new": "        self.replay.claim_and_consume(nonce, expires_at=expires_at, operation=lambda: None)\n        content = answer.get(\"content\")\n        if action != \"accept\" or not isinstance(content, dict):\n"
+        }
+      ],
+      "expect": "requestState was already consumed"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "a cancel consumes the nonce",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if action == \"cancel\":\n            return complete(",
+          "new": "        if action == \"cancel\":\n            self.replay.claim_and_consume(nonce, expires_at=expires_at, operation=lambda: None)\n            return complete("
+        }
+      ],
+      "expect": "requestState was already consumed"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "candidates searched again on the retry",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "note_id not in state[\"candidateIds\"]",
+          "new": "note_id not in [note.note_id for note in self.notes.matching(arguments[\"workspaceUri\"], arguments[\"title\"])]"
+        }
+      ],
+      "expect": "only a note the user was shown can be chosen"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "no live containment check before deleting",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            if not uri_within_workspace(workspace_uri, note.uri):\n                raise McpError(-32602, \"selected note is outside workspace\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "the live note is checked again just before the deletion"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "no live existence check before deleting",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            if note is None:\n                raise McpError(-32602, \"selected note no longer exists\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "a decline consumes nothing",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if action == \"decline\":\n            self.replay.claim_and_consume(nonce, expires_at=expires_at, operation=lambda: None)\n",
+          "new": "        if action == \"decline\":\n"
+        }
+      ],
+      "expect": "a decline is final"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "a decline asks again",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            return complete(content=text(\"deletion declined\"), structuredContent={\"deleted\": False}, isError=False)\n",
+          "new": "            return self.offer(principal=principal, arguments=arguments)\n"
+        }
+      ],
+      "expect": "a decline is a complete, non-error refusal, not a new prompt"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "a decline reported as an error",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "text(\"deletion declined\"), structuredContent={\"deleted\": False}, isError=False",
+          "new": "text(\"deletion declined\"), structuredContent={\"deleted\": False}, isError=True"
+        }
+      ],
+      "expect": "a decline is a complete, non-error refusal, not a new prompt"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "candidates found by title alone",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        candidates = [\n            note.note_id\n            for note in self.notes.matching(workspace_uri, arguments[\"title\"])\n            if self.grants.allowed(principal, note.uri, \"delete\")\n        ]\n",
+          "new": "        candidates = [note.note_id for note in self.notes.all() if arguments[\"title\"].casefold() in note.title.casefold()]\n"
+        }
+      ],
+      "expect": "one flat form whose enum lists the matching notes inside the workspace"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "enum sorted by id",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "{\"type\": \"string\", \"enum\": candidates}",
+          "new": "{\"type\": \"string\", \"enum\": sorted(candidates)}"
+        }
+      ],
+      "expect": "one flat form whose enum lists the matching notes inside the workspace"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "no match raised as a protocol error",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            return complete(content=text(\"no match in authorized workspace\"), isError=True)\n",
+          "new": "            raise McpError(-32602, \"no match in authorized workspace\")\n"
+        }
+      ],
+      "expect": "no candidate in the workspace is a tool error"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "nonce derived from the arguments",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "nonce=secrets.token_hex(16),",
+          "new": "nonce=repr(sorted(arguments.items())),"
+        }
+      ],
+      "expect": "every prompt carries a fresh nonce"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "delete first, claim afterwards",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        self.replay.claim_and_consume(nonce, expires_at=expires_at, operation=delete_live_note)\n",
+          "new": "        delete_live_note()\n        self.replay.claim_and_consume(nonce, expires_at=expires_at, operation=lambda: None)\n"
+        }
+      ],
+      "expect": "a refused replay deletes nothing"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "open the URL before asking",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            action = consent(url, params[\"message\"])\n",
+          "new": "            open_url(url)\n            action = consent(url, params[\"message\"])\n"
+        }
+      ],
+      "expect": "open it only after the user agrees"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "open the URL whatever the answer",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            if action == \"accept\":\n                open_url(url)\n",
+          "new": "            open_url(url)\n            if action == \"accept\":\n"
+        }
+      ],
+      "expect": "a declined URL is never opened"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "accept taken as completion",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "                yield line(event=\"open\", url=url)\n",
+          "new": "                yield line(event=\"open\", url=url)\n                yield line(event=\"complete\", id=response[\"id\"])\n                return\n"
+        }
+      ],
+      "expect": "accept only means the user agreed to open the URL"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "retry without waiting for a tick",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if action == \"accept\":\n            try:\n                await ticks.__anext__()\n            except StopAsyncIteration:\n                return\n",
+          "new": ""
+        }
+      ],
+      "expect": "the client keeps retrying"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "ask and open again on every round",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if url in opened:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "accept only means the user agreed to open the URL"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "keep going after a decline",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            yield line(event=\"refused\", id=request_id, action=action)\n            return\n",
+          "new": "            yield line(event=\"refused\", id=request_id, action=action)\n"
+        }
+      ],
+      "expect": "a decline is sent once and ends the flow"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "wait for a tick before sending a decline",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if action == \"accept\":\n            try:\n",
+          "new": "        if True:\n            try:\n"
+        }
+      ],
+      "expect": "a declined URL is never opened, and nothing waits after it"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "the browser user is not checked",
+      "edits": [
+        {
+          "file": "connect.py",
+          "old": "        if flow is None or flow.status != \"pending\" or browser_user != flow.principal:\n",
+          "new": "        if flow is None or flow.status != \"pending\":\n"
+        }
+      ],
+      "expect": "only the principal who started a pending flow can finish it in the browser"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "a finished flow can finish again",
+      "edits": [
+        {
+          "file": "connect.py",
+          "old": "        if flow is None or flow.status != \"pending\" or browser_user != flow.principal:\n",
+          "new": "        if flow is None or browser_user != flow.principal:\n"
+        }
+      ],
+      "expect": "only the principal who started a pending flow can finish it in the browser"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "an unknown flow raises KeyError",
+      "edits": [
+        {
+          "file": "connect.py",
+          "old": "        flow = self.flows.get(flow_id)\n",
+          "new": "        flow = self.flows[flow_id]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "lines collected and sent at the end",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "async def drive_url_elicitation(\n",
+          "new": "async def _drive(\n"
+        },
+        {
+          "file": "client.py",
+          "old": "            yield line(event=\"refused\", id=request_id, action=action)\n            return\n",
+          "new": "            yield line(event=\"refused\", id=request_id, action=action)\n            return\n\n\nasync def drive_url_elicitation(send, request, *, consent, open_url, ticks):\n    lines = [line async for line in _drive(send, request, consent=consent, open_url=open_url, ticks=ticks)]\n    for line in lines:\n        yield line\n"
+        }
+      ],
+      "expect": "write each line as soon as its action happens"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "no newline after each line",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        return json.dumps(event) + \"\\n\"\n",
+          "new": "        return json.dumps(event)\n"
+        }
+      ],
+      "expect": "every line ends with a newline"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "a blank line after each line",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        return json.dumps(event) + \"\\n\"\n",
+          "new": "        return json.dumps(event) + \"\\n\\n\"\n"
+        }
+      ],
+      "expect": "Expecting value"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "retries reuse the original id",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        request_id += 1\n",
+          "new": ""
+        }
+      ],
+      "expect": "accept only means the user agreed to open the URL"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "the consent prompt shows the page without its query",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            action = consent(url, params[\"message\"])\n",
+          "new": "            action = consent(url.split(\"?\")[0], params[\"message\"])\n"
+        }
+      ],
+      "expect": "ask once, with the full URL"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "retries rebuilt without the request _meta",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        retry = copy.deepcopy(request)\n",
+          "new": "        retry = {\"jsonrpc\": \"2.0\", \"method\": request[\"method\"], \"params\": {\"name\": request[\"params\"][\"name\"], \"arguments\": request[\"params\"][\"arguments\"]}}\n"
+        }
+      ],
+      "expect": "missing request _meta"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "error responses read as results",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        if \"error\" in response:\n            error = response[\"error\"]\n            raise McpError(error[\"code\"], error[\"message\"], error.get(\"data\"))\n        result = response[\"result\"]\n",
+          "new": "        result = response.get(\"result\", {})\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "a URL-mode answer sent with empty content",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        retry[\"params\"][\"inputResponses\"] = {key: {\"action\": action}}\n",
+          "new": "        retry[\"params\"][\"inputResponses\"] = {key: {\"action\": action, \"content\": {}}}\n"
+        }
+      ],
+      "expect": "a URL-mode answer carries no content"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "longest string prefix wins",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "        self._roots: dict[str, _Node] = {}\n",
+          "new": "        self._roots: dict[str, _Node] = {}\n        self._flat: list[tuple[str, str, Grant]] = []\n"
+        },
+        {
+          "file": "grants.py",
+          "old": "            node.grants.setdefault(grant.principal, set()).add(grant.permission)\n",
+          "new": "            node.grants.setdefault(grant.principal, set()).add(grant.permission)\n            self._flat.append((host, path, grant))\n"
+        },
+        {
+          "file": "grants.py",
+          "old": "        root = self._roots.get(host)\n        deciding = set() if root is None else _deciding(root, _components(path), principal, set())\n",
+          "new": "        matches = [(len(p), g.permission) for h, p, g in self._flat if h == host and g.principal == principal and path.startswith(p)]\n        longest = max((n for n, _ in matches), default=-1)\n        deciding = {permission for n, permission in matches if n == longest}\n"
+        }
+      ],
+      "expect": "alice may not delete file:///work/notes-evil/q3.md"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "the least specific grant wins",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "    here = node.grants.get(principal, inherited)\n",
+          "new": "    here = inherited or node.grants.get(principal, inherited)\n"
+        }
+      ],
+      "expect": "alice may delete file:///work/notes"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "any deny above wins",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "    here = node.grants.get(principal, inherited)\n",
+          "new": "    here = node.grants.get(principal, inherited) | (inherited & {\"deny\"})\n"
+        }
+      ],
+      "expect": "alice may delete file:///work/notes/archive/keep/2019.md"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "the last grant on a workspace replaces the earlier ones",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "            node.grants.setdefault(grant.principal, set()).add(grant.permission)\n",
+          "new": "            node.grants[grant.principal] = {grant.permission}\n"
+        }
+      ],
+      "expect": "alice may delete file:///work/notes/team/t.md"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "read plus delete on one workspace is read",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "        return \"delete\" in deciding or (action == \"read\" and \"read\" in deciding)\n",
+          "new": "        return (\"read\" not in deciding and \"delete\" in deciding) or (action == \"read\" and bool(deciding & {\"read\", \"delete\"}))\n"
+        }
+      ],
+      "expect": "alice may delete file:///work/notes/team/t.md"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "a read grant allows deleting",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "        return \"delete\" in deciding or (action == \"read\" and \"read\" in deciding)\n",
+          "new": "        return bool(deciding & {\"read\", \"delete\"})\n"
+        }
+      ],
+      "expect": "alice may not delete file:///work/plan.md"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "a delete grant does not allow reading",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "        return \"delete\" in deciding or (action == \"read\" and \"read\" in deciding)\n",
+          "new": "        return action in deciding\n"
+        }
+      ],
+      "expect": "alice may read file:///work/notes/q3.md"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "grant URIs used as written",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "from .scope import file_uri_parts, uri_within_workspace\n",
+          "new": "from urllib.parse import urlparse\n\nfrom .scope import file_uri_parts, uri_within_workspace\n"
+        },
+        {
+          "file": "grants.py",
+          "old": "            host, path = file_uri_parts(grant.workspace_uri)\n",
+          "new": "            host, path = urlparse(grant.workspace_uri).netloc, urlparse(grant.workspace_uri).path\n"
+        }
+      ],
+      "expect": "alice may not delete file:///work/notes/private/diary.md"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "target URIs used as written",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "from .scope import file_uri_parts, uri_within_workspace\n",
+          "new": "from urllib.parse import urlparse\n\nfrom .scope import file_uri_parts, uri_within_workspace\n"
+        },
+        {
+          "file": "grants.py",
+          "old": "            host, path = file_uri_parts(uri)\n",
+          "new": "            host, path = urlparse(uri).netloc, urlparse(uri).path\n"
+        }
+      ],
+      "expect": "alice may not delete file:///work/notes/%61rchive/2019.md"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "no grant means allowed",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "        if not deciding or \"deny\" in deciding:\n            return False\n",
+          "new": "        if not deciding:\n            return True\n        if \"deny\" in deciding:\n            return False\n"
+        }
+      ],
+      "expect": "alice may not read file:///home/alice/todo.md"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "the deepest workspace with any grant decides, whoever holds it",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "    here = node.grants.get(principal, inherited)\n",
+          "new": "    here = node.grants.get(principal, set()) if node.grants else inherited\n"
+        }
+      ],
+      "expect": "alice may delete file:///work/notes/q4/plan.md"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "grants not kept per principal",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "            node.grants.setdefault(grant.principal, set()).add(grant.permission)\n",
+          "new": "            node.grants.setdefault(\"*\", set()).add(grant.permission)\n"
+        },
+        {
+          "file": "grants.py",
+          "old": "    here = node.grants.get(principal, inherited)\n",
+          "new": "    here = node.grants.get(\"*\", inherited)\n"
+        }
+      ],
+      "expect": "may delete file:///work/notes/q4/plan.md"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "hosts ignored",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "        root = self._roots.get(host)\n",
+          "new": "        root = self._roots.get(\"\")\n"
+        }
+      ],
+      "expect": "alice may not read file://nas/work/notes/q3.md"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "unknown permissions accepted",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "            if grant.permission not in PERMISSIONS:\n                raise ValueError(f\"unknown permission {grant.permission!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "unknown actions answered with False",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "        Unknown actions raise ValueError.\n        \"\"\"\n        if action not in ACTIONS:\n            raise ValueError(f\"unknown action {action!r}\")\n",
+          "new": "        Unknown actions raise ValueError.\n        \"\"\"\n        if action not in ACTIONS:\n            return False\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "grants with invalid URIs skipped",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "            host, path = file_uri_parts(grant.workspace_uri)\n",
+          "new": "            try:\n                host, path = file_uri_parts(grant.workspace_uri)\n            except ValueError:\n                continue\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "the form offers notes the principal may not delete",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            if self.grants.allowed(principal, note.uri, \"delete\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "the form offers only notes the principal may delete"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "authorization not checked again before the deletion",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            if not self.grants.allowed(principal, note.uri, \"delete\"):\n                raise McpError(-32602, \"selected note is not authorized\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "authorization is checked again just before the deletion"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "refuse any .. segment instead of normalizing",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "    path = posixpath.normpath(unquote(parsed.path))\n",
+          "new": "    decoded = unquote(parsed.path)\n    if \"..\" in decoded.split(\"/\"):\n        raise ValueError(f\"dot segments in {uri!r}\")\n    path = posixpath.normpath(decoded)\n"
+        }
+      ],
+      "expect": "file:///work/notes/drafts/../q4-plan.md is inside the workspace"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "workspace checked with SQL LIKE",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "            if not uri_within_workspace(workspace_uri, row[0]):\n",
+          "new": "            if not self._db.execute(\"SELECT 1 FROM notes WHERE note_id = ? AND uri LIKE ? || '%'\", (note_id, workspace_uri)).fetchone():\n"
+        }
+      ],
+      "expect": "the live note must still be inside the workspace"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "the decline claim skips the checks",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "        with self._db:\n            self._claim(nonce, expires_at)\n\n",
+          "new": "        with self._db:\n            self._db.execute(\"INSERT INTO claims (nonce, expires_at) VALUES (?, ?)\", (nonce, expires_at))\n\n"
+        }
+      ],
+      "expect": "a state that expires now is expired"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "confirm false taken as a decline",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        note_id = content.get(\"note_id\")\n",
+          "new": "        if content.get(\"confirm\") is False:\n            self.replay.claim_and_consume(nonce, expires_at=expires_at, operation=lambda: None)\n            return complete(content=text(\"deletion declined\"), structuredContent={\"deleted\": False}, isError=False)\n        note_id = content.get(\"note_id\")\n"
+        }
+      ],
+      "expect": "the server checks the answer itself"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "a cancel asks again",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            return complete(content=text(\"deletion cancelled\"), structuredContent={\"deleted\": False}, isError=False)\n",
+          "new": "            return self.offer(principal=principal, arguments=arguments)\n"
+        }
+      ],
+      "expect": "a cancel is a complete, non-error result"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "titles matched case-sensitively",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            for note in self.notes.matching(workspace_uri, arguments[\"title\"])\n",
+          "new": "            for note in self.notes.matching(workspace_uri, arguments[\"title\"])\n            if arguments[\"title\"] in note.title\n"
+        }
+      ],
+      "expect": "notes whose title contains the title, in any case, are offered"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "the state decoded without checking its signature",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        state = open_state(self.secret, request_state, principal=principal, arguments=arguments, now=self.clock())\n",
+          "new": "        import base64, json\n        body = request_state.split(\".\")[0]\n        state = json.loads(base64.urlsafe_b64decode(body + \"=\" * (-len(body) % 4)))\n"
+        }
+      ],
+      "expect": "the candidate list is signed: a client cannot add to it"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "a cancel sent as a decline",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            action = consent(url, params[\"message\"])\n",
+          "new": "            action = consent(url, params[\"message\"])\n            if action == \"cancel\":\n                action = \"decline\"\n"
+        }
+      ],
+      "expect": "a cancel is passed on as a cancel"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "running out of ticks is not handled",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "            try:\n                await ticks.__anext__()\n            except StopAsyncIteration:\n                return\n",
+          "new": "            await ticks.__anext__()\n"
+        }
+      ],
+      "expect": "StopAsyncIteration"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "a finished flow does not connect its principal",
+      "edits": [
+        {
+          "file": "connect.py",
+          "old": "        self.connected.add(flow.principal)\n",
+          "new": ""
+        }
+      ],
+      "expect": "accept only means the user agreed to open the URL"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "deny only blocks deleting",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "        if not deciding or \"deny\" in deciding:\n            return False\n",
+          "new": "        if not deciding or (\"deny\" in deciding and action == \"delete\"):\n            return False\n"
+        }
+      ],
+      "expect": "alice may not read file:///work/notes/shared/s.md"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "targets normalized before they are decoded",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "from .scope import file_uri_parts, uri_within_workspace\n",
+          "new": "import posixpath\nfrom urllib.parse import unquote, urlparse\n\nfrom .scope import file_uri_parts, uri_within_workspace\n"
+        },
+        {
+          "file": "grants.py",
+          "old": "            host, path = file_uri_parts(uri)\n",
+          "new": "            parsed = urlparse(uri)\n            host, path = parsed.netloc, unquote(posixpath.normpath(parsed.path))\n"
+        }
+      ],
+      "expect": "alice may not delete file:///work/notes/%2e%2e/plan.md"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "claim_and_delete reuses claim(), whose own with-block commits",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "            self._claim(nonce, expires_at)\n            row = self._db.execute(",
+          "new": "            self.claim(nonce, expires_at=expires_at)\n            row = self._db.execute("
+        }
+      ],
+      "expect": "a refused deletion rolls its claim back"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "a state that expires exactly now is still claimed",
+      "edits": [
+        {
+          "file": "replay.py",
+          "old": "            if expires_at <= now:\n",
+          "new": "            if expires_at < now:\n"
+        }
+      ],
+      "expect": "a nonce frees its slot when its state expires"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "prune reads the wall clock instead of the injected one",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "(\"DELETE FROM claims WHERE expires_at <= ?\", (self._clock(),))",
+          "new": "(\"DELETE FROM claims WHERE expires_at <= ?\", (time.time(),))"
+        }
+      ],
+      "expect": "prune drops exactly the claims whose state has expired"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "the store is full one claim too late",
+      "edits": [
+        {
+          "file": "replay.py",
+          "old": "len(self._consumed) >= self.max_entries",
+          "new": "len(self._consumed) > self.max_entries"
+        }
+      ],
+      "expect": "a full store refuses new nonces and never forgets a live one"
+    },
+    {
+      "test": "test_scope_and_replay",
+      "name": "the capacity check runs before the replay check",
+      "edits": [
+        {
+          "file": "replay.py",
+          "old": "            if nonce in self._consumed:\n                raise McpError(-32602, \"requestState was already consumed\")\n            if len(self._consumed) >= self.max_entries:\n                raise McpError(-32023, \"replay protection capacity exhausted\")\n",
+          "new": "            if len(self._consumed) >= self.max_entries:\n                raise McpError(-32023, \"replay protection capacity exhausted\")\n            if nonce in self._consumed:\n                raise McpError(-32602, \"requestState was already consumed\")\n"
+        }
+      ],
+      "expect": "a full store refuses new nonces and never forgets a live one"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "the connection opened in autocommit mode",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "self._db = sqlite3.connect(path)",
+          "new": "self._db = sqlite3.connect(path, isolation_level=None)"
+        }
+      ],
+      "expect": "a refused deletion rolls its claim back"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "busy timeout set to 0",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "self._db = sqlite3.connect(path)",
+          "new": "self._db = sqlite3.connect(path, timeout=0)"
+        }
+      ],
+      "expect": "of two simultaneous retries exactly one deletes"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "the conditional insert judged by lastrowid",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": ").rowcount\n        if inserted != 1:",
+          "new": ").lastrowid\n        if not inserted:"
+        }
+      ],
+      "expect": "a declined confirmation cannot delete later"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "expiry rounded to microseconds",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "            (nonce, expires_at),\n",
+          "new": "            (nonce, round(expires_at, 6)),\n"
+        }
+      ],
+      "expect": "a claim keeps its expiry exactly"
+    },
+    {
+      "test": "test_replay_db_roundtrip",
+      "name": "the live note checked before the claim takes the write lock",
+      "edits": [
+        {
+          "file": "notedb.py",
+          "old": "        with self._db:\n            self._claim(nonce, expires_at)\n            row =",
+          "new": "        with self._db:\n            row ="
+        },
+        {
+          "file": "notedb.py",
+          "old": "                raise McpError(-32602, \"selected note is outside workspace\")\n",
+          "new": "                raise McpError(-32602, \"selected note is outside workspace\")\n            self._claim(nonce, expires_at)\n"
+        }
+      ],
+      "expect": "the nonce is claimed first, then the note is re-checked"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "authorization re-checked before containment",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            if not uri_within_workspace(workspace_uri, note.uri):\n                raise McpError(-32602, \"selected note is outside workspace\")\n            if not self.grants.allowed(principal, note.uri, \"delete\"):\n                raise McpError(-32602, \"selected note is not authorized\")\n",
+          "new": "            if not self.grants.allowed(principal, note.uri, \"delete\"):\n                raise McpError(-32602, \"selected note is not authorized\")\n            if not uri_within_workspace(workspace_uri, note.uri):\n                raise McpError(-32602, \"selected note is outside workspace\")\n"
+        }
+      ],
+      "expect": "the live note is checked again just before the deletion"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "a cancel reported as an error",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "text(\"deletion cancelled\"), structuredContent={\"deleted\": False}, isError=False",
+          "new": "text(\"deletion cancelled\"), structuredContent={\"deleted\": False}, isError=True"
+        }
+      ],
+      "expect": "a cancel is a complete, non-error result"
+    },
+    {
+      "test": "test_delete_confirmation",
+      "name": "a decline without structuredContent",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "text(\"deletion declined\"), structuredContent={\"deleted\": False}, isError=False",
+          "new": "text(\"deletion declined\"), isError=False"
+        }
+      ],
+      "expect": "a decline is a complete, non-error refusal, not a new prompt"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "retries echo the first requestState",
+      "edits": [
+        {
+          "file": "client.py",
+          "old": "        retry[\"params\"][\"requestState\"] = result[\"requestState\"]\n",
+          "new": "        retry[\"params\"][\"requestState\"] = first_state\n"
+        },
+        {
+          "file": "client.py",
+          "old": "    response = await send(request)\n",
+          "new": "    response = await send(request)\n    first_state = response.get(\"result\", {}).get(\"requestState\")\n"
+        }
+      ],
+      "expect": "a retry echoes the requestState of the latest input_required result"
+    },
+    {
+      "test": "test_url_mode_flow",
+      "name": "only declined flows refused in the browser callback",
+      "edits": [
+        {
+          "file": "connect.py",
+          "old": "flow.status != \"pending\"",
+          "new": "flow.status == \"declined\""
+        }
+      ],
+      "expect": "only the principal who started a pending flow can finish it in the browser, and only once"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "the workspace re-authorized instead of the note",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            if not self.grants.allowed(principal, note.uri, \"delete\"):\n                raise McpError(-32602, \"selected note is not authorized\")",
+          "new": "            if not self.grants.allowed(principal, workspace_uri, \"delete\"):\n                raise McpError(-32602, \"selected note is not authorized\")"
+        }
+      ],
+      "expect": "authorization is checked again just before the deletion"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "permissions along the path added up",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "    here = node.grants.get(principal, inherited)\n",
+          "new": "    here = inherited | node.grants.get(principal, set())\n"
+        }
+      ],
+      "expect": "alice may delete file:///work/notes/archive/keep/2019.md"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "an invalid target URI raises",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "        try:\n            host, path = file_uri_parts(uri)\n        except ValueError:\n            return False\n",
+          "new": "        host, path = file_uri_parts(uri)\n"
+        }
+      ],
+      "expect": "not a plain file URI"
+    },
+    {
+      "test": "test_nested_grants",
+      "name": "an ancestor walk that stops before the root workspace",
+      "edits": [
+        {
+          "file": "grants.py",
+          "old": "    def __init__(self, grants: Iterable[Grant]) -> None:\n        \"\"\"Unknown permissions and grant URIs that are not plain file URIs raise ValueError.\"\"\"\n",
+          "new": "    def __init__(self, grants: Iterable[Grant]) -> None:\n        \"\"\"Unknown permissions and grant URIs that are not plain file URIs raise ValueError.\"\"\"\n        self._by = {}\n        for g in grants:\n            if g.permission not in PERMISSIONS:\n                raise ValueError(\"perm\")\n            host, path = file_uri_parts(g.workspace_uri)\n            self._by.setdefault((g.principal, host, path), set()).add(g.permission)\n        self._roots = {}\n\n    def allowed(self, principal, uri, action):\n        if action not in ACTIONS:\n            raise ValueError(\"action\")\n        try:\n            host, path = file_uri_parts(uri)\n        except ValueError:\n            return False\n        while path != \"/\":\n            perms = self._by.get((principal, host, path))\n            if perms:\n                if \"deny\" in perms:\n                    return False\n                return \"delete\" in perms or action == \"read\"\n            path = posixpath.dirname(path)\n        return False\n\n    def _unused(self, grants):\n"
+        },
+        {
+          "file": "grants.py",
+          "old": "from dataclasses import dataclass, field\n",
+          "new": "import posixpath\nfrom dataclasses import dataclass, field\n"
+        },
+        {
+          "file": "grants.py",
+          "old": "    def allowed(self, principal: str, uri: str, action: str) -> bool:\n        \"\"\"Whether principal",
+          "new": "    def _orig_allowed(self, principal: str, uri: str, action: str) -> bool:\n        \"\"\"Whether principal"
+        }
+      ],
+      "expect": "dave may read file:///etc/hosts"
+    }
+  ]
+}
