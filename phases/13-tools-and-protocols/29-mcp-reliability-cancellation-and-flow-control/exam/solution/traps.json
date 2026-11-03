@@ -1,0 +1,1161 @@
+{
+  "package": "reliablerpc",
+  "tests": [
+    "test_cancellation_races",
+    "test_idempotency_ledger",
+    "test_retry_and_cancel_signals",
+    "test_two_clock_stream",
+    "test_race_explorer"
+  ],
+  "layers": [
+    {
+      "test": "test_cancellation_races",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "write to a closed response stream"
+        },
+        {
+          "name": "complete() sends nothing once cancellation won",
+          "edits": [
+            {
+              "file": "coordinator.py",
+              "old": "        request = self.requests[request_id]\n        if request.state == COMPLETED:\n            return request.response\n",
+              "new": "        request = self.requests[request_id]\n        if request.state == CANCELLED:\n            return None\n        if request.state == COMPLETED:\n            return request.response\n"
+            }
+          ],
+          "expect": "a late cancellation changes nothing"
+        },
+        {
+          "name": "+ a finished request ignores cancellation",
+          "edits": [
+            {
+              "file": "coordinator.py",
+              "old": "        \"\"\"Cancel a request, unless it has already finished.\"\"\"\n        request.state = CANCELLED\n",
+              "new": "        \"\"\"Cancel a request, unless it has already finished.\"\"\"\n        if request.state != IN_PROGRESS:\n            return\n        request.state = CANCELLED\n"
+            }
+          ],
+          "expect": "notifications stop once a request completes or is cancelled"
+        },
+        {
+          "name": "+ progress only while the request runs",
+          "edits": [
+            {
+              "file": "coordinator.py",
+              "old": "        if request.progress_token is None:\n            return None\n",
+              "new": "        if request.state != IN_PROGRESS or request.progress_token is None:\n            return None\n"
+            }
+          ],
+          "expect": "a push takes constant time, however many responses wait ahead of it"
+        },
+        {
+          "name": "+ the oldest progress found without a scan",
+          "edits": [
+            {
+              "file": "buffer.py",
+              "old": "from typing import Any\n\nfrom .wire",
+              "new": "from collections import deque\nfrom typing import Any\n\nfrom .wire"
+            },
+            {
+              "file": "buffer.py",
+              "old": "        self._messages: list[dict[str, Any]] = []\n",
+              "new": "        self._messages: dict[int, dict[str, Any]] = {}  # insertion-ordered by sequence number\n        self._progress: deque[int] = deque()  # sequence numbers of queued progress, oldest first\n        self._next = 0\n"
+            },
+            {
+              "file": "buffer.py",
+              "old": "            queued = self._messages[-1]\n            if is_progress(queued) and queued[\"params\"][\"progressToken\"] == token:\n                self._messages[-1] = notification\n",
+              "new": "            newest = next(reversed(self._messages))\n            queued = self._messages[newest]\n            if is_progress(queued) and queued[\"params\"][\"progressToken\"] == token:\n                self._messages[newest] = notification\n"
+            },
+            {
+              "file": "buffer.py",
+              "old": "        self._messages.append(notification)\n",
+              "new": "        self._append(notification, progress=True)\n"
+            },
+            {
+              "file": "buffer.py",
+              "old": "        self._messages.append(message)\n",
+              "new": "        self._append(message, progress=False)\n"
+            },
+            {
+              "file": "buffer.py",
+              "old": "        drained = list(self._messages)\n        self._messages.clear()\n",
+              "new": "        drained = list(self._messages.values())\n        self._messages.clear()\n        self._progress.clear()\n"
+            },
+            {
+              "file": "buffer.py",
+              "old": "    def _drop_oldest_progress(self) -> bool:\n        for index, message in enumerate(self._messages):\n            if is_progress(message):\n                del self._messages[index]\n                self._lose_progress()\n                return True\n        return False\n",
+              "new": "    def _append(self, message: dict[str, Any], *, progress: bool) -> None:\n        self._messages[self._next] = message\n        if progress:\n            self._progress.append(self._next)\n        self._next += 1\n\n    def _drop_oldest_progress(self) -> bool:\n        if not self._progress:\n            return False\n        del self._messages[self._progress.popleft()]\n        self._lose_progress()\n        return True\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_cancellation_races",
+      "name": "StreamClosed swallowed in complete() instead of checking the state",
+      "edits": [
+        {
+          "file": "coordinator.py",
+          "old": "from .buffer import BoundedSseBuffer\n",
+          "new": "from .buffer import BoundedSseBuffer, StreamClosed\n"
+        },
+        {
+          "file": "coordinator.py",
+          "old": "        if request.state == CANCELLED:\n            return None\n        if request.state == COMPLETED:\n            return request.response\n        message = response(request_id, result)\n        self._outbox(request).push_final(message)\n",
+          "new": "        if request.state == COMPLETED:\n            return request.response\n        message = response(request_id, result)\n        try:\n            self._outbox(request).push_final(message)\n        except StreamClosed:\n            pass\n"
+        }
+      ],
+      "expect": "a cancelled request gets no response"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "complete() returns None for every finished request, a completed one too",
+      "edits": [
+        {
+          "file": "coordinator.py",
+          "old": "        if request.state == CANCELLED:\n            return None\n        if request.state == COMPLETED:\n            return request.response\n",
+          "new": "        if request.state != IN_PROGRESS:\n            return None\n"
+        }
+      ],
+      "expect": "completing again returns the response already sent"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "a late cancellation raises instead of being ignored",
+      "edits": [
+        {
+          "file": "coordinator.py",
+          "old": "        if request.state != IN_PROGRESS:\n            return\n",
+          "new": "        if request.state != IN_PROGRESS:\n            raise ReliabilityError(\"request already finished\")\n"
+        }
+      ],
+      "expect": "request already finished"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "a late cancellation ignored on stdio only",
+      "edits": [
+        {
+          "file": "coordinator.py",
+          "old": "        if request.state != IN_PROGRESS:\n            return\n        request.state = CANCELLED\n",
+          "new": "        request.state = CANCELLED\n"
+        },
+        {
+          "file": "coordinator.py",
+          "old": "        if request is None or request.transport != STDIO:\n            return None\n",
+          "new": "        if request is None or request.transport != STDIO or request.state != IN_PROGRESS:\n            return None\n"
+        }
+      ],
+      "expect": "a late cancellation changes nothing, on Streamable HTTP too"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "stdio cancellation ignored altogether",
+      "edits": [
+        {
+          "file": "coordinator.py",
+          "old": "        reason = params.get(\"reason\")\n        self._cancel(request, reason if isinstance(reason, str) else None)\n",
+          "new": "        reason = params.get(\"reason\")\n"
+        }
+      ],
+      "expect": "a cancelled request sends nothing"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "drop the oldest message of any kind when full, as deque(maxlen) does",
+      "edits": [
+        {
+          "file": "buffer.py",
+          "old": "        if not self._progress:\n            return False\n        del self._messages[self._progress.popleft()]\n",
+          "new": "        if not self._messages:\n            return False\n        oldest = next(iter(self._messages))\n        if self._progress and self._progress[0] == oldest:\n            self._progress.popleft()\n        del self._messages[oldest]\n"
+        }
+      ],
+      "expect": "every response stays queued, in order"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "a full buffer drops the incoming progress instead of the oldest",
+      "edits": [
+        {
+          "file": "buffer.py",
+          "old": "        if len(self._messages) >= self.capacity and not self._drop_oldest_progress():\n            self._lose_progress()\n            return\n        self._append(notification, progress=True)\n",
+          "new": "        if len(self._messages) >= self.capacity:\n            self._lose_progress()\n            return\n        self._append(notification, progress=True)\n"
+        }
+      ],
+      "expect": "the oldest progress makes room for the newest"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "lost progress counted but needs_refetch left unset",
+      "edits": [
+        {
+          "file": "buffer.py",
+          "old": "        self.dropped_progress += 1\n        self.needs_refetch = True\n",
+          "new": "        self.dropped_progress += 1\n"
+        }
+      ],
+      "expect": "every progress lost is counted and asks for a refetch"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "progress never coalesced",
+      "edits": [
+        {
+          "file": "buffer.py",
+          "old": "            if is_progress(queued) and queued[\"params\"][\"progressToken\"] == token:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "progress replaces the newest message only when that is progress for the same token"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "one latest progress per token, wherever it is queued",
+      "edits": [
+        {
+          "file": "buffer.py",
+          "old": "        if self._messages:\n            newest = next(reversed(self._messages))\n            queued = self._messages[newest]\n            if is_progress(queued) and queued[\"params\"][\"progressToken\"] == token:\n                self._messages[newest] = notification\n                self._lose_progress()\n                return\n",
+          "new": "        for seq in self._progress:\n            if self._messages[seq][\"params\"][\"progressToken\"] == token:\n                self._messages[seq] = notification\n                self._lose_progress()\n                return\n"
+        }
+      ],
+      "expect": "progress replaces the newest message only when that is progress for the same token"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "a buffer full of responses evicts the oldest response",
+      "edits": [
+        {
+          "file": "buffer.py",
+          "old": "        if len(self._messages) >= self.capacity and not self._drop_oldest_progress():\n            raise ReliabilityError(\"buffer cannot discard a final response\")\n",
+          "new": "        if len(self._messages) >= self.capacity and not self._drop_oldest_progress():\n            del self._messages[next(iter(self._messages))]\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "progress coalesced with the newest progress, even past a response",
+      "edits": [
+        {
+          "file": "buffer.py",
+          "old": "        if self._messages:\n            newest = next(reversed(self._messages))\n            queued = self._messages[newest]\n",
+          "new": "        if self._progress:\n            newest = self._progress[-1]\n            queued = self._messages[newest]\n"
+        }
+      ],
+      "expect": "progress replaces the newest message only when that is progress for the same token"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "a replaced progress not counted as lost",
+      "edits": [
+        {
+          "file": "buffer.py",
+          "old": "                self._messages[newest] = notification\n                self._lose_progress()\n                return\n",
+          "new": "                self._messages[newest] = notification\n                return\n"
+        }
+      ],
+      "expect": "a replaced progress counts as lost"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "a full buffer drops the oldest progress of the incoming token first",
+      "edits": [
+        {
+          "file": "buffer.py",
+          "old": "        if len(self._messages) >= self.capacity and not self._drop_oldest_progress():\n            self._lose_progress()\n            return\n",
+          "new": "        if len(self._messages) >= self.capacity:\n            same = [seq for seq in self._progress if self._messages[seq][\"params\"][\"progressToken\"] == token]\n            if same:\n                self._progress.remove(same[0])\n                del self._messages[same[0]]\n                self._lose_progress()\n            elif not self._drop_oldest_progress():\n                self._lose_progress()\n                return\n"
+        }
+      ],
+      "expect": "the oldest progress makes room, whatever its token"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "the newest queued progress dropped instead of the oldest",
+      "edits": [
+        {
+          "file": "buffer.py",
+          "old": "        del self._messages[self._progress.popleft()]\n",
+          "new": "        del self._messages[self._progress.pop()]\n"
+        }
+      ],
+      "expect": "the oldest progress makes room for the newest"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "capacity checked with > instead of >=",
+      "edits": [
+        {
+          "file": "buffer.py",
+          "old": "        if len(self._messages) >= self.capacity and not self._drop_oldest_progress():\n            self._lose_progress()\n",
+          "new": "        if len(self._messages) > self.capacity and not self._drop_oldest_progress():\n            self._lose_progress()\n"
+        },
+        {
+          "file": "buffer.py",
+          "old": "        if len(self._messages) >= self.capacity and not self._drop_oldest_progress():\n            raise",
+          "new": "        if len(self._messages) > self.capacity and not self._drop_oldest_progress():\n            raise"
+        }
+      ],
+      "expect": "the oldest progress makes room for the newest"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "responses drained ahead of progress",
+      "edits": [
+        {
+          "file": "buffer.py",
+          "old": "        drained = list(self._messages.values())\n",
+          "new": "        drained = [m for m in self._messages.values() if not is_progress(m)]\n        drained += [m for m in self._messages.values() if is_progress(m)]\n"
+        }
+      ],
+      "expect": "the channel carries each message once, in order"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "a full queue makes room before same-token progress is coalesced",
+      "edits": [
+        {
+          "file": "buffer.py",
+          "old": "        token = notification[\"params\"][\"progressToken\"]\n        if self._messages:\n",
+          "new": "        token = notification[\"params\"][\"progressToken\"]\n        if len(self._messages) >= self.capacity and not self._drop_oldest_progress():\n            self._lose_progress()\n            return\n        if self._messages:\n"
+        }
+      ],
+      "expect": "progress for the newest message's token replaces it, even in a full queue"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "the index of queued progress kept across a drain",
+      "edits": [
+        {
+          "file": "buffer.py",
+          "old": "        self._progress.clear()\n",
+          "new": ""
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "no transaction: every statement commits on its own",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        self._db.execute(\"BEGIN IMMEDIATE\")\n",
+          "new": ""
+        },
+        {
+          "file": "ledger.py",
+          "old": "                    self._db.execute(\"COMMIT\")\n                    return json.loads(stored[1])\n",
+          "new": "                    return json.loads(stored[1])\n"
+        },
+        {
+          "file": "ledger.py",
+          "old": "            self._db.execute(\"COMMIT\")\n        except BaseException:",
+          "new": "        except BaseException:"
+        }
+      ],
+      "expect": "a call that crashed after charging keeps neither the charge nor a record"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "a deferred BEGIN: the replica reads, then fails to write",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "self._db.execute(\"BEGIN IMMEDIATE\")",
+          "new": "self._db.execute(\"BEGIN\")"
+        }
+      ],
+      "expect": "a replica retrying the key while the first call runs waits for it, then replays its result"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "the key checked before the transaction begins",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        self._db.execute(\"BEGIN IMMEDIATE\")\n        try:\n            if key is not None:\n                stored = self._db.execute(\n                    \"SELECT fingerprint, result_json FROM idempotency_records WHERE idempotency_key = ?\",\n                    (key,),\n                ).fetchone()\n                if stored is not None:",
+          "new": "        stored = None\n        if key is not None:\n            stored = self._db.execute(\n                \"SELECT fingerprint, result_json FROM idempotency_records WHERE idempotency_key = ?\",\n                (key,),\n            ).fetchone()\n        self._db.execute(\"BEGIN IMMEDIATE\")\n        try:\n            if key is not None:\n                if stored is not None:"
+        }
+      ],
+      "expect": "a replica retrying the key while the first call runs waits for it, then replays its result"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "Python's implicit transactions: the SELECT runs before any BEGIN",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "sqlite3.connect(path, timeout=timeout_s, isolation_level=None)",
+          "new": "sqlite3.connect(path, timeout=timeout_s)"
+        },
+        {
+          "file": "ledger.py",
+          "old": "        self._db.execute(\"BEGIN IMMEDIATE\")\n",
+          "new": ""
+        },
+        {
+          "file": "ledger.py",
+          "old": "                    self._db.execute(\"COMMIT\")\n",
+          "new": "                    self._db.commit()\n"
+        },
+        {
+          "file": "ledger.py",
+          "old": "            self._db.execute(\"COMMIT\")\n",
+          "new": "            self._db.commit()\n"
+        },
+        {
+          "file": "ledger.py",
+          "old": "            if self._db.in_transaction:\n                self._db.execute(\"ROLLBACK\")\n",
+          "new": "            self._db.rollback()\n"
+        }
+      ],
+      "expect": "a replica retrying the key while the first call runs waits for it, then replays its result"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "a process-wide lock around the call instead of BEGIN IMMEDIATE",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "import sqlite3\n",
+          "new": "import sqlite3\nimport threading\n"
+        },
+        {
+          "file": "ledger.py",
+          "old": "class IdempotencyConflict(",
+          "new": "_LOCK = threading.RLock()\n\n\nclass IdempotencyConflict("
+        },
+        {
+          "file": "ledger.py",
+          "old": "sqlite3.connect(path, timeout=timeout_s, isolation_level=None)",
+          "new": "sqlite3.connect(path, timeout=timeout_s)"
+        },
+        {
+          "file": "ledger.py",
+          "old": "        self._db.execute(\"BEGIN IMMEDIATE\")\n        try:\n",
+          "new": "        _LOCK.acquire()\n        try:\n"
+        },
+        {
+          "file": "ledger.py",
+          "old": "                    self._db.execute(\"COMMIT\")\n",
+          "new": "                    self._db.commit()\n"
+        },
+        {
+          "file": "ledger.py",
+          "old": "            self._db.execute(\"COMMIT\")\n",
+          "new": "            self._db.commit()\n"
+        },
+        {
+          "file": "ledger.py",
+          "old": "            if self._db.in_transaction:\n                self._db.execute(\"ROLLBACK\")\n            raise\n",
+          "new": "            self._db.rollback()\n            raise\n        finally:\n            _LOCK.release()\n"
+        }
+      ],
+      "expect": "a replica retrying the key while the first call runs waits for it, then replays its result"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "the tool run between two transactions",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "            result_json = json.dumps(tool(self._db, arguments, rpc_id=rpc_id), sort_keys=True)\n",
+          "new": "            self._db.execute(\"COMMIT\")\n            result_json = json.dumps(tool(self._db, arguments, rpc_id=rpc_id), sort_keys=True)\n            self._db.execute(\"BEGIN IMMEDIATE\")\n"
+        }
+      ],
+      "expect": "a call that crashed after charging keeps neither the charge nor a record"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "a replay that leaves its transaction open",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "                    self._db.execute(\"COMMIT\")\n                    return json.loads(stored[1])\n",
+          "new": "                    return json.loads(stored[1])\n"
+        }
+      ],
+      "expect": "cannot start a transaction within a transaction"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "keys kept per tool, so another tool reuses a key freely",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        key = arguments.get(\"idempotencyKey\")\n",
+          "new": "        key = arguments.get(\"idempotencyKey\")\n        key = None if key is None else f\"{name}:{key}\"\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "no ROLLBACK when a call fails",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        except BaseException:\n            if self._db.in_transaction:\n                self._db.execute(\"ROLLBACK\")\n            raise\n",
+          "new": "        except BaseException:\n            raise\n"
+        }
+      ],
+      "expect": "cannot start a transaction within a transaction"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "replays served from an in-memory cache",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        self._db.execute(RECORDS_TABLE)\n",
+          "new": "        self._db.execute(RECORDS_TABLE)\n        self._cache: dict[str, dict[str, Any]] = {}\n"
+        },
+        {
+          "file": "ledger.py",
+          "old": "        fingerprint = _fingerprint(name, arguments)\n",
+          "new": "        fingerprint = _fingerprint(name, arguments)\n        if key in self._cache:\n            return self._cache[key]\n"
+        },
+        {
+          "file": "ledger.py",
+          "old": "            raise\n        return json.loads(result_json)\n",
+          "new": "            raise\n        result = json.loads(result_json)\n        if key is not None:\n            self._cache[key] = result\n        return result\n"
+        }
+      ],
+      "expect": "changing a returned result changes nothing that later replays return"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "cached results handed out as shallow copies",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        self._db.execute(RECORDS_TABLE)\n",
+          "new": "        self._db.execute(RECORDS_TABLE)\n        self._cache: dict[str, dict[str, Any]] = {}\n"
+        },
+        {
+          "file": "ledger.py",
+          "old": "        fingerprint = _fingerprint(name, arguments)\n",
+          "new": "        fingerprint = _fingerprint(name, arguments)\n        if key in self._cache:\n            return dict(self._cache[key])\n"
+        },
+        {
+          "file": "ledger.py",
+          "old": "            raise\n        return json.loads(result_json)\n",
+          "new": "            raise\n        result = json.loads(result_json)\n        if key is not None:\n            self._cache[key] = result\n        return dict(result)\n"
+        }
+      ],
+      "expect": "changing a returned result changes nothing that later replays return"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "fingerprint without sort_keys",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "json.dumps({\"tool\": name, \"arguments\": arguments}, sort_keys=True, separators=(\",\", \":\"))",
+          "new": "json.dumps({\"tool\": name, \"arguments\": arguments}, separators=(\",\", \":\"))"
+        }
+      ],
+      "expect": "IdempotencyConflict"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "fingerprint that sorts only the top-level keys",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "json.dumps({\"tool\": name, \"arguments\": arguments}, sort_keys=True, separators=(\",\", \":\"))",
+          "new": "json.dumps([name, sorted(arguments.items())], separators=(\",\", \":\"))"
+        }
+      ],
+      "expect": "IdempotencyConflict"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "fingerprint without the tool name",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "json.dumps({\"tool\": name, \"arguments\": arguments}, sort_keys=True, separators=(\",\", \":\"))",
+          "new": "json.dumps(arguments, sort_keys=True, separators=(\",\", \":\"))"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "fingerprint that includes the JSON-RPC id",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        fingerprint = _fingerprint(name, arguments)\n",
+          "new": "        fingerprint = _fingerprint(name, {**arguments, \"rpcId\": rpc_id})\n"
+        }
+      ],
+      "expect": "IdempotencyConflict"
+    },
+    {
+      "test": "test_idempotency_ledger",
+      "name": "a replay stamped with the new JSON-RPC id",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "                    return json.loads(stored[1])\n",
+          "new": "                    return {**json.loads(stored[1]), \"rpcId\": rpc_id}\n"
+        }
+      ],
+      "expect": "the same key with the same arguments, in any key order, returns the first call's result"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "readOnlyHint trusted as retry-safe",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    contract = contracts.get(call.params.get(\"name\"))\n",
+          "new": "    hints = (tools or {}).get(call.params.get(\"name\"), {}).get(\"annotations\", {})\n    if hints.get(\"readOnlyHint\"):\n        return RetryDecision(\"safe\", NewRequest(\"tools/call\", copy.deepcopy(call.params)))\n    contract = contracts.get(call.params.get(\"name\"))\n"
+        }
+      ],
+      "expect": "whatever the annotations say"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "idempotentHint makes a mutation conditional",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    if isinstance(key, str) and key:\n",
+          "new": "    hints = (tools or {}).get(call.params.get(\"name\"), {}).get(\"annotations\", {})\n    if (isinstance(key, str) and key) or hints.get(\"idempotentHint\"):\n"
+        }
+      ],
+      "expect": "whatever the annotations say"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "annotations decide when the application has no contract",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    if contract is None:\n        return RetryDecision(\"unsafe\", None)\n",
+          "new": "    if contract is None:\n        hints = (tools or {}).get(call.params.get(\"name\"), {}).get(\"annotations\", {})\n        contract = ToolContract(side_effect=not hints.get(\"readOnlyHint\", False))\n"
+        }
+      ],
+      "expect": "a tool without a contract is unsafe"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "a tool without a contract is retried as safe",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    if contract is None:\n        return RetryDecision(\"unsafe\", None)\n",
+          "new": "    if contract is None:\n        return RetryDecision(\"safe\", NewRequest(\"tools/call\", copy.deepcopy(call.params)))\n"
+        }
+      ],
+      "expect": "a tool without a contract is unsafe"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "the key read from idempotencyKey whatever the contract names",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    key = arguments.get(contract.idempotency_key) if contract.idempotency_key else None\n",
+          "new": "    key = arguments.get(\"idempotencyKey\")\n"
+        }
+      ],
+      "expect": "the contract names the argument that carries the key"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "idempotencyKey taken as the key when the contract names none",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    key = arguments.get(contract.idempotency_key) if contract.idempotency_key else None\n",
+          "new": "    key = arguments.get(contract.idempotency_key or \"idempotencyKey\")\n"
+        }
+      ],
+      "expect": "a tool that deduplicates nothing is unsafe"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "an empty key counts as a key",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    if isinstance(key, str) and key:\n",
+          "new": "    if isinstance(key, str):\n"
+        }
+      ],
+      "expect": "an empty key is unsafe"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "the retry gets a fresh key",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        return RetryDecision(\"conditional\", NewRequest(\"tools/call\", copy.deepcopy(call.params)))\n",
+          "new": "        params = copy.deepcopy(call.params)\n        params[\"arguments\"][contract.idempotency_key] = key + \"-retry\"\n        return RetryDecision(\"conditional\", NewRequest(\"tools/call\", params))\n"
+        }
+      ],
+      "expect": "a mutation the server deduplicates is retried with the same key and identical arguments"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "notifications/cancelled posted on Streamable HTTP too",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    if call.transport == STDIO:\n        return Notify(_cancelled(call, reason))\n",
+          "new": "    if call.transport in (STDIO, STREAMABLE_HTTP):\n        return Notify(_cancelled(call, reason))\n"
+        }
+      ],
+      "expect": "on Streamable HTTP the client closes the call's response stream and posts nothing"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "a durable task cancelled like its tools/call request",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    if call.task_id is not None:\n        return NewRequest(\"tasks/cancel\", {\"taskId\": call.task_id})\n",
+          "new": ""
+        }
+      ],
+      "expect": "a durable task is cancelled with tasks/cancel, an ordinary request naming the task"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "tasks/cancel naming the request id",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "NewRequest(\"tasks/cancel\", {\"taskId\": call.task_id})",
+          "new": "NewRequest(\"tasks/cancel\", {\"requestId\": call.request_id})"
+        }
+      ],
+      "expect": "a durable task is cancelled with tasks/cancel, an ordinary request naming the task"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "the cancellation notification sent with an id",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    return notification(\"notifications/cancelled\", params)\n",
+          "new": "    return {\"jsonrpc\": \"2.0\", \"id\": call.request_id, \"method\": \"notifications/cancelled\", \"params\": params}\n"
+        }
+      ],
+      "expect": "on stdio the client sends notifications/cancelled, a notification without an id"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "requestId sent as a string",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    params: dict[str, Any] = {\"requestId\": call.request_id}\n",
+          "new": "    params: dict[str, Any] = {\"requestId\": str(call.request_id)}\n"
+        }
+      ],
+      "expect": "on stdio the client sends notifications/cancelled, a notification without an id"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "reason sent as null",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    params: dict[str, Any] = {\"requestId\": call.request_id}\n    if reason is not None:\n        params[\"reason\"] = reason\n",
+          "new": "    params: dict[str, Any] = {\"requestId\": call.request_id, \"reason\": reason}\n"
+        }
+      ],
+      "expect": "reason is left out when there is none"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "the server may cancel any stdio request",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    if call.transport != STDIO or call.method != \"subscriptions/listen\":\n",
+          "new": "    if call.transport != STDIO:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "the server may cancel a subscriptions/listen on any transport",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    if call.transport != STDIO or call.method != \"subscriptions/listen\":\n",
+          "new": "    if call.method != \"subscriptions/listen\":\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_retry_and_cancel_signals",
+      "name": "any truthy value counts as a key",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    if isinstance(key, str) and key:",
+          "new": "    if key:"
+        }
+      ],
+      "expect": "a key that is not a string is unsafe"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "headers without X-Accel-Buffering",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": ", \"X-Accel-Buffering\": \"no\"}",
+          "new": "}"
+        }
+      ],
+      "expect": "an SSE response that proxies do not buffer"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "progress moves the maximum deadline",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                    deadline = min(hard_deadline, last_progress_at + budget.idle_timeout_ms)\n",
+          "new": "                    deadline = last_progress_at + min(budget.max_timeout_ms, budget.idle_timeout_ms)\n"
+        }
+      ],
+      "expect": "progress at 1999 ms does not move the 2000 ms maximum deadline"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "an event that is due is handled before the deadline is checked",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                    if deadline <= keepalive_at and (at_ms is None or deadline <= at_ms):\n                        self.clock.advance_to(deadline)\n                        self.outcome = \"maximum timeout\" if deadline == hard_deadline else \"idle timeout\"\n                        return\n                    if at_ms is not None and at_ms <= keepalive_at:\n                        break\n",
+          "new": "                    if at_ms is not None and at_ms <= keepalive_at:\n                        break\n                    if deadline <= keepalive_at and (at_ms is None or deadline <= at_ms):\n                        self.clock.advance_to(deadline)\n                        self.outcome = \"maximum timeout\" if deadline == hard_deadline else \"idle timeout\"\n                        return\n"
+        }
+      ],
+      "expect": "progress at 1999 ms does not move the 2000 ms maximum deadline"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "the outcome always reported as an idle timeout",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                        self.outcome = \"maximum timeout\" if deadline == hard_deadline else \"idle timeout\"\n",
+          "new": "                        self.outcome = \"idle timeout\"\n"
+        }
+      ],
+      "expect": "the maximum clock ran out at 2000 ms"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "a keepalive restarts the idle clock",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                    last_write_at = keepalive_at\n",
+          "new": "                    last_progress_at = last_write_at = keepalive_at\n"
+        }
+      ],
+      "expect": "a keepalive is not progress"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "keepalives timed from the last progress instead of the last write",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                    keepalive_at = last_write_at + budget.keepalive_ms\n",
+          "new": "                    keepalive_at = last_progress_at + budget.keepalive_ms\n"
+        }
+      ],
+      "expect": "progress at 1999 ms does not move the 2000 ms maximum deadline"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "the clock left behind when a keepalive is written",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                    self.clock.advance_to(keepalive_at)\n",
+          "new": ""
+        }
+      ],
+      "expect": "progress at 1999 ms does not move the 2000 ms maximum deadline"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "keepalives timed from the last keepalive, not the last write",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                last_progress_at = last_write_at = at_ms\n",
+          "new": "                last_progress_at = at_ms\n"
+        }
+      ],
+      "expect": "progress at 1999 ms does not move the 2000 ms maximum deadline"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "the clock not moved when an event is written",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                self.clock.advance_to(at_ms)\n",
+          "new": ""
+        }
+      ],
+      "expect": "progress at 1999 ms does not move the 2000 ms maximum deadline"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "a repeated or smaller progress value sent",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                if self.progress_token is None or (last_value is not None and event.progress <= last_value):\n",
+          "new": "                if self.progress_token is None:\n"
+        }
+      ],
+      "expect": "progress values must increase"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "a repeated value not sent but still taken as activity",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                if self.progress_token is None or (last_value is not None and event.progress <= last_value):\n                    continue\n",
+          "new": "                if self.progress_token is None or (last_value is not None and event.progress <= last_value):\n                    last_progress_at = at_ms\n                    continue\n"
+        }
+      ],
+      "expect": "progress values must increase"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "progress sent without a progress token",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                if self.progress_token is None or (last_value is not None and event.progress <= last_value):\n",
+          "new": "                if last_value is not None and event.progress <= last_value:\n"
+        }
+      ],
+      "expect": "without a progress token nothing is sent as progress"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "progress without a token still restarts the idle clock",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                if self.progress_token is None or (last_value is not None and event.progress <= last_value):\n                    continue\n",
+          "new": "                if self.progress_token is None:\n                    last_progress_at = at_ms\n                    continue\n                if last_value is not None and event.progress <= last_value:\n                    continue\n"
+        }
+      ],
+      "expect": "without a progress token nothing is sent as progress"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "the stream ends when the worker runs out of events",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                at_ms, event = next(self.worker, (None, None))  # None: the worker has stalled\n",
+          "new": "                at_ms, event = next(self.worker, (None, None))  # None: the worker has stalled\n                if at_ms is None:\n                    return\n"
+        }
+      ],
+      "expect": "a worker that goes silent still runs out of idle time"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "nothing at all sent without a progress token",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                    yield _data(response(self.request_id, event.result))\n                    return\n",
+          "new": "                    if self.progress_token is not None:\n                        yield _data(response(self.request_id, event.result))\n                    return\n"
+        }
+      ],
+      "expect": "without a progress token the response still goes out"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "the stream goes on after the result",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                    yield _data(response(self.request_id, event.result))\n                    return\n",
+          "new": "                    yield _data(response(self.request_id, event.result))\n                    continue\n"
+        }
+      ],
+      "expect": "keepalives fill the silence every keepalive_ms; the response ends the stream"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "the worker read to the end before anything is written",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        last_value: int | float | None = None\n        try:\n",
+          "new": "        last_value: int | float | None = None\n        pending = iter(list(self.worker))\n        try:\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "next(self.worker, (None, None))",
+          "new": "next(pending, (None, None))"
+        }
+      ],
+      "expect": "nothing is read from the worker after its result"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "the worker never closed",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            close = getattr(self.worker, \"close\", None)\n            if close is not None:\n                close()\n",
+          "new": "            pass\n"
+        }
+      ],
+      "expect": "a cancelled call stops its worker"
+    },
+    {
+      "test": "test_two_clock_stream",
+      "name": "the worker closed when the stream completes or times out, but not when the client closes it",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                        self.clock.advance_to(deadline)\n",
+          "new": "                        self.clock.advance_to(deadline)\n                        self.worker.close()\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "                    yield _data(response(self.request_id, event.result))\n                    return\n",
+          "new": "                    self.worker.close()\n                    yield _data(response(self.request_id, event.result))\n                    return\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "        try:\n            while True:\n",
+          "new": "        if True:\n            while True:\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "        finally:\n            close = getattr(self.worker, \"close\", None)\n            if close is not None:\n                close()\n",
+          "new": ""
+        }
+      ],
+      "expect": "closing the response stream stops the worker"
+    },
+    {
+      "test": "test_race_explorer",
+      "name": "no deduplication of worlds",
+      "edits": [
+        {
+          "file": "race.py",
+          "old": "            if after is None or after in seen:\n",
+          "new": "            if after is None:\n"
+        }
+      ],
+      "expect": "explore keeps expanding worlds it has already explored"
+    },
+    {
+      "test": "test_race_explorer",
+      "name": "depth-first instead of breadth-first",
+      "edits": [
+        {
+          "file": "race.py",
+          "old": "        world, trace = frontier.popleft()\n",
+          "new": "        world, trace = frontier.pop()\n"
+        }
+      ],
+      "expect": "the shortest sequence that breaks an invariant, first in the order of events"
+    },
+    {
+      "test": "test_race_explorer",
+      "name": "events tried in the model's order",
+      "edits": [
+        {
+          "file": "race.py",
+          "old": "        for event in events:\n",
+          "new": "        for event in EVENTS:\n"
+        }
+      ],
+      "expect": "events are tried in the order given"
+    },
+    {
+      "test": "test_race_explorer",
+      "name": "events tried in sorted order",
+      "edits": [
+        {
+          "file": "race.py",
+          "old": "        for event in events:\n",
+          "new": "        for event in sorted(events):\n"
+        }
+      ],
+      "expect": "the shortest sequence that breaks an invariant, first in the order of events"
+    },
+    {
+      "test": "test_race_explorer",
+      "name": "sequences one event shorter than max_depth",
+      "edits": [
+        {
+          "file": "race.py",
+          "old": "        if len(trace) >= max_depth:\n",
+          "new": "        if len(trace) >= max_depth - 1:\n"
+        }
+      ],
+      "expect": "a sequence of exactly max_depth events is checked"
+    },
+    {
+      "test": "test_race_explorer",
+      "name": "sequences one event longer than max_depth",
+      "edits": [
+        {
+          "file": "race.py",
+          "old": "        if len(trace) >= max_depth:\n",
+          "new": "        if len(trace) > max_depth:\n"
+        }
+      ],
+      "expect": "no sequence is longer than max_depth"
+    },
+    {
+      "test": "test_race_explorer",
+      "name": "the trace returned as a list",
+      "edits": [
+        {
+          "file": "race.py",
+          "old": "                return Counterexample(path, after.problem)\n",
+          "new": "                return Counterexample(list(path), after.problem)\n"
+        }
+      ],
+      "expect": "the shortest sequence that breaks an invariant, first in the order of events"
+    },
+    {
+      "test": "test_race_explorer",
+      "name": "the counterexample missing its last event",
+      "edits": [
+        {
+          "file": "race.py",
+          "old": "                return Counterexample(path, after.problem)\n",
+          "new": "                return Counterexample(trace, after.problem)\n"
+        }
+      ],
+      "expect": "the shortest sequence that breaks an invariant, first in the order of events"
+    }
+  ]
+}

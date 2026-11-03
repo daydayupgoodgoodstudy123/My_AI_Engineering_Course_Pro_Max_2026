@@ -1,0 +1,145 @@
+{
+  "lesson": "phases/13-tools-and-protocols/29-mcp-reliability-cancellation-and-flow-control",
+  "title": "MCP Reliability, Cancellation, and Flow Control",
+  "format": "staged-brownfield",
+  "service": "reliablerpc: the reliability layer of a small MCP server and its client: a request coordinator that settles completion and cancellation races over stdio and Streamable HTTP, bounded SSE buffers, a SQLite idempotency ledger shared by replicas, retry classification and transport-specific cancellation signals, a two-clock SSE stream, and a breadth-first check of every interleaving of the race",
+  "sources": {
+    "docs/en.md": "50f4b4cf4a382debc911c7f769cb3699bf0f54f4789bf19b9418635097be25df",
+    "code/main.py": "68144d5c88c3ae1ab2e853d8e31198643542d431a8302c3f0191d54396debcea",
+    "code/tests/test_main.py": "c065c51e83c812323c65d2f787bd0bb94880d90b6a3950cb51134e61b94d3c6b",
+    "quiz/quiz.md": "e14493022a6e32ef2d1c5dd8c01c3673677bea7de1fe8b8a99306a29f49e2a1a"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_cancellation_races",
+      "kind": "debug",
+      "lesson_anchor": "Cancellation Is a Race (cancellation wins: suppress the response; completion wins: ignore the late cancellation); Request Cancellation Is Transport-Specific (stdio notification, HTTP stream closure, no messages after the disconnect); Timeouts Need Two Clocks (notifications stop after completion or cancellation); Backpressure Is Part of Correctness (coalesce, drop the oldest progress, mark for refetch, preserve the final response, refuse to drop another final response); code/main.py RequestCoordinator and BoundedSseBuffer",
+      "planted_bugs": [
+        "complete() checks only for a completed request, so a cancelled one still builds its response; on Streamable HTTP the error surfaces one call away, as StreamClosed: write to a closed response stream raised in buffer.py",
+        "_cancel() changes the state whatever it is, so a late stdio cancellation or a late HTTP stream close turns a completed request into a cancelled one",
+        "progress() checks only the progress token, so a completed or cancelled request still writes progress",
+        "BoundedSseBuffer._drop_oldest_progress scans the queue from its head on every push, so progress pushed behind queued responses costs O(responses ahead)"
+      ],
+      "timing_assert": "5000 responses queued, then 5000 progress pushes alternating two tokens, timed after gc.collect(), under 0.05 s. Measured here under load (load average 4 to 6 on 10 cores): the scanning buffer takes 0.80 to 1.36 s (at least 16x the limit), a dict keyed by sequence number plus a deque of progress sequence numbers takes 1.3 to 1.6 ms (at least 31x under it)",
+      "overfix_guard": "deque(maxlen) or dropping the oldest message of any kind loses responses; dropping the incoming progress, the newest queued progress, or the oldest progress of the same token keeps the wrong one; no coalescing, one latest progress per token, coalescing past a queued response, and making room before coalescing in a full queue change the queue; a side index of queued progress kept across a drain deletes the wrong message; needs_refetch unset, coalescing uncounted, a capacity check with >, and draining responses ahead of progress are each caught; a buffer full of responses must raise rather than evict one. Swallowing StreamClosed in complete(), returning None for every finished request, raising on a late cancellation, ignoring stdio cancellation, and fixing the late cancellation on stdio only are caught too"
+    },
+    {
+      "part": 2,
+      "test": "test_idempotency_ledger",
+      "kind": "model and persistence",
+      "lesson_anchor": "A New JSON-RPC ID Is Not Idempotency (key, argument fingerprint, committed result; same key and arguments return the stored result, same key with other arguments is rejected); The ledger boundary must be atomic and durable (BEGIN IMMEDIATE around the key check, the effect and the result; two independent ledger connections run a key once; reopen keeps the record; every return value rebuilt from stored JSON; a process lock alone does not protect replicas); Practice Lab (the key binds the operation name, reconcile by key, crash after the effect)",
+      "exactness": "a replay returns the first call's stored result exactly, compared as canonical JSON (so 1, 1.0 and True differ): receipt, rpcId 41 of the first call, a nested charged object, a null coupon and a memo with non-ASCII text, an emoji and U+2028; the same holds for a retry with its keys reordered at both levels, after a reopen, through lookup, and in another process",
+      "traps": [
+        "no transaction (every statement autocommits), or the tool run between two transactions: a crash after the charge keeps the charge",
+        "a deferred BEGIN: the second replica reads, then fails to write with database is locked",
+        "the key checked outside the transaction, or through Python's implicit transactions (with conn:), so a second replica runs the tool again",
+        "a process-wide threading lock instead of a database transaction (the second replica is another process)",
+        "no ROLLBACK after a conflict or a tool error, or no COMMIT on the replay path: cannot start a transaction within a transaction",
+        "fingerprint without sort_keys, sorting only the top-level keys, without the tool name, or including the JSON-RPC id",
+        "keys kept per tool, so another tool reuses a key",
+        "a replay stamped with the new rpcId",
+        "results served from an in-memory cache, or as shallow copies of it"
+      ],
+      "clarifying_questions": [
+        "caching results in memory",
+        "rpcId in a replay",
+        "one key for another tool",
+        "key order inside the arguments",
+        "a tool that raises",
+        "empty or non-string keys",
+        "WAL mode"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_retry_and_cancel_signals",
+      "kind": "core algorithm",
+      "lesson_anchor": "Retry matrix (safe: new JSON-RPC id; conditional: same key and identical arguments; unsafe: do not retry automatically, reconcile first; readOnlyHint and idempotentHint are untrusted hints, the application contract decides); Request Cancellation Is Transport-Specific (stdio notifications/cancelled with requestId and optional reason, HTTP closes the response stream and posts nothing, server-sent cancellation only ends a stdio subscriptions/listen); Request Cancellation Is Not tasks/cancel",
+      "traps": [
+        "readOnlyHint trusted as retry-safe",
+        "idempotentHint turning a mutation conditional",
+        "annotations filling in for a missing contract, or a tool without a contract retried as safe",
+        "the key read from idempotencyKey whatever argument the contract names, or idempotencyKey taken as the key when the contract names none",
+        "an empty key, or a key that is not a string, counted",
+        "the retry sent with a fresh key",
+        "notifications/cancelled posted on Streamable HTTP",
+        "a durable task cancelled like its tools/call, or tasks/cancel naming the request id",
+        "the cancellation notification sent with an id, requestId sent as a string, or reason sent as null",
+        "the server cancelling any stdio request, or a subscriptions/listen on Streamable HTTP"
+      ],
+      "clarifying_questions": [
+        "readOnlyHint on the server's tool",
+        "a tool without a contract",
+        "a key the contract does not name",
+        "changing params on a safe retry",
+        "posting a cancellation as well as closing the stream",
+        "closing the stream of a task-backed call",
+        "whether reason is required",
+        "a key that is not a string"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_two_clock_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Timeouts Need Two Clocks (idle reset by progress, maximum from the start; at 2000 ms the maximum cancels even after progress at 1999 ms; progress values must increase; a progress token is not an infinite timeout); Proxy buffering (Content-Type: text/event-stream, Cache-Control: no-cache, X-Accel-Buffering: no; ':' comments on quiet streams; keepalive is not progress); Request Cancellation Is Transport-Specific (after cancellation nothing more is sent; stop work and free resources); Reconnect Means Refetch (no Last-Event-ID)",
+      "wire_format": "SSE bytes decided by the test's SseReader: a comment line is a keepalive, data lines are joined and decoded as JSON at a blank line, any other field fails; LF or CRLF; each message is recorded with the SimClock time at which its chunk was yielded",
+      "traps": [
+        "progress moving the maximum deadline",
+        "an event that is due handled before the deadline is checked",
+        "a keepalive restarting the idle clock",
+        "keepalives timed from the last progress, or from the last keepalive, instead of the last write",
+        "the clock not moved for keepalives or for events",
+        "a repeated or smaller progress value sent, or taken as activity",
+        "progress sent without a progress token, or restarting the idle clock",
+        "nothing at all sent without a progress token",
+        "the stream ending when the worker runs out of events",
+        "the stream going on after the result",
+        "the worker read to the end before anything is written",
+        "the worker never closed, or closed on completion and timeout but not when the client closes the stream",
+        "the outcome always reported as an idle timeout",
+        "headers without X-Accel-Buffering"
+      ],
+      "clarifying_questions": [
+        "keepalive text",
+        "repeated progress values",
+        "a deadline and a keepalive on the same millisecond",
+        "an error response on timeout",
+        "event ids for resuming",
+        "the final response without a progress token",
+        "an event due exactly at the deadline"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_race_explorer",
+      "kind": "graph search over a state space",
+      "lesson_anchor": "Cancellation Is a Race (both event orders, the client ignores a late response for an abandoned request, network latency means neither side knows which event the other saw first); Interactive Lab (four event orderings without sleeps); The lesson's RequestCoordinator stores one terminal state",
+      "traps": [
+        "no deduplication of worlds (840 steps with it, about 36,000 without; the test's counting model stops at 2000)",
+        "depth-first instead of breadth-first",
+        "events tried in the module's EVENTS order, or sorted, instead of the order given",
+        "sequences one event shorter, or one event longer, than max_depth",
+        "the counterexample without its last event, or its trace as a list"
+      ],
+      "integration": "explore runs the candidate's Part 1 coordinator through every interleaving and must find no violation; test-defined subclasses that put Part 1's three state bugs back, and a client that uses a late response, must each come back as their shortest event sequence",
+      "clarifying_questions": [
+        "search depth",
+        "equal worlds with different coordinator objects",
+        "which of several shortest counterexamples",
+        "who checks the invariants"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1 follows the suggested design. To make the first bug surface away from its cause, each Streamable HTTP request writes to its own BoundedSseBuffer, which closes when the client cancels; complete() on a cancelled HTTP request then fails inside buffer.py. The lesson code's timeout_signal moved to Part 4, and client_cancel_signal and server_cancel_subscription moved to Part 3, so Part 1 is only about the race and the buffer.",
+    "Part 1's timing case is 5000 progress pushes behind 5000 queued responses rather than 100,000 pushes. The lesson's scan is slow only when responses sit ahead of the first progress; with progress at the head it finds one at index 0 and the cost is a list memmove, which gives less than an 8x margin. Coalescing counts as a lost progress and sets needs_refetch, as in code/main.py and its own test, although the quiz (Q10.3) argues it need not.",
+    "Part 2 follows the suggested design with the lesson's wire shape: the key travels as arguments['idempotencyKey'], and the fingerprint binds the tool name as the Practice Lab asks. The effect is an entries row that the given tools write through the ledger's connection, instead of the lesson's counter row, so a test tool can crash after its effect. The race is with another Python process that opens the same file: the first call's tool hands the key to it from inside its transaction and waits 0.4 s, which makes the interleaving deterministic and rules out a process-wide lock. The missing-commit trap (lessons 02 and 09) and SQLite type affinity (lessons 02 and 19) are not featured; the round trip still catches both.",
+    "Part 3 decides retries from an application ToolContract (side effect, and the argument the server deduplicates on), following 'the application contract and server implementation decide retry safety'; the server's tools/list entries are passed in and must be ignored. The resend is the tools/call params, and the transport assigns the new id, so new-id allocation (lesson 08) is not tested. tasks/cancel carries params.taskId as lesson 13 shows; this lesson names the method only. reconnect_plan and retry_delay_ms are interviewer follow-ups.",
+    "Part 4 is the server side of one Streamable HTTP request: the worker yields (at_ms, event) and the stream moves an injected SimClock as it writes. The idle clock restarts only when progress is sent, so without a progress token it runs from the start, as with code/main.py's timeout_signal (quiz Q4). A progress value that does not increase is neither sent nor activity, rather than an error as in code/main.py's coordinator, so a worker stuck repeating a value still idles out. On a timeout nothing more is written, not even an error, since the lesson defines none. SSE framing traps (id: and event: lines, pretty JSON, bytes) are already used twice in this chapter (lessons 09 and 17), so the reader is lenient on line endings and the part is about the clocks; exact ties at a deadline are not tested, since lessons 09, 11, 12 and 13 already test instant boundaries. Rate limiting is a follow-up.",
+    "Part 5 replaces the nested-structure part, which this lesson does not have, with the suggested breadth-first search over the cancellation race. RaceModel, with its events and invariants, is given and built on the Part 1 coordinator; the candidate writes explore. max_progress=3 keeps the state space small. The invariants are: nothing sent for a cancelled request, no change after the first terminal state, nothing used by the client after it abandoned the request. Stdio only; adding Streamable HTTP is a follow-up.",
+    "Out of scope, to stay clear of other lessons: DurableTaskService and task state (lesson 13), request-scoped SSE framing (lesson 09), new JSON-RPC ids on retry (lesson 08), and Last-Event-ID resumption, which the lesson says this transport does not support."
+  ]
+}
