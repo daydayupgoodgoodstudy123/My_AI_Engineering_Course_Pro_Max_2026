@@ -1,0 +1,126 @@
+{
+  "lesson": "phases/13-tools-and-protocols/21-llm-routing-layer",
+  "title": "LLM Routing Layer — LiteLLM, OpenRouter, Portkey",
+  "format": "staged-brownfield",
+  "service": "ModelRouter: an OpenAI-shaped routing gateway with PII redaction, an alias fallback chain, per-model pricing and monthly team budgets, a SQLite cost ledger in whole micro-dollars, weighted deployment pools with EU residency and a shared retry budget, latency-aware routing with circuit breakers logged as CSV, and alias-graph expansion",
+  "sources": {
+    "docs/en.md": "76708436ac5d3bafa1bcf40c7a4a7cc6cdb7e89b9d75bd0694bc5cc81549549a",
+    "code/main.py": "bdea81aa42c4747bb3a142b364bca343e8ebc89334e5cadff4d8b3f751b1e836",
+    "quiz/quiz.md": "8f09aea0b1a5dfc5ddc58f0c52024d00f95b2bf180487105aa4dc48091f2b762"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network: scripted fake providers in the tests reject requests the way an OpenAI-compatible API would (a tool message without the tool_call_id it answers is a 400, an unknown role a 422)",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_route_and_charge",
+      "kind": "debug",
+      "lesson_anchor": "Fallback chains (on 5xx); Guardrails (PII redaction before sending prompts); Cost tracking; Per-key rate limits and Exercise 4 (monthly team caps); code/main.py route and redact_pii; quiz Q10 and Q12",
+      "planted_bugs": [
+        "redact_messages redacts only the last message and rebuilds it as {role, content}, so the tool result loses its tool_call_id; the fake API answers 400, and the error surfaces two layers away as AllProvidersFailed in Gateway.route",
+        "Gateway.route falls back on every ProviderError, so the 400 goes to all three providers and the client sees '... 400, 400, 400' instead of the request's own error (the lesson falls back on 5xx only)",
+        "only the last message is redacted: the card number and SSN in the earlier user turn reach the provider",
+        "the price is taken from chain[0] before the loop, so a request served by gemini after two 5xx is charged at gpt-4o's rates (12,000 instead of 3,500 micro-dollars)",
+        "Budget.spent sums every charge on each check, O(history) per request"
+      ],
+      "timing_assert": "150,000 earlier charges, then 200 requests under 0.02 s; measured on this machine at load average 5-7: the scan 0.73-1.8 s, the fixed budget 0.9 ms median (2.5 ms worst); grouping charges by (team, month) and summing the list on every check takes 51-95 ms and is caught too. The 150,000 charges themselves must stay under 2 s, which catches a total recomputed on every charge without hanging the test",
+      "overfix_guard": "the running total is keyed by team and month: a per-team total refuses the request at 00:00 UTC on December 1st with November's spend, and a single current-month counter loses November's spend once December starts; also a 422 is a 4xx (only-400 fix), a 502 is a 5xx (only-503 fix), content None must be skipped, the redacted flag covers every message, the budget is checked before anything is sent, and spend equal to the cap is refused"
+    },
+    {
+      "part": 2,
+      "test": "test_cost_ledger",
+      "kind": "model and persistence",
+      "lesson_anchor": "Cost tracking (provider, model, input_tokens, output_tokens times per-model prices; per-user / per-team / per-project aggregation); Per-key budgets; code/main.py Invocation.cost_usd as a float",
+      "exactness": "six tricky calls (a 5xx-5xx-200 fallback, a call no model served, a served call that costs 0 because 0.15 rounds down, 11 and 249 micro-dollars, times at 23:59:59.999999 UTC, 00:30 +01:00 and 20:00 -05:00) round-trip exactly as dataclasses across close and reopen, with int costs and token counts; spend per team and month is the exact integer sum, 0 when empty; 400 calls at the lesson's prices sum exactly",
+      "traps": [
+        "money as float: a REAL column reads back floats, REAL dollars read back with int() turn 249 into 248, TOTAL() returns a float (in spend and in report, where 1270.0 == 1270 would hide it), a bare SUM() returns NULL",
+        "months in UTC: the +01:00 call on November 1st is October, the -05:00 call on November 30th is December; strftime on the given offset or BETWEEN the first and last day files them wrongly",
+        "calls in recorded order, not time order",
+        "call numbers carry on after a reopen (a counter in memory restarts at 1)",
+        "attempts as an ordered tuple of Attempt: JSON lists or a sorted copy do not compare equal",
+        "no served model is NULL, not the text None; failed means no model served it, not cost 0",
+        "report by team name, calls counting every call",
+        "a float cost, even 3500.0, raises TypeError",
+        "timestamps kept to the microsecond"
+      ],
+      "clarifying_questions": [
+        "storing dollars",
+        "a whole-number float cost",
+        "recorded or time order",
+        "failed calls in the report",
+        "indexes"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_weighted_pools",
+      "kind": "core algorithm",
+      "lesson_anchor": "Routing strategies (Static priority; Load balancing: round-robin or weighted); Fallback chains (retries count against a budget so cascades do not explode cost); The Problem 4 (EU users must stay in EU regions); outputs/skill-routing-config-designer.md hard reject (a region violating the compliance constraint); quiz Q12.2 (at most 2 models per request)",
+      "traps": [
+        "smooth weighted round robin: 5:2:1 goes us, eu, us, us, sonnet, us, eu, us; classic weighted round robin sends five in a row, random.choices is not deterministic",
+        "every eligible weight 0: the plan is the listed order, not a crash or NoEligibleDeployment",
+        "a tie goes to the earliest listed; the winner gives back the candidates' total weight, not its own and not the whole pool's",
+        "the rest of the plan in listed order, not by weight",
+        "region filter before the pick, with one rotation per (alias, region); EU traffic does not move the global rotation; fallbacks never leave the region; no eligible deployment raises NoEligibleDeployment",
+        "max_attempts counts every try of one request, retries of the same deployment included, checked before each try; a plan that ends exactly at the budget is AllProvidersFailed; a counter kept across requests runs out",
+        "a 4xx is RequestRejected at once, never retried",
+        "send plans once, so a request moves the rotation once"
+      ],
+      "clarifying_questions": [
+        "does a fallback move the rotation",
+        "weight 0",
+        "budget and plan ending together",
+        "region None"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_latency_routing",
+      "kind": "streaming",
+      "lesson_anchor": "Routing strategies (Latency-aware: pick the fastest model in the last N minutes); Fallback chains (on 5xx); quiz Q12.2 (circuit breaker: 3 failures in a row, skip the model for 30 s)",
+      "wire_format": "CSV, a header record t_ms,request_id,model,reason first and one record per request, each chunk exactly one record with its line ending, decided by the test's csv.reader; the test compares decisions row by row and names the rule each row checks",
+      "traps": [
+        "a 5xx is not a latency sample",
+        "models with no sample go first, in listed order, and stay unmeasured until a result comes back",
+        "even-count median is the mean of the two middle samples (upper middle fails r16, lower middle fails q4); median, not mean, min, max or the latest sample",
+        "a success resets the run of 5xx; the circuit opens at exactly trip_after, at the time of the last 5xx",
+        "a late success while open does not close the circuit; one probe at a time, recognised by its request id: a late 5xx from an earlier request neither ends it nor restarts the cooldown; the probe goes out at opened + cooldown exactly, before unmeasured models and even when another model is faster; a failed probe re-opens from its own time; a successful probe closes and starts a new run of 5xx",
+        "a sample exactly window_ms old has expired, judged at the request's time rather than when the model next reports",
+        "every circuit open gives an empty model and reason unavailable; ties go to the earliest listed model; trip_after is a parameter",
+        "header first, one record per chunk, each decision yielded as soon as its request arrives (the test counts pulled events)"
+      ],
+      "clarifying_questions": [
+        "header before the first event",
+        "4xx results",
+        "a probe that never returns",
+        "line endings"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_alias_expansion",
+      "kind": "recursive structure",
+      "lesson_anchor": "Model aliases (change the alias server-side); code/main.py ROUTES.get(alias, [alias]) and PRICES.get(model, (0, 0)); quiz Q9; The Problem 4 (EU regions)",
+      "traps": [
+        "unknown names pass through as models, as the lesson's ROUTES.get(alias, [alias]) does; a model name given directly stands for itself",
+        "an alias reached by two paths is not a cycle; the cycle is reported from the repeated alias (['a', 'b', 'c', 'a']), and a short cycle is a cycle, not a depth error",
+        "depth: the alias you expand is 1, exactly max_depth is fine",
+        "a model reached twice keeps its first place; a model a region left out takes no place, so a later path can add it; caching an alias's expansion by name ignores the region",
+        "a region applies all the way down, from an alias or from the caller, and to a model named directly; an inner region narrows and never widens, and one equal to the outer region is no conflict; a conflicting subtree adds nothing but is still checked",
+        "nothing admitted raises AliasError instead of returning []"
+      ],
+      "clarifying_questions": [
+        "a model name given directly",
+        "conflicting regions",
+        "does max_depth count models",
+        "cycle or depth first"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the four suggested defects are kept, and the remote failure comes from a fifth taken from quiz Q10: the redaction rebuilds the last message without tool_call_id. A tool-calling conversation (whose last message is the tool result) makes the fake API answer 400, and the any-error fallback turns that into AllProvidersFailed in Gateway.route. The timing uses 150,000 charges recorded before 200 timed requests instead of 20,000 requests that build their own history, because a quadratic over requests cannot keep 8x margins on both sides within 3 s (per-request overhead is about 5 microseconds, the scan about 50 ns per charge). Not mutating the caller's messages is not checked, because lessons 02 and 15 already test input mutation.",
+    "Part 2: costs are computed by the given cost_micros (Decimal, half up, once per call) before they reach the ledger, so the ledger's precision trap is storing and summing money without floats. SQLite's SUM over REAL is compensated, so a REAL column does not drift at these sizes (a Python += loop over float dollars would); the test catches float storage through types, int() truncation (249 becomes 248), TOTAL() and the NULL of an empty SUM(). The UTC month and the BETWEEN date range join the suggested traps. Naive timestamps (lessons 13 and 15) and the missing commit (lesson 09 and others) are not featured; the round trip still catches naive storage and a lost commit.",
+    "Part 3: weights are 5:2:1 instead of 5:1:1, listed us, sonnet-eu, gpt-4o-eu, gemini-us. With two equal EU weights the EU rotation is a plain alternation that cannot tell a winner who gives back the whole pool's weight from one who gives back the candidates' weight, and a listed order sorted by weight cannot tell the plan's tail from a sorted one. The retry budget is per request (max_attempts across the cascade, same-deployment retries included), and 4xx is only a side check because Part 1 owns it.",
+    "Part 4: the circuit-breaker numbers (3 failures, 30 s) come from quiz Q12.2. Precedence is probe, then unmeasured, then fastest; median of an even count is the mean of the two middle samples. A second, shorter stream (trip_after 1, cooldown 1 s) carries the median-definition, tie, unavailable and probe-before-faster-model rows, and a third (trip_after 2) carries probe-before-unmeasured, the probe recognised by request id, and the run of 5xx starting over after a successful probe. Request ids are plain, because the comma-joined CSV trap is already used by lessons 02 and 11.",
+    "Part 5: regions are single-valued per model; an alias written as {region, chain} narrows the region for everything below it, a conflicting inner alias adds nothing but is still validated, and expand also takes the caller's region. Lesson 11 also tests a diamond against a cycle, so with lesson 25 this check may appear three times in the chapter; the cycle path and region propagation are this lesson's own."
+  ]
+}

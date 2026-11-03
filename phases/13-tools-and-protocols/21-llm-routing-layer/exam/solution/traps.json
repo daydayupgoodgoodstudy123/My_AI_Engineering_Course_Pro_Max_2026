@@ -1,0 +1,1418 @@
+{
+  "package": "modelrouter",
+  "tests": [
+    "test_route_and_charge",
+    "test_cost_ledger",
+    "test_weighted_pools",
+    "test_latency_routing",
+    "test_alias_expansion"
+  ],
+  "layers": [
+    {
+      "test": "test_route_and_charge",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "AllProvidersFailed"
+        },
+        {
+          "name": "a 4xx is raised at once instead of falling back",
+          "edits": [
+            {
+              "file": "gateway.py",
+              "old": "                attempts.append(Attempt(model, err.status))\n                continue\n",
+              "new": "                attempts.append(Attempt(model, err.status))\n                if err.status < 500:\n                    raise RequestRejected(err) from err\n                continue\n"
+            }
+          ],
+          "expect": "tool_call_id"
+        },
+        {
+          "name": "+ the redacted message keeps its other fields",
+          "edits": [
+            {
+              "file": "guard.py",
+              "old": "    return [*earlier, {\"role\": latest[\"role\"], \"content\": text}], redacted\n",
+              "new": "    return [*earlier, {**latest, \"content\": text}], redacted\n"
+            }
+          ],
+          "expect": "PII never leaves the gateway, in any message"
+        },
+        {
+          "name": "+ every message is redacted",
+          "edits": [
+            {
+              "file": "guard.py",
+              "old": "    *earlier, latest = messages\n    text, redacted = redact_pii(latest[\"content\"])\n    return [*earlier, {**latest, \"content\": text}], redacted\n",
+              "new": "    prepared = []\n    redacted = False\n    for message in messages:\n        copy = dict(message)\n        if message.get(\"content\") is not None:\n            copy[\"content\"], hit = redact_pii(message[\"content\"])\n            redacted = redacted or hit\n        prepared.append(copy)\n    return prepared, redacted\n"
+            }
+          ],
+          "expect": "a request is charged at the prices of the model that served it"
+        },
+        {
+          "name": "+ the serving model's prices",
+          "edits": [
+            {
+              "file": "gateway.py",
+              "old": "        price = self.prices[chain[0]]\n",
+              "new": ""
+            },
+            {
+              "file": "gateway.py",
+              "old": "        cost = cost_micros(price, reply.input_tokens, reply.output_tokens)\n",
+              "new": "        cost = cost_micros(self.prices[model], reply.input_tokens, reply.output_tokens)\n"
+            }
+          ],
+          "expect": "a request costs the same however much the team has already spent this month"
+        },
+        {
+          "name": "+ a running total per team and month",
+          "edits": [
+            {
+              "file": "budget.py",
+              "old": "        self._charges: list[tuple[str, str, int]] = []  # (team, month, micro-dollars)\n",
+              "new": "        self._spent: dict[tuple[str, str], int] = {}\n"
+            },
+            {
+              "file": "budget.py",
+              "old": "        return sum(micros for who, when, micros in self._charges if who == team and when == month)\n",
+              "new": "        return self._spent.get((team, month), 0)\n"
+            },
+            {
+              "file": "budget.py",
+              "old": "        self._charges.append((team, month_of(at), micros))\n",
+              "new": "        key = (team, month_of(at))\n        self._spent[key] = self._spent.get(key, 0) + micros\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_route_and_charge",
+      "name": "only user messages are redacted",
+      "edits": [
+        {
+          "file": "guard.py",
+          "old": "        if message.get(\"content\") is not None:\n",
+          "new": "        if message[\"role\"] == \"user\" and message.get(\"content\") is not None:\n"
+        }
+      ],
+      "expect": "PII never leaves the gateway, in any message"
+    },
+    {
+      "test": "test_route_and_charge",
+      "name": "every message with a content key is redacted, None included",
+      "edits": [
+        {
+          "file": "guard.py",
+          "old": "        if message.get(\"content\") is not None:\n",
+          "new": "        if \"content\" in message:\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_route_and_charge",
+      "name": "redacted reports only the last message",
+      "edits": [
+        {
+          "file": "guard.py",
+          "old": "            redacted = redacted or hit\n",
+          "new": "            redacted = hit\n"
+        }
+      ],
+      "expect": "redacted says whether any message was redacted, not just the last"
+    },
+    {
+      "test": "test_route_and_charge",
+      "name": "only a 400 counts as the request's fault",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "                if err.status < 500:\n                    raise RequestRejected(err) from err\n",
+          "new": "                if err.status == 400:\n                    raise RequestRejected(err) from err\n"
+        }
+      ],
+      "expect": "AllProvidersFailed"
+    },
+    {
+      "test": "test_route_and_charge",
+      "name": "only a 503 falls back",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "                if err.status < 500:\n                    raise RequestRejected(err) from err\n",
+          "new": "                if err.status != 503:\n                    raise RequestRejected(err) from err\n"
+        }
+      ],
+      "expect": "RequestRejected"
+    },
+    {
+      "test": "test_route_and_charge",
+      "name": "every attempted model is charged the served usage",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        cost = cost_micros(self.prices[model], reply.input_tokens, reply.output_tokens)\n",
+          "new": "        cost = sum(cost_micros(self.prices[a.model], reply.input_tokens, reply.output_tokens) for a in attempts)\n"
+        }
+      ],
+      "expect": "a request is charged at the prices of the model that served it"
+    },
+    {
+      "test": "test_route_and_charge",
+      "name": "the budget is checked after the request is sent",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        now = self.clock()\n        self.budget.check(team, now)\n",
+          "new": "        now = self.clock()\n"
+        },
+        {
+          "file": "gateway.py",
+          "old": "        cost = cost_micros(",
+          "new": "        self.budget.check(team, now)\n        cost = cost_micros("
+        }
+      ],
+      "expect": "a team at its cap is refused before anything is sent"
+    },
+    {
+      "test": "test_route_and_charge",
+      "name": "a team is refused only once it is over its cap",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "        if self.spent(team, month) >= cap:\n",
+          "new": "        if self.spent(team, month) > cap:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_route_and_charge",
+      "name": "one running total per team, whatever the month",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "        self._spent: defaultdict[tuple[str, str], int] = defaultdict(int)\n",
+          "new": "        self._spent: defaultdict[str, int] = defaultdict(int)\n"
+        },
+        {
+          "file": "budget.py",
+          "old": "        return self._spent.get((team, month), 0)\n",
+          "new": "        return self._spent.get(team, 0)\n"
+        },
+        {
+          "file": "budget.py",
+          "old": "        self._spent[(team, month_of(at))] += micros\n",
+          "new": "        self._spent[team] += micros\n"
+        }
+      ],
+      "expect": "BudgetExceeded"
+    },
+    {
+      "test": "test_route_and_charge",
+      "name": "one counter per team, reset when a charge lands in a new month",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "        self._spent: defaultdict[tuple[str, str], int] = defaultdict(int)\n",
+          "new": "        self._month: dict[str, str] = {}\n        self._total: dict[str, int] = {}\n"
+        },
+        {
+          "file": "budget.py",
+          "old": "        return self._spent.get((team, month), 0)\n",
+          "new": "        return self._total.get(team, 0) if self._month.get(team) == month else 0\n"
+        },
+        {
+          "file": "budget.py",
+          "old": "        self._spent[(team, month_of(at))] += micros\n",
+          "new": "        month = month_of(at)\n        if self._month.get(team) != month:\n            self._month[team], self._total[team] = month, 0\n        self._total[team] += micros\n"
+        }
+      ],
+      "expect": "last month's spend stays with last month"
+    },
+    {
+      "test": "test_route_and_charge",
+      "name": "the month's sum is cached until the next charge",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "        self._spent: defaultdict[tuple[str, str], int] = defaultdict(int)\n",
+          "new": "        self._charges: list[tuple[str, str, int]] = []\n        self._cache: dict[tuple[str, str], int] = {}\n"
+        },
+        {
+          "file": "budget.py",
+          "old": "        return self._spent.get((team, month), 0)\n",
+          "new": "        if (team, month) not in self._cache:\n            self._cache[(team, month)] = sum(m for t, mo, m in self._charges if t == team and mo == month)\n        return self._cache[(team, month)]\n"
+        },
+        {
+          "file": "budget.py",
+          "old": "        self._spent[(team, month_of(at))] += micros\n",
+          "new": "        self._charges.append((team, month_of(at), micros))\n        self._cache.clear()\n"
+        }
+      ],
+      "expect": "a request costs the same however much the team has already spent this month"
+    },
+    {
+      "test": "test_route_and_charge",
+      "name": "charges grouped by team and month, summed on every check",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "        self._spent: defaultdict[tuple[str, str], int] = defaultdict(int)\n",
+          "new": "        self._charges: defaultdict[tuple[str, str], list[int]] = defaultdict(list)\n"
+        },
+        {
+          "file": "budget.py",
+          "old": "        return self._spent.get((team, month), 0)\n",
+          "new": "        return sum(self._charges.get((team, month), ()))\n"
+        },
+        {
+          "file": "budget.py",
+          "old": "        self._spent[(team, month_of(at))] += micros\n",
+          "new": "        self._charges[(team, month_of(at))].append(micros)\n"
+        }
+      ],
+      "expect": "a request costs the same however much the team has already spent this month"
+    },
+    {
+      "test": "test_route_and_charge",
+      "name": "the month's total recomputed on every charge",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "        self._spent: defaultdict[tuple[str, str], int] = defaultdict(int)\n",
+          "new": "        self._spent: defaultdict[tuple[str, str], int] = defaultdict(int)\n        self._charges: list[tuple[str, str, int]] = []\n"
+        },
+        {
+          "file": "budget.py",
+          "old": "        self._spent[(team, month_of(at))] += micros\n",
+          "new": "        key = (team, month_of(at))\n        self._charges.append((team, key[1], micros))\n        self._spent[key] = sum(m for t, mo, m in self._charges if (t, mo) == key)\n"
+        }
+      ],
+      "expect": "a charge costs the same however much the team has already spent"
+    },
+    {
+      "test": "test_route_and_charge",
+      "name": "the provider's error re-raised as it is",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "                    raise RequestRejected(err) from err\n",
+          "new": "                    raise\n"
+        }
+      ],
+      "expect": "ProviderError"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "cost in a REAL column",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "    cost_micros INTEGER NOT NULL\n",
+          "new": "    cost_micros REAL NOT NULL\n"
+        }
+      ],
+      "expect": "costs come back as whole micro-dollars"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "cost kept as REAL dollars, read back with int()",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "    cost_micros INTEGER NOT NULL\n",
+          "new": "    cost_micros REAL NOT NULL\n"
+        },
+        {
+          "file": "ledger.py",
+          "old": "call.input_tokens, call.output_tokens, call.cost_micros, month),",
+          "new": "call.input_tokens, call.output_tokens, call.cost_micros / 1_000_000, month),"
+        },
+        {
+          "file": "ledger.py",
+          "old": "        cost_micros=cost,\n",
+          "new": "        cost_micros=int(cost * 1_000_000),\n"
+        }
+      ],
+      "expect": "a call comes back exactly as it was recorded"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "spend with TOTAL()",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "\"SELECT COALESCE(SUM(cost_micros), 0) FROM calls",
+          "new": "\"SELECT TOTAL(cost_micros) FROM calls"
+        }
+      ],
+      "expect": "spend is a whole number of micro-dollars"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "spend with a bare SUM()",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "\"SELECT COALESCE(SUM(cost_micros), 0) FROM calls",
+          "new": "\"SELECT SUM(cost_micros) FROM calls"
+        }
+      ],
+      "expect": "spend is the exact sum of the month's calls, and 0 when there are none"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "month from the timestamp's own offset",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        month = month_of(call.at)\n",
+          "new": "        month = call.at.strftime(\"%Y-%m\")\n"
+        }
+      ],
+      "expect": "months are calendar months in UTC"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "month filter written as BETWEEN the first and the last day",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "            where.append(\"month = ?\")\n            params.append(month)\n",
+          "new": "            where.append(\"at BETWEEN ? AND ?\")\n            params.extend([month + \"-01\", month + \"-31\"])\n"
+        }
+      ],
+      "expect": "months are calendar months in UTC"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "calls in time order instead of recorded order",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "\" ORDER BY number\"",
+          "new": "\" ORDER BY at\""
+        }
+      ],
+      "expect": "a reopened ledger has every call, in the order they were recorded"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "call numbers counted in memory",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "            self._db.execute(SCHEMA)\n",
+          "new": "            self._db.execute(SCHEMA)\n        self._recorded = 0\n"
+        },
+        {
+          "file": "ledger.py",
+          "old": "        return cursor.lastrowid\n",
+          "new": "        self._recorded += 1\n        return self._recorded\n"
+        }
+      ],
+      "expect": "numbers carry on after a reopen"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "attempts read back as plain JSON lists",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        attempts=tuple(Attempt(model, status) for model, status in json.loads(attempts)),\n",
+          "new": "        attempts=json.loads(attempts),\n"
+        }
+      ],
+      "expect": "a call comes back exactly as it was recorded"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "attempts stored sorted",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        attempts = json.dumps([[a.model, a.status] for a in call.attempts])\n",
+          "new": "        attempts = json.dumps(sorted([a.model, a.status] for a in call.attempts))\n"
+        }
+      ],
+      "expect": "a call comes back exactly as it was recorded"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "no served model stored as text",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "(call.team, call.alias, at, attempts, call.served_model,",
+          "new": "(call.team, call.alias, at, attempts, str(call.served_model),"
+        }
+      ],
+      "expect": "a call comes back exactly as it was recorded"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "timestamps stored to the second",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        at = call.at.astimezone(timezone.utc).isoformat(timespec=\"microseconds\")\n",
+          "new": "        at = call.at.astimezone(timezone.utc).isoformat(timespec=\"seconds\")\n"
+        }
+      ],
+      "expect": "a call comes back exactly as it was recorded"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "failed counts calls that cost nothing",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "\"SELECT team, COUNT(*), COUNT(*) - COUNT(served_model),\"",
+          "new": "\"SELECT team, COUNT(*), SUM(cost_micros = 0),\""
+        }
+      ],
+      "expect": "one row per team, by team name; a call is failed when no model served it"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "calls counts only served calls",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "\"SELECT team, COUNT(*), COUNT(*) - COUNT(served_model),\"",
+          "new": "\"SELECT team, COUNT(served_model), COUNT(*) - COUNT(served_model),\""
+        }
+      ],
+      "expect": "one row per team, by team name; a call is failed when no model served it"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "report ordered by cost",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "\" FROM calls WHERE month = ? GROUP BY team ORDER BY team\"",
+          "new": "\" FROM calls WHERE month = ? GROUP BY team ORDER BY SUM(cost_micros) DESC\""
+        }
+      ],
+      "expect": "one row per team, by team name; a call is failed when no model served it"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "a float cost accepted",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        if type(call.cost_micros) is not int:\n            raise TypeError",
+          "new": "        if False:\n            raise TypeError"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "a whole-number float cost accepted",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        if type(call.cost_micros) is not int:\n",
+          "new": "        if call.cost_micros != int(call.cost_micros):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "calls() filters joined with OR",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "            query += \" WHERE \" + \" AND \".join(where)\n",
+          "new": "            query += \" WHERE \" + \" OR \".join(where)\n"
+        }
+      ],
+      "expect": "months are calendar months in UTC"
+    },
+    {
+      "test": "test_cost_ledger",
+      "name": "report totals with TOTAL()",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": " SUM(input_tokens), SUM(output_tokens), SUM(cost_micros)\"",
+          "new": " TOTAL(input_tokens), TOTAL(output_tokens), TOTAL(cost_micros)\""
+        }
+      ],
+      "expect": "report totals are whole numbers too"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "classic weighted round robin: each deployment's turns in a row",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "        scores = self._scores.setdefault((alias, region), {})\n        best = None\n        for deployment in candidates:\n            scores[deployment.name] = scores.get(deployment.name, 0) + deployment.weight\n            if best is None or scores[deployment.name] > scores[best.name]:\n                best = deployment\n        scores[best.name] -= sum(d.weight for d in candidates)\n",
+          "new": "        turns = [d for d in candidates for _ in range(d.weight)]\n        counter = self._scores.setdefault((alias, region), {\"next\": 0})\n        best = turns[counter[\"next\"] % len(turns)]\n        counter[\"next\"] += 1\n"
+        }
+      ],
+      "expect": "smooth weighted round robin, earliest listed on a tie"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "weighted random choice",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "        scores = self._scores.setdefault((alias, region), {})\n        best = None\n        for deployment in candidates:\n            scores[deployment.name] = scores.get(deployment.name, 0) + deployment.weight\n            if best is None or scores[deployment.name] > scores[best.name]:\n                best = deployment\n        scores[best.name] -= sum(d.weight for d in candidates)\n",
+          "new": "        best = _RNG.choices(candidates, weights=[d.weight for d in candidates])[0]\n"
+        },
+        {
+          "file": "balancer.py",
+          "old": "from dataclasses import dataclass\n",
+          "new": "import random\nfrom dataclasses import dataclass\n\n_RNG = random.Random(21)\n"
+        }
+      ],
+      "expect": "smooth weighted round robin, earliest listed on a tie"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "a tie goes to the later deployment",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "            if best is None or scores[deployment.name] > scores[best.name]:\n",
+          "new": "            if best is None or scores[deployment.name] >= scores[best.name]:\n"
+        }
+      ],
+      "expect": "smooth weighted round robin, earliest listed on a tie"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "the winner loses only its own weight",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "        scores[best.name] -= sum(d.weight for d in candidates)\n",
+          "new": "        scores[best.name] -= best.weight\n"
+        }
+      ],
+      "expect": "smooth weighted round robin, earliest listed on a tie"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "one rotation per alias, shared by every region",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "        scores = self._scores.setdefault((alias, region), {})\n",
+          "new": "        scores = self._scores.setdefault((alias, None), {})\n"
+        }
+      ],
+      "expect": "EU traffic does not move the other rotation"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "the rotation picks from every deployment, then skips the ones outside the region",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "        candidates = [d for d in eligible if d.weight > 0]\n",
+          "new": "        candidates = [d for d in self.pools[alias].deployments if d.weight > 0]\n"
+        },
+        {
+          "file": "balancer.py",
+          "old": "        return [best] + [d for d in eligible if d is not best]\n",
+          "new": "        return [d for d in [best] + [d for d in eligible if d is not best] if d in eligible]\n"
+        }
+      ],
+      "expect": "EU users only ever see EU deployments, in their own rotation"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "the fallbacks are every other deployment of the alias",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "        return [best] + [d for d in eligible if d is not best]\n",
+          "new": "        return [best] + [d for d in self.pools[alias].deployments if d is not best]\n"
+        }
+      ],
+      "expect": "EU users only ever see EU deployments, in their own rotation"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "no eligible deployment gives an empty plan",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "            raise NoEligibleDeployment(f\"{alias} has no deployment in region {region}\")\n",
+          "new": "            return []\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "retries of the same deployment are free",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "                if len(attempts) >= budget:\n",
+          "new": "                if len({a.model for a in attempts}) >= budget:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "the budget counts retries after the first try",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "                if len(attempts) >= budget:\n",
+          "new": "                if len(attempts) > budget:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "the budget is checked after each failure",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "                    if err.status < 500:\n                        raise RequestRejected(err) from err\n                    continue\n",
+          "new": "                    if err.status < 500:\n                        raise RequestRejected(err) from err\n                    if len(attempts) >= budget:\n                        raise RetryBudgetExhausted(alias, tuple(attempts))\n                    continue\n"
+        }
+      ],
+      "expect": "RetryBudgetExhausted"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "a 4xx is treated like a 5xx",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "                    if err.status < 500:\n                        raise RequestRejected(err) from err\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "a 4xx is raised only once the deployment's retries are used",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "                    if err.status < 500:\n",
+          "new": "                    if err.status < 500 and len(attempts) > deployment.retries:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "send plans twice, once to check the region",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "        for deployment in self.plan(alias, region):\n",
+          "new": "        self.plan(alias, region)\n        for deployment in self.plan(alias, region):\n"
+        }
+      ],
+      "expect": "a deployment's retries come before the next deployment"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "the winner gives back the weight of every deployment in the pool",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "        scores[best.name] -= sum(d.weight for d in candidates)\n",
+          "new": "        scores[best.name] -= sum(d.weight for d in self.pools[alias].deployments)\n"
+        }
+      ],
+      "expect": "EU users only ever see EU deployments, in their own rotation"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "the rest of the plan sorted by weight",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "        return [best] + [d for d in eligible if d is not best]\n",
+          "new": "        return [best] + sorted((d for d in eligible if d is not best), key=lambda d: -d.weight)\n"
+        }
+      ],
+      "expect": "the rest of the plan keeps the listed order"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "every plan starts the rotation from zero",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "        scores = self._scores.setdefault((alias, region), {})\n",
+          "new": "        scores = {}\n"
+        }
+      ],
+      "expect": "smooth weighted round robin, earliest listed on a tie"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "every weight 0 not handled: the rotation has no candidate",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "        if not candidates:\n            return eligible\n",
+          "new": ""
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "every weight 0 treated as no eligible deployment",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "        if not candidates:\n            return eligible\n",
+          "new": "        if not candidates:\n            raise NoEligibleDeployment(f\"{alias} has no deployment to pick first\")\n"
+        }
+      ],
+      "expect": "NoEligibleDeployment"
+    },
+    {
+      "test": "test_weighted_pools",
+      "name": "one try counter per alias, kept across requests",
+      "edits": [
+        {
+          "file": "balancer.py",
+          "old": "        self._scores: dict[tuple[str, str | None], dict[str, int]] = {}\n",
+          "new": "        self._scores: dict[tuple[str, str | None], dict[str, int]] = {}\n        self._used: dict[str, int] = {}\n"
+        },
+        {
+          "file": "balancer.py",
+          "old": "                if len(attempts) >= budget:\n                    raise RetryBudgetExhausted(alias, tuple(attempts))\n",
+          "new": "                if self._used.get(alias, 0) >= budget:\n                    raise RetryBudgetExhausted(alias, tuple(attempts))\n                self._used[alias] = self._used.get(alias, 0) + 1\n"
+        }
+      ],
+      "expect": "RetryBudgetExhausted"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "a 5xx is a latency sample too",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    if ok:\n        health.samples.append",
+          "new": "    if True:\n        health.samples.append"
+        }
+      ],
+      "expect": "a 5xx is not a latency sample"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "unmeasured models rank after measured ones",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    for model in closed:\n        if not health[model].samples:\n            return model, \"unmeasured\"\n    if closed:\n        return min(closed, key=lambda model: _twice_median(health[model].samples)), \"fastest\"\n",
+          "new": "    measured = [model for model in closed if health[model].samples]\n    if measured:\n        return min(measured, key=lambda model: _twice_median(health[model].samples)), \"fastest\"\n    for model in closed:\n        return model, \"unmeasured\"\n"
+        }
+      ],
+      "expect": "an unmeasured model goes before any measured one"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "samples never expire",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "            while samples and now - samples[0][0] >= window_ms:\n",
+          "new": "            while False:\n"
+        }
+      ],
+      "expect": "a sample exactly window_ms old is gone; a model with none left is unmeasured again"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "a sample exactly window_ms old still counts",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "            while samples and now - samples[0][0] >= window_ms:\n",
+          "new": "            while samples and now - samples[0][0] > window_ms:\n"
+        }
+      ],
+      "expect": "a sample exactly window_ms old is gone; a model with none left is unmeasured again"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "old samples dropped only when the model reports again",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "            while samples and now - samples[0][0] >= window_ms:\n",
+          "new": "            while False:\n"
+        },
+        {
+          "file": "latency.py",
+          "old": "    if ok:\n        health.samples.append((result.t_ms, result.latency_ms))\n",
+          "new": "    if ok:\n        health.samples.append((result.t_ms, result.latency_ms))\n        while result.t_ms - health.samples[0][0] >= 60_000:\n            health.samples.popleft()\n"
+        }
+      ],
+      "expect": "a sample exactly window_ms old is gone; a model with none left is unmeasured again"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "the upper middle sample as the median",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    return 2 * values[middle] if len(values) % 2 else values[middle - 1] + values[middle]\n",
+          "new": "    return 2 * values[middle]\n"
+        }
+      ],
+      "expect": "for an even count, the median is the mean of the two middle samples"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "the lower middle sample as the median",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    return 2 * values[middle] if len(values) % 2 else values[middle - 1] + values[middle]\n",
+          "new": "    return 2 * values[(len(values) - 1) // 2]\n"
+        }
+      ],
+      "expect": "for an even count, the median is the mean of the two middle samples"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "the mean latency instead of the median",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    return 2 * values[middle] if len(values) % 2 else values[middle - 1] + values[middle]\n",
+          "new": "    return 2 * sum(values) / len(values)\n"
+        }
+      ],
+      "expect": "one slow outlier does not hide a fast model: the median, not the mean"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "a success does not reset the run of 5xx",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "        health.failures = 0 if ok else health.failures + 1\n",
+          "new": "        health.failures = health.failures if ok else health.failures + 1\n"
+        }
+      ],
+      "expect": "a success resets the run of 5xx"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "the circuit opens after more than trip_after 5xx",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "        if health.failures >= trip_after:\n",
+          "new": "        if health.failures > trip_after:\n"
+        }
+      ],
+      "expect": "trip_after 5xx in a row open the circuit: no requests until the cooldown is over"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "an open circuit goes half-open at once",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "        if h.opened_at is not None and h.probe is None and now >= h.opened_at + cooldown_ms:\n",
+          "new": "        if h.opened_at is not None and h.probe is None:\n"
+        }
+      ],
+      "expect": "trip_after 5xx in a row open the circuit: no requests until the cooldown is over"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "any success closes an open circuit",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    elif result.request_id == health.probe:\n",
+          "new": "    elif ok or result.request_id == health.probe:\n"
+        }
+      ],
+      "expect": "while a circuit is open, only its probe's result changes it"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "the cooldown runs from the first 5xx of the run",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "        health.failures = 0 if ok else health.failures + 1\n        if health.failures >= trip_after:\n            health.opened_at = result.t_ms\n",
+          "new": "        health.failures = 0 if ok else health.failures + 1\n        if health.failures == 1:\n            health.first_failure = result.t_ms\n        if health.failures >= trip_after:\n            health.opened_at = health.first_failure\n"
+        }
+      ],
+      "expect": "the cooldown runs from the 5xx that opened the circuit"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "the probe waits until after the cooldown",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "now >= h.opened_at + cooldown_ms:\n",
+          "new": "now > h.opened_at + cooldown_ms:\n"
+        }
+      ],
+      "expect": "once cooldown_ms have passed, the next request is the probe"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "every request is a probe while the circuit is half-open",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "        if h.opened_at is not None and h.probe is None and now >= h.opened_at + cooldown_ms:\n",
+          "new": "        if h.opened_at is not None and now >= h.opened_at + cooldown_ms:\n"
+        }
+      ],
+      "expect": "only one probe is out at a time"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "a failed probe keeps the old cooldown",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "        health.opened_at = None if ok else result.t_ms\n",
+          "new": "        health.opened_at = None if ok else health.opened_at\n"
+        }
+      ],
+      "expect": "a failed probe opens the circuit again, from the probe's result"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "a successful probe leaves the circuit half-open",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "        health.opened_at = None if ok else result.t_ms\n",
+          "new": "        health.opened_at = health.opened_at if ok else result.t_ms\n"
+        }
+      ],
+      "expect": "a successful probe closes the circuit"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "a tie goes to the model whose name sorts first",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "        return min(closed, key=lambda model: _twice_median(health[model].samples)), \"fastest\"\n",
+          "new": "        return min(closed, key=lambda model: (_twice_median(health[model].samples), model)), \"fastest\"\n"
+        }
+      ],
+      "expect": "a tie goes to the earliest listed model"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "a tie goes to the last listed model",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "        return min(closed, key=lambda model: _twice_median(health[model].samples)), \"fastest\"\n",
+          "new": "        return min(reversed(closed), key=lambda model: _twice_median(health[model].samples)), \"fastest\"\n"
+        }
+      ],
+      "expect": "a tie goes to the earliest listed model"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "no header record",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    yield _record(*FIELDS)\n",
+          "new": ""
+        }
+      ],
+      "expect": "the first record is the header"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "records without a line ending",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    return out.getvalue()\n",
+          "new": "    return out.getvalue().rstrip(\"\\r\\n\")\n"
+        }
+      ],
+      "expect": "each chunk is one whole CSV record"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "no model written as the text None",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "        yield _record(now, event.request_id, model or \"\", reason)\n",
+          "new": "        yield _record(now, event.request_id, str(model), reason)\n"
+        }
+      ],
+      "expect": "with every circuit open the request is unavailable, with an empty model"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "every event read before the first decision",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    async for event in events:\n",
+          "new": "    everything = [event async for event in events]\n    for event in everything:\n"
+        }
+      ],
+      "expect": "decide each request as soon as it arrives"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "trip_after ignored",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "        if health.failures >= trip_after:\n",
+          "new": "        if health.failures >= 3:\n"
+        }
+      ],
+      "expect": "trip_after 5xx in a row open the circuit: no requests until the cooldown is over"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "a half-open model competes on latency for its probe",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    for model in models:\n        h = health[model]\n        if h.opened_at is not None and h.probe is None and now >= h.opened_at + cooldown_ms:\n            return model, \"probe\"\n    closed = [model for model in models if health[model].opened_at is None]\n    for model in closed:\n        if not health[model].samples:\n            return model, \"unmeasured\"\n    if closed:\n        return min(closed, key=lambda model: _twice_median(health[model].samples)), \"fastest\"\n",
+          "new": "    ready = [m for m in models if health[m].opened_at is not None and health[m].probe is None and now >= health[m].opened_at + cooldown_ms]\n    closed = [model for model in models if health[model].opened_at is None or model in ready]\n    for model in closed:\n        if not health[model].samples:\n            return model, \"probe\" if model in ready else \"unmeasured\"\n    if closed:\n        best = min(closed, key=lambda model: _twice_median(health[model].samples))\n        return best, \"probe\" if best in ready else \"fastest\"\n"
+        }
+      ],
+      "expect": "its probe goes out even if another model is faster"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "the slowest sample instead of the median",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    return 2 * values[middle] if len(values) % 2 else values[middle - 1] + values[middle]\n",
+          "new": "    return 2 * values[-1]\n"
+        }
+      ],
+      "expect": "for an even count, the median is the mean of the two middle samples"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "the latest sample instead of the median",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    return 2 * values[middle] if len(values) % 2 else values[middle - 1] + values[middle]\n",
+          "new": "    return 2 * samples[-1][1]\n"
+        }
+      ],
+      "expect": "for an even count, the median is the mean of the two middle samples"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "the fastest sample instead of the median",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    return 2 * values[middle] if len(values) % 2 else values[middle - 1] + values[middle]\n",
+          "new": "    return 2 * values[0]\n"
+        }
+      ],
+      "expect": "for an even count, the median is the mean of the two middle samples"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "any result for the model ends its probe",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    elif result.request_id == health.probe:",
+          "new": "    elif health.probe is not None:"
+        }
+      ],
+      "expect": "only the probe's own result ends the probe"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "the run of 5xx not reset when the circuit opens",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "            health.opened_at = result.t_ms\n            health.failures = 0\n",
+          "new": "            health.opened_at = result.t_ms\n"
+        }
+      ],
+      "expect": "a successful probe starts a new run"
+    },
+    {
+      "test": "test_latency_routing",
+      "name": "unmeasured models before the probe",
+      "edits": [
+        {
+          "file": "latency.py",
+          "old": "    for model in models:\n        h = health[model]\n        if h.opened_at is not None and h.probe is None and now >= h.opened_at + cooldown_ms:\n            return model, \"probe\"\n    closed = [model for model in models if health[model].opened_at is None]\n    for model in closed:\n        if not health[model].samples:\n            return model, \"unmeasured\"\n",
+          "new": "    closed = [model for model in models if health[model].opened_at is None]\n    for model in closed:\n        if not health[model].samples:\n            return model, \"unmeasured\"\n    for model in models:\n        h = health[model]\n        if h.opened_at is not None and h.probe is None and now >= h.opened_at + cooldown_ms:\n            return model, \"probe\"\n"
+        }
+      ],
+      "expect": "a probe goes before an unmeasured model"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "an unknown alias passes through as a model, as the lesson's ROUTES.get(alias, [alias]) does",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "    else:\n        raise UnknownName(name, [])\n",
+          "new": "    else:\n        chain.append(name)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "an unknown name inside a chain passes through as a model",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "            else:\n                raise UnknownName(entry, here)\n",
+          "new": "            else:\n                chain.append(entry)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "a model given by name is refused",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "    elif name in models:\n        admit(name, region, False)\n",
+          "new": ""
+        }
+      ],
+      "expect": "UnknownName"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "one visited set for the whole expansion",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "        if alias in path:\n            raise AliasCycle(path[path.index(alias):] + [alias])\n",
+          "new": "        if alias in visited:\n            raise AliasCycle(path + [alias])\n        visited.add(alias)\n"
+        },
+        {
+          "file": "aliases.py",
+          "old": "    placed: set[str] = set()\n",
+          "new": "    placed: set[str] = set()\n    visited: set[str] = set()\n"
+        }
+      ],
+      "expect": "AliasCycle"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "no cycle check: the depth limit stops it",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "        if alias in path:\n            raise AliasCycle(path[path.index(alias):] + [alias])\n",
+          "new": ""
+        }
+      ],
+      "expect": "aliases nest deeper than 5"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "the cycle reported from the root",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "            raise AliasCycle(path[path.index(alias):] + [alias])\n",
+          "new": "            raise AliasCycle(path + [alias])\n"
+        }
+      ],
+      "expect": "the error names the cycle, from the alias that repeats"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "depth counted from 0",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "        if len(here) > max_depth:\n",
+          "new": "        if len(here) >= max_depth:\n"
+        }
+      ],
+      "expect": "aliases nest deeper than 5: l1"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "the depth limit one level too loose",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "        if len(here) > max_depth:\n",
+          "new": "        if len(here) > max_depth + 1:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "a region filters only the alias's own models",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "                visit(entry, here, region, blocked)\n",
+          "new": "                visit(entry, here, None, False)\n"
+        }
+      ],
+      "expect": "a region applies to everything reached through the alias"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "an inner region replaces the outer one",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "        if inner is not None:\n            if region is not None and inner != region:\n                blocked = True\n            region = region if region is not None else inner\n",
+          "new": "        if inner is not None:\n            region = inner\n"
+        }
+      ],
+      "expect": "an inner region can narrow an outer one, never widen it"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "a model left out still takes its place",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "        if not blocked and (region is None or models[model] == region) and model not in placed:\n            placed.add(model)\n            chain.append(model)\n",
+          "new": "        if model in placed:\n            return\n        placed.add(model)\n        if not blocked and (region is None or models[model] == region):\n            chain.append(model)\n"
+        }
+      ],
+      "expect": "a model one path leaves out can still be added by a later path"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "each alias expanded once and reused, whatever the region",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "        spec = aliases[alias]\n",
+          "new": "        if alias in expanded:\n            for model in expanded[alias]:\n                admit(model, None, False)\n            return\n        before = len(chain)\n        spec = aliases[alias]\n"
+        },
+        {
+          "file": "aliases.py",
+          "old": "            else:\n                raise UnknownName(entry, here)\n",
+          "new": "            else:\n                raise UnknownName(entry, here)\n        expanded[alias] = chain[before:]\n"
+        },
+        {
+          "file": "aliases.py",
+          "old": "    placed: set[str] = set()\n",
+          "new": "    placed: set[str] = set()\n    expanded: dict[str, list[str]] = {}\n"
+        }
+      ],
+      "expect": "a model one path leaves out can still be added by a later path"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "a model reached twice keeps its last place",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": " and model not in placed:\n            placed.add(model)\n            chain.append(model)\n",
+          "new": ":\n            if model in placed:\n                chain.remove(model)\n            placed.add(model)\n            chain.append(model)\n"
+        }
+      ],
+      "expect": "a model reached twice keeps its first place; an alias reached twice is not a cycle"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "the caller's region ignored",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "        visit(name, [], region, False)\n",
+          "new": "        visit(name, [], None, False)\n"
+        }
+      ],
+      "expect": "the caller's region applies all the way down"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "nothing admitted gives an empty chain",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "    if not chain:\n        where",
+          "new": "    if False:\n        where"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "a subtree whose region conflicts is skipped without being checked",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "                blocked = True\n",
+          "new": "                return\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "a model named directly skips the caller's region",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "    elif name in models:\n        admit(name, region, False)",
+          "new": "    elif name in models:\n        return [name]"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_alias_expansion",
+      "name": "any alias region under a caller's region is a conflict",
+      "edits": [
+        {
+          "file": "aliases.py",
+          "old": "            if region is not None and inner != region:",
+          "new": "            if region is not None:"
+        }
+      ],
+      "expect": "eu-smart has no model in region eu"
+    }
+  ]
+}
