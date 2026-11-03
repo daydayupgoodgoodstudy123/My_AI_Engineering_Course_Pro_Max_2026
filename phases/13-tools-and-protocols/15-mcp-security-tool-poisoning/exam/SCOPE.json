@@ -1,0 +1,132 @@
+{
+  "lesson": "phases/13-tools-and-protocols/15-mcp-security-tool-poisoning",
+  "title": "MCP Security: Poisoned Metadata, Routing, and MRTR State",
+  "format": "staged-brownfield",
+  "service": "PoisonGuard: the descriptor gate in front of an MCP gateway's merged tool catalog, with the lesson's scanner and whole-descriptor pins, a JSON pin manifest shared by the gateway and the review tool, refresh decisions, a paged multi-backend decision stream in NDJSON and policy-path redaction of audit records",
+  "sources": {
+    "docs/en.md": "8df9c5d03680ae24853c738c8c3876eb8e95decd5932e8356ac7c3b2915820e6",
+    "code/main.py": "aa9394a785e0b8b35e9f0fc51fa9d1c2465d58c4d9845484c5ac196f91dad035",
+    "outputs/skill-mcp-threat-model.md": "c6e7c0174adaade28b916f1aa6b9d654878aeb2a242b9266022e5526147f0362",
+    "quiz/quiz.md": "0acd61a9b8a0a4fad073f76883bfd1dbfbfaa0bb07e3a6adc7d5db82a3afd043"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_scan_and_pin",
+      "kind": "debug",
+      "lesson_anchor": "Pin the whole descriptor (canonical JSON with sort_keys and compact separators, SHA-256; a description hash alone misses schema and annotation changes); Static scanning is a tripwire; Exercise 4 (change inputSchema without changing the description); code/main.py descriptor_digest, scan_description, scan_catalog and SecurityGateway._visible_tools",
+      "planted_bugs": [
+        "scan_catalog passes tool.get('description') without a default, so a tool sent without a description hands None to scan_description and the TypeError surfaces one call down, inside re.search",
+        "descriptor_digest hashes only name and description (approved_fields), so an inputSchema or annotation change is no rug pull",
+        "canonical_json has no sort_keys, so the same descriptor with its keys in another order reads as a rug pull once the whole descriptor is hashed",
+        "scan_description drops re.I, so <SYSTEM> and IGNORE Previous Instructions get through; the test first sees issues.search in visible_tools, two calls above the bug",
+        "visible_tools calls scan_catalog once per tool, O(n^2) digests and scans"
+      ],
+      "timing_assert": "visible_tools on 25 servers x 20 tools under 0.06 s. At load average 6 to 12: quadratic version 1.17-1.87 s over 40 runs (2.0-2.7 s at load 20-25), fixed version 2.2-4.3 ms over 150 runs",
+      "overfix_guard": "exact digest of a stored pin for a descriptor with umlauts, German quotes and an unsorted required list (catches ensure_ascii=False, hash(), sorting lists); an annotation-only change is a rug pull (catches hashing name, description and inputSchema only); nested key order (catches sorting top-level keys only); a description-less tool's schema change is a rug pull (catches skipping tools without a description); a descriptor changed in place after a scan (catches a digest cache keyed by id); shadowing hides nothing (catches hiding both colliding tools); canonical JSON with sorted keys but default separators (exact digest); an unapproved tool hidden like any other finding (catches hiding only poisoning and rug pulls)"
+    },
+    {
+      "part": 2,
+      "test": "test_pin_manifest",
+      "kind": "model and persistence",
+      "lesson_anchor": "Store the digest under a qualified key such as notes.export, together with publisher evidence and approval time; Same key, different digest: quarantine as a rug pull until re-approved; Review every new or changed descriptor before updating its digest",
+      "exactness": "pins read back equal after a reopen: approval and quarantine times with 250, 999999 and 1 microseconds at +05:30, UTC and -07:00, compared as instants; digests normalized to lowercase; publisher evidence with non-ASCII text",
+      "traps": [
+        "qualified name folded to lowercase (notes.Export and notes.export merge)",
+        "digest kept as given, checked by length only, by int(digest, 16), matched with $ (trailing newline), or uppercase rejected",
+        "approval time saved to the second or as naive UTC",
+        "naive approval or quarantine time accepted; an unqualified key, notes. or .export accepted",
+        "manifest loaded once and served from memory, so another process's pin is not seen and is then overwritten",
+        "quarantining again moves the time; approving again keeps the quarantine, or only clears it on the old pin instead of replacing the digest, publisher evidence and approval time",
+        "a torn or empty manifest read as no pins instead of raising ValueError"
+      ],
+      "clarifying_questions": [
+        "keeping the original offset",
+        "caching pins in memory",
+        "file layout",
+        "sha256: prefix",
+        "true concurrent writers"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_refresh_decisions",
+      "kind": "core algorithm",
+      "lesson_anchor": "On every refresh (unknown key: quarantine until review; same key, different digest: quarantine as a rug pull until re-approved; duplicate unqualified name: deterministic namespacing; scanner hit: block and review the complete descriptor); Hash equality proves stability, not safety; Namespace before merging (the qualified name is the public gateway name; never let discovery order decide); attack surface 7, supply-chain identity confusion",
+      "traps": [
+        "trust on first use, in refresh or in Gateway.refresh",
+        "a pin with the same digest under another key vouches for a copycat tool",
+        "a matching digest skips the scan",
+        "only the top-level description, only description fields, or only nested objects and not list items such as enum values scanned",
+        "a missing or changed pin checked before the scan",
+        "labels sorted by name or repeated per string",
+        "a quarantined pin approved again once the digest matches",
+        "a decision carrying the pinned digest instead of the live one",
+        "a unique tool shown under its bare name; shadowed keys in discovery order; removed pins not reported, or reported only for servers that sent a listing; decisions in discovery order",
+        "the gateway not recording a rug pull, re-pinning the changed descriptor, recording only quarantine_changed decisions (a change the scanner blocks then comes back as approved after a revert), or quarantining a blocked tool whose digest still matches its pin"
+      ],
+      "integration": "PinStore from Part 2 behind the given Gateway: an annotation flip and a poisoned description are both quarantined on the pin, stay quarantined after the server reverts, and come back after re-approval; a new tool stays unknown over two refreshes and is never pinned",
+      "clarifying_questions": [
+        "quarantined pin with a matching digest",
+        "new and poisoned tool",
+        "colliding names",
+        "prefix only on collision",
+        "scanning keys",
+        "one joined scan of all strings",
+        "a server missing from the refresh"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_decision_stream",
+      "kind": "streaming",
+      "lesson_anchor": "On every refresh rules applied per backend as listings arrive; Namespace before merging (arrival order must not decide); Use It: a cached approval must be invalidated when the descriptor changes",
+      "wire_format": "NDJSON: the chunks joined end with a newline and split on \\n into one JSON object per line, {backend, listing, key, decision}; chunks may hold any number of whole lines",
+      "traps": [
+        "a listing judged before its last page, on its last page alone, or without the last page's own tools",
+        "pins picked by prefix without the dot, or every pin offered to every backend",
+        "late pages of an older listing not ignored; a newer listing keeping the older pages; any other listing number taken as newer; one newest listing number shared by all backends",
+        "a backend ignored after its first complete listing",
+        "removed pins left out; events unsorted within a listing",
+        "the first backend to offer a bare name keeps it (arrival order decides)",
+        "incomplete listings judged when the pages run out",
+        "every page read before judging (probe: at most one page pulled past the completed listing)",
+        "missing newline, blank line, or pretty-printed events"
+      ],
+      "clarifying_questions": [
+        "page order within a listing",
+        "empty last page",
+        "incomplete listings at the end",
+        "several lines in one chunk"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_audit_redaction",
+      "kind": "recursive structure",
+      "lesson_anchor": "Reduce authority before execution, step 6: redacted audit evidence, store digests or redacted values instead of secrets",
+      "traps": [
+        "keys redacted by name wherever they are",
+        "[*] taking the first element only, walking object values, or digesting a trailing list whole; a key step over a list walking every element",
+        "an object at a path redacted leaf by leaf",
+        "str(value), plain SHA-256, ensure_ascii=False, unsorted JSON or default separators under the HMAC",
+        "paths applied one after another, so an inner path changes what the outer one digests",
+        "the record modified in place",
+        "a path that leads nowhere raising; a path that cannot be parsed skipped"
+      ],
+      "clarifying_questions": [
+        "missing paths",
+        "malformed paths",
+        "nested paths"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the quadratic step is visible_tools calling scan_catalog per tool (the lesson's _visible_tools with the scan moved into the loop), timed on 500 tools. The suggested scan_catalog recomputing the approved manifest for 5,000 tools would take minutes; 500 tools keep the slow version near 1.2 s with margins of about 19x and 14x on the two sides of the limit. A fifth bug, the missing-description None, gives the required error one call away from its cause.",
+    "Part 2: no simulated crash in the middle of a write. Chapter 13 already tests that trap in 04 (os.replace raising) and 13 (a leftover .tmp file), and a trap class may appear at most twice per chapter. The reference still writes a temporary file and os.replace, and the interviewer asks about it. In its place the manifest is shared by two processes (a stale in-memory copy loses an update), a torn or empty manifest must raise ValueError instead of reading as empty, and the quarantine state is part of the record: the first quarantine time is kept and re-approval clears it, which is the lesson's 'until re-approved'.",
+    "Part 3: Gateway.refresh, which records rug pulls on the pins and never pins a new tool, is part of the work, so no-TOFU and 'until re-approved' are tested end to end against the Part 2 store. The scan covers every string in the descriptor, following 'descriptions and annotations are untrusted' and 'review the complete descriptor'. Namespacing is reported as shadowed while every tool always goes by server.tool ('the qualified name is the public gateway name'); a verbatim copy on another server is not approved by its matching digest, from attack surface 7.",
+    "Part 4: pages carry an explicit last flag and a listing number instead of cursors, because the lesson does not describe tools/list pagination fields. A newer listing of the same backend replaces an older incomplete one and late pages of the old one are ignored; this is the refresh-after-change situation of the suggested design. Cross-backend duplicate names are tested as arrival-order independence of the event set.",
+    "Part 5: digests are HMAC-SHA256 under an audit key rather than plain SHA-256, since a plain hash of a short secret can be reversed by trying every value. parse_path is given; malformed paths raise ValueError, the outer of two nested paths wins whatever the policy order, and [*] matches lists only."
+  ]
+}
