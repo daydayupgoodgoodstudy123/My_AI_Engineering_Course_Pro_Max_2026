@@ -1,0 +1,141 @@
+{
+  "lesson": "phases/13-tools-and-protocols/25-skill-invocation-and-routing",
+  "title": "Skill Invocation and Routing",
+  "format": "staged-brownfield",
+  "service": "SkillRoute: a skill host's invocation layer: core and host-extension policy adapters, a router that serves one catalog snapshot (eligibility first, relevance second, abstain or ask), a re-entrant JSON run state, argument binding across the three representations, an NDJSON trace of skill lifecycle stages across a multi-turn session, and skill-to-skill calls on the host's own chain",
+  "sources": {
+    "docs/en.md": "f4fa06f11b9425126ba87828fd851254847552c5b73142d6ca5f0ae8c7e056cc",
+    "code/main.py": "690eab3a4f08a3d25362fbdcdd4c1f6bb6a5941524f4371e4438d3fb324fcaa1",
+    "quiz/quiz.md": "b818f59e0ba0e082a61c081f1bbb3f91dd0a14834b67f53ee502901caf6cd7a1",
+    "../22-skills-and-agent-sdks/docs/en.md": "adc5ec9cd045c954ade287b53453397cfaf3c1152024d5cf01f896b80f4ff2b6"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_route_eligible_first",
+      "kind": "debug",
+      "lesson_anchor": "Eligibility must precede ranking (incident-triage 0.80 blocked, incident-review eligible); Human and model invocation form a 2x2 matrix (user-invocable: false and disable-model-invocation: true, and the confusing detail); Routing is classification with an abstain option; Exercise 4 (ambiguity margin); code/main.py route_request, ExtensionPolicyAdapter, _extension_false/_extension_true",
+      "planted_bugs": [
+        "Router.route's implicit branch scores every skill, takes the best and only then asks the policy, so incident-triage (0.8, model invocation disabled) makes the whole request abstain and incident-review (0.5) is never considered",
+        "ExtensionPolicyAdapter.allows maps the host fields to the wrong actors: disable-model-invocation: true blocks every actor and user-invocable: false blocks the model; the test sees it one call up, in Router.route refusing a human's explicit incident-triage and in Router.eligible's human and model views",
+        "no ambiguity rule: the lesson code's max(key=(score, name)) lets the alphabetically last name win a tie, and InvocationPolicy.ambiguity_margin is never read",
+        "Router._catalog parses every frontmatter block again on every route and eligible call, O(catalog) per explicit invocation"
+      ],
+      "timing_assert": "50 explicit human invocations against a 3000-skill catalog, after one warm-up request and gc.collect(), under 0.02 s. Measured here at load average 5 to 6: the per-request reparse takes 0.27 to 0.32 s (at least 13x the limit, about 0.3 s per run), the fixed starter and the reference 0.06 to 0.09 ms (more than 200x under it); parsing once but scanning the list for the name takes about 0.7 ms, and an lru_cache around parse_frontmatter about 4 ms",
+      "overfix_guard": "host fields written as text (quoted \"false\", unquoted False, TRUE) must mean what the booleans mean, which catches flags precomputed with bool(), case-sensitive comparisons and boolean-only checks; the core adapter still gives host fields no meaning; the application channel still reaches a skill neither humans nor the model may invoke; naming a skill still goes through the policy; only eligible skills make a request ambiguous; a tie below the threshold abstains instead of asking",
+      "traps": [
+        "max() over an empty eligible list, or a fallback to the best blocked skill",
+        "user-invocable: false also blocking the model, disable-model-invocation applied to every actor or to the model but not to agents, host fields closing the application channel",
+        "ties broken by name in either direction, the margin compared with <, exact ties only, ambiguity judged over blocked skills, candidates without the best skill or in score order, an ambiguous request still activating",
+        "the catalog parsed again for every request"
+      ]
+    },
+    {
+      "part": 2,
+      "test": "test_resume_state",
+      "kind": "model and persistence",
+      "lesson_anchor": "Context lifecycle is host-specific (On resume, read artifacts/release-readiness.json if it exists. Revalidate the candidate commit before continuing. Do not repeat an external write whose idempotency key is already recorded; put durable outputs in files or typed state, make re-entry safe); Use It (context.durable_state)",
+      "exactness": "a run with a full 40-hex commit, typed arguments (the version-like string 2.10, a bool, an int, an empty string), three steps in execution order (approvals sorts first by name) with nested, empty-list and zero outputs, and two writes whose results are None and a dict with id 0, reads back equal as Step and Write objects through a fresh SkillRun after an interruption; a file in the documented layout written by the skill's instructions reads back, and the host writes the same layout back",
+      "traps": [
+        "the artifacts/ directory never created",
+        "a step saved only when a later write happens",
+        "steps or writes sorted, records read back as dicts, empty outputs read back as missing",
+        "a recorded write looked up by its result, so the 204 status write is repeated, or by key and target; a recorded write answering None",
+        "the write recorded before it runs, or a failed write remembered in memory, so it never runs again",
+        "the commit revalidated by a 12-character prefix, an abbreviated commit accepted",
+        "a moved commit throwing the whole file away or keeping the steps; arguments or the candidate left out of the run's identity",
+        "another skill's file taken as a stale run",
+        "a step completed twice; an output JSON would change ({200: 14}) accepted, checked with json.dumps alone, or recorded before the check",
+        "a layout of its own (wrapped, camelCase keys, Python repr)"
+      ],
+      "clarifying_questions": [
+        "writing on resume",
+        "fsync",
+        "short commit ids",
+        "concurrent writers",
+        "same key with another target",
+        "a crash between the external write and the record"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_bind_arguments",
+      "kind": "core algorithm",
+      "lesson_anchor": "Arguments have three representations (host parser, bound values with required values and defaults, typed tool schema; never interpolate raw arguments into shell commands); Explicit invocation is identity-first (/release-readiness v2.4.0; naming a skill does not bypass policy); Use It (arguments: candidate: required, publish: fixed_false)",
+      "traps": [
+        "split on whitespace, shlex in non-POSIX mode, a quote regex without escapes, empty arguments dropped, an unclosed quote falling back to a plain split, shlex's ValueError let through, text without the leading /, # read as a comment, $VAR or ~ expanded",
+        "-- skipped while options are still parsed after it, a single dash taken for an option",
+        "an option taking a value that starts with --, option names matched by prefix as argparse abbreviations are, --name=value not understood",
+        "a missing required argument raising instead of being asked for, or guessed as empty text",
+        "the fixed publish parameter settable, unknown options taken as positionals or ignored, extra positionals dropped, a repeated option or a flag's value accepted, defaults never applied",
+        "number-looking text converted whatever the schema says (2.10 becomes 2.1, 007 becomes 7), integers parsed through float() or checked with isdigit(), untyped values passed to the tool, a boolean property taking text (bool(\"false\") turns publish on), a string property taking a bool",
+        "names outside the schema passed through, required properties not checked"
+      ],
+      "integration": "SkillHost.prepare: Part 1's router decides first (the model-only style-guide is refused before any binding), then bind and tool_arguments; v2.4.0; rm -rf ~ and $(whoami) | tee stay plain values",
+      "clarifying_questions": [
+        "using shlex",
+        "values starting with a dash",
+        "--dry-run=false",
+        "text booleans",
+        "integer syntax"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_session_lifecycle",
+      "kind": "streaming",
+      "lesson_anchor": "The five invocation stages (eligible, selected, activated, executing, completed; a trace that records only skill_used=true hides the boundary); Context lifecycle is host-specific (a body may remain, be summarized during compaction, or run elsewhere; tool allowances may last one turn while instructions persist longer; state what must be reloaded)",
+      "wire_format": "NDJSON: the chunks joined end with a newline and split on \\n into one JSON object per line, {turn, skill, stage} plus actor, score, revision, tool or reason by stage; the test compares the objects turn by turn and as a whole, and counts load_body calls",
+      "traps": [
+        "approvals carried into the next turn (also one that only continues the active skills), replaced by a later approval, or cleared by a compaction",
+        "the body kept through a compaction, reloaded at the compaction, reloaded every turn, reloaded only when the tool may run, announced as reloaded from a cached body, or one compaction flag for the whole session",
+        "any check completing the skill, a completed skill staying active, a passing check for an inactive skill reported",
+        "a continuing turn routed again, an active skill activated again, an implicit miss reported as denied, the body loaded before the policy decides",
+        "a tool call under an inactive skill ignored, turns counted from 0, a refusal with a reason of its own, the score as text",
+        "every event read first, or a turn's lines held until the next turn has lines (probe: at most one event pulled past the first turn)",
+        "missing newline, blank lines, pretty-printed lines"
+      ],
+      "clarifying_questions": [
+        "session-wide approvals",
+        "when to reload",
+        "invoking an active skill",
+        "implicit misses",
+        "events before the first turn"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_skill_chains",
+      "kind": "recursive structure",
+      "lesson_anchor": "Skill-to-skill invocation is a tool-like edge (target_skill, a bounded task and artifact paths, the expected response contract, the reason, a fallback if unavailable, a maximum depth or cycle rule; the host decides whether it shares context or runs in a fork); Exercise 5 (maximum composition depth and a two-skill cycle); Use It (missing_dependency: stop); quiz Q12 (a host-recorded chain instead of self-reported caller and depth)",
+      "traps": [
+        "only direct self-calls, or only calls back to the session's skill, counted as cycles; a cycle path without the target or reversed",
+        "depth checked before cycles",
+        "only this request's max_depth or only the earlier requests' counted, the session skill's calls counted as depth 0, a call at max_depth refused, the session's skill limited by a request of its own",
+        "a missing skill looked up with []",
+        "fallbacks ignored, a failure without a fallback answering None, fallbacks applied to refusals only, a falsy fallback (\"\") taken for none, a skill's own exception turned into a stop",
+        "the reply's contract never checked",
+        "refused calls left out of the tree, used_fallback not marked, calls newest first, results left out",
+        "a forked skill handed its caller's context, a shared skill handed nothing or the whole conversation, the conversation not passed to the session's skill",
+        "a mutable call stack left behind by a stop, so the next call counts one level too deep"
+      ],
+      "clarifying_questions": [
+        "where caller and depth come from",
+        "which failures a fallback covers",
+        "a None fallback",
+        "what a fork sees",
+        "calling the same skill twice in a row"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the router is an object that serves one catalog snapshot and takes the SKILL.md frontmatter blocks discovery found, parsed by a given parser that follows lesson 22's portable field table. The planted performance bug is Router._catalog reparsing the whole catalog on every request, and the timing uses 50 explicit invocations against 3000 skills instead of 2000 skills times 50 implicit requests: implicit routing has to score every eligible skill on every request, and measured here reparsing costs about 2.5 microseconds per skill against 1 to 1.5 for scoring, so a fixed version can only be about 10x faster there, short of the 8x margin on both sides. Explicit invocations make the fix O(1) per request, as identity-first invocation should be.",
+    "Part 1: the overfix guard writes the host fields as frontmatter text (quoted \"false\", unquoted False and TRUE), because the given parser keeps every value except unquoted lowercase true/false as text; bool(value) then turns \"false\" into True. Ambiguity is an abstention that lists the tied skills in a candidates field, with InvocationPolicy.ambiguity_margin from Exercise 4; the threshold is checked before ambiguity.",
+    "Part 2: no simulated crash in the middle of a write. Chapter 13 already tests that trap in 04 and 13, and a trap class may appear at most twice per chapter; the reference still writes a temporary file and os.replace, and the interviewer asks about it. The stale in-memory copy (13 and 15) is left out for the same reason: every resume reads the file. In their place: the full commit id (a moved tag keeps the same 12-character prefix), the rule that a different commit, other arguments or another candidate drop the steps but keep the writes, outputs JSON would change ({200: 14}) refused, and a fixed layout shared with the skill's instructions, checked with a file the skill wrote.",
+    "Part 3: the fixed publish parameter comes from the lesson's Use It contract (publish: fixed_false). Text is never turned into a boolean, so the bool(\"false\") trap appears once in this pack (Part 1); int() leniency (\" 3\", \"+3\") is not tested because lessons 05, 18 and 20 of this chapter already test that kind of trap. The part ends with SkillHost.prepare, which runs Part 1's router before binding.",
+    "Part 4: the suggested subagent trap (a subagent gets the skill without the parent's history) moved to Part 5's fork mode so the same thing is not tested twice. The stream adds a denied stage, so refused invocations and tool calls show in the trace, and leaves argument binding to Part 3. Approvals are checked within a turn, across turns and across a compaction; the reload happens before the skill's next tool call, through load_body, and picks up a changed SKILL.md (revision r2).",
+    "Part 5: fallback is the value the caller continues with, and None means stop (the Use It contract's missing_dependency: stop); a stop raises inside the caller and is decided by the caller's own request, up to the session's skill. A request's max_depth also bounds every call below it, so a deeper request cannot raise an earlier limit. The host policy's skill caller allowlist is not involved. There is no diamond and no repeated call, because the visited-set-versus-chain trap is already tested twice in this chapter (11 and 23).",
+    "Kept apart from neighbouring lessons: no evaluation metrics (27), routing selects skills rather than models (21), Part 5 runs call chains at run time instead of checking static dependency edges (22), and nothing here discovers skills or budgets the catalog (24)."
+  ]
+}

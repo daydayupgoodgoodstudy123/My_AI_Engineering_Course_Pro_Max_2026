@@ -1,0 +1,1723 @@
+{
+  "package": "skillroute",
+  "tests": [
+    "test_route_eligible_first",
+    "test_resume_state",
+    "test_bind_arguments",
+    "test_session_lifecycle",
+    "test_skill_chains"
+  ],
+  "layers": [
+    {
+      "test": "test_route_eligible_first",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a blocked top match must not keep an eligible skill from being ranked"
+        },
+        {
+          "name": "rank only the eligible skills",
+          "edits": [
+            {
+              "file": "router.py",
+              "old": "        scored = [(relevance_score(request.query, skill), skill) for skill in skills]\n        score, selected = max(scored, key=lambda item: (item[0], item[1].name))\n        allowed, reason = self.adapter.allows(selected, actor, request)\n        if not allowed:\n            return InvocationDecision(False, actor, selected.name, mode, round(score, 4), f\"blocked by {reason}\")\n",
+              "new": "        eligible = []\n        blocked = set()\n        for skill in skills:\n            allowed, reason = self.adapter.allows(skill, actor, request)\n            if allowed:\n                eligible.append((relevance_score(request.query, skill), skill, reason))\n            else:\n                blocked.add(reason)\n        if not eligible:\n            reason = \"no discovered skill is eligible for implicit routing\"\n            if blocked:\n                reason = f\"{reason}: {'; '.join(sorted(blocked))}\"\n            return InvocationDecision(False, actor, None, mode, 0.0, reason)\n        score, selected, reason = max(eligible, key=lambda item: (item[0], item[1].name))\n"
+            }
+          ],
+          "expect": "disable-model-invocation leaves explicit human invocation alone"
+        },
+        {
+          "name": "+ each host field limits its own actors",
+          "edits": [
+            {
+              "file": "policy.py",
+              "old": "        if _extension_true(fields.get(\"disable-model-invocation\")):\n            return False, \"host extension disable-model-invocation=true\"\n        if actor in (Actor.MODEL, Actor.AGENT) and _extension_false(fields.get(\"user-invocable\")):\n            return False, \"host extension user-invocable=false\"\n",
+              "new": "        if actor is Actor.HUMAN and _extension_false(fields.get(\"user-invocable\")):\n            return False, \"host extension user-invocable=false\"\n        if actor in (Actor.MODEL, Actor.AGENT) and _extension_true(fields.get(\"disable-model-invocation\")):\n            return False, \"host extension disable-model-invocation=true\"\n"
+            }
+          ],
+          "expect": "an exact tie is ambiguous: activate nothing and let the host ask"
+        },
+        {
+          "name": "+ ask when eligible skills tie or come within the margin",
+          "edits": [
+            {
+              "file": "router.py",
+              "old": "        return InvocationDecision(True, actor, selected.name, mode, round(score, 4), reason)\n",
+              "new": "        close = sorted(skill.name for other, skill, _ in eligible if score - other <= policy.ambiguity_margin)\n        if len(close) > 1:\n            return InvocationDecision(False, actor, None, mode, round(score, 4), f\"ambiguous between {', '.join(close)}\", tuple(close))\n        return InvocationDecision(True, actor, selected.name, mode, round(score, 4), reason)\n"
+            }
+          ],
+          "expect": "route should be fast on a big catalog"
+        },
+        {
+          "name": "+ parse the catalog once and look names up",
+          "edits": [
+            {
+              "file": "router.py",
+              "old": "        self.adapter = adapter\n        self.entries = list(entries)\n\n    def _catalog(self) -> list[SkillMetadata]:\n        return [parse_frontmatter(text) for text in self.entries]\n",
+              "new": "        self.adapter = adapter\n        self._skills = [parse_frontmatter(text) for text in entries]\n        self._by_name = {skill.name: skill for skill in self._skills}\n\n    def _catalog(self) -> list[SkillMetadata]:\n        return self._skills\n"
+            },
+            {
+              "file": "router.py",
+              "old": "            skill = next((skill for skill in skills if skill.name == request.explicit_name), None)\n",
+              "new": "            skill = self._by_name.get(request.explicit_name)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_route_eligible_first",
+      "name": "flags precomputed with bool(): disable-model-invocation \"false\" blocks the model",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        if actor in (Actor.MODEL, Actor.AGENT) and _extension_true(fields.get(\"disable-model-invocation\")):\n",
+          "new": "        if actor in (Actor.MODEL, Actor.AGENT) and bool(fields.get(\"disable-model-invocation\")):\n"
+        }
+      ],
+      "expect": "a host field written as text means what the boolean means"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "flags precomputed with bool(): user-invocable False stays invocable",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        if actor is Actor.HUMAN and _extension_false(fields.get(\"user-invocable\")):\n",
+          "new": "        if actor is Actor.HUMAN and not bool(fields.get(\"user-invocable\", True)):\n"
+        }
+      ],
+      "expect": "a host field written as text means what the boolean means"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "text values compared case-sensitively",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    return value is False or (isinstance(value, str) and value.lower() == \"false\")\n",
+          "new": "    return value is False or value == \"false\"\n"
+        },
+        {
+          "file": "policy.py",
+          "old": "    return value is True or (isinstance(value, str) and value.lower() == \"true\")\n",
+          "new": "    return value is True or value == \"true\"\n"
+        }
+      ],
+      "expect": "a host field written as text means what the boolean means"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "only real booleans count",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    return value is False or (isinstance(value, str) and value.lower() == \"false\")\n",
+          "new": "    return value is False\n"
+        }
+      ],
+      "expect": "a host field written as text means what the boolean means"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "user-invocable: false read as 'the model cannot use it' as well",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        if actor is Actor.HUMAN and _extension_false(fields.get(\"user-invocable\")):\n",
+          "new": "        if actor in (Actor.HUMAN, Actor.MODEL, Actor.AGENT) and _extension_false(fields.get(\"user-invocable\")):\n"
+        }
+      ],
+      "expect": "the model and agents may select the shared and the model-only skills"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "disable-model-invocation: true read as 'the skill is disabled'",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        if actor in (Actor.MODEL, Actor.AGENT) and _extension_true(fields.get(\"disable-model-invocation\")):\n",
+          "new": "        if _extension_true(fields.get(\"disable-model-invocation\")):\n"
+        }
+      ],
+      "expect": "disable-model-invocation leaves explicit human invocation alone"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "disable-model-invocation applied to the model but not to agents",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        if actor in (Actor.MODEL, Actor.AGENT) and _extension_true(fields.get(\"disable-model-invocation\")):\n",
+          "new": "        if actor is Actor.MODEL and _extension_true(fields.get(\"disable-model-invocation\")):\n"
+        }
+      ],
+      "expect": "a blocked top match must not keep an eligible skill from being ranked"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "host fields also close the application channel",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        if actor is Actor.HUMAN and _extension_false(fields.get(\"user-invocable\")):\n",
+          "new": "        if actor in (Actor.HUMAN, Actor.APPLICATION) and _extension_false(fields.get(\"user-invocable\")):\n"
+        }
+      ],
+      "expect": "an application can still preload a skill neither humans nor the model may invoke"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "the core adapter reads host fields too",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            return self.policy.allow_human, \"human activation policy\"\n",
+          "new": "            if _extension_false(skill.runtime_extensions.get(\"user-invocable\")):\n                return False, \"host extension user-invocable=false\"\n            return self.policy.allow_human, \"human activation policy\"\n"
+        }
+      ],
+      "expect": "the core adapter gives host fields no meaning"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "a named skill is activated without asking the policy",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "            return InvocationDecision(allowed, actor, skill.name, mode, 1.0, reason if allowed else f\"blocked by {reason}\")\n",
+          "new": "            return InvocationDecision(True, actor, skill.name, mode, 1.0, reason)\n"
+        }
+      ],
+      "expect": "naming a skill does not bypass the policy"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "nothing eligible: max() over an empty list",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "        if not eligible:\n            reason = \"no discovered skill is eligible for implicit routing\"\n",
+          "new": "        if False:\n            reason = \"no discovered skill is eligible for implicit routing\"\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "nothing eligible: fall back to the best blocked skill",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "        if not eligible:\n            reason = \"no discovered skill is eligible for implicit routing\"\n",
+          "new": "        if not eligible:\n            eligible = [(skill, \"best effort\") for skill in self._skills]\n        if False:\n            reason = \"no discovered skill is eligible for implicit routing\"\n"
+        }
+      ],
+      "expect": "with nothing eligible, routing abstains"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "ties broken by the alphabetically first name",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "        if len(close) > 1:\n",
+          "new": "        if False:\n"
+        },
+        {
+          "file": "router.py",
+          "old": "        score, selected, eligibility_reason = max(scored, key=lambda item: (item[0], item[1].name))\n",
+          "new": "        score, selected, eligibility_reason = min(scored, key=lambda item: (-item[0], item[1].name))\n"
+        }
+      ],
+      "expect": "an exact tie is ambiguous: activate nothing and let the host ask"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "margin compared with <, so an exact tie never counts",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "if score - other <= policy.ambiguity_margin)",
+          "new": "if score - other < policy.ambiguity_margin)"
+        }
+      ],
+      "expect": "an exact tie is ambiguous: activate nothing and let the host ask"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "only exact ties are ambiguous; the margin is ignored",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "if score - other <= policy.ambiguity_margin)",
+          "new": "if other == score)"
+        }
+      ],
+      "expect": "a runner-up within the ambiguity margin makes the request ambiguous"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "ambiguity judged before the threshold",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "        if score < policy.model_threshold:\n            return InvocationDecision(False, actor, selected.name, mode, round(score, 4), \"best match did not meet the host threshold\")\n        close = sorted(",
+          "new": "        close = sorted("
+        },
+        {
+          "file": "router.py",
+          "old": "        return InvocationDecision(True, actor, selected.name, mode, round(score, 4), eligibility_reason)\n",
+          "new": "        if score < policy.model_threshold:\n            return InvocationDecision(False, actor, selected.name, mode, round(score, 4), \"best match did not meet the host threshold\")\n        return InvocationDecision(True, actor, selected.name, mode, round(score, 4), eligibility_reason)\n"
+        }
+      ],
+      "expect": "a tie too weak to clear the threshold is not worth asking about"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "ambiguity judged over every discovered skill, blocked ones included",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "        close = sorted(skill.name for other, skill, _ in scored if score - other <= policy.ambiguity_margin)\n",
+          "new": "        close = sorted(skill.name for skill in self._skills if score - relevance_score(request.query, skill) <= policy.ambiguity_margin)\n"
+        }
+      ],
+      "expect": "a blocked top match must not keep an eligible skill from being ranked"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "candidates leave out the best skill",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "        close = sorted(skill.name for other, skill, _ in scored if score - other <= policy.ambiguity_margin)\n        if len(close) > 1:\n",
+          "new": "        close = sorted(skill.name for other, skill, _ in scored if skill is not selected and score - other <= policy.ambiguity_margin)\n        if close:\n"
+        }
+      ],
+      "expect": "an exact tie is ambiguous: activate nothing and let the host ask"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "candidates in score order instead of by name",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "        close = sorted(skill.name for other, skill, _ in scored if score - other <= policy.ambiguity_margin)\n",
+          "new": "        close = [skill.name for other, skill, _ in sorted(scored, key=lambda item: (-item[0], item[1].name)) if score - other <= policy.ambiguity_margin]\n"
+        }
+      ],
+      "expect": "a runner-up within the ambiguity margin makes the request ambiguous"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "an ambiguous request still activates the best skill",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "            return InvocationDecision(\n                False, actor, None, mode, round(score, 4), f\"ambiguous between {', '.join(close)}\", tuple(close)\n            )\n",
+          "new": "            return InvocationDecision(\n                True, actor, selected.name, mode, round(score, 4), f\"ambiguous between {', '.join(close)}\", tuple(close)\n            )\n"
+        }
+      ],
+      "expect": "an exact tie is ambiguous: activate nothing and let the host ask"
+    },
+    {
+      "test": "test_route_eligible_first",
+      "name": "the catalog parsed again for every request",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "            skill = self._by_name.get(request.explicit_name)\n",
+          "new": "            skill = next((s for s in (parse_frontmatter(text) for text in self._entries) if s.name == request.explicit_name), None)\n"
+        },
+        {
+          "file": "router.py",
+          "old": "        self.adapter = adapter\n",
+          "new": "        self.adapter = adapter\n        entries = list(entries)\n        self._entries = entries\n"
+        }
+      ],
+      "expect": "route should be fast on a big catalog"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "parent directory never created",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "        self.path.parent.mkdir(parents=True, exist_ok=True)\n",
+          "new": ""
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "steps saved only when a write is recorded",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "        _check_json(f\"output of {step!r}\", output)\n        self._state.steps.append(Step(step, output))\n        self._save()\n",
+          "new": "        _check_json(f\"output of {step!r}\", output)\n        self._state.steps.append(Step(step, output))\n"
+        }
+      ],
+      "expect": "a completed step is on disk as soon as it is recorded"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "steps sorted by name in the file",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "for step in state.steps],",
+          "new": "for step in sorted(state.steps, key=lambda s: s.name)],"
+        }
+      ],
+      "expect": "the state reads back exactly, in the order it happened"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "writes kept as a dict sorted by key",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "for write in state.writes],",
+          "new": "for write in sorted(state.writes, key=lambda w: w.key)],"
+        }
+      ],
+      "expect": "the state reads back exactly, in the order it happened"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "empty outputs read back as missing",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "[Step(item[\"name\"], item[\"output\"]) for item in data[\"steps\"]]",
+          "new": "[Step(item[\"name\"], item.get(\"output\") or None) for item in data[\"steps\"]]"
+        }
+      ],
+      "expect": "the state reads back exactly, in the order it happened"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "records read back as plain dicts",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "[Step(item[\"name\"], item[\"output\"]) for item in data[\"steps\"]]",
+          "new": "list(data[\"steps\"])"
+        }
+      ],
+      "expect": "a completed step is on disk as soon as it is recorded"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "a recorded write found by its result instead of its key",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "            if write.key == key:\n",
+          "new": "            if write.key == key and write.result:\n"
+        }
+      ],
+      "expect": "a recorded write is never repeated, even one that answered nothing"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "a recorded write answers None",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "            if write.key == key:\n                return write.result\n",
+          "new": "            if write.key == key:\n                return None\n"
+        }
+      ],
+      "expect": "a recorded write answers with its recorded result"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "the write recorded before it runs (at most once, not exactly once)",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "        result = action(key)\n        self._state.writes.append(Write(key, target, result))\n        self._save()\n        return result\n",
+          "new": "        self._state.writes.append(Write(key, target, None))\n        self._save()\n        result = action(key)\n        self._state.writes[-1] = Write(key, target, result)\n        self._save()\n        return result\n"
+        }
+      ],
+      "expect": "a write that failed is not recorded"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "a failed write kept in memory and answered later",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "        result = action(key)\n        self._state.writes.append(Write(key, target, result))\n",
+          "new": "        try:\n            result = action(key)\n        except Exception:\n            self._state.writes.append(Write(key, target, None))\n            raise\n        self._state.writes.append(Write(key, target, result))\n"
+        }
+      ],
+      "expect": "a failed write runs again, under the same key, on the next attempt"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "commit revalidated by its first 12 characters",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "        elif (recorded.candidate, recorded.commit, recorded.arguments) == (candidate, commit, arguments):\n",
+          "new": "        elif (recorded.candidate, recorded.commit[:12], recorded.arguments) == (candidate, commit[:12], arguments):\n"
+        }
+      ],
+      "expect": "a moved commit drops the completed steps and keeps the recorded writes"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "a moved commit throws the whole file away",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "            state = RunState(skill, candidate, commit, arguments, [], list(recorded.writes))\n",
+          "new": "            state = RunState(skill, candidate, commit, arguments)\n"
+        }
+      ],
+      "expect": "a moved commit drops the completed steps and keeps the recorded writes"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "a moved commit keeps the completed steps",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "            state = RunState(skill, candidate, commit, arguments, [], list(recorded.writes))\n",
+          "new": "            state = RunState(skill, candidate, commit, arguments, list(recorded.steps), list(recorded.writes))\n"
+        }
+      ],
+      "expect": "a moved commit drops the completed steps and keeps the recorded writes"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "only the commit is revalidated, not the arguments",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "        elif (recorded.candidate, recorded.commit, recorded.arguments) == (candidate, commit, arguments):\n",
+          "new": "        elif (recorded.candidate, recorded.commit) == (candidate, commit):\n"
+        }
+      ],
+      "expect": "other arguments, or another candidate on the same commit, make another run"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "the candidate left out of the run's identity",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "        elif (recorded.candidate, recorded.commit, recorded.arguments) == (candidate, commit, arguments):\n",
+          "new": "        elif (recorded.commit, recorded.arguments) == (commit, arguments):\n"
+        }
+      ],
+      "expect": "other arguments, or another candidate on the same commit, make another run"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "an abbreviated commit accepted",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "        if not isinstance(commit, str) or not _COMMIT.fullmatch(commit):\n",
+          "new": "        if not isinstance(commit, str):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "another skill's file taken as a stale run",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "        elif recorded.skill != skill:\n            raise ValueError(f\"{path} holds a {recorded.skill} run, not {skill}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "a step completed twice",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "        if any(done.name == step for done in self._state.steps):\n            raise ValueError(f\"step {step!r} is already complete\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "outputs not checked: JSON turns 200 into \"200\" on the way back",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "        _check_json(f\"output of {step!r}\", output)\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "outputs checked with json.dumps alone",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "        same = json.loads(json.dumps(value, allow_nan=False)) == value\n",
+          "new": "        json.dumps(value, allow_nan=False)\n        same = True\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "output checked after it is recorded",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "        _check_json(f\"output of {step!r}\", output)\n        self._state.steps.append(Step(step, output))\n",
+          "new": "        self._state.steps.append(Step(step, output))\n        _check_json(f\"output of {step!r}\", output)\n"
+        }
+      ],
+      "expect": "a step already done, or an output JSON would change, is refused and nothing is recorded"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "a layout of its own, wrapped under one key",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "        self.path.parent.mkdir(parents=True, exist_ok=True)\n",
+          "new": "        data = {\"run\": data}\n        self.path.parent.mkdir(parents=True, exist_ok=True)\n"
+        },
+        {
+          "file": "state.py",
+          "old": "    data = json.loads(text)\n",
+          "new": "    data = json.loads(text)[\"run\"]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "camelCase keys in the file",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "            \"writes\": [{\"key\": write.key, \"target\": write.target, \"result\": write.result} for write in state.writes],\n",
+          "new": "            \"externalWrites\": [{\"key\": write.key, \"target\": write.target, \"result\": write.result} for write in state.writes],\n"
+        },
+        {
+          "file": "state.py",
+          "old": "        [Write(item[\"key\"], item[\"target\"], item[\"result\"]) for item in data[\"writes\"]],\n",
+          "new": "        [Write(item[\"key\"], item[\"target\"], item[\"result\"]) for item in data[\"externalWrites\"]],\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "the file written with Python repr instead of JSON",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "                json.dump(data, handle, ensure_ascii=False, indent=2)\n",
+          "new": "                handle.write(repr(data))\n"
+        },
+        {
+          "file": "state.py",
+          "old": "    data = json.loads(text)\n",
+          "new": "    data = __import__(\"ast\").literal_eval(text)\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_resume_state",
+      "name": "a recorded write matched by key and target, so another target name repeats it",
+      "edits": [
+        {
+          "file": "state.py",
+          "old": "if write.key == key:",
+          "new": "if write.key == key and write.target == target:"
+        }
+      ],
+      "expect": "the idempotency key alone identifies a recorded write"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "split on whitespace",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        words = shlex.split(text[1:])\n",
+          "new": "        words = text[1:].split()\n"
+        }
+      ],
+      "expect": "quotes keep the spaces inside one argument"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "shlex in non-POSIX mode keeps the quotes",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        words = shlex.split(text[1:])\n",
+          "new": "        words = shlex.split(text[1:], posix=False)\n"
+        }
+      ],
+      "expect": "quotes keep the spaces inside one argument"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "double quotes grouped with a regex, no escapes",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        words = shlex.split(text[1:])\n",
+          "new": "        words = [w[1:-1] if w[:1] == w[-1:] == '\"' else w for w in re.findall(r'\"[^\"]*\"|\\S+', text[1:])]\n"
+        }
+      ],
+      "expect": "escaped quotes, single quotes and empty arguments follow the host's rules"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "empty arguments dropped",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        words = shlex.split(text[1:])\n",
+          "new": "        words = [word for word in shlex.split(text[1:]) if word]\n"
+        }
+      ],
+      "expect": "escaped quotes, single quotes and empty arguments follow the host's rules"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "an unclosed quote falls back to a plain split",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "    except ValueError as error:\n        raise ArgumentError(str(error)) from None\n",
+          "new": "    except ValueError:\n        words = text[1:].split()\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "shlex's ValueError let through as it is",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "    except ValueError as error:\n        raise ArgumentError(str(error)) from None\n",
+          "new": "    except KeyError:\n        raise\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "text without the leading / accepted",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "    if not text.startswith(\"/\"):\n        raise ArgumentError(\"an explicit invocation starts with /\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "-- skipped, but options still parsed after it",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        if arg == \"--\":\n            given_positional.extend(argv[i:])\n            break\n",
+          "new": "        if arg == \"--\":\n            continue\n"
+        }
+      ],
+      "expect": "after -- every argument is positional"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "an option takes the next argument whatever it is",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        elif i < len(argv) and not argv[i].startswith(\"--\"):\n",
+          "new": "        elif i < len(argv):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "--name=value not understood",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        option, has_value, inline = arg.partition(\"=\")\n",
+          "new": "        option, has_value, inline = arg, \"\", \"\"\n"
+        }
+      ],
+      "expect": "unknown option --min-approvals=2"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "option names matched by prefix, as argparse abbreviations are",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        param = options.get(option)\n",
+          "new": "        param = options.get(option) or next((p for name, p in options.items() if name.startswith(option)), None)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "a missing required argument raises instead of being asked for",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        if param.required:\n            missing.append(param.name)\n",
+          "new": "        if param.required:\n            raise ArgumentError(f\"{param.name} is required\")\n"
+        }
+      ],
+      "expect": "candidate is required"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "a missing required argument guessed as empty text",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        if param.required:\n            missing.append(param.name)\n",
+          "new": "        if param.required:\n            values[param.name] = \"\"\n"
+        }
+      ],
+      "expect": "a missing required argument is asked for, never guessed"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "a fixed parameter set by the caller",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        if param.fixed:\n            raise ArgumentError(f\"{param.name} is fixed and cannot be set\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "an unknown option taken as a positional argument",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        if param is None:\n            raise ArgumentError(f\"unknown option {option}\")\n",
+          "new": "        if param is None:\n            given_positional.append(arg)\n            continue\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "unknown options ignored",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        if param is None:\n            raise ArgumentError(f\"unknown option {option}\")\n",
+          "new": "        if param is None:\n            continue\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "extra positional arguments dropped",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "    if len(given_positional) > len(positional):\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "an option given twice: the last one wins",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        if param.name in values:\n            raise ArgumentError(f\"{option} given twice\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "a value given to a flag ignored",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "            if has_value:\n                raise ArgumentError(f\"{option} takes no value\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "defaults never applied",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        elif param.default is not None:\n            values[param.name] = param.default\n",
+          "new": ""
+        }
+      ],
+      "expect": "positionals, flags and defaults bind by name"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "number-looking text converted whatever the schema says",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        if kind == \"string\" and isinstance(value, str):\n            typed[name] = value\n",
+          "new": "        if kind == \"string\" and isinstance(value, str):\n            try:\n                typed[name] = int(value)\n            except ValueError:\n                try:\n                    typed[name] = float(value)\n                except ValueError:\n                    typed[name] = value\n"
+        }
+      ],
+      "expect": "text becomes a number only where the schema asks for an integer"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "integers parsed through float()",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        elif kind == \"integer\" and isinstance(value, str) and _INTEGER.fullmatch(value):\n            typed[name] = int(value)\n",
+          "new": "        elif kind == \"integer\" and isinstance(value, str) and value.lstrip(\"-\").replace(\".\", \"\", 1).isdigit():\n            typed[name] = int(float(value))\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "names the schema does not know passed through",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        if name not in properties:\n            raise ArgumentError(f\"{name} is not a parameter of this tool\")\n",
+          "new": "        if name not in properties:\n            typed[name] = value\n            continue\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "required properties not checked",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "        if name not in typed:\n            raise ArgumentError(f\"{name} is required\")\n",
+          "new": "        pass\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "the tool gets the bound text, untyped",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "            typed[name] = int(value)\n",
+          "new": "            typed[name] = value\n"
+        }
+      ],
+      "expect": "text becomes a number only where the schema asks for an integer"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "a shlex.shlex lexer that keeps # as a comment",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "words = shlex.split(text[1:])",
+          "new": "lex = shlex.shlex(text[1:], posix=True)\n        lex.whitespace_split = True\n        words = list(lex)"
+        }
+      ],
+      "expect": "nothing is expanded or dropped"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "$VAR and ~ expanded as a shell would",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "    return words[0], words[1:]",
+          "new": "    import os.path\n    return words[0], [os.path.expanduser(os.path.expandvars(w)) for w in words[1:]]"
+        }
+      ],
+      "expect": "nothing is expanded or dropped"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "a value starting with a single dash taken for an option",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "elif i < len(argv) and not argv[i].startswith(\"--\"):",
+          "new": "elif i < len(argv) and not argv[i].startswith(\"-\"):"
+        }
+      ],
+      "expect": "--min-approvals needs a value"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "integers checked with str.isdigit, so a minus sign is refused",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "_INTEGER.fullmatch(value)",
+          "new": "value.isdigit()"
+        }
+      ],
+      "expect": "is not a valid integer"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "a boolean property takes whatever value it gets",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "elif kind == \"boolean\" and isinstance(value, bool):",
+          "new": "elif kind == \"boolean\":"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "a boolean property converted with bool(), so \"false\" turns publish on",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "elif kind == \"boolean\" and isinstance(value, bool):\n            typed[name] = value",
+          "new": "elif kind == \"boolean\":\n            typed[name] = bool(value)"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bind_arguments",
+      "name": "a string property takes whatever value it gets",
+      "edits": [
+        {
+          "file": "arguments.py",
+          "old": "if kind == \"string\" and isinstance(value, str):",
+          "new": "if kind == \"string\":"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "approvals carried into the next turn",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            turn += 1\n            allowed = set()\n",
+          "new": "            turn += 1\n"
+        }
+      ],
+      "expect": "the skill stays active, and an approval lasts only until its turn ends"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "a new approval replaces the earlier ones",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            allowed.update(event.tools)\n",
+          "new": "            allowed = set(event.tools)\n"
+        }
+      ],
+      "expect": "the skill stays active, and an approval lasts only until its turn ends"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "a passing check completes a skill that is not active",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            if event.passed and event.skill in bodies:\n                del bodies[event.skill]\n",
+          "new": "            if event.passed:\n                bodies.pop(event.skill, None)\n"
+        }
+      ],
+      "expect": "a completed skill is gone until something activates it again"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "approvals cleared by a compaction",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        elif isinstance(event, Compaction):\n            for name in bodies:\n",
+          "new": "        elif isinstance(event, Compaction):\n            allowed = set()\n            for name in bodies:\n"
+        }
+      ],
+      "expect": "after a compaction the body is reloaded before the skill works again"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "the body kept through a compaction",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            for name in bodies:\n                bodies[name] = None\n",
+          "new": "            pass\n"
+        }
+      ],
+      "expect": "after a compaction the body is reloaded before the skill works again"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "bodies reloaded right away at the compaction",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            for name in bodies:\n                bodies[name] = None\n",
+          "new": "            for name in bodies:\n                bodies[name] = load_body(name)\n                yield line(name, \"reloaded\", revision=bodies[name].revision)\n"
+        }
+      ],
+      "expect": "after a compaction the body is reloaded before the skill works again"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "one compaction flag for the whole session",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            for name in bodies:\n                bodies[name] = None\n",
+          "new": "            compacted.add(\"all\")\n"
+        },
+        {
+          "file": "session.py",
+          "old": "            if bodies[event.skill] is None:\n",
+          "new": "            if compacted:\n                compacted.clear()\n"
+        },
+        {
+          "file": "session.py",
+          "old": "    bodies: dict[str, Body | None] = {}",
+          "new": "    compacted: set[str] = set()\n    bodies: dict[str, Body | None] = {}"
+        }
+      ],
+      "expect": "each skill reloads its own body, and only a passing check completes it"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "bodies reloaded at the start of every turn",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            turn += 1\n            allowed = set()\n",
+          "new": "            turn += 1\n            allowed = set()\n            for name in bodies:\n                bodies[name] = None\n"
+        }
+      ],
+      "expect": "the skill stays active, and an approval lasts only until its turn ends"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "reloaded only when the tool is allowed to run",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            if bodies[event.skill] is None:\n                body = load_body(event.skill)\n                bodies[event.skill] = body\n                yield line(event.skill, \"reloaded\", revision=body.revision)\n            if event.tool in allowed:\n",
+          "new": "            if event.tool in allowed:\n                if bodies[event.skill] is None:\n                    body = load_body(event.skill)\n                    bodies[event.skill] = body\n                    yield line(event.skill, \"reloaded\", revision=body.revision)\n"
+        }
+      ],
+      "expect": "each skill reloads its own body, and only a passing check completes it"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "\"reloaded\" announced from a cached body",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            if bodies[event.skill] is None:\n                body = load_body(event.skill)\n",
+          "new": "            if bodies[event.skill] is None:\n                body = cache[event.skill]\n"
+        },
+        {
+          "file": "session.py",
+          "old": "                body = load_body(name)\n                bodies[name] = body\n",
+          "new": "                body = load_body(name)\n                cache[name] = body\n                bodies[name] = body\n"
+        },
+        {
+          "file": "session.py",
+          "old": "    bodies: dict[str, Body | None] = {}",
+          "new": "    cache: dict[str, Body] = {}\n    bodies: dict[str, Body | None] = {}"
+        }
+      ],
+      "expect": "each skill reloads its own body, and only a passing check completes it"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "any check completes the skill",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            if event.passed and event.skill in bodies:\n",
+          "new": "            if event.skill in bodies:\n"
+        }
+      ],
+      "expect": "each skill reloads its own body, and only a passing check completes it"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "a completed skill stays active",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "                del bodies[event.skill]\n",
+          "new": ""
+        }
+      ],
+      "expect": "a completed skill is gone until something activates it again"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "a continuing turn routed like a new request",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            elif bodies:\n                continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "a turn that continues the active skills routes nothing"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "asking for an active skill activates it again",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "                if name in bodies:\n                    continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "the skill stays active, and an approval lasts only until its turn ends"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "an implicit turn that selects nothing reported as denied",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            elif request.actor is Actor.HUMAN:\n",
+          "new": "            else:\n"
+        }
+      ],
+      "expect": "an implicit turn that selects nothing emits nothing"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "the body loaded before the policy decides",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            decision = router.route(request)\n",
+          "new": "            if request.explicit_name:\n                load_body(request.explicit_name)\n            decision = router.route(request)\n"
+        }
+      ],
+      "expect": "bodies are loaded on activation and after a compaction, and at no other time"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "a tool call under an inactive skill ignored",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "                yield line(event.skill, \"denied\", reason=\"skill not active\", tool=event.tool)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a completed skill is gone until something activates it again"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "turns counted from 0",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "    turn = 0\n",
+          "new": "    turn = -1\n"
+        }
+      ],
+      "expect": "an explicit invocation goes through every stage before the skill works"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "a refused request reported with a reason of its own",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "                yield line(request.explicit_name, \"denied\", reason=decision.reason)\n",
+          "new": "                yield line(request.explicit_name, \"denied\", reason=\"not eligible\")\n"
+        }
+      ],
+      "expect": "each skill reloads its own body, and only a passing check completes it"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "the score sent as text",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "                yield line(name, \"selected\", score=decision.score)\n",
+          "new": "                yield line(name, \"selected\", score=str(decision.score))\n"
+        }
+      ],
+      "expect": "an explicit invocation goes through every stage before the skill works"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "every event read before the first line goes out",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "    async for event in events:\n",
+          "new": "    async for event in _drain(events):\n"
+        },
+        {
+          "file": "session.py",
+          "old": "Event = Union[UserTurn, Approve, ToolCall, Compaction, Check]\n",
+          "new": "Event = Union[UserTurn, Approve, ToolCall, Compaction, Check]\n\n\nasync def _drain(events):\n    everything = [event async for event in events]\n    for event in everything:\n        yield event\n"
+        }
+      ],
+      "expect": "an explicit invocation goes through every stage before the skill works"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "a turn's lines held until the next turn has lines",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "async def lifecycle(\n",
+          "new": "async def _lifecycle(\n"
+        },
+        {
+          "file": "session.py",
+          "old": "            raise TypeError(f\"unknown event {event!r}\")\n",
+          "new": "            raise TypeError(f\"unknown event {event!r}\")\n\n\nasync def lifecycle(events, router, load_body):\n    pending: list[str] = []\n    async for text in _lifecycle(events, router, load_body):\n        if pending and json.loads(pending[-1])[\"turn\"] != json.loads(text)[\"turn\"]:\n            for held in pending:\n                yield held\n            pending = []\n        pending.append(text)\n    for held in pending:\n        yield held\n"
+        }
+      ],
+      "expect": "each stage goes out as soon as it happens"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "no newline after a line",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "**extra}) + \"\\n\"",
+          "new": "**extra})"
+        }
+      ],
+      "expect": "every line ends with a newline"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "a blank line after every line",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "**extra}) + \"\\n\"",
+          "new": "**extra}) + \"\\n\\n\""
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "pretty-printed lines",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "**extra}) + \"\\n\"",
+          "new": "**extra}, indent=2) + \"\\n\""
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_session_lifecycle",
+      "name": "approvals cleared only on turns that route something",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            allowed = set()\n            text = event.text.strip()\n            if text.startswith(\"/\"):",
+          "new": "            text = event.text.strip()\n            if not text.startswith(\"/\") and bodies:\n                continue\n            allowed = set()\n            if text.startswith(\"/\"):"
+        }
+      ],
+      "expect": "a turn that continues the active skills routes nothing, and starts with no approvals"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "only a direct self-call counts as a cycle",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        if req.target_skill in names:\n",
+          "new": "        if req.target_skill == names[-1]:\n"
+        }
+      ],
+      "expect": "a skill calling back into its caller is refused, with the whole path"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "only a call back to the session's skill counts as a cycle",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        if req.target_skill in names:\n",
+          "new": "        if req.target_skill == names[0]:\n"
+        }
+      ],
+      "expect": "a cycle below the session's skill is a cycle too"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "cycle path without the target",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "\"cycle: \" + \" -> \".join([*names, req.target_skill])",
+          "new": "\"cycle: \" + \" -> \".join(names)"
+        }
+      ],
+      "expect": "a skill calling back into its caller is refused, with the whole path"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "cycle path from the caller back to the root",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "\"cycle: \" + \" -> \".join([*names, req.target_skill])",
+          "new": "\"cycle: \" + \" -> \".join([req.target_skill, *reversed(names)])"
+        }
+      ],
+      "expect": "a cycle through a third skill is refused too"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "depth checked before cycles",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        if req.target_skill in names:\n            return Call(req.target_skill, \"refused\", \"cycle: \" + \" -> \".join([*names, req.target_skill])), None\n",
+          "new": ""
+        },
+        {
+          "file": "compose.py",
+          "old": "        spec = self._skills.get(req.target_skill)\n        if spec is None:\n",
+          "new": "        if req.target_skill in names:\n            return Call(req.target_skill, \"refused\", \"cycle: \" + \" -> \".join([*names, req.target_skill])), None\n        spec = self._skills.get(req.target_skill)\n        if spec is None:\n"
+        }
+      ],
+      "expect": "a cycle through a third skill is refused too"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "only this request's max_depth counts",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        limit = min([started.max_depth for _, started in chain if started is not None] + [req.max_depth])\n",
+          "new": "        limit = req.max_depth\n"
+        }
+      ],
+      "expect": "a deeper request cannot raise the depth an earlier request allowed"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "the limit taken from the earlier requests only",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        limit = min([started.max_depth for _, started in chain if started is not None] + [req.max_depth])\n",
+          "new": "        limit = min([started.max_depth for _, started in chain if started is not None], default=req.max_depth)\n"
+        }
+      ],
+      "expect": "a request's own max_depth bounds the call it makes"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "the session skill's own calls counted as depth 0",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        depth = len(chain)\n",
+          "new": "        depth = len(chain) - 1\n"
+        }
+      ],
+      "expect": "a deeper request cannot raise the depth an earlier request allowed"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "a call at max_depth refused",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        if depth > limit:\n",
+          "new": "        if depth >= limit:\n"
+        }
+      ],
+      "expect": "a skill calling back into its caller is refused, with the whole path"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "the session's skill limited by a request of its own",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        node, _ = self._start(spec, task, None, tuple(context), ())\n",
+          "new": "        node, _ = self._start(spec, task, SkillRequest(root, task), tuple(context), ())\n"
+        }
+      ],
+      "expect": "a skill calling back into its caller is refused, with the whole path"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "a missing skill looked up with []",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        spec = self._skills.get(req.target_skill)\n        if spec is None:\n            return Call(req.target_skill, \"refused\", f\"unknown skill {req.target_skill}\"), None\n",
+          "new": "        spec = self._skills[req.target_skill]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "fallbacks ignored: every failure stops the caller",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "            if req.fallback is not None:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "a skill calling back into its caller is refused, with the whole path"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "a failure without a fallback answers None instead of stopping",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "            raise Stopped(f\"{req.target_skill}: {child.detail}\")\n",
+          "new": "            return None\n"
+        }
+      ],
+      "expect": "a failure without a fallback stops its caller"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "a target that ran and failed always stops its caller",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "            if req.fallback is not None:\n",
+          "new": "            if req.fallback is not None and child.status == \"refused\":\n"
+        }
+      ],
+      "expect": "a reply under another contract is not a reply"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "the reply's contract never checked",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        if req.expected and reply.contract != req.expected:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "a reply under another contract is not a reply"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "refused calls left out of the tree",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "            if req.fallback is not None:\n                children.append(replace(child, used_fallback=True))\n",
+          "new": "            if req.fallback is not None:\n"
+        }
+      ],
+      "expect": "a skill calling back into its caller is refused, with the whole path"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "the fallback not marked on the node",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "                children.append(replace(child, used_fallback=True))\n",
+          "new": "                children.append(child)\n"
+        }
+      ],
+      "expect": "a skill calling back into its caller is refused, with the whole path"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "calls listed newest first",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        return Call(spec.name, \"completed\", result=reply.body, calls=tuple(children)), reply\n",
+          "new": "        return Call(spec.name, \"completed\", result=reply.body, calls=tuple(reversed(children))), reply\n"
+        }
+      ],
+      "expect": "a failure without a fallback stops its caller"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "results left out of the tree",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        return Call(spec.name, \"completed\", result=reply.body, calls=tuple(children)), reply\n",
+          "new": "        return Call(spec.name, \"completed\", calls=tuple(children)), reply\n"
+        }
+      ],
+      "expect": "the tree records every call, in the order made, with what each one returned"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "a forked skill handed its caller's context",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        visible = caller_visible if spec.context == \"shared\" else ()\n",
+          "new": "        visible = caller_visible\n"
+        }
+      ],
+      "expect": "a forked skill sees only its request; a shared skill sees what its caller sees"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "a shared skill handed nothing",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        visible = caller_visible if spec.context == \"shared\" else ()\n",
+          "new": "        visible = ()\n"
+        }
+      ],
+      "expect": "a forked skill sees only its request; a shared skill sees what its caller sees"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "a shared skill handed the whole conversation instead of its caller's view",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        visible = caller_visible if spec.context == \"shared\" else ()\n",
+          "new": "        visible = self._conversation if spec.context == \"shared\" else ()\n"
+        },
+        {
+          "file": "compose.py",
+          "old": "        node, _ = self._start(spec, task, None, tuple(context), ())\n",
+          "new": "        self._conversation = tuple(context)\n        node, _ = self._start(spec, task, None, tuple(context), ())\n"
+        }
+      ],
+      "expect": "a forked skill sees only its request; a shared skill sees what its caller sees"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "the conversation not passed to the session's skill",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        node, _ = self._start(spec, task, None, tuple(context), ())\n",
+          "new": "        node, _ = self._start(spec, task, None, (), ())\n"
+        }
+      ],
+      "expect": "a forked skill sees only its request; a shared skill sees what its caller sees"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "a mutable call stack that a stop leaves behind",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        here = chain + ((spec.name, request),)\n",
+          "new": "        self._stack.append((spec.name, request))\n        here = tuple(self._stack)\n"
+        },
+        {
+          "file": "compose.py",
+          "old": "            child, reply = self._serve(req, visible, here)\n",
+          "new": "            child, reply = self._serve(req, visible, tuple(self._stack))\n"
+        },
+        {
+          "file": "compose.py",
+          "old": "        except Stopped:\n            return Call(spec.name, \"failed\", \"stopped\", calls=tuple(children)), None\n",
+          "new": "        except Stopped:\n            return Call(spec.name, \"failed\", \"stopped\", calls=tuple(children)), None\n        self._stack.pop()\n"
+        },
+        {
+          "file": "compose.py",
+          "old": "        self._skills = {spec.name: spec for spec in skills}\n",
+          "new": "        self._skills = {spec.name: spec for spec in skills}\n        self._stack: list = []\n"
+        }
+      ],
+      "expect": "a failure without a fallback stops its caller, whose own fallback takes over, and the chain recovers"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "any exception from a skill treated as a stop",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "        except Stopped:\n",
+          "new": "        except Exception:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_skill_chains",
+      "name": "a falsy fallback such as \"\" treated as no fallback",
+      "edits": [
+        {
+          "file": "compose.py",
+          "old": "if req.fallback is not None:",
+          "new": "if req.fallback:"
+        }
+      ],
+      "expect": "a reply under another contract is not a reply"
+    }
+  ]
+}
