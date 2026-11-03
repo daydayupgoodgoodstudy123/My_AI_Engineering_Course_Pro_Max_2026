@@ -1,0 +1,1238 @@
+{
+  "package": "mrtrkit",
+  "tests": [
+    "test_mrtr_rounds",
+    "test_state_token_roundtrip",
+    "test_host_driver",
+    "test_concurrent_approvals",
+    "test_phase_graph"
+  ],
+  "layers": [
+    {
+      "test": "test_mrtr_rounds",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a retry that repeats the call continues the flow"
+        },
+        {
+          "name": "bind the tool name and arguments only",
+          "edits": [
+            {
+              "file": "server.py",
+              "old": "    return hashlib.sha256(canonical(params)).hexdigest()\n",
+              "new": "    bound = {\"name\": params.get(\"name\"), \"arguments\": params.get(\"arguments\", {})}\n    return hashlib.sha256(canonical(bound)).hexdigest()\n"
+            }
+          ],
+          "expect": "a requestState only works for the principal it was issued to"
+        },
+        {
+          "name": "+ bind the authenticated principal, not clientInfo",
+          "edits": [
+            {
+              "file": "server.py",
+              "old": "    return info[\"name\"] if isinstance(info, dict) and \"name\" in info else principal\n",
+              "new": "    return principal\n"
+            }
+          ],
+          "expect": "model output names a file only if the listing offered it"
+        },
+        {
+          "name": "+ keep only names the listing offered",
+          "edits": [
+            {
+              "file": "server.py",
+              "old": "        return [name for name in picks if (self.repo / name).is_file()][:3]\n",
+              "new": "        offered = set(self.listing())\n        return [name for name in picks if name in offered][:3]\n"
+            }
+          ],
+          "expect": "picked files are distinct, in the model's order, at most three"
+        },
+        {
+          "name": "+ drop repeats before cutting to three",
+          "edits": [
+            {
+              "file": "server.py",
+              "old": "        return [name for name in picks if name in offered][:3]\n",
+              "new": "        return list(dict.fromkeys(name for name in picks if name in offered))[:3]\n"
+            }
+          ],
+          "expect": "two dozen retries must not take long"
+        },
+        {
+          "name": "+ derive the key once",
+          "edits": [
+            {
+              "file": "server.py",
+              "old": "    def _key(self) -> bytes:\n        return hashlib.pbkdf2_hmac(\"sha256\", self._secret.encode(), KDF_SALT, KDF_ITERATIONS)\n",
+              "new": "    def _key(self) -> bytes:\n        if not hasattr(self, \"_derived\"):\n            self._derived = hashlib.pbkdf2_hmac(\"sha256\", self._secret.encode(), KDF_SALT, KDF_ITERATIONS)\n        return self._derived\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_mrtr_rounds",
+      "name": "verified states cached by token",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if not isinstance(token, str):\n            raise McpError(-32602, \"requestState must be a string\")\n",
+          "new": "        if not isinstance(token, str):\n            raise McpError(-32602, \"requestState must be a string\")\n        cache = self.__dict__.setdefault(\"_verified\", {})\n        if token in cache:\n            return cache[token]\n"
+        },
+        {
+          "file": "server.py",
+          "old": "            raise McpError(-32602, \"requestState expired\")\n        return state\n",
+          "new": "            raise McpError(-32602, \"requestState expired\")\n        cache[token] = state\n        return state\n"
+        }
+      ],
+      "expect": "a requestState is bound to the original arguments"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "verified states cached by token, principal and call",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if not isinstance(token, str):\n            raise McpError(-32602, \"requestState must be a string\")\n",
+          "new": "        if not isinstance(token, str):\n            raise McpError(-32602, \"requestState must be a string\")\n        cache = self.__dict__.setdefault(\"_verified\", {})\n        seen = (token, principal, _binding(params))\n        if seen in cache:\n            return cache[seen]\n"
+        },
+        {
+          "file": "server.py",
+          "old": "            raise McpError(-32602, \"requestState expired\")\n        return state\n",
+          "new": "            raise McpError(-32602, \"requestState expired\")\n        cache[seen] = state\n        return state\n"
+        }
+      ],
+      "expect": "an expired requestState is rejected, even one that verified before"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "a random key per replica",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        self._key = hashlib.pbkdf2_hmac(\"sha256\", secret.encode(), KDF_SALT, KDF_ITERATIONS)\n",
+          "new": "        self._key = __import__(\"os\").urandom(32)\n"
+        }
+      ],
+      "expect": "requestState is signed with the PBKDF2 key of the shared secret"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "fewer PBKDF2 iterations to go faster",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "KDF_ITERATIONS = 600_000\n",
+          "new": "KDF_ITERATIONS = 1_000\n"
+        }
+      ],
+      "expect": "requestState is signed with the PBKDF2 key of the shared secret"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "binding without the arguments",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "    bound = {\"name\": params.get(\"name\"), \"arguments\": params.get(\"arguments\", {})}\n",
+          "new": "    bound = {\"name\": params.get(\"name\")}\n"
+        }
+      ],
+      "expect": "a requestState is bound to the original arguments"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "binding check dropped",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if state.get(\"binding\") != _binding(params):\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "a requestState is bound to the original arguments"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "principal check dropped",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if state.get(\"principal\") != principal:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "a requestState only works for the principal it was issued to"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "picks kept when they resolve inside the repository",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            if name in offered and name not in picked:\n",
+          "new": "            path = (self.repo / name).resolve()\n            if path.is_file() and path.is_relative_to(self.repo.resolve()) and name not in picked:\n"
+        }
+      ],
+      "expect": "model output names a file only if the listing offered it"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "names starting with .. skipped, other files read",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            if name in offered and name not in picked:\n",
+          "new": "            if not name.startswith(\"..\") and (self.repo / name).is_file() and name not in picked:\n"
+        }
+      ],
+      "expect": "model output names a file only if the listing offered it"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "repeats removed with a set",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        picked: list[str] = []\n        for name in picks:\n            if name in offered and name not in picked:\n                picked.append(name)\n        return picked[:3]\n",
+          "new": "        return sorted({name for name in picks if name in offered})[:3]\n"
+        }
+      ],
+      "expect": "picked files are distinct, in the model's order, at most three"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "cut to three before dropping repeats",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        for name in picks:\n            if name in offered",
+          "new": "        for name in picks[:3]:\n            if name in offered"
+        }
+      ],
+      "expect": "picked files are distinct, in the model's order, at most three"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "expired already at the expiresAt second",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if state.get(\"expiresAt\", 0) < self._clock():\n",
+          "new": "        if state.get(\"expiresAt\", 0) <= self._clock():\n"
+        }
+      ],
+      "expect": "a requestState is still valid at its expiresAt second"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "expiry read from the wall clock",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if state.get(\"expiresAt\", 0) < self._clock():\n",
+          "new": "        if state.get(\"expiresAt\", 0) < time.time():\n"
+        }
+      ],
+      "expect": "a retry that repeats the call continues the flow"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "the derived key cached on the class, whatever the secret",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        self._key = hashlib.pbkdf2_hmac(\"sha256\", secret.encode(), KDF_SALT, KDF_ITERATIONS)\n",
+          "new": "        if not hasattr(type(self), \"_shared_key\"):\n            type(self)._shared_key = hashlib.pbkdf2_hmac(\"sha256\", secret.encode(), KDF_SALT, KDF_ITERATIONS)\n        self._key = type(self)._shared_key\n"
+        }
+      ],
+      "expect": "a server with another secret rejects the state"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "any unoffered pick rejects the whole answer",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        offered = set(self.listing())\n",
+          "new": "        offered = set(self.listing())\n        if any(name not in offered for name in picks):\n            return []\n"
+        }
+      ],
+      "expect": "picks the listing did not offer are dropped, not fatal"
+    },
+    {
+      "test": "test_mrtr_rounds",
+      "name": "picks with .. parts or absolute paths skipped, other files read",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        offered = set(self.listing())\n        picked: list[str] = []\n        for name in picks:\n            if name in offered and name not in picked:\n",
+          "new": "        picked: list[str] = []\n        for name in picks:\n            if name.startswith(\"/\") or \"..\" in name.split(\"/\"):\n                continue\n            if (self.repo / name).is_file() and name not in picked:\n"
+        }
+      ],
+      "expect": "model output names a file only if the listing offered it"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "padding kept",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": ".decode(\"ascii\").rstrip(\"=\")",
+          "new": ".decode(\"ascii\")"
+        }
+      ],
+      "expect": "a token is base64url without padding"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "padding not restored before decoding",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "base64.urlsafe_b64decode(token + \"=\" * (-len(token) % 4))",
+          "new": "base64.urlsafe_b64decode(token)"
+        }
+      ],
+      "expect": "requestState is not base64url"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "standard base64 alphabet",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "return base64.urlsafe_b64encode(body + mac)",
+          "new": "return base64.b64encode(body + mac)"
+        }
+      ],
+      "expect": "a token is base64url without padding"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "payload length counted in characters",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "expires_at, len(payload))",
+          "new": "expires_at, len(payload.decode(\"utf-8\")))"
+        }
+      ],
+      "expect": "requestState length does not match its header"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "JSON with \\u escapes",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "ensure_ascii=False, allow_nan=False",
+          "new": "allow_nan=False"
+        }
+      ],
+      "expect": "header: version 1, the current key id, expiresAt, payload length in bytes"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "keys not sorted",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "state, sort_keys=True, separators",
+          "new": "state, separators"
+        }
+      ],
+      "expect": "the payload is canonical JSON in UTF-8"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "MAC over the payload only",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "mac = hmac.new(keyring.keys[keyring.current], body, hashlib.sha256)",
+          "new": "mac = hmac.new(keyring.keys[keyring.current], body[HEADER.size :], hashlib.sha256)"
+        },
+        {
+          "file": "statetoken.py",
+          "old": "hmac.new(key, body, hashlib.sha256)",
+          "new": "hmac.new(key, body[HEADER.size :], hashlib.sha256)"
+        }
+      ],
+      "expect": "HMAC-SHA256 covers the header and the payload"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "little-endian header",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "HEADER = struct.Struct(\">BBQI\")",
+          "new": "HEADER = struct.Struct(\"<BBQI\")"
+        }
+      ],
+      "expect": "header: version 1, the current key id, expiresAt, payload length in bytes"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "version not checked",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "    if version != VERSION:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "an unknown version is rejected, even with a valid MAC"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "unknown key id looked up directly",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "    key = keyring.keys.get(key_id)\n    if key is None:\n        raise StateError(f\"unknown key id {key_id}\")\n",
+          "new": "    key = keyring.keys[key_id]\n"
+        }
+      ],
+      "expect": "a bad token raises StateError, not builtins.KeyError"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "always the current key",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "    key = keyring.keys.get(key_id)\n",
+          "new": "    key = keyring.keys[keyring.current] if key_id in keyring.keys else None\n"
+        }
+      ],
+      "expect": "tokens signed with an older key in the ring still open"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "bytes after the MAC ignored",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "    if len(raw) != HEADER.size + length + MAC_SIZE:\n        raise StateError(\"requestState length does not match its header\")\n    body, mac = raw[:-MAC_SIZE], raw[-MAC_SIZE:]\n",
+          "new": "    if len(raw) < HEADER.size + length + MAC_SIZE:\n        raise StateError(\"requestState length does not match its header\")\n    end = HEADER.size + length\n    body, mac = raw[:end], raw[end : end + MAC_SIZE]\n"
+        }
+      ],
+      "expect": "a token with bytes added is caught"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "expired already at the expiresAt second",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "    if now > expires_at:\n",
+          "new": "    if now >= expires_at:\n"
+        }
+      ],
+      "expect": "a token is valid at its expiresAt second"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "NaN allowed",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "ensure_ascii=False, allow_nan=False",
+          "new": "ensure_ascii=False"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "short tokens reach struct",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "    if len(raw) < HEADER.size + MAC_SIZE:\n        raise StateError(\"requestState is too short\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a bad token raises StateError, not struct.error"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "the highest key id signs",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "    body = HEADER.pack(VERSION, keyring.current, expires_at, len(payload)) + payload\n    mac = hmac.new(keyring.keys[keyring.current], body, hashlib.sha256).digest()\n",
+          "new": "    signer = max(keyring.keys)\n    body = HEADER.pack(VERSION, signer, expires_at, len(payload)) + payload\n    mac = hmac.new(keyring.keys[signer], body, hashlib.sha256).digest()\n"
+        }
+      ],
+      "expect": "header: version 1, the current key id, expiresAt, payload length in bytes"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "urlsafe_b64decode trusted to check the alphabet",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "    if not isinstance(token, str) or not BASE64URL.fullmatch(token):\n",
+          "new": "    if not isinstance(token, str):\n"
+        }
+      ],
+      "expect": "only base64url text opens"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "NaN checked by hand at the top level",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "    payload = json.dumps(\n        state, sort_keys=True, separators=(\",\", \":\"), ensure_ascii=False, allow_nan=False\n    ).encode(\"utf-8\")\n",
+          "new": "    if any(isinstance(v, float) and v != v for v in state.values()):\n        raise ValueError(\"NaN\")\n    payload = json.dumps(\n        state, sort_keys=True, separators=(\",\", \":\"), ensure_ascii=False\n    ).encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_state_token_roundtrip",
+      "name": "unknown key id verified with the current key",
+      "edits": [
+        {
+          "file": "statetoken.py",
+          "old": "    key = keyring.keys.get(key_id)\n    if key is None:\n        raise StateError(f\"unknown key id {key_id}\")\n",
+          "new": "    key = keyring.keys.get(key_id, keyring.keys[keyring.current])\n"
+        }
+      ],
+      "expect": "an unknown key id is rejected"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "one id for the whole interaction",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    response = send({\"jsonrpc\": \"2.0\", \"id\": next(ids), \"method\": method, \"params\": params})\n",
+          "new": "    first_id = next(ids)\n    response = send({\"jsonrpc\": \"2.0\", \"id\": first_id, \"method\": method, \"params\": params})\n"
+        },
+        {
+          "file": "host.py",
+          "old": "send(retry_request(next(ids), method,",
+          "new": "send(retry_request(first_id, method,"
+        }
+      ],
+      "expect": "every round is a new request with the next id"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "answers kept across rounds",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    round_no = 0\n",
+          "new": "    round_no = 0\n    answers = {}\n"
+        },
+        {
+          "file": "host.py",
+          "old": "        answers = {key: model(request[\"params\"]) for key, request in requests.items()}\n",
+          "new": "        answers.update({key: model(request[\"params\"]) for key, request in requests.items()})\n"
+        }
+      ],
+      "expect": "a retry carries only this round's answers"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "the first requestState echoed every round",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    round_no = 0\n",
+          "new": "    round_no = 0\n    first_state = None\n"
+        },
+        {
+          "file": "host.py",
+          "old": "answers, result[\"requestState\"]))",
+          "new": "answers, first_state))"
+        },
+        {
+          "file": "host.py",
+          "old": "        answers = {key: model(request[\"params\"]) for key, request in requests.items()}\n",
+          "new": "        answers = {key: model(request[\"params\"]) for key, request in requests.items()}\n        first_state = first_state or result[\"requestState\"]\n"
+        }
+      ],
+      "expect": "missing input response: pick_files"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "requestState stripped",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "\"requestState\": state}",
+          "new": "\"requestState\": state.strip()}"
+        }
+      ],
+      "expect": "requestState goes back byte for byte, whatever it looks like"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "a requestState that looks like JSON re-serialized",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    retry = {**params, \"inputResponses\": answers, \"requestState\": state}\n",
+          "new": "    try:\n        state = __import__(\"json\").dumps(__import__(\"json\").loads(state))\n    except ValueError:\n        pass\n    retry = {**params, \"inputResponses\": answers, \"requestState\": state}\n"
+        }
+      ],
+      "expect": "requestState goes back byte for byte, whatever it looks like"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "only tools/call may ask for input",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "MRTR_METHODS = (\"tools/call\", \"prompts/get\", \"resources/read\")",
+          "new": "MRTR_METHODS = (\"tools/call\",)"
+        }
+      ],
+      "expect": "prompts/get may not ask for input"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "any method may ask for input",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    if method not in MRTR_METHODS:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "capability checked against what the host can do, not what it declared",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "        if capability is None or capability not in declared:\n",
+          "new": "        if capability is None:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "input requests the host does not know let through",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "        if capability is None or capability not in declared:\n",
+          "new": "        if capability is not None and capability not in declared:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "includeContext not checked",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "        if context != \"none\":\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "each request screened just before it is approved",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "        requests = screen(method, params, result, round_no, max_rounds)\n        for key, request in requests.items():\n            if not approve(key, request):\n",
+          "new": "        requests = result.get(\"inputRequests\", {})\n        for key, request in requests.items():\n            screen(method, params, {\"inputRequests\": {key: request}}, round_no, max_rounds)\n            if not approve(key, request):\n"
+        }
+      ],
+      "expect": "a refused round reaches neither the user nor the model"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "the model answers each request as soon as it is approved",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "        for key, request in requests.items():\n            if not approve(key, request):\n                raise HostError(\"denied\", key)\n        answers = {key: model(request[\"params\"]) for key, request in requests.items()}\n",
+          "new": "        answers = {}\n        for key, request in requests.items():\n            if not approve(key, request):\n                raise HostError(\"denied\", key)\n            answers[key] = model(request[\"params\"])\n"
+        }
+      ],
+      "expect": "the model runs only once the whole round is approved"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "the cap refuses the last allowed round",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    if round_no > max_rounds:\n",
+          "new": "    if round_no >= max_rounds:\n"
+        }
+      ],
+      "expect": "HostError: rounds: round 2 is past the cap of 2"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "rounds counted after they are screened",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "        round_no += 1\n        requests = screen(method, params, result, round_no, max_rounds)\n",
+          "new": "        requests = screen(method, params, result, round_no, max_rounds)\n        round_no += 1\n"
+        }
+      ],
+      "expect": "the host fulfils at most max_rounds rounds"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "the caller's params gain the answers",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    retry = {**params, \"inputResponses\": answers, \"requestState\": state}\n",
+          "new": "    params.update(inputResponses=answers, requestState=state)\n    retry = params\n"
+        }
+      ],
+      "expect": "the caller's params are left as they were"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "modelPreferences normalized to sum to one",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "def drive(\n",
+          "new": "def _normalized(params):\n    hints = params.get(\"modelPreferences\", {})\n    total = sum(hints.values()) or 1\n    return {**params, \"modelPreferences\": {k: v / total for k, v in hints.items()}}\n\n\ndef drive(\n"
+        },
+        {
+          "file": "host.py",
+          "old": "answers = {key: model(request[\"params\"])",
+          "new": "answers = {key: model(_normalized(request[\"params\"]))"
+        }
+      ],
+      "expect": "the model gets each request's params as the server sent them"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "error responses returned like results",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "        if \"error\" in response:\n            error = response[\"error\"]\n            raise McpError(error[\"code\"], error[\"message\"], error.get(\"data\"))\n        result = response[\"result\"]\n",
+          "new": "        result = response.get(\"result\", response)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "an omitted includeContext refused",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "        context = request.get(\"params\", {}).get(\"includeContext\", \"none\")\n",
+          "new": "        context = request.get(\"params\", {}).get(\"includeContext\")\n"
+        }
+      ],
+      "expect": "draft asks for includeContext None"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "the user asked before the round cap is checked",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "        round_no += 1\n        requests = screen(method, params, result, round_no, max_rounds)\n        for key, request in requests.items():\n            if not approve(key, request):\n                raise HostError(\"denied\", key)\n",
+          "new": "        round_no += 1\n        requests = screen(method, params, result, 1, max_rounds)\n        for key, request in requests.items():\n            if not approve(key, request):\n                raise HostError(\"denied\", key)\n        if round_no > max_rounds:\n            raise HostError(\"rounds\", str(round_no))\n"
+        }
+      ],
+      "expect": "never asks the user about one past the cap"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "includeContext checked on the first request only",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "        if context != \"none\":\n",
+          "new": "        if context != \"none\" and key == next(iter(requests)):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "rounds counted per input request",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "        round_no += 1\n",
+          "new": "        round_no += max(len(result.get(\"inputRequests\", {})), 1)\n"
+        }
+      ],
+      "expect": "HostError: rounds"
+    },
+    {
+      "test": "test_host_driver",
+      "name": "method refused before the first request is sent",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    response = send({\"jsonrpc\": \"2.0\", \"id\": next(ids), \"method\": method, \"params\": params})\n",
+          "new": "    if method not in MRTR_METHODS:\n        raise HostError(\"method\")\n    response = send({\"jsonrpc\": \"2.0\", \"id\": next(ids), \"method\": method, \"params\": params})\n"
+        }
+      ],
+      "expect": "a refused round reaches neither the user nor the model"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "rows collected, then yielded at the end",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "async def run_interactions(\n",
+          "new": "async def run_interactions(*args, **kwargs):\n    rows = [row async for row in _run(*args, **kwargs)]\n    for row in rows:\n        yield row\n\n\nasync def _run(\n"
+        }
+      ],
+      "expect": "the run stalled"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "approvals taken in the order the rounds were asked",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "        if slot in waiting:\n            async for row in decide(slot, approval.approved):\n                yield row\n        else:\n            early[slot] = approval.approved\n",
+          "new": "        early[slot] = approval.approved\n        while waiting and next(iter(waiting)) in early:\n            oldest = next(iter(waiting))\n            async for row in decide(oldest, early.pop(oldest)):\n                yield row\n"
+        }
+      ],
+      "expect": "the run stalled"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "approvals that arrive early are dropped",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "        else:\n            early[slot] = approval.approved\n",
+          "new": ""
+        }
+      ],
+      "expect": "the run stalled"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "a budget per interaction",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "        have = left.get(it.principal, Budget(0, 0))\n",
+          "new": "        have = left.get(it.name, budgets.get(it.principal, Budget(0, 0)))\n"
+        },
+        {
+          "file": "approvals.py",
+          "old": "        left[it.principal] = Budget(",
+          "new": "        left[it.name] = Budget("
+        }
+      ],
+      "expect": "one row per decision, in the order the decisions are made"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "bytes not budgeted",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "        if cost.tokens > have.tokens or cost.bytes > have.bytes:\n",
+          "new": "        if cost.tokens > have.tokens:\n"
+        }
+      ],
+      "expect": "one row per decision, in the order the decisions are made"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "ids counted per interaction",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "        first = {\"jsonrpc\": \"2.0\", \"id\": next(ids),",
+          "new": "        first = {\"jsonrpc\": \"2.0\", \"id\": 1,"
+        },
+        {
+          "file": "approvals.py",
+          "old": "retry_request(next(ids), it.method",
+          "new": "retry_request(number + 1, it.method"
+        }
+      ],
+      "expect": "request ids are unique across interactions"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "denied rounds not logged",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "        if not approved:\n            yield _row(it.name, number, request_id, it.method, keys, \"denied\", 0)\n            return\n",
+          "new": "        if not approved:\n            return\n"
+        }
+      ],
+      "expect": "the run stalled"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "every round charged, approved or not",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "        if not approved:\n            yield _row(",
+          "new": "        left[it.principal] = Budget(have.tokens - cost.tokens, have.bytes - cost.bytes)\n        if not approved:\n            yield _row("
+        }
+      ],
+      "expect": "one row per decision, in the order the decisions are made"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "the model runs before the decision",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "        cost = round_cost(requests)\n",
+          "new": "        cost = round_cost(requests)\n        answers = {key: model(request[\"params\"]) for key, request in requests.items()}\n"
+        },
+        {
+          "file": "approvals.py",
+          "old": "        answers = {key: model(request[\"params\"]) for key, request in requests.items()}\n        refused = await ask(",
+          "new": "        refused = await ask("
+        }
+      ],
+      "expect": "the model runs for approved rounds only"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "request_id of the retry instead of the request that asked",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "        yield _row(it.name, number, request_id, it.method, keys, \"approved\", cost.tokens)\n        answers = {key: model(request[\"params\"]) for key, request in requests.items()}\n        refused = await ask(it, number + 1, retry_request(next(ids), it.method, it.params, answers, state))\n",
+          "new": "        retry_id = next(ids)\n        yield _row(it.name, number, retry_id, it.method, keys, \"approved\", cost.tokens)\n        answers = {key: model(request[\"params\"]) for key, request in requests.items()}\n        refused = await ask(it, number + 1, retry_request(retry_id, it.method, it.params, answers, state))\n"
+        }
+      ],
+      "expect": "request_id is the request whose result asked for the round"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "keeps reading approvals after the last interaction ended",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "            early[slot] = approval.approved\n        if not waiting:\n            return\n",
+          "new": "            early[slot] = approval.approved\n"
+        }
+      ],
+      "expect": "the run stalled"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "rounds still waiting when approvals end are dropped",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "    for slot in list(waiting):\n        async for row in decide(slot, False):\n            yield row\n",
+          "new": ""
+        }
+      ],
+      "expect": "a round past max_rounds is refused; when approvals end, waiting rounds are denied"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "refused rounds not logged",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "            return _row(it.name, number, request[\"id\"], it.method, keys, \"refused\", 0)\n",
+          "new": "            return None\n"
+        }
+      ],
+      "expect": "the run stalled"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "rows joined with commas, no CSV quoting",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "    out = io.StringIO()\n    csv.writer(out).writerow(fields)\n    return out.getvalue()\n",
+          "new": "    return \",\".join(str(field) for field in fields) + \"\\n\"\n"
+        }
+      ],
+      "expect": "one row per decision, in the order the decisions are made"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "bytes checked but never charged",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "        left[it.principal] = Budget(have.tokens - cost.tokens, have.bytes - cost.bytes)\n",
+          "new": "        left[it.principal] = Budget(have.tokens - cost.tokens, have.bytes)\n"
+        }
+      ],
+      "expect": "one row per decision, in the order the decisions are made"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "approvals matched by interaction only",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "        slot = (approval.interaction, approval.round)\n",
+          "new": "        slot = next((s for s in waiting if s[0] == approval.interaction),\n                    (approval.interaction, approval.round))\n"
+        }
+      ],
+      "expect": "the run stalled"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "an exact fit counted as over budget",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "        if cost.tokens > have.tokens or cost.bytes > have.bytes:\n",
+          "new": "        if cost.tokens >= have.tokens or cost.bytes >= have.bytes:\n"
+        }
+      ],
+      "expect": "one row per decision, in the order the decisions are made"
+    },
+    {
+      "test": "test_concurrent_approvals",
+      "name": "budget checked before the user's decision",
+      "edits": [
+        {
+          "file": "approvals.py",
+          "old": "        if not approved:\n            yield _row(it.name, number, request_id, it.method, keys, \"denied\", 0)\n            return\n        if cost.tokens > have.tokens or cost.bytes > have.bytes:\n            yield _row(it.name, number, request_id, it.method, keys, \"over_budget\", 0)\n            return\n",
+          "new": "        if cost.tokens > have.tokens or cost.bytes > have.bytes:\n            yield _row(it.name, number, request_id, it.method, keys, \"over_budget\", 0)\n            return\n        if not approved:\n            yield _row(it.name, number, request_id, it.method, keys, \"denied\", 0)\n            return\n"
+        }
+      ],
+      "expect": "waiting rounds are denied, whatever the budget"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "cycles found with one visited set",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "        if name not in rounds_from:\n            on_path.add(name)\n            rounds_from[name] = 1 + max(longest(target) for target in phases[name].then.values())\n            on_path.discard(name)\n",
+          "new": "        on_path.add(name)\n        rounds_from[name] = 1 + max(longest(target) for target in phases[name].then.values())\n"
+        }
+      ],
+      "expect": "is part of a cycle"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "rounds counted by breadth-first levels",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    rounds = longest(start)\n",
+          "new": "    longest(start)\n    rounds, frontier, seen = 0, [start], {start}\n    while frontier:\n        rounds += 1\n        frontier = [t for n in frontier for t in phases[n].then.values() if t != DONE and t not in seen]\n        seen.update(frontier)\n"
+        }
+      ],
+      "expect": "the longest run takes four rounds"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "rounds taken as the number of phases",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    rounds = longest(start)\n",
+          "new": "    longest(start)\n    rounds = len(phases)\n"
+        }
+      ],
+      "expect": "a run counts only the phases it visits"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "unreachable phases accepted",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    if unreachable:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "DONE counted as a round",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "        if name == DONE:\n            return 0\n",
+          "new": "        if name == DONE:\n            return 1\n"
+        }
+      ],
+      "expect": "the longest run takes four rounds"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "the round cap is off by one",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    if rounds > max_rounds:\n",
+          "new": "    if rounds >= max_rounds:\n"
+        }
+      ],
+      "expect": "more than 4"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "undefined next phases not checked",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "            if target != DONE and target not in phases:\n                raise ValueError(f\"phase {name!r} leads to undefined phase {target!r}\")\n",
+          "new": "            pass\n"
+        }
+      ],
+      "expect": "KeyError: 'sumarize'"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "the raw answer recorded",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    data = {**state[\"data\"], name: value}\n",
+          "new": "    data = {**state[\"data\"], name: responses[phase.ask][\"content\"][\"text\"]}\n"
+        }
+      ],
+      "expect": "the validated value moves on, and the outcome picks the next phase"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "earlier values dropped",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    data = {**state[\"data\"], name: value}\n",
+          "new": "    data = {name: value}\n"
+        }
+      ],
+      "expect": "every validated value travels on to later rounds"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "only checks that the asked key is there",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    if not isinstance(responses, dict) or set(responses) != {phase.ask}:\n",
+          "new": "    if not isinstance(responses, dict) or phase.ask not in responses:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "the phase taken from the answer's key",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    name = state.get(\"phase\")\n",
+          "new": "    name = next((n for n, p in phases.items() if isinstance(responses, dict) and p.ask in responses),\n                state.get(\"phase\"))\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "an unknown phase looked up directly",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    phase = phases.get(name)\n    if phase is None:\n        raise McpError(-32602, f\"requestState phase {name!r} is not in this flow\")\n",
+          "new": "    phase = phases[name]\n"
+        }
+      ],
+      "expect": "KeyError: 'polish'"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "an unknown outcome looked up directly",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    target = phase.then.get(outcome)\n    if target is None:\n        raise ValueError(f\"phase {name!r} has no outcome {outcome!r}\")\n",
+          "new": "    target = phase.then[outcome]\n"
+        }
+      ],
+      "expect": "KeyError: 'translate'"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "advance updates the verified state in place",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    data = {**state[\"data\"], name: value}\n",
+          "new": "    data = state[\"data\"]\n    data[name] = value\n"
+        }
+      ],
+      "expect": "advance leaves the verified state as it was"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "DONE starts another round",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "        return {\"phase\": DONE, \"round\": state[\"round\"], \"data\": data}\n",
+          "new": "        return {\"phase\": DONE, \"round\": state[\"round\"] + 1, \"data\": data}\n"
+        }
+      ],
+      "expect": "DONE ends the flow without starting another round"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "unreachable taken as never named by a then",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    unreachable = sorted(set(phases) - set(rounds_from))\n",
+          "new": "    unreachable = sorted(set(phases) - {t for p in phases.values() for t in p.then.values()} - {start})\n"
+        }
+      ],
+      "expect": "DID NOT RAISE ValueError"
+    },
+    {
+      "test": "test_phase_graph",
+      "name": "value recorded under the ask key",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    data = {**state[\"data\"], name: value}\n",
+          "new": "    data = {**state[\"data\"], phase.ask: value}\n"
+        }
+      ],
+      "expect": "the validated value moves on, and the outcome picks the next phase"
+    }
+  ]
+}

@@ -1,0 +1,143 @@
+{
+  "lesson": "phases/13-tools-and-protocols/11-mcp-sampling",
+  "title": "MCP Model Input: Sampling Migration and Stateless MRTR",
+  "format": "staged-brownfield",
+  "service": "mrtrkit: summarize_repo over stateless MCP 2026-07-28, reaching the client's model through MRTR rounds, with a versioned requestState token, a host-side driver, concurrent approvals with per-principal budgets, and multi-round flows as a phase graph",
+  "sources": {
+    "docs/en.md": "a205ee1e92a30eb61080e980620eaf0c5dbd1772db8b35da65a453273ed4fd71",
+    "code/main.py": "02a6f02cabd190db6890528265f756694a38c796471e12b29adb5415286cb452"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_mrtr_rounds",
+      "kind": "debug",
+      "lesson_anchor": "Multi-Round State (bind the authenticated principal, not clientInfo; method; digest of the original arguments; short expiry); Safety Invariants (validate a sampling response before using it as a filename); code/main.py _arguments_digest, verify_request_state, tools_call; quiz Q10(d) duplicate picks",
+      "planted_bugs": [
+        "_binding digests the whole params, inputResponses, requestState and _meta included, so every faithful retry fails; the -32602 'requestState arguments mismatch' is raised in verify, one call away from the root cause",
+        "_caller binds the state to the self-reported clientInfo.name instead of the authenticated principal, so another user with the same client continues someone else's flow",
+        "_offered keeps any pick that is an existing file, so ../secrets.txt and an absolute path read outside the repository",
+        "_offered keeps repeated picks, so the same file fills all three slots",
+        "_key() runs PBKDF2-HMAC-SHA256 with 600,000 iterations on every seal and verify instead of once when the replica starts"
+      ],
+      "timing_assert": "24 retries of the final round under 0.1 s (key derived on every verify: 1.1 to 1.5 s on this machine; derived once: 0.1 to 0.4 ms)",
+      "overfix_guard": "the signature is checked against PBKDF2(secret, KDF_SALT, 600000), which rules out fewer iterations and a random key per replica; a retry with changed arguments must still be -32602, which rules out dropping or weakening the binding check; after the clock passes expiresAt the same state must be rejected, which rules out caching verified states (by token alone it also skips the principal and argument checks); './LICENSE' among the picks rules out skipping only '..' names and absolute paths instead of keeping the listing's names",
+      "deviation": "The suggested design had verify skip the principal check; here the state is bound to clientInfo.name, the lesson's explicit warning, with the same effect. A fifth defect (repeated picks, quiz Q10(d)) was added. The timed loop retries the final round, one verify per retry, because the file reads of the pick round made the fixed version's time too noisy under load for an 8x margin."
+    },
+    {
+      "part": 2,
+      "test": "test_state_token_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Multi-Round State (integrity-protected requestState, HMAC when confidentiality is not required, opaque to the client); The client must echo requestState byte for byte; code/main.py _b64, _unb64, seal_request_state",
+      "exactness": "seal then open returns the state with every value and type intact: 0.1 + 0.2, a subnormal, -0.0, the largest float, 2 next to 2.0, 2**70, CJK, accented and emoji file names, a decomposed e plus U+0301, U+2028, nested lists and objects; the bytes match the documented layout (>BBQI header, canonical UTF-8 JSON with ensure_ascii=False, HMAC-SHA256 over header and payload, unpadded base64url)",
+      "traps": [
+        "padding kept, or not restored before decoding",
+        "standard base64 alphabet",
+        "a standard-alphabet spelling of the same bytes accepted, because urlsafe_b64decode does not check the alphabet",
+        "payload length in characters instead of UTF-8 bytes",
+        "protocol.canonical reused, so non-ASCII is \\u-escaped",
+        "keys not sorted",
+        "MAC over the payload only, so the expiry or key id can be changed",
+        "little-endian header",
+        "version not checked, even with a valid MAC",
+        "unknown key id leaking KeyError, short input leaking struct.error",
+        "signing with the highest key id, or opening with the current key only",
+        "bytes after the MAC ignored",
+        "expired already at the expiresAt second",
+        "NaN or Infinity accepted, or NaN checked by hand at the top level only"
+      ],
+      "clarifying_questions": [
+        "which key signs",
+        "the expiresAt second",
+        "NaN",
+        "padded tokens"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_host_driver",
+      "kind": "core algorithm",
+      "lesson_anchor": "One MRTR Round (new id, same method and arguments, only this round's inputResponses, requestState echoed byte for byte; MRTR only on tools/call, prompts/get, resources/read); Model Preferences Are Hints (independent hints, includeContext none); Safety Invariants (approval, round cap, refuse undeclared input requests); code/main.py run_mrtr",
+      "traps": [
+        "one id for the whole interaction",
+        "answers accumulated across rounds",
+        "the first requestState echoed every round",
+        "requestState stripped, or parsed and re-serialized when it looks like JSON",
+        "only tools/call allowed to ask for input, or any method allowed",
+        "capabilities checked against what the host can do instead of what this request declared",
+        "unknown input methods (elicitation/create) let through",
+        "includeContext not checked, or a missing includeContext refused",
+        "each request screened just before its approval, so the user sees part of a refused round",
+        "the model called as each request is approved, before the whole round is",
+        "round cap off by one, or counted after the model runs",
+        "rounds counted per input request instead of per input_required result",
+        "the caller's params mutated",
+        "modelPreferences normalized to sum to one",
+        "error responses returned like results"
+      ],
+      "integration": "the real summarize_repo server from Part 1, driven to its complete result with ids 41, 42, 43",
+      "clarifying_questions": [
+        "approval per request or per round",
+        "what max_rounds counts",
+        "unsupported input requests",
+        "empty inputRequests"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_concurrent_approvals",
+      "kind": "streaming",
+      "lesson_anchor": "Safety Invariants (cap MRTR rounds; limit bytes and tokens per round; log the originating method and input-request key without logging sensitive prompt content); the client owns approval and model policy",
+      "wire_format": "CSV, one record per yielded chunk: header interaction, round, request_id, method, input_key, decision, tokens; decided by the test's csv.reader over the joined chunks",
+      "traps": [
+        "rows collected and yielded at the end",
+        "interactions or approvals handled in a fixed order, so one waiting interaction blocks the others",
+        "approvals that arrive before their round dropped, or matched by interaction name only",
+        "a budget per interaction instead of per principal",
+        "bytes not checked, or checked but never charged",
+        "an exact fit counted as over budget, or rejected rounds charged",
+        "the budget checked before the user's decision, so a round the user did not approve is logged over_budget",
+        "ids counted per interaction",
+        "denied, over_budget or refused rounds not logged",
+        "the model called before the decision",
+        "request_id of the retry instead of the request that asked",
+        "reading approvals after the last interaction ended",
+        "rounds still waiting when the approvals stream ends dropped instead of denied",
+        "rows joined with commas, so a quoted interaction name breaks the CSV"
+      ],
+      "clarifying_questions": [
+        "when the budget is charged",
+        "cost of rejected rounds",
+        "row order",
+        "approvals that never come",
+        "several input keys in one round",
+        "a principal with no budget"
+      ],
+      "deviation": "A method column (the originating method) was added to the suggested columns, because the lesson asks to log the originating method with the input key. Approvals are per round, and decisions are approved, denied, over_budget or refused. round_cost is given: maxTokens plus the UTF-8 bytes of the messages' text. The test's user gives each approval only after a set number of rows is out, so the expected order is the same for an event loop or a task-per-interaction design; both were run against the test."
+    },
+    {
+      "part": 5,
+      "test": "test_phase_graph",
+      "kind": "graph",
+      "lesson_anchor": "Multi-Round State (the server puts the phase and validated intermediate data into the next requestState); Exercise 3 (a third round to critique the summary, the whole flow capped at three rounds); code/main.py tools_call phases and 'unknown requestState phase'",
+      "traps": [
+        "cycle detection with one visited set, so a diamond is reported as a cycle",
+        "rounds counted by breadth-first levels, or DONE counted as a round",
+        "round cap off by one",
+        "unreachable phases accepted, or taken as phases no then names, undefined next phases leaking KeyError",
+        "the raw answer recorded instead of the validated value, or earlier values dropped",
+        "only checking that the asked key is present, so extra answers and stale states get through",
+        "the phase taken from the answer's key instead of the verified state",
+        "unknown phase or unknown outcome leaking KeyError",
+        "DONE starting another round"
+      ],
+      "clarifying_questions": [
+        "diamond versus cycle",
+        "whether DONE is a round",
+        "a retried round"
+      ],
+      "deviation": "The phase graph is pick -> narrow? -> summarize -> critique?, checked once at start: undefined phases, phases without outcomes, unreachable phases, cycles, and a longest run beyond the cap. 'Replaying an older requestState' is tested as an older state sent with a later round's answers, which a stateless server can see through the exact key check; an exact replay of the same round is indistinguishable from a network retry and needs the one-time store that the chapter plan gives to lesson 12. advance is tested directly, and a canonical-JSON round trip stands in for the requestState trip."
+    }
+  ]
+}
