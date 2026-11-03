@@ -1,0 +1,1230 @@
+{
+  "package": "invoicekit",
+  "tests": [
+    "test_validate_and_classify",
+    "test_result_snapshot",
+    "test_retry_extraction",
+    "test_constrained_decode",
+    "test_tagged_line_items"
+  ],
+  "layers": [
+    {
+      "test": "test_validate_and_classify",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "list indices must be integers or slices, not str"
+        },
+        {
+          "name": "fix _at: array indices stay ints",
+          "edits": [
+            {
+              "file": "schema.py",
+              "old": "    return loc + (str(step),)\n",
+              "new": "    return loc + (step,)\n"
+            }
+          ],
+          "expect": "the feedback names every error in every line item"
+        },
+        {
+          "name": "+ keep the errors of every array element",
+          "edits": [
+            {
+              "file": "schema.py",
+              "old": "                item_errors = validate(item_schema, item, _at(loc, i))\n                if item_errors:\n                    return errors + item_errors\n",
+              "new": "                errors.extend(validate(item_schema, item, _at(loc, i)))\n"
+            }
+          ],
+          "expect": "a refusal is a typed outcome, not a parse error"
+        },
+        {
+          "name": "+ refusal checked before parsing",
+          "edits": [
+            {
+              "file": "outcome.py",
+              "old": "    try:\n        parsed = json.loads(raw, parse_float=Decimal)\n    except json.JSONDecodeError as e:\n        return ParsedResult(\"parse_error\", None, [ValidationError((), str(e))], raw)\n    if raw.startswith(REFUSAL_PREFIX):\n        return ParsedResult(\"refusal\", raw.removeprefix(REFUSAL_PREFIX).strip(), [], raw)\n",
+              "new": "    if raw.startswith(REFUSAL_PREFIX):\n        return ParsedResult(\"refusal\", raw.removeprefix(REFUSAL_PREFIX).strip(), [], raw)\n    try:\n        parsed = json.loads(raw, parse_float=Decimal)\n    except json.JSONDecodeError as e:\n        return ParsedResult(\"parse_error\", None, [ValidationError((), str(e))], raw)\n"
+            }
+          ],
+          "expect": "validation stays fast with a 5,000-SKU enum"
+        },
+        {
+          "name": "+ enum members indexed once by a JSON-equality key",
+          "edits": [
+            {
+              "file": "schema.py",
+              "old": "    if \"enum\" in schema and not any(_same_json(value, option) for option in schema[\"enum\"]):\n",
+              "new": "    if \"enum\" in schema and not _in_enum(value, schema[\"enum\"]):\n"
+            },
+            {
+              "file": "schema.py",
+              "old": "class _Missing:",
+              "new": "def _in_enum(value: Any, options: list) -> bool:\n    entry = _ENUM_KEYS.get(id(options))\n    if entry is None:\n        entry = (options, frozenset(_json_key(option) for option in options))\n        _ENUM_KEYS[id(options)] = entry\n    return _json_key(value) in entry[1]\n\n\ndef _json_key(value: Any) -> tuple:\n    if isinstance(value, bool):\n        return (\"boolean\", value)\n    if _is_number(value):\n        return (\"number\", value)\n    if isinstance(value, list):\n        return (\"array\", tuple(_json_key(v) for v in value))\n    if isinstance(value, dict):\n        return (\"object\", frozenset((k, _json_key(v)) for k, v in value.items()))\n    return (type(value).__name__, value)\n\n\n_ENUM_KEYS: dict = {}\n\n\nclass _Missing:"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_validate_and_classify",
+      "name": "enum members put in a plain set",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "        entry = (options, frozenset(_json_key(option) for option in options))\n",
+          "new": "        entry = (options, frozenset(options))\n"
+        },
+        {
+          "file": "schema.py",
+          "old": "    return _json_key(value) in entry[1]\n",
+          "new": "    return value in entry[1]\n"
+        }
+      ],
+      "expect": "unhashable type"
+    },
+    {
+      "test": "test_validate_and_classify",
+      "name": "hashable members in a set, objects and arrays compared with ==",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    entry = _ENUM_KEYS.get(id(options))\n    if entry is None:\n        if len(_ENUM_KEYS) >= 1024:\n            _ENUM_KEYS.clear()\n        entry = (options, frozenset(_json_key(option) for option in options))\n        _ENUM_KEYS[id(options)] = entry\n    return _json_key(value) in entry[1]\n",
+          "new": "    entry = _ENUM_KEYS.get(id(options))\n    if entry is None:\n        plain = frozenset(o for o in options if not isinstance(o, (dict, list)))\n        entry = (options, (plain, [o for o in options if isinstance(o, (dict, list))]))\n        _ENUM_KEYS[id(options)] = entry\n    plain, rest = entry[1]\n    return value in rest if isinstance(value, (dict, list)) else value in plain\n"
+        }
+      ],
+      "expect": "false is not 0 and true is not 1"
+    },
+    {
+      "test": "test_validate_and_classify",
+      "name": "a set of the members built on every check",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    if \"enum\" in schema and not _in_enum(value, schema[\"enum\"]):\n",
+          "new": "    if \"enum\" in schema and value not in set(schema[\"enum\"]):\n"
+        }
+      ],
+      "expect": "validation stays fast with a 5,000-SKU enum"
+    },
+    {
+      "test": "test_validate_and_classify",
+      "name": "index cached inside the schema",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    if \"enum\" in schema and not _in_enum(value, schema[\"enum\"]):\n",
+          "new": "    if \"enum\" in schema and _json_key(value) not in (schema.get(\"_keys\") or schema.setdefault(\"_keys\", frozenset(map(_json_key, schema[\"enum\"])))):\n"
+        }
+      ],
+      "expect": "validate leaves the schema as it was"
+    },
+    {
+      "test": "test_validate_and_classify",
+      "name": "enum members keyed by repr",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "def _json_key(value: Any) -> tuple:\n    \"\"\"A hashable stand-in for a JSON value: two keys are equal exactly when the values are (see validate).\"\"\"\n",
+          "new": "def _json_key(value: Any) -> tuple:\n    \"\"\"A hashable stand-in for a JSON value: two keys are equal exactly when the values are (see validate).\"\"\"\n    return repr(value)\n"
+        }
+      ],
+      "expect": "enum compares JSON values: 5.0 is 5"
+    },
+    {
+      "test": "test_validate_and_classify",
+      "name": "enum members keyed by json.dumps(sort_keys=True)",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "def _json_key(value: Any) -> tuple:\n    \"\"\"A hashable stand-in for a JSON value: two keys are equal exactly when the values are (see validate).\"\"\"\n",
+          "new": "def _json_key(value: Any) -> tuple:\n    \"\"\"A hashable stand-in for a JSON value: two keys are equal exactly when the values are (see validate).\"\"\"\n    return __import__(\"json\").dumps(value, sort_keys=True)\n"
+        }
+      ],
+      "expect": "is not JSON serializable"
+    },
+    {
+      "test": "test_validate_and_classify",
+      "name": "path printing taught to show digit strings as indices, loc left untyped",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    return loc + (step,)\n",
+          "new": "    return loc + (str(step),)\n"
+        },
+        {
+          "file": "schema.py",
+          "old": "        return \"$\" + \"\".join(f\"[{step}]\" if isinstance(step, int) else f\".{step}\" for step in self.loc)\n",
+          "new": "        return \"$\" + \"\".join(f\"[{step}]\" if str(step).isdigit() else f\".{step}\" for step in self.loc)\n"
+        }
+      ],
+      "expect": "list indices must be integers or slices, not str"
+    },
+    {
+      "test": "test_validate_and_classify",
+      "name": "lookup made to swallow the TypeError",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    return loc + (step,)\n",
+          "new": "    return loc + (str(step),)\n"
+        },
+        {
+          "file": "schema.py",
+          "old": "        except (KeyError, IndexError):\n",
+          "new": "        except (KeyError, IndexError, TypeError):\n"
+        }
+      ],
+      "expect": "the feedback names every error in every line item"
+    },
+    {
+      "test": "test_validate_and_classify",
+      "name": "refusal reason not stripped",
+      "edits": [
+        {
+          "file": "outcome.py",
+          "old": "raw.removeprefix(REFUSAL_PREFIX).strip()",
+          "new": "raw.removeprefix(REFUSAL_PREFIX)"
+        }
+      ],
+      "expect": "a refusal is a typed outcome, not a parse error"
+    },
+    {
+      "test": "test_validate_and_classify",
+      "name": "lookup taught to read digit strings as indices, loc left untyped",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    return loc + (step,)\n",
+          "new": "    return loc + (str(step),)\n"
+        },
+        {
+          "file": "schema.py",
+          "old": "f\"[{step}]\" if isinstance(step, int) else f\".{step}\"",
+          "new": "f\"[{step}]\" if str(step).isdigit() else f\".{step}\""
+        },
+        {
+          "file": "schema.py",
+          "old": "            node = node[step]\n",
+          "new": "            node = node[int(step)] if isinstance(node, list) else node[step]\n"
+        }
+      ],
+      "expect": "an array index in loc is an int"
+    },
+    {
+      "test": "test_validate_and_classify",
+      "name": "enum key without a boolean case",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    if isinstance(value, bool):\n        return (\"boolean\", value)\n    if _is_number(value):\n        return (\"number\", value)\n",
+          "new": "    if isinstance(value, (int, float, Decimal)):\n        return (\"number\", value)\n"
+        }
+      ],
+      "expect": "false is not 0 and true is not 1"
+    },
+    {
+      "test": "test_validate_and_classify",
+      "name": "object members keyed in the order they were written",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "        return (\"object\", frozenset((k, _json_key(v)) for k, v in value.items()))\n",
+          "new": "        return (\"object\", tuple((k, _json_key(v)) for k, v in value.items()))\n"
+        }
+      ],
+      "expect": "object members may come in any order"
+    },
+    {
+      "test": "test_validate_and_classify",
+      "name": "numbers keyed by their Python type",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    if _is_number(value):\n        return (\"number\", value)\n",
+          "new": "    if _is_number(value):\n        return (type(value).__name__, value)\n"
+        }
+      ],
+      "expect": "5.0 is 5"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "payload dumped with default=str",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "\"payload\": _encode(r.payload),",
+          "new": "\"payload\": r.payload,"
+        },
+        {
+          "file": "snapshot.py",
+          "old": "json.dumps({\"results\": rows}, indent=1)",
+          "new": "json.dumps({\"results\": rows}, indent=1, default=str)"
+        }
+      ],
+      "expect": "po-1041 must round-trip exactly"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "Decimal saved as a float, read back with parse_float=Decimal",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        return {_DECIMAL: str(value)}\n",
+          "new": "        return float(value)\n"
+        },
+        {
+          "file": "snapshot.py",
+          "old": "json.load(f, object_hook=_decode)",
+          "new": "json.load(f, object_hook=_decode, parse_float=Decimal)"
+        }
+      ],
+      "expect": "po-1041: amounts keep their type and every digit"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "payload dumped as it is",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "\"payload\": _encode(r.payload),",
+          "new": "\"payload\": r.payload,"
+        }
+      ],
+      "expect": "is not JSON serializable"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "Decimal saved as a plain string, numeric strings read back as Decimal",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        return {_DECIMAL: str(value)}\n",
+          "new": "        return str(value)\n"
+        },
+        {
+          "file": "snapshot.py",
+          "old": "def _decode(obj: dict) -> Any:\n",
+          "new": "def _decode(obj: dict) -> Any:\n    return {k: Decimal(v) if isinstance(v, str) and v.replace(\".\", \"\", 1).isdigit() else v for k, v in obj.items()}\n"
+        }
+      ],
+      "expect": "po-0977 must round-trip exactly"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "Decimal normalized before saving",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        return {_DECIMAL: str(value)}\n",
+          "new": "        return {_DECIMAL: str(value.normalize())}\n"
+        }
+      ],
+      "expect": "po-1041: amounts keep their type and every digit"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "error locations read back as lists",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "[ValidationError(tuple(loc), message)",
+          "new": "[ValidationError(loc, message)"
+        }
+      ],
+      "expect": "po-0977 must round-trip exactly"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "raw reply not saved",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "                \"raw\": r.raw,\n",
+          "new": "                \"raw\": \"\",\n"
+        }
+      ],
+      "expect": "po-1041 must round-trip exactly"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "results kept by id and written with sort_keys=True",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "json.dumps({\"results\": rows}, indent=1)",
+          "new": "json.dumps({\"results\": {row[\"doc_id\"]: row for row in rows}}, indent=1, sort_keys=True)"
+        },
+        {
+          "file": "snapshot.py",
+          "old": "for row in data[\"results\"]\n",
+          "new": "for row in data[\"results\"].values()\n"
+        }
+      ],
+      "expect": "a reopened store sees every result, in the order stored"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "results rebuilt from the raw reply on load",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        return {\n            row[\"doc_id\"]: ParsedResult(\n                row[\"kind\"],\n                row[\"payload\"],\n                [ValidationError(tuple(loc), message) for loc, message in row[\"errors\"]],\n                row[\"raw\"],\n            )\n            for row in data[\"results\"]\n        }\n",
+          "new": "        from .outcome import process_model_output\n        from .schema import INVOICE_SCHEMA\n\n        return {row[\"doc_id\"]: process_model_output(row[\"raw\"], INVOICE_SCHEMA) for row in data[\"results\"]}\n"
+        }
+      ],
+      "expect": "po-0452 must round-trip exactly"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "a missing snapshot file not handled",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        try:\n            with open(self.path, encoding=\"utf-8\") as f:\n                data = json.load(f, object_hook=_decode)\n        except FileNotFoundError:\n            return {}\n",
+          "new": "        with open(self.path, encoding=\"utf-8\") as f:\n            data = json.load(f, object_hook=_decode)\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "only ok results saved",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "            for doc_id, r in results.items()\n        ]\n",
+          "new": "            for doc_id, r in results.items()\n            if r.kind == \"ok\"\n        ]\n"
+        }
+      ],
+      "expect": "a reopened store sees every result, in the order stored"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "unknown ids return None",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        return self._load()[doc_id]\n",
+          "new": "        return self._load().get(doc_id)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "a failed save swallowed",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        except BaseException:\n            os.unlink(tmp)\n            raise\n",
+          "new": "        except BaseException:\n            os.unlink(tmp)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "a replaced result moves to the end",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        results[doc_id] = result\n",
+          "new": "        results.pop(doc_id, None)\n        results[doc_id] = result\n"
+        }
+      ],
+      "expect": "a replaced result keeps its place"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "snapshot rewritten in place",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        directory = os.path.dirname(os.path.abspath(self.path))\n        fd, tmp = tempfile.mkstemp(dir=directory, prefix=\".results-\", suffix=\".tmp\")\n        try:\n            with os.fdopen(fd, \"w\", encoding=\"utf-8\") as f:\n                f.write(text)\n                f.flush()\n                os.fsync(f.fileno())\n            os.replace(tmp, self.path)\n        except BaseException:\n            os.unlink(tmp)\n            raise\n",
+          "new": "        with open(self.path, \"w\", encoding=\"utf-8\") as f:\n            f.write(text)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "temporary file left behind after a failed save",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        except BaseException:\n            os.unlink(tmp)\n            raise\n",
+          "new": "        except BaseException:\n            raise\n"
+        }
+      ],
+      "expect": "a failed save leaves no temporary file behind"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "results cached in memory and updated before the save",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        self.path = path\n",
+          "new": "        self.path = path\n        self._results = self._load()\n"
+        },
+        {
+          "file": "snapshot.py",
+          "old": "        results = self._load()\n        results[doc_id] = result\n",
+          "new": "        results = self._results\n        results[doc_id] = result\n"
+        },
+        {
+          "file": "snapshot.py",
+          "old": "        return list(self._load())\n",
+          "new": "        return list(self._results)\n"
+        }
+      ],
+      "expect": "a put that fails changes nothing"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "temporary file in the system temp directory",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "tempfile.mkstemp(dir=directory, prefix=\".results-\", suffix=\".tmp\")",
+          "new": "tempfile.mkstemp(prefix=\".results-\", suffix=\".tmp\")"
+        }
+      ],
+      "expect": "the temporary file is written next to the snapshot"
+    },
+    {
+      "test": "test_result_snapshot",
+      "name": "temporary file in the system temp directory, left there after a failed save",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "tempfile.mkstemp(dir=directory, prefix=\".results-\", suffix=\".tmp\")",
+          "new": "tempfile.mkstemp(prefix=\".results-\", suffix=\".tmp\")"
+        },
+        {
+          "file": "snapshot.py",
+          "old": "        except BaseException:\n            os.unlink(tmp)\n            raise\n",
+          "new": "        except BaseException:\n            raise\n"
+        }
+      ],
+      "expect": "the temporary file is written next to the snapshot"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "totals compared as floats",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "    expected = sum(item[\"qty\"] * item[\"unit_usd\"] for item in payload[\"line_items\"])\n    if expected != payload[\"total_usd\"]:\n",
+          "new": "    expected = sum(item[\"qty\"] * float(item[\"unit_usd\"]) for item in payload[\"line_items\"])\n    if expected != float(payload[\"total_usd\"]):\n"
+        }
+      ],
+      "expect": "2 × 49.99 + 120.00 is exactly 219.98"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "totals through Decimal(float)",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "    expected = sum(item[\"qty\"] * item[\"unit_usd\"] for item in payload[\"line_items\"])\n    if expected != payload[\"total_usd\"]:\n",
+          "new": "    D = __import__(\"decimal\").Decimal\n    expected = sum(item[\"qty\"] * D(float(item[\"unit_usd\"])) for item in payload[\"line_items\"])\n    if expected != D(float(payload[\"total_usd\"])):\n"
+        }
+      ],
+      "expect": "2 × 49.99 + 120.00 is exactly 219.98"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "totals allowed to be a cent off",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "    if expected != payload[\"total_usd\"]:\n",
+          "new": "    if abs(expected - payload[\"total_usd\"]) > __import__(\"decimal\").Decimal(\"0.01\"):\n"
+        }
+      ],
+      "expect": "a total one cent off is wrong"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "sum rounded to cents before comparing",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "    if expected != payload[\"total_usd\"]:\n",
+          "new": "    if expected.quantize(__import__(\"decimal\").Decimal(\"0.01\")) != payload[\"total_usd\"]:\n"
+        }
+      ],
+      "expect": "amounts are compared exactly, without rounding"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "totals compared as text",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "    if expected != payload[\"total_usd\"]:\n",
+          "new": "    if str(expected) != str(payload[\"total_usd\"]):\n"
+        }
+      ],
+      "expect": "a total written as 220 equals 220.00"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "attempts reported as retries",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "    return Extraction(result, attempt)\n",
+          "new": "    return Extraction(result, attempt - 1)\n"
+        }
+      ],
+      "expect": "text around the JSON is a parse error, so ask again"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "feedback written without the values",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "        note = feedback(result)\n",
+          "new": "        note = \"\\n\".join(str(e) for e in result.errors)\n"
+        }
+      ],
+      "expect": "a reply that fails check_totals is a violation, fed back like any other"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "the sum printed to two decimals",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "f\"expected {expected}, the sum of qty * unit_usd\"",
+          "new": "f\"expected {expected:.2f}, the sum of qty * unit_usd\""
+        }
+      ],
+      "expect": "amounts are compared exactly, without rounding"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "errors never fed back",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "        note = feedback(result)\n",
+          "new": "        note = None\n"
+        }
+      ],
+      "expect": "the first attempt gets no note, a retry gets feedback()"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "totals violation built without its payload",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "ParsedResult(\"violation\", result.payload, errors, result.raw)",
+          "new": "ParsedResult(\"violation\", None, errors, result.raw)"
+        }
+      ],
+      "expect": "a reply that fails check_totals is a violation, fed back like any other"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "JSON cut out of the surrounding text",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "        result = process_model_output(generate(note), INVOICE_SCHEMA)\n",
+          "new": "        reply = generate(note)\n        result = process_model_output(reply[reply.find(\"{\"):] if \"{\" in reply else reply, INVOICE_SCHEMA)\n"
+        }
+      ],
+      "expect": "text around the JSON is a parse error, so ask again"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "first attempt sent an empty note",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "    note = None\n",
+          "new": "    note = \"\"\n"
+        }
+      ],
+      "expect": "the first attempt gets no note"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "refusals retried",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "        if result.kind in (\"ok\", \"refusal\"):\n",
+          "new": "        if result.kind == \"ok\":\n"
+        }
+      ],
+      "expect": "a refusal ends the extraction"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "check_totals never called in the loop",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "            errors = check_totals(result.payload)\n",
+          "new": "            errors = []\n"
+        }
+      ],
+      "expect": "a reply that fails check_totals is a violation, fed back like any other"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "totals violation sent back without its errors",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "ParsedResult(\"violation\", result.payload, errors, result.raw)",
+          "new": "ParsedResult(\"violation\", result.payload, [], result.raw)"
+        }
+      ],
+      "expect": "a reply that fails check_totals is a violation, fed back like any other"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "three attempts in all",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "range(1, max_retries + 2)",
+          "new": "range(1, max_retries + 1)"
+        }
+      ],
+      "expect": "three retries means up to four attempts"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "totals checked on replies that broke the schema",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "        if result.kind == \"ok\":\n            errors = check_totals",
+          "new": "        if result.kind in (\"ok\", \"violation\"):\n            errors = check_totals"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "the first failure's feedback reused",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "        note = feedback(result)\n",
+          "new": "        note = note or feedback(result)\n"
+        }
+      ],
+      "expect": "each retry carries every error of the attempt before it"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "feedback piled up across attempts",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "        note = feedback(result)\n",
+          "new": "        note = \"\\n\".join(filter(None, [note, feedback(result)]))\n"
+        }
+      ],
+      "expect": "each retry carries every error of the attempt before it"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "totals allowed to be under half a cent off",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "    if expected != payload[\"total_usd\"]:\n",
+          "new": "    if abs(expected - payload[\"total_usd\"]) >= __import__(\"decimal\").Decimal(\"0.005\"):\n"
+        }
+      ],
+      "expect": "amounts are compared exactly, without rounding or tolerance"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "totals compared with math.isclose",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "    if expected != payload[\"total_usd\"]:\n",
+          "new": "    if not __import__(\"math\").isclose(expected, payload[\"total_usd\"]):\n"
+        }
+      ],
+      "expect": "a cent off is wrong on a large invoice too"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "each line rounded to cents before summing",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "    expected = sum(item[\"qty\"] * item[\"unit_usd\"] for item in payload[\"line_items\"])\n",
+          "new": "    D = __import__(\"decimal\").Decimal\n    expected = sum(D(item[\"qty\"] * item[\"unit_usd\"]).quantize(D(\"0.01\")) for item in payload[\"line_items\"])\n"
+        }
+      ],
+      "expect": "amounts are compared exactly, without rounding"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "a totals violation returned without a retry",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "            if errors:\n                result = ParsedResult(\"violation\", result.payload, errors, result.raw)\n",
+          "new": "            if errors:\n                result = ParsedResult(\"violation\", result.payload, errors, result.raw)\n                break\n"
+        }
+      ],
+      "expect": "a reply that fails check_totals is a violation, fed back like any other"
+    },
+    {
+      "test": "test_retry_extraction",
+      "name": "a fixed note instead of feedback() after a parse error",
+      "edits": [
+        {
+          "file": "extract.py",
+          "old": "        note = feedback(result)\n",
+          "new": "        note = feedback(result) if result.kind == \"violation\" else \"Reply with JSON only.\"\n"
+        }
+      ],
+      "expect": "the first attempt gets no note, a retry gets feedback()"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "tokens yielded as str",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "        yield token.encode(\"utf-8\")\n",
+          "new": "        yield token\n"
+        }
+      ],
+      "expect": "decode yields raw bytes"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "EOS taken whenever it is offered",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "            if token == EOS:\n                if _complete(pieces, state):\n                    return\n                continue\n",
+          "new": "            if token == EOS:\n                return\n"
+        }
+      ],
+      "expect": "at every step, take the best token that keeps the output valid"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "spaces skipped as JSON whitespace",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "    i, typed = state\n    while i < len(pieces):\n",
+          "new": "    i, typed = state\n    if ch in \" \\n\\t\":\n        return state\n    while i < len(pieces):\n"
+        }
+      ],
+      "expect": "at every step, take the best token that keeps the output valid"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "an enum string may close on a prefix of a member",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "        if kind == \"enum\":\n            typed += ch\n",
+          "new": "        if kind == \"enum\":\n            if ch == '\"' and len(typed) > 1 and any(member.startswith(typed) for member in arg):\n                return (i + 1, \"\")\n            typed += ch\n"
+        }
+      ],
+      "expect": "at every step, take the best token that keeps the output valid"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "a member that is complete must close at once",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "        if kind == \"enum\":\n            typed += ch\n",
+          "new": "        if kind == \"enum\":\n            if typed + '\"' in arg and ch != '\"':\n                return None\n            typed += ch\n"
+        }
+      ],
+      "expect": "at every step, take the best token that keeps the output valid"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "members written with \\u escapes",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "json.dumps(member, ensure_ascii=False)",
+          "new": "json.dumps(member)"
+        }
+      ],
+      "expect": "at every step, take the best token that keeps the output valid"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "only the first character of a token checked",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "    for ch in token:\n        state = _step(pieces, state, ch)\n        if state is None:\n            return None\n    return state\n",
+          "new": "    if not token or _step(pieces, state, token[0]) is None:\n        return None\n    for ch in token:\n        state = _step(pieces, state, ch) or state\n    return state\n"
+        }
+      ],
+      "expect": "no allowed token"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "properties expected in sorted order",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "        names = list(schema.get(\"properties\", {}))\n",
+          "new": "        names = sorted(schema.get(\"properties\", {}))\n"
+        }
+      ],
+      "expect": "no allowed token"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "EOS allowed only when nothing more can follow",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "                if _complete(pieces, state):\n                    return\n",
+          "new": "                if not _can_continue(pieces, state):\n                    return\n"
+        }
+      ],
+      "expect": "no allowed token"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "negative integers allowed",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "        if ch in \"0123456789\" and typed != \"0\":\n",
+          "new": "        if ch in \"0123456789\" and typed not in (\"0\", \"-0\") or ch == \"-\" and not typed:\n"
+        }
+      ],
+      "expect": "at every step, take the best token that keeps the output valid"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "the longest allowed token instead of the best",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "        for token in model(text):\n            if token == EOS:\n                if _complete(pieces, state):\n                    return\n                continue\n            after = _advance(pieces, state, token)\n            if after is not None:\n                break\n        else:\n            raise ValueError(f\"no allowed token after {text!r}\")\n",
+          "new": "        allowed = [t for t in model(text) if t != EOS and _advance(pieces, state, t) is not None]\n        if not allowed:\n            if _complete(pieces, state):\n                return\n            raise ValueError(f\"no allowed token after {text!r}\")\n        token = max(allowed, key=len)\n        after = _advance(pieces, state, token)\n"
+        }
+      ],
+      "expect": "no allowed token"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "tokens encoded as Latin-1",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "        yield token.encode(\"utf-8\")\n",
+          "new": "        yield token.encode(\"latin-1\")\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "the model asked again after the output is complete",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "    while not _complete(pieces, state) or _can_continue(pieces, state):\n",
+          "new": "    while True:\n"
+        }
+      ],
+      "expect": "ask the model once per token, and not again once the output is complete"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "leading zeros allowed",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "        if ch in \"0123456789\" and typed != \"0\":\n",
+          "new": "        if ch in \"0123456789\":\n"
+        }
+      ],
+      "expect": "05 is not an integer"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "the whole output decoded before the first chunk",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "    Other schemas raise ValueError.\n    \"\"\"\n    pieces = _pieces(schema)\n",
+          "new": "    Other schemas raise ValueError.\n    \"\"\"\n    yield from list(_eager(model, schema))\n\n\ndef _eager(model, schema):\n    pieces = _pieces(schema)\n"
+        }
+      ],
+      "expect": "each token is sent as soon as it is chosen"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "no fitting token ends the output quietly",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "            raise ValueError(f\"no allowed token after {text!r}\")\n",
+          "new": "            return\n"
+        }
+      ],
+      "expect": "StopIteration"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "an integer allowed to end before its first digit",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "        if not typed:\n            return None\n        i, typed = i + 1, \"\"",
+          "new": "        i, typed = i + 1, \"\""
+        }
+      ],
+      "expect": "at every step, take the best token that keeps the output valid"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "an integer counted as complete before its first digit",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "    return i == len(pieces) or (i == len(pieces) - 1 and pieces[i][0] == \"int\" and typed != \"\")\n",
+          "new": "    return i == len(pieces) or (i == len(pieces) - 1 and pieces[i][0] == \"int\")\n"
+        }
+      ],
+      "expect": "0 is complete; 07 is not JSON"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "only the model's best candidate tried",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "        for token in model(text):\n",
+          "new": "        for token in model(text)[:1]:\n"
+        }
+      ],
+      "expect": "no allowed token"
+    },
+    {
+      "test": "test_constrained_decode",
+      "name": "completion detected by counting braces",
+      "edits": [
+        {
+          "file": "decode.py",
+          "old": "    while not _complete(pieces, state) or _can_continue(pieces, state):\n",
+          "new": "    while text.count(\"{\") != text.count(\"}\") or not text:\n"
+        }
+      ],
+      "expect": "EOS is allowed once the value is complete"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "every branch checked and all their errors reported",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    for branch in branches:\n        if _in_enum(value[tag], branch[\"properties\"][tag][\"enum\"]):\n            return validate(branch, value, loc)\n",
+          "new": "    errors = [e for branch in branches for e in validate(branch, value, loc)]\n    if errors:\n        return errors\n"
+        }
+      ],
+      "expect": "each line item is checked against the branch its kind names"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "the branch with the fewest errors wins",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    tag = discriminator[\"propertyName\"]\n",
+          "new": "    return min((validate(branch, value, loc) for branch in branches), key=len)\n    tag = discriminator[\"propertyName\"]\n"
+        }
+      ],
+      "expect": "only the chosen branch reports errors, each at its full path"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "an unknown tag reported at the item",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    return [ValidationError(_at(loc, tag), f\"value {value[tag]!r} not in enum\")]\n",
+          "new": "    return [ValidationError(loc, f\"value {value[tag]!r} not in enum\")]\n"
+        }
+      ],
+      "expect": "only the chosen branch reports errors, each at its full path"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "a missing tag not handled",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    if tag not in value:\n        return [ValidationError(_at(loc, tag), \"missing required field\")]\n",
+          "new": ""
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "the tag looked up before checking for an object",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    if not isinstance(value, dict):\n        return [ValidationError(loc, f\"expected object, got {type(value).__name__}\")]\n    tag = discriminator",
+          "new": "    tag = discriminator"
+        }
+      ],
+      "expect": "only the chosen branch reports errors, each at its full path"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "the chosen branch checked from the root",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "            return validate(branch, value, loc)\n",
+          "new": "            return validate(branch, value)\n"
+        }
+      ],
+      "expect": "only the chosen branch reports errors, each at its full path"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "anyOf: one matching branch or more",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "        if matches == 1:\n",
+          "new": "        if matches >= 1:\n"
+        }
+      ],
+      "expect": "without a discriminator, a value must match exactly one branch"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "the first matching branch wins",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "        matches = sum(1 for branch in branches if not validate(branch, value, loc))\n",
+          "new": "        matches = min(1, sum(1 for branch in branches if not validate(branch, value, loc)))\n"
+        }
+      ],
+      "expect": "without a discriminator, a value must match exactly one branch"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "no match reported as every branch's errors",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "            return [ValidationError(loc, \"matches none of the oneOf branches\")]\n",
+          "new": "            return [e for branch in branches for e in validate(branch, value, loc)]\n"
+        }
+      ],
+      "expect": "without a discriminator, a value must match exactly one branch"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "a missing tag reported at the item",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "        return [ValidationError(_at(loc, tag), \"missing required field\")]\n",
+          "new": "        return [ValidationError(loc, \"missing required field\")]\n"
+        }
+      ],
+      "expect": "only the chosen branch reports errors, each at its full path"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "a missing tag read as None",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    if tag not in value:\n        return [ValidationError(_at(loc, tag), \"missing required field\")]\n    for branch in branches:\n        if _in_enum(value[tag],",
+          "new": "    for branch in branches:\n        if _in_enum(value.get(tag),"
+        },
+        {
+          "file": "schema.py",
+          "old": "f\"value {value[tag]!r} not in enum\"",
+          "new": "f\"value {value.get(tag)!r} not in enum\""
+        }
+      ],
+      "expect": "only the chosen branch reports errors, each at its full path"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "a non-object item matched against every branch",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    if not isinstance(value, dict):\n        return [ValidationError(loc, f\"expected object, got {type(value).__name__}\")]\n    tag = discriminator",
+          "new": "    if not isinstance(value, dict):\n        return _one_of({\"oneOf\": branches}, value, loc)\n    tag = discriminator"
+        }
+      ],
+      "expect": "only the chosen branch reports errors, each at its full path"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "an unknown tag matched against every branch",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    return [ValidationError(_at(loc, tag), f\"value {value[tag]!r} not in enum\")]\n",
+          "new": "    return _one_of({\"oneOf\": branches}, value, loc)\n"
+        }
+      ],
+      "expect": "only the chosen branch reports errors, each at its full path"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "an unknown tag printed without repr",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "f\"value {value[tag]!r} not in enum\"",
+          "new": "f\"value {value[tag]} not in enum\""
+        }
+      ],
+      "expect": "only the chosen branch reports errors, each at its full path"
+    },
+    {
+      "test": "test_tagged_line_items",
+      "name": "no match reported as the closest branch's errors",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "            return [ValidationError(loc, \"matches none of the oneOf branches\")]\n",
+          "new": "            return min((validate(b, value, loc) for b in branches), key=len)\n"
+        }
+      ],
+      "expect": "without a discriminator, a value must match exactly one branch"
+    }
+  ]
+}

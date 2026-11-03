@@ -1,0 +1,69 @@
+{
+  "lesson": "phases/13-tools-and-protocols/04-structured-output",
+  "title": "Structured Output — JSON Schema, Pydantic, Zod, Constrained Decoding",
+  "format": "staged-brownfield",
+  "service": "InvoiceKit: invoice extraction from model replies, with a JSON Schema subset validator, typed outcomes, a JSON result snapshot, a retry loop, a constrained decoder and discriminated oneOf",
+  "sources": {
+    "docs/en.md": "bd468ed5c79526e09282f88722e4603d5f80e9a3087e8de0e151dd94d48f73cc",
+    "code/main.py": "7f689e21eb4d9995c3991cbd792cf54b67e0e932ee5af508df7bfd749ce3db07"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_validate_and_classify",
+      "kind": "debug",
+      "lesson_anchor": "code/main.py validate and process_model_output; The three failure modes; Pydantic: ValidationError with typed error paths; JSON Schema 2020-12 enum",
+      "planted_bugs": [
+        "_at stores array indices in loc as str, so paths print as $.line_items.0.sku; the TypeError surfaces two calls later, in lookup called by feedback",
+        "the array branch returns at the first element with errors, so the errors of later line items are lost",
+        "process_model_output parses before checking the __REFUSAL__ prefix, so the refusal branch is dead code and a refusal becomes a parse_error",
+        "enum is a linear scan with _same_json, O(lines x SKUs)"
+      ],
+      "timing_assert": "3,000 line items against a 5,000-SKU enum under 0.1 s (the linear scan takes 1.09-1.14 s on this machine under light load and 3-5 s under heavy load; the indexed version 4.5-4.9 ms)",
+      "overfix_guard": "enum keeps JSON equality: false is not 0 and true is not 1, 5.0 equals 5, objects compare member by member in any key order and are unhashable, so set(enum), the lesson's list membership, repr keys and json.dumps keys all fail; and validate must not cache its index inside the schema"
+    },
+    {
+      "part": 2,
+      "test": "test_result_snapshot",
+      "kind": "model and persistence",
+      "lesson_anchor": "Pydantic: total_usd: Decimal; Refusals: a first-class outcome; the three failure modes kept with the raw reply",
+      "storage": "one JSON snapshot file, rewritten through a temporary file in the same directory and os.replace; Decimal saved as a tagged string with all its digits; a payload object shaped like a tag, such as a model-written {\"$decimal\": \"1\"}, is saved as {\"$object\": [[key, value]]}",
+      "exactness": "ok, violation, parse_error and refusal results round-trip across reopen: Decimal('120.00') keeps its digits (checked with exact(), since Decimal('120.0') == Decimal('120.00')), model-quoted strings like \"49.99\" stay strings, error locations come back as tuples with int indices, raw replies and refusal reasons keep every character",
+      "traps": ["json.dump of Decimal", "default=str", "default=float with parse_float=Decimal (120.00 becomes 120.0)", "numeric strings turned into Decimal", "Decimal normalized", "loc read back as a list", "raw reply not stored", "results rebuilt from the raw reply on load", "ids sorted", "a replaced result moved to the end", "file rewritten in place", "temporary file outside the snapshot's directory", "temporary file left after a failed save", "memory updated before a failed save", "missing file", "only ok results saved", "unknown ids returning None", "a failed save swallowed"],
+      "clarifying_questions": ["one file per document", "re-parsing the raw reply on load", "floats for amounts", "fsync", "position of a replaced result"]
+    },
+    {
+      "part": 3,
+      "test": "test_retry_extraction",
+      "kind": "core algorithm",
+      "lesson_anchor": "Retry strategy: generate -> parse -> validate -> if fail, inject error and retry, max 3x; The refusal branch does NOT retry; Approach one: leaked prose like 'Here is your JSON:'; Pydantic total_usd: Decimal",
+      "traps": ["three retries means four attempts", "the first attempt has no note", "feedback of the previous attempt only, not the first and not accumulated", "refusal is final, also after a failed attempt", "prose before the JSON is a parse error, no stripping", "business rule only after the schema passes", "floats: 2 x 49.99 + 120.00 != 219.98", "Decimal(float)", "a one-cent tolerance", "rounding to cents (0.375)", "each line rounded to cents", "a tolerance under half a cent (0.3751)", "math.isclose, a relative tolerance that lets a cent through on 25,000,000.00", "text comparison (220 vs 220.00)", "the totals violation carries its errors and payload", "feedback without values", "errors never fed back", "the sum printed to two decimals", "attempts reported as retries"],
+      "clarifying_questions": ["stripping prose", "tolerance or rounding", "what max_retries counts", "what to return after giving up", "retrying a refusal"]
+    },
+    {
+      "part": 4,
+      "test": "test_constrained_decode",
+      "kind": "streaming",
+      "lesson_anchor": "Constrained decoding in the open: grammar-based decoding builds a deterministic finite automaton from the schema and masks tokens that would violate it",
+      "wire_format": "raw byte stream: a generator yielding each chosen token as UTF-8 bytes as soon as it is chosen, decided by the test's b''.join and per-chunk comparison",
+      "traps": ["str instead of bytes", "an enum string closed on a prefix of a member (EU of EUR)", "a complete member forced to close (ABC-1 of ABC-12)", "tokens spanning several pieces of syntax", "first-character-only checks", "\\u escapes from json.dumps", "EOS before the output is complete", "EOS only when nothing can follow", "asking the model after the closing brace", "leading zeros", "an integer with no digits (qty followed by a comma)", "negative integers", "whitespace", "sorted property order", "no allowed token: raise instead of stopping quietly", "the longest allowed token instead of the best", "Latin-1 instead of UTF-8", "buffering the whole output"],
+      "clarifying_questions": ["whitespace", "property order", "sampling", "stopping after the closing brace", "tokens across syntax"]
+    },
+    {
+      "part": 5,
+      "test": "test_tagged_line_items",
+      "kind": "recursive structure",
+      "lesson_anchor": "Exercise 2: oneOf with a discriminator, line_item is a product or a service tagged by kind",
+      "traps": ["errors from every branch", "the branch with the fewest errors", "unknown kind reported at the item", "missing kind reported at the item or read as None", "missing kind as KeyError", "non-objects read for their tag", "chosen branch checked without its location", "nested bundles", "anyOf instead of oneOf (integer is a number)", "first match wins", "no match reported as every branch's errors"],
+      "clarifying_questions": ["discriminator is OpenAPI", "errors from the other branches", "integer counts as number"]
+    }
+  ],
+  "deviations": [
+    "Part 1: error paths are typed locations (a loc tuple of str and int, rendered as $.line_items[0].sku), after the Pydantic section's 'typed error paths'. The path bug therefore surfaces in feedback/lookup, two calls from the root cause, instead of as a wrong string. The enum check in the starter already has JSON-equality semantics and is only slow, so the set over-fix is a real guard; validate must also leave the schema unchanged.",
+    "Part 2: Decimal amounts are saved as tagged strings ({\"$decimal\": \"120.00\"}) rather than read back with parse_float=Decimal, because violation payloads hold model-quoted strings such as \"49.99\" that must stay strings. parse_float=Decimal is used when replies are parsed (process_model_output), and JSON numbers read back with parse_float=Decimal are also accepted. The snapshot also holds a totals violation from Part 3, so rebuilding results from the raw reply is caught.",
+    "Part 3: feedback() from Part 1 is the injected note, and it carries every error path; the business rule also has to accept 220 for 220.00 and sub-cent prices without rounding.",
+    "Part 4: besides objects with fixed property order, string enums and non-negative integers, a bare integer schema is decoded to exercise EOS and leading zeros; the stand-in model is keyed by the text so far, with detours that make wrong decoders produce visibly wrong output.",
+    "Part 5: bundles add one nested level of discriminated oneOf, and a separate discount oneOf without a discriminator tests exactly-one matching on the integer/number overlap."
+  ]
+}
