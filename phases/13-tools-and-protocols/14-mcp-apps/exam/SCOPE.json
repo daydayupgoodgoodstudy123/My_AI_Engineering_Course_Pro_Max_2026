@@ -1,0 +1,126 @@
+{
+  "lesson": "phases/13-tools-and-protocols/14-mcp-apps",
+  "title": "MCP Apps on the Stateless Protocol",
+  "format": "staged-brownfield",
+  "service": "AppBridge: the lesson's MCP Apps server plus a host that reviews UI resources, caches them as content-addressed files, decides what a mounted View may do, runs the postMessage bridge and plans cache invalidation",
+  "sources": {
+    "docs/en.md": "40f058cda91f1ed151492d82de0578ec39a8df5ded405087c2824c4d885abdcc",
+    "code/main.py": "9bf3c8789eae10bf85e383039c2c6d7612a1c1d42bf93d0cc8b886c0954bf635",
+    "outputs/skill-mcp-apps-spec.md": "cbd3eda509e9aee46289ae2c7d8ddd5c8c64b845b863bcbb125ecd08d66f2867"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_ui_fallback",
+      "kind": "debug",
+      "lesson_anchor": "Declare the UI on the tool definition; Fallback is part of the contract; Reject wire ambiguity (-32021 with data.requiredCapabilities); Cache UI resources (a stale iframe must not keep broader permissions); Exercise 1; code/main.py _apps_enabled, tools/list and resources/read",
+      "planted_bugs": [
+        "McpAppServer._apps_enabled looks for io.modelcontextprotocol/ui at the top level of clientCapabilities instead of under extensions; the failure surfaces one call later, as an Apps host getting -32602 Unknown resource URI for the URI tools/list just gave it",
+        "McpAppServer._tool adds _meta.ui when the client declared Apps or the server offers them (or instead of and), so every client gets the binding although both peers must opt in",
+        "McpAppServer._read folds the missing capability into -32602 Unknown resource URI instead of -32021 with data.requiredCapabilities.extensions naming the extension",
+        "AppMount.review re-encodes the 1 MB HTML, recomputes its sha256 and re-reviews the CSP on every View action"
+      ],
+      "timing_assert": "2000 review() calls on a 1,003,800-byte App under 0.05 s. Measured on this machine: the per-action review takes 0.66-2.0 s (13x the limit or more), the review cached per version and admission change 0.4-2.7 ms (18x under it or more)",
+      "overfix_guard": "a declaration is an object under extensions: a list of names, true, the empty object read as false, only the empty object accepted (a declaration with settings), .get on a list and extensions indexed directly are all caught; an unknown URI stays -32602; a host without Apps still gets the tool without _meta.ui, not an empty list; a cached review must follow replace (narrower CSP, then a version that is not admitted) and withdraw, so a review kept for good, memoized by URI or by digest, kept when the new version fails, reset on replace only, or a digest over a prefix all fail"
+    },
+    {
+      "part": 2,
+      "test": "test_app_cache_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Cache UI resources as executable content: key by canonical ui:// URI, admitted server identity and version, content digest and, when private, the authorization context",
+      "storage": "content-addressed files: blobs/<sha256 hex of the HTML's UTF-8 bytes> plus an index file",
+      "exactness": "the content entry round-trips exactly across a reopen: HTML with \\r\\n, a lone \\r, U+2028 and non-ASCII text byte for byte, mimeType text/html;profile=mcp-app, CSP lists in their order with empty lists kept, and other _meta keys",
+      "traps": [
+        "blob read with read_text (universal newlines)",
+        "blob written with a trailing newline, stripped, or with a BOM",
+        "digest over the whole content entry",
+        "blob served without checking its digest",
+        "a missing blob raising FileNotFoundError",
+        "dedupe by file existence, so a damaged blob is never repaired",
+        "principal left out of the key, or put into the key of public entries, or looked up only under the caller's principal",
+        "the principal stored beside a private entry instead of in its key, so the same HTML read for two principals collides",
+        "server version, server name or digest left out of the key",
+        "index kept in memory only",
+        "CSP lists sorted, or only _meta.ui kept",
+        "private without a principal, a non-App MIME type or a non-ui:// URI accepted"
+      ],
+      "integration": "the lesson's App, read from McpAppServer (Part 1 fixed) for alice, comes back for bob from a fresh cache and passes AppMount review",
+      "clarifying_questions": ["index format", "damaged blobs", "public entries stored with a principal", "ttlMs", "URI normalization"]
+    },
+    {
+      "part": 3,
+      "test": "test_host_policy",
+      "kind": "core algorithm",
+      "lesson_anchor": "The sandbox is a boundary, not a trust verdict; Host context, actions, and revocation",
+      "traps": [
+        "connect kinds allowed by resourceDomains, or subresources by connectDomains",
+        "origins matched by prefix, by prefix plus a slash, by the first three slash-separated parts, by host name without the scheme, or by scheme and host name without the port",
+        "a missing csp object or list raising KeyError",
+        "any declared permission unlocking every device",
+        "postMessage origins matched by prefix or after trimming a slash; a wildcard pin accepted",
+        "a user gesture taken as approval",
+        "a call run twice",
+        "revocation sparing approved calls, or rejecting calls under other capabilities",
+        "revocation only checked at run time, so a new grant revives rejected calls",
+        "the capability checked only when the call is requested",
+        "requests after revocation accepted"
+      ],
+      "clarifying_questions": ["port and case normalization", "wss versus https", "cancelling pending calls", "approving a rejected call"]
+    },
+    {
+      "part": 4,
+      "test": "test_bridge_lifecycle",
+      "kind": "streaming",
+      "lesson_anchor": "The Apps bridge has its own lifecycle; Host context, actions, and revocation (theme and size as changing host context, the host caps the size); code/main.py timeline_html bridge script",
+      "wire_format": "postMessage frames (target origin, JSON-RPC message) in the Apps dialect: answers carry the View's id, notifications carry no id; the test splits frames by the presence of method and records how many inbox events the bridge had pulled when each frame came out",
+      "traps": [
+        "host notifications sent before ui/notifications/initialized",
+        "the removed core notifications/initialized opening the gate",
+        "the ui/initialize answer held back",
+        "id 0 read as no id",
+        "core initialize treated as the Apps handshake",
+        "the View's id reused as the core id, or the View answered under the core id",
+        "a duplicate core response answered again",
+        "the View's params or whole message forwarded, with its own _meta and principal",
+        "notifications with a null id",
+        "the size applied uncapped, scaled by aspect ratio, or capped by the wrong dimension",
+        "the whole context sent instead of the changed fields",
+        "held notifications flushed out of order",
+        "the whole inbox read first",
+        "frames posted to *",
+        "non-JSON-RPC messages and stray responses handled, or crashing the bridge",
+        "ui/initialize answered with the initial host context instead of the current one"
+      ],
+      "integration": "a tools/call from the View reaches McpAppServer through send_core and comes back to the View under its own id, which the server only answers when the request carries full metadata and matching headers",
+      "clarifying_questions": ["tools/call before initialized", "scaling the size", "the View's own _meta", "a second ui/notifications/initialized"]
+    },
+    {
+      "part": 5,
+      "test": "test_invalidation_plan",
+      "kind": "graph",
+      "lesson_anchor": "Cache UI resources as executable content: the four invalidation conditions (ttlMs, binding change, server version or descriptor pin, acknowledged resource-change subscription) and refetch, review and remount",
+      "traps": [
+        "an expired entry treated as its whole resource, or as every entry sharing its blob",
+        "change notifications counted without an acknowledged subscription, or with subscriptions matched by URI alone",
+        "a binding change invalidating only the new or only the old resource, or only remounting the tool's Views",
+        "entries or bound tools matched by URI alone, across servers",
+        "a server change reaching only bound resources or only cached ones",
+        "Views remounted only through dropped entries, or only through bound tools",
+        "a newly bound tool, which has no old resource, crashing the lookup",
+        "the host state changed while planning",
+        "unsorted or duplicated output",
+        "unknown event types ignored"
+      ],
+      "clarifying_questions": ["events in one batch", "expired entries already evicted", "bindings across servers"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the timing defect sits in the host's per-action check (review.AppMount.review), the code that runs once per View action, not in McpAppServer.handle; the three server defects are the suggested ones, with the binding defect written as 'client declared or server offers' so it reads as the lesson's 'both peers opt in'. The overfix guard covers a new version with a narrower CSP, a version that is not admitted and a withdrawn digest; capability revocation is tested in Part 3, so the same rule is not tested twice.",
+    "Part 2: the lookup takes the digest, so the key is exactly the lesson's (URI, server name and version, digest, principal when private); the cache holds no TTL, because expiry is one of Part 5's events. A damaged blob must be repaired by the next put, and a missing blob is a miss.",
+    "Part 3: privileged actions get explicit per-call approval in host UI, and a revocation rejects every pending call under the capability for good, so a later grant does not revive them. The load kinds, the device names (camera, microphone, location, as the lesson words them) and the capability names (tools, navigate, clipboard) are this host's names; the lesson does not spell them as keys.",
+    "Part 4: send_core only sends; core responses come back as inbox events, so the bridge keeps an in-flight map from core id to View id, and out-of-order and duplicate responses test that mapping. The lesson names only ui/initialize and ui/notifications/initialized; ui/notifications/tool-result, ui/notifications/host-context-changed, ui/notifications/size-changed, the hostCapabilities and hostContext result keys and the theme and size context fields are this host's dialect, stated in bridge.py. Frame timing is checked by recording how many inbox events the bridge had pulled when each frame came out, instead of a timeout.",
+    "Part 5: the graph is server, resources (server, uri), cache entries, tools bound to resources, and mounted Views, each mounted from an entry that may have been evicted; a binding event carries only the new URI and the old one comes from the state. Expiry is per entry; the other three events are per resource.",
+    "Facts used beyond docs/en.md: the JSON-RPC message text 'Method not found' for -32601 (also in code/main.py); wildcard CSP lists as a hard reject (outputs/skill-mcp-apps-spec.md); the host dialect and names listed for Parts 3 and 4."
+  ]
+}

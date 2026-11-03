@@ -1,0 +1,1302 @@
+{
+  "package": "appbridge",
+  "tests": [
+    "test_ui_fallback",
+    "test_app_cache_roundtrip",
+    "test_host_policy",
+    "test_bridge_lifecycle",
+    "test_invalidation_plan"
+  ],
+  "layers": [
+    {
+      "test": "test_ui_fallback",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "an Apps host reads the UI that tools/list bound"
+        },
+        {
+          "name": "look for the extension under extensions",
+          "edits": [
+            {
+              "file": "server.py",
+              "old": "        capabilities = meta[CLIENT_CAPABILITIES_META]\n        return isinstance(capabilities.get(APPS_EXTENSION), dict)\n",
+              "new": "        extensions = meta[CLIENT_CAPABILITIES_META].get(\"extensions\")\n        return isinstance(extensions, dict) and isinstance(extensions.get(APPS_EXTENSION), dict)\n"
+            }
+          ],
+          "expect": "a host that did not declare the extension gets the same tool, without _meta.ui"
+        },
+        {
+          "name": "+ both peers opt in",
+          "edits": [
+            {
+              "file": "server.py",
+              "old": "        if apps or APPS_EXTENSION in self.extensions:\n",
+              "new": "        if apps and APPS_EXTENSION in self.extensions:\n"
+            }
+          ],
+          "expect": "a host without the Apps extension is refused the UI with -32021"
+        },
+        {
+          "name": "+ -32021 for a missing capability",
+          "edits": [
+            {
+              "file": "server.py",
+              "old": "        if uri != RESOURCE_URI or not apps:\n            raise ProtocolError(-32602, \"Unknown resource URI\")\n",
+              "new": "        if uri != RESOURCE_URI:\n            raise ProtocolError(-32602, \"Unknown resource URI\")\n        if not apps:\n            raise ProtocolError(\n                -32021,\n                \"MCP Apps client capability is required\",\n                {\"requiredCapabilities\": {\"extensions\": {APPS_EXTENSION: {}}}},\n            )\n"
+            }
+          ],
+          "expect": "checking an action should not review the whole resource again"
+        },
+        {
+          "name": "+ review once per version and admission change",
+          "edits": [
+            {
+              "file": "review.py",
+              "old": "        self._admitted = set(admitted)\n\n    def replace",
+              "new": "        self._admitted = set(admitted)\n        self._review: Review | None = None\n\n    def replace"
+            },
+            {
+              "file": "review.py",
+              "old": "        self._content = content\n\n    def withdraw",
+              "new": "        self._content = content\n        self._review = None\n\n    def withdraw"
+            },
+            {
+              "file": "review.py",
+              "old": "        self._admitted.discard(digest)\n",
+              "new": "        self._admitted.discard(digest)\n        self._review = None\n"
+            },
+            {
+              "file": "review.py",
+              "old": "        return review_resource(self._content, self._admitted)\n",
+              "new": "        if self._review is None:\n            self._review = review_resource(self._content, self._admitted)\n        return self._review\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_ui_fallback",
+      "name": "the extension found with `in`, so a list of names or true counts",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        extensions = meta[CLIENT_CAPABILITIES_META].get(\"extensions\")\n        return isinstance(extensions, dict) and isinstance(extensions.get(APPS_EXTENSION), dict)\n",
+          "new": "        return APPS_EXTENSION in meta[CLIENT_CAPABILITIES_META].get(\"extensions\", {})\n"
+        }
+      ],
+      "expect": "only an object under extensions declares the Apps extension"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "the declaration tested for truth, so the empty object {} reads as absent",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        extensions = meta[CLIENT_CAPABILITIES_META].get(\"extensions\")\n        return isinstance(extensions, dict) and isinstance(extensions.get(APPS_EXTENSION), dict)\n",
+          "new": "        return bool(meta[CLIENT_CAPABILITIES_META].get(\"extensions\", {}).get(APPS_EXTENSION))\n"
+        }
+      ],
+      "expect": "an Apps host sees the tool's UI binding in tools/list"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "the declaration tested with `is not None`, so true counts",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        extensions = meta[CLIENT_CAPABILITIES_META].get(\"extensions\")\n        return isinstance(extensions, dict) and isinstance(extensions.get(APPS_EXTENSION), dict)\n",
+          "new": "        extensions = meta[CLIENT_CAPABILITIES_META].get(\"extensions\")\n        return isinstance(extensions, dict) and extensions.get(APPS_EXTENSION) is not None\n"
+        }
+      ],
+      "expect": "only an object under extensions declares the Apps extension"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "extensions read with .get whatever its type, so a list crashes",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        extensions = meta[CLIENT_CAPABILITIES_META].get(\"extensions\")\n        return isinstance(extensions, dict) and isinstance(extensions.get(APPS_EXTENSION), dict)\n",
+          "new": "        extensions = meta[CLIENT_CAPABILITIES_META].get(\"extensions\", {})\n        return isinstance(extensions.get(APPS_EXTENSION), dict)\n"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "extensions indexed directly, so capabilities without it crash",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        extensions = meta[CLIENT_CAPABILITIES_META].get(\"extensions\")\n        return isinstance(extensions, dict) and isinstance(extensions.get(APPS_EXTENSION), dict)\n",
+          "new": "        extensions = meta[CLIENT_CAPABILITIES_META][\"extensions\"]\n        return isinstance(extensions.get(APPS_EXTENSION), dict)\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "a host without Apps gets no tool at all (overfix)",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "                result = {\"tools\": [self._tool(apps)], \"ttlMs\": 60_000, \"cacheScope\": \"public\"}\n",
+          "new": "                result = {\"tools\": [self._tool(apps)] if apps else [], \"ttlMs\": 60_000, \"cacheScope\": \"public\"}\n"
+        }
+      ],
+      "expect": "a host that did not declare the extension gets the same tool, without _meta.ui"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "every refusal of resources/read reported as -32021 (overfix)",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        if uri != RESOURCE_URI:\n            raise ProtocolError(-32602, \"Unknown resource URI\")\n        if not apps:\n",
+          "new": "        if uri != RESOURCE_URI or not apps:\n"
+        }
+      ],
+      "expect": "an unknown resource is still -32602"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "-32021 data names the extension without the extensions level",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "{\"requiredCapabilities\": {\"extensions\": {APPS_EXTENSION: {}}}}",
+          "new": "{\"requiredCapabilities\": {APPS_EXTENSION: {}}}"
+        }
+      ],
+      "expect": "the error names the extension the host has to declare"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "-32021 sent without data",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "                {\"requiredCapabilities\": {\"extensions\": {APPS_EXTENSION: {}}}},\n",
+          "new": ""
+        }
+      ],
+      "expect": "the error names the extension the host has to declare"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "the review computed once and kept for good (overfix)",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "        self._content = content\n        self._review = None\n",
+          "new": "        self._content = content\n"
+        },
+        {
+          "file": "review.py",
+          "old": "        self._admitted.discard(digest)\n        self._review = None\n",
+          "new": "        self._admitted.discard(digest)\n"
+        }
+      ],
+      "expect": "a new version is reviewed before the View acts under it"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "the review reset on replace but not on withdraw (overfix)",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "        self._admitted.discard(digest)\n        self._review = None\n",
+          "new": "        self._admitted.discard(digest)\n"
+        }
+      ],
+      "expect": "a withdrawn digest stops the View at its next action"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "reviews memoized by URI across versions (overfix)",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "        if self._review is None:\n            self._review = review_resource(self._content, self._admitted)\n        return self._review\n",
+          "new": "        uri = self._content[\"uri\"]\n        if uri not in _REVIEWS_BY_URI:\n            _REVIEWS_BY_URI[uri] = review_resource(self._content, self._admitted)\n        return _REVIEWS_BY_URI[uri]\n"
+        },
+        {
+          "file": "review.py",
+          "old": "class ReviewError(Exception):",
+          "new": "_REVIEWS_BY_URI: dict = {}\n\n\nclass ReviewError(Exception):"
+        }
+      ],
+      "expect": "a new version is reviewed before the View acts under it"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "a new version that fails review is ignored, the old one keeps running (overfix)",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "        self._content = content\n        self._review = None\n",
+          "new": "        try:\n            review_resource(content, self._admitted)\n        except ReviewError:\n            return\n        self._content = content\n        self._review = None\n"
+        }
+      ],
+      "expect": "a version the host has not admitted runs under no review, not under the last one"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "the per-action review kept, made cheaper by hashing a prefix (overfix)",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "        if self._review is None:\n            self._review = review_resource(self._content, self._admitted)\n        return self._review\n",
+          "new": "        return review_resource(self._content, self._admitted)\n"
+        },
+        {
+          "file": "review.py",
+          "old": "    return hashlib.sha256(text.encode(\"utf-8\")).hexdigest()\n",
+          "new": "    return hashlib.sha256(text[:4096].encode(\"utf-8\")).hexdigest()\n"
+        }
+      ],
+      "expect": "ReviewError"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "only the empty object counts as a declaration, so settings read as absent",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        return isinstance(extensions, dict) and isinstance(extensions.get(APPS_EXTENSION), dict)\n",
+          "new": "        return isinstance(extensions, dict) and extensions.get(APPS_EXTENSION) == {}\n"
+        }
+      ],
+      "expect": "any object under extensions declares the Apps extension"
+    },
+    {
+      "test": "test_ui_fallback",
+      "name": "reviews memoized by digest, so the same HTML keeps its old CSP (overfix)",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "        self._content = content\n        self._admitted = set(admitted)\n        self._review: Review | None = None\n",
+          "new": "        self._content = content\n        self._admitted = set(admitted)\n        self._review: Review | None = None\n        self._digest = content_digest(content[\"text\"])\n        self._memo: dict = {}\n"
+        },
+        {
+          "file": "review.py",
+          "old": "        self._content = content\n        self._review = None\n",
+          "new": "        self._content = content\n        self._digest = content_digest(content[\"text\"])\n"
+        },
+        {
+          "file": "review.py",
+          "old": "        self._admitted.discard(digest)\n        self._review = None\n",
+          "new": "        self._admitted.discard(digest)\n        self._memo.clear()\n"
+        },
+        {
+          "file": "review.py",
+          "old": "        if self._review is None:\n            self._review = review_resource(self._content, self._admitted)\n        return self._review\n",
+          "new": "        if self._digest not in self._memo:\n            self._memo[self._digest] = review_resource(self._content, self._admitted)\n        return self._memo[self._digest]\n"
+        }
+      ],
+      "expect": "a new version is reviewed before the View acts under it"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "blob read back as text, with universal newlines",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "            return (self.blobs / digest).read_bytes()\n",
+          "new": "            return (self.blobs / digest).read_text(encoding=\"utf-8\").encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "an App resource round-trips exactly"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "blob written the way print() writes, with a trailing newline",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "            _write(self.blobs / digest, data)\n",
+          "new": "            _write(self.blobs / digest, data + b\"\\n\")\n"
+        }
+      ],
+      "expect": "blobs/<digest> holds the HTML bytes exactly"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "HTML stripped before it is stored",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        data = content[\"text\"].encode(\"utf-8\")\n",
+          "new": "        data = content[\"text\"].strip().encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "the digest is the sha256 hex of the HTML's UTF-8 bytes"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "HTML encoded with a byte order mark (utf-8-sig)",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        data = content[\"text\"].encode(\"utf-8\")\n",
+          "new": "        data = content[\"text\"].encode(\"utf-8-sig\")\n"
+        }
+      ],
+      "expect": "the digest is the sha256 hex of the HTML's UTF-8 bytes"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "digest taken over the whole content entry",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        digest = hashlib.sha256(data).hexdigest()\n",
+          "new": "        digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode(\"utf-8\")).hexdigest()\n"
+        }
+      ],
+      "expect": "the digest is the sha256 hex of the HTML's UTF-8 bytes"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "blob served without checking its digest",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        if data is None or hashlib.sha256(data).hexdigest() != digest:\n",
+          "new": "        if data is None:\n"
+        }
+      ],
+      "expect": "a blob that does not match its digest is a miss"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "a missing blob raises FileNotFoundError",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        data = self._blob(digest)\n",
+          "new": "        data = (self.blobs / digest).read_bytes()\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "blobs deduplicated by existence, so a damaged one is never rewritten",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        if self._blob(digest) != data:\n",
+          "new": "        if not (self.blobs / digest).exists():\n"
+        }
+      ],
+      "expect": "storing the resource again repairs a damaged blob"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "principal left out of the key",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        key = _key(server, uri, digest, principal if scope == \"private\" else None)\n",
+          "new": "        key = _key(server, uri, digest, None)\n"
+        }
+      ],
+      "expect": "a private entry is only for its own principal, not for bob"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "public entries keyed by the principal they were read for",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        key = _key(server, uri, digest, principal if scope == \"private\" else None)\n",
+          "new": "        key = _key(server, uri, digest, principal)\n"
+        }
+      ],
+      "expect": "the lesson's App, read for alice, is public"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "lookups only under the caller's principal",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        record = index.get(_key(server, uri, digest, None))\n        if record is None and principal:\n            record = index.get(_key(server, uri, digest, principal))\n",
+          "new": "        record = index.get(_key(server, uri, digest, principal))\n"
+        }
+      ],
+      "expect": "a public entry is for anyone"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "server version left out of the key",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "    return json.dumps([uri, server[\"name\"], server[\"version\"], digest, principal])\n",
+          "new": "    return json.dumps([uri, server[\"name\"], digest, principal])\n"
+        }
+      ],
+      "expect": "another server version is another entry"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "server name left out of the key",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "    return json.dumps([uri, server[\"name\"], server[\"version\"], digest, principal])\n",
+          "new": "    return json.dumps([uri, server[\"version\"], digest, principal])\n"
+        }
+      ],
+      "expect": "another server is another entry"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "digest left out of the key, so the newest version wins",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "    return json.dumps([uri, server[\"name\"], server[\"version\"], digest, principal])\n",
+          "new": "    return json.dumps([uri, server[\"name\"], server[\"version\"], principal])\n"
+        }
+      ],
+      "expect": "the digest is part of the key"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "index kept in memory only",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        self.index_path = self.root / \"index.json\"\n",
+          "new": "        self.index_path = self.root / \"index.json\"\n        self._memory: dict = {}\n"
+        },
+        {
+          "file": "cache.py",
+          "old": "        try:\n            return json.loads(self.index_path.read_bytes())\n        except FileNotFoundError:\n            return {}\n",
+          "new": "        return self._memory\n"
+        }
+      ],
+      "expect": "a fresh cache on the same folder sees earlier entries"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "CSP lists sorted into a canonical order",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        index[key] = {name: value for name, value in content.items() if name != \"text\"}\n",
+          "new": "        index[key] = _canonical({name: value for name, value in content.items() if name != \"text\"})\n"
+        },
+        {
+          "file": "cache.py",
+          "old": "def _write(path: Path, data: bytes) -> None:",
+          "new": "def _canonical(value):\n    if isinstance(value, dict):\n        return {name: _canonical(item) for name, item in value.items()}\n    if isinstance(value, list):\n        return sorted(_canonical(item) for item in value)\n    return value\n\n\ndef _write(path: Path, data: bytes) -> None:"
+        }
+      ],
+      "expect": "an App resource round-trips exactly"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "only the ui part of _meta kept",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        index[key] = {name: value for name, value in content.items() if name != \"text\"}\n",
+          "new": "        index[key] = {\"uri\": uri, \"mimeType\": content[\"mimeType\"], \"_meta\": {\"ui\": content[\"_meta\"][\"ui\"]}}\n"
+        }
+      ],
+      "expect": "an App resource round-trips exactly"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "a private entry accepted without a principal",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        if scope == \"private\" and not principal:\n            raise ValueError(\"a private entry needs the principal it was read for\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a private entry needs the principal it was read for"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "any MIME type cached",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        if content.get(\"mimeType\") != RESOURCE_MIME:\n            raise ValueError(f\"{uri} is not an MCP App: mimeType {content.get('mimeType')!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "only MCP Apps are cached"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "any URI scheme cached",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        if not isinstance(uri, str) or not uri.startswith(\"ui://\"):\n",
+          "new": "        if not isinstance(uri, str):\n"
+        }
+      ],
+      "expect": "only ui:// resources are cached"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "the principal stored beside a private entry instead of in its key",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        key = _key(server, uri, digest, principal if scope == \"private\" else None)\n        index[key] = {name: value for name, value in content.items() if name != \"text\"}\n",
+          "new": "        key = _key(server, uri, digest, None)\n        index[key] = {\"owner\": principal if scope == \"private\" else None, \"entry\": {name: value for name, value in content.items() if name != \"text\"}}\n"
+        },
+        {
+          "file": "cache.py",
+          "old": "        record = index.get(_key(server, uri, digest, None))\n        if record is None and principal:\n            record = index.get(_key(server, uri, digest, principal))\n        if record is None:\n            return None\n",
+          "new": "        found = index.get(_key(server, uri, digest, None))\n        if found is None or (found[\"owner\"] is not None and found[\"owner\"] != principal):\n            return None\n        record = found[\"entry\"]\n"
+        }
+      ],
+      "expect": "the same HTML read for two principals is two entries"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "connect kinds allowed by either list",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            allowed = self._connect\n",
+          "new": "            allowed = self._connect | self._resource\n"
+        }
+      ],
+      "expect": "resourceDomains does not grant connect"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "subresource kinds allowed by either list",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            allowed = self._resource\n",
+          "new": "            allowed = self._resource | self._connect\n"
+        }
+      ],
+      "expect": "connectDomains does not grant scripts, styles, images or fonts"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "URL matched by prefix",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        parts = urlsplit(url)\n        return f\"{parts.scheme}://{parts.netloc}\" in allowed\n",
+          "new": "        return any(url.startswith(origin) for origin in allowed)\n"
+        }
+      ],
+      "expect": "a URL's origin must equal a listed origin exactly"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "URL matched by prefix plus a slash",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        parts = urlsplit(url)\n        return f\"{parts.scheme}://{parts.netloc}\" in allowed\n",
+          "new": "        return any(url.startswith(origin + \"/\") for origin in allowed)\n"
+        }
+      ],
+      "expect": "a listed origin is reachable, with any path or none"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "origin cut from the URL at the third slash",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        parts = urlsplit(url)\n        return f\"{parts.scheme}://{parts.netloc}\" in allowed\n",
+          "new": "        return \"/\".join(url.split(\"/\")[:3]) in allowed\n"
+        }
+      ],
+      "expect": "a listed origin is reachable, with any path or none"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "host name compared, scheme ignored",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        parts = urlsplit(url)\n        return f\"{parts.scheme}://{parts.netloc}\" in allowed\n",
+          "new": "        return urlsplit(url).hostname in {urlsplit(origin).hostname for origin in allowed}\n"
+        }
+      ],
+      "expect": "a URL's origin must equal a listed origin exactly"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "a missing CSP list raises KeyError",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        self._resource = frozenset(csp.get(\"resourceDomains\") or ())\n",
+          "new": "        self._resource = frozenset(csp[\"resourceDomains\"])\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "a missing csp object raises KeyError",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        csp = ui_meta.get(\"csp\") or {}\n",
+          "new": "        csp = ui_meta[\"csp\"]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "any declared permission unlocks every device",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        return device in self._devices\n",
+          "new": "        return bool(self._devices)\n"
+        }
+      ],
+      "expect": "a device is allowed only when the resource declares it"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "messages accepted by origin prefix",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        return origin == self.view_origin\n",
+          "new": "        return origin.startswith(self.view_origin)\n"
+        }
+      ],
+      "expect": "only the View's exact origin is accepted"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "messages accepted after trimming a trailing slash",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        return origin == self.view_origin\n",
+          "new": "        return origin.rstrip(\"/\") == self.view_origin\n"
+        }
+      ],
+      "expect": "only the View's exact origin is accepted"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "a wildcard pin accepted",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        if not view_origin or view_origin == \"*\":\n",
+          "new": "        if not view_origin:\n"
+        }
+      ],
+      "expect": "a wildcard pin would accept messages from any frame"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "a user gesture counts as approval",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            \"approved\": False,\n",
+          "new": "            \"approved\": user_gesture,\n"
+        }
+      ],
+      "expect": "a click inside the View is intent, not the user's approval"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "a call can run twice",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        call[\"state\"] = \"done\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "a call runs at most once"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "revocation spares approved calls",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            if call[\"capability\"] == capability and call[\"state\"] == \"pending\"\n",
+          "new": "            if call[\"capability\"] == capability and call[\"state\"] == \"pending\" and not call[\"approved\"]\n"
+        }
+      ],
+      "expect": "revoking a capability rejects every pending call under it"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "revocation rejects pending calls under every capability",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            if call[\"capability\"] == capability and call[\"state\"] == \"pending\"\n",
+          "new": "            if call[\"state\"] == \"pending\"\n"
+        }
+      ],
+      "expect": "revoking a capability rejects every pending call under it"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "revocation only checked when a call runs, nothing rejected for good",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        for call_id in rejected:\n            self._calls[call_id][\"state\"] = \"rejected\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "a call rejected by a revocation stays rejected after a new grant"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "capability checked only when the call is requested",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        for call_id in rejected:\n            self._calls[call_id][\"state\"] = \"rejected\"\n",
+          "new": ""
+        },
+        {
+          "file": "policy.py",
+          "old": "        if call[\"capability\"] not in self._granted:\n            raise Refused(f\"{call['capability']} was revoked\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "an approval does not survive the revocation"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "requests not checked against the granted capabilities",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        if capability not in self._granted:\n            raise Refused(f\"{capability} is not available to this View\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a revoked capability is refused"
+    },
+    {
+      "test": "test_host_policy",
+      "name": "origin rebuilt from the host name, so the port is dropped",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        return f\"{parts.scheme}://{parts.netloc}\" in allowed\n",
+          "new": "        return f\"{parts.scheme}://{parts.hostname}\" in allowed\n"
+        }
+      ],
+      "expect": "https://api.notes.example:8443/v1/notes"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "host notifications sent before the View is ready",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "            if ready:\n                frames.extend(notices)\n            else:\n                held.extend(notices)\n",
+          "new": "            frames.extend(notices)\n"
+        }
+      ],
+      "expect": "answers go out at once; host notifications wait for ui/notifications/initialized"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "the removed core notifications/initialized opens the gate",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                elif method == INITIALIZED:\n",
+          "new": "                elif method.endswith(\"notifications/initialized\"):\n"
+        }
+      ],
+      "expect": "answers go out at once; host notifications wait for ui/notifications/initialized"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "the ui/initialize answer held back like a host notification",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                        frames.append(_result(view_id, answer))\n",
+          "new": "                        (frames if ready else held).append(_result(view_id, answer))\n"
+        }
+      ],
+      "expect": "answers go out at once; host notifications wait for ui/notifications/initialized"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "requests recognised by a truthy id, so id 0 looks like a notification",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                if \"id\" in message:\n",
+          "new": "                if message.get(\"id\"):\n"
+        }
+      ],
+      "expect": "each View request is answered once, under the id the View used"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "core initialize treated as the Apps handshake",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                    if method == INITIALIZE:\n",
+          "new": "                    if method in (INITIALIZE, \"initialize\"):\n"
+        }
+      ],
+      "expect": "each View request is answered once, under the id the View used"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "the View's id reused as the core id",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                        core_id = next(self.core_ids)\n",
+          "new": "                        core_id = view_id\n"
+        }
+      ],
+      "expect": "each View request is answered once, under the id the View used"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "the View answered under the core id",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                        in_flight[core_id] = view_id\n",
+          "new": "                        in_flight[core_id] = core_id\n"
+        }
+      ],
+      "expect": "each View request is answered once, under the id the View used"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "a duplicate core response answered again",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                view_id = in_flight.pop(response.get(\"id\"), _UNKNOWN)\n",
+          "new": "                view_id = in_flight.get(response.get(\"id\"), _UNKNOWN)\n"
+        }
+      ],
+      "expect": "each View request is answered once, under the id the View used"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "the View's params forwarded whole",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                        body, headers = make_request(\n                            \"tools/call\",\n                            core_id,\n                            {\"name\": params.get(\"name\"), \"arguments\": params.get(\"arguments\", {})},\n                        )\n",
+          "new": "                        body, headers = make_request(\"tools/call\", core_id, params)\n"
+        }
+      ],
+      "expect": "each tools/call becomes a new core request with the host's own id and metadata"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "the View's message forwarded as the core request",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                        body, headers = make_request(\n                            \"tools/call\",\n                            core_id,\n                            {\"name\": params.get(\"name\"), \"arguments\": params.get(\"arguments\", {})},\n                        )\n",
+          "new": "                        body = dict(message, id=core_id)\n                        headers = {\"Mcp-Method\": \"tools/call\", \"Mcp-Name\": str(params.get(\"name\"))}\n"
+        }
+      ],
+      "expect": "each tools/call becomes a new core request with the host's own id and metadata"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "notifications sent with a null id",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "    return {\"jsonrpc\": \"2.0\", \"method\": method, \"params\": params}\n",
+          "new": "    return {\"jsonrpc\": \"2.0\", \"id\": None, \"method\": method, \"params\": params}\n"
+        }
+      ],
+      "expect": "a notification carries no id"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "the size the View asks for applied as it is",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                    size = {\n                        \"width\": min(params[\"width\"], self.max_size[\"width\"]),\n                        \"height\": min(params[\"height\"], self.max_size[\"height\"]),\n                    }\n",
+          "new": "                    size = {\"width\": params[\"width\"], \"height\": params[\"height\"]}\n"
+        }
+      ],
+      "expect": "host notifications go out in the order they happened, with the size the host allows"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "the size scaled down as a whole, keeping its aspect ratio",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                    size = {\n                        \"width\": min(params[\"width\"], self.max_size[\"width\"]),\n                        \"height\": min(params[\"height\"], self.max_size[\"height\"]),\n                    }\n",
+          "new": "                    scale = min(1, self.max_size[\"width\"] / params[\"width\"], self.max_size[\"height\"] / params[\"height\"])\n                    size = {\"width\": int(params[\"width\"] * scale), \"height\": int(params[\"height\"] * scale)}\n"
+        }
+      ],
+      "expect": "host notifications go out in the order they happened, with the size the host allows"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "a context change sent as the whole context",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                notices.append(_notification(CONTEXT_CHANGED, copy.deepcopy(event[\"changes\"])))\n",
+          "new": "                notices.append(_notification(CONTEXT_CHANGED, copy.deepcopy(context)))\n"
+        }
+      ],
+      "expect": "host notifications go out in the order they happened, with the size the host allows"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "held notifications flushed newest first",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                        frames.extend(held)\n",
+          "new": "                        frames.extend(reversed(held))\n"
+        }
+      ],
+      "expect": "host notifications go out in the order they happened, with the size the host allows"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "the whole inbox read before anything is sent",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "        async for event in inbox:\n",
+          "new": "        for event in [event async for event in inbox]:\n"
+        }
+      ],
+      "expect": "answers go out at once; host notifications wait for ui/notifications/initialized"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "frames posted to any origin",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                yield self.view_origin, frame\n",
+          "new": "                yield \"*\", frame\n"
+        }
+      ],
+      "expect": "every frame is posted to the View's exact origin"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "objects without jsonrpc 2.0 handled anyway",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                if not isinstance(message, dict) or message.get(\"jsonrpc\") != \"2.0\":\n",
+          "new": "                if not isinstance(message, dict):\n"
+        }
+      ],
+      "expect": "each View request is answered once, under the id the View used"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "a stray response from the View answered as a request",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                if not isinstance(method, str):\n                    continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "each View request is answered once, under the id the View used"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "a message that is not an object crashes the bridge",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                if not isinstance(message, dict) or message.get(\"jsonrpc\") != \"2.0\":\n",
+          "new": "                if message.get(\"jsonrpc\") != \"2.0\":\n"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "the height capped by the width limit",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "\"height\": min(params[\"height\"], self.max_size[\"height\"]),",
+          "new": "\"height\": min(params[\"height\"], self.max_size[\"width\"]),"
+        }
+      ],
+      "expect": "host notifications go out in the order they happened, with the size the host allows"
+    },
+    {
+      "test": "test_bridge_lifecycle",
+      "name": "ui/initialize answered with the host context the bridge started with",
+      "edits": [
+        {
+          "file": "bridge.py",
+          "old": "                            \"hostContext\": copy.deepcopy(context),\n",
+          "new": "                            \"hostContext\": copy.deepcopy(self.host_context),\n"
+        }
+      ],
+      "expect": "ui/initialize answers with the host context as it is now"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "an expired entry invalidates its whole resource",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "            if event[\"entry\"] in state.entries:\n                dropped.add(event[\"entry\"])\n",
+          "new": "            if event[\"entry\"] in state.entries:\n                expired = state.entries[event[\"entry\"]]\n                resources.add((expired.server, expired.uri))\n"
+        }
+      ],
+      "expect": "an expired entry is dropped on its own, with the Views mounted from it"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "entries that share a blob expire together",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "            if event[\"entry\"] in state.entries:\n                dropped.add(event[\"entry\"])\n",
+          "new": "            if event[\"entry\"] in state.entries:\n                blob = state.entries[event[\"entry\"]].digest\n                dropped.update(i for i, e in state.entries.items() if e.digest == blob)\n"
+        }
+      ],
+      "expect": "an entry that shares its blob with another entry is still dropped on its own"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "change notifications counted without a subscription",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "            if (event[\"server\"], event[\"uri\"]) in state.subscriptions:\n                resources.add((event[\"server\"], event[\"uri\"]))\n",
+          "new": "            resources.add((event[\"server\"], event[\"uri\"]))\n"
+        }
+      ],
+      "expect": "a change notification counts only on an acknowledged subscription"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "subscriptions matched by URI alone",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "            if (event[\"server\"], event[\"uri\"]) in state.subscriptions:\n",
+          "new": "            if event[\"uri\"] in {uri for _, uri in state.subscriptions}:\n"
+        }
+      ],
+      "expect": "a change notification counts only on an acknowledged subscription"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "a binding change invalidates only the new resource",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "            if old is not None:\n                resources.add((server, old))\n",
+          "new": ""
+        }
+      ],
+      "expect": "a binding change invalidates the old and the new resource"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "a binding change invalidates only the old resource",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "            resources.add((server, event[\"uri\"]))\n",
+          "new": ""
+        }
+      ],
+      "expect": "a binding change invalidates the old and the new resource"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "a binding change only remounts the tool's Views",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "            if old is not None:\n                resources.add((server, old))\n",
+          "new": ""
+        },
+        {
+          "file": "invalidation.py",
+          "old": "            resources.add((server, event[\"uri\"]))\n",
+          "new": ""
+        }
+      ],
+      "expect": "a binding change invalidates the old and the new resource"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "cache entries matched by URI alone, ignoring the server",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "        entry_id for entry_id, entry in state.entries.items() if (entry.server, entry.uri) in resources\n",
+          "new": "        entry_id for entry_id, entry in state.entries.items() if entry.uri in {uri for _, uri in resources}\n"
+        }
+      ],
+      "expect": "a binding change invalidates the old and the new resource"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "bound tools matched by URI alone, ignoring the server",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "    bound = {tool for tool, uri in state.bindings.items() if (tool[0], uri) in resources}\n",
+          "new": "    bound = {tool for tool, uri in state.bindings.items() if uri in {u for _, u in resources}}\n"
+        }
+      ],
+      "expect": "a binding change invalidates the old and the new resource"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "a server change only reaches resources its tools are bound to",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "            resources.update((e.server, e.uri) for e in state.entries.values() if e.server == server)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a server change reaches every resource it serves and every View of a tool bound to one"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "a server change only reaches resources it has entries for",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "            resources.update((owner, uri) for (owner, _), uri in state.bindings.items() if owner == server)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a server change reaches every resource it serves and every View of a tool bound to one"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "only Views mounted from dropped entries are remounted",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "        if view.entry in dropped or (view.server, view.tool) in bound\n",
+          "new": "        if view.entry in dropped\n"
+        }
+      ],
+      "expect": "a server change reaches every resource it serves and every View of a tool bound to one"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "only Views of tools bound to invalidated resources are remounted",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "        if view.entry in dropped or (view.server, view.tool) in bound\n",
+          "new": "        if (view.server, view.tool) in bound\n"
+        }
+      ],
+      "expect": "an expired entry is dropped on its own, with the Views mounted from it"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "the plan returned in the state's order",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "    return Plan(sorted(dropped), sorted(remount))\n",
+          "new": "    return Plan([e for e in state.entries if e in dropped], [v for v in state.views if v in remount])\n"
+        }
+      ],
+      "expect": "a change notification drops every copy of its resource"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "one plan per event, concatenated",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "    resources: set[tuple[str, str]] = set()\n",
+          "new": "    if len(events) > 1:\n        parts = [plan_invalidation(state, [event]) for event in events]\n        return Plan(sorted(sum((p.drop for p in parts), [])), sorted(sum((p.remount for p in parts), [])))\n    resources: set[tuple[str, str]] = set()\n"
+        }
+      ],
+      "expect": "a batch gives one plan: each entry and View once, sorted"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "unknown event types ignored",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "        else:\n            raise ValueError(f\"unknown change event {kind!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "an unknown change event is an error"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "the old binding looked up by index, so a newly bound tool crashes",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "            old = state.bindings.get((server, tool))\n",
+          "new": "            old = state.bindings[(server, tool)]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_invalidation_plan",
+      "name": "a binding event written into the host state",
+      "edits": [
+        {
+          "file": "invalidation.py",
+          "old": "    return Plan(sorted(dropped), sorted(remount))\n",
+          "new": "    for event in events:\n        if event.get(\"type\") == \"binding\":\n            state.bindings[(event[\"server\"], event[\"tool\"])] = event[\"uri\"]\n    return Plan(sorted(dropped), sorted(remount))\n"
+        }
+      ],
+      "expect": "a tool bound for the first time has no old resource"
+    }
+  ]
+}
