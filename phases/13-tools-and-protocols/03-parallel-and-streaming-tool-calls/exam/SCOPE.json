@@ -1,0 +1,68 @@
+{
+  "lesson": "phases/13-tools-and-protocols/03-parallel-and-streaming-tool-calls",
+  "title": "Parallel Tool Calls and Streaming with Tools",
+  "format": "staged-brownfield",
+  "service": "Fanout: the part of an agent host that reassembles streamed parallel tool calls, runs them concurrently, answers each under its own id, logs calls in flight for crash recovery, plans fan-outs with dependencies and a concurrency limit, and streams results while the model is still writing",
+  "sources": {
+    "docs/en.md": "b848b9e12e391ea6442042d0108f5c9cc9a5527a5f31a8acabed0083e8da9306",
+    "code/main.py": "846f5176ec20f77ab0607fb14ed7cda2a8870afc42296b9131864a95a21f3462"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_replay_turn",
+      "kind": "debug",
+      "lesson_anchor": "Id correlation; Streaming tool calls (OpenAI: per-index accumulation, id only when it first appears); Out-of-order completion; Running calls concurrently; code/main.py StreamAccumulator, replay_and_execute, run_parallel",
+      "planted_bugs": [
+        "StreamAccumulator.on_event looks buffers up by event.get('id'), but only call_start carries the id; every later fragment of every call lands in one defaultdict buffer under None, and the JSONDecodeError surfaces one call later in CallBuffer.to_call at the first call_stop",
+        "replay_and_execute collects results with asyncio.as_completed and zips them with the in_flight keys in call_stop order, so out-of-order completion pairs Zurich's id with Bengaluru's weather",
+        "an executor that raises is not caught (answer has no try, and replay runs executors directly), so one LookupError loses the whole turn instead of answering that call with an error",
+        "run_parallel awaits each create_task immediately, so 250 calls of 8 ms take about 2.4 s instead of one call's time"
+      ],
+      "timing_assert": "250 calls of 8 ms through run_parallel under 0.2 s (the serial version takes 2.40-2.50 s; the concurrent one has a median of 11-12 ms and stayed under 20 ms on a machine with load averages up to about 40)",
+      "overfix_guard": "each call runs exactly once, starts only after its own call_stop and before the turn has finished streaming (catches parse-early starts, wait-for-the-whole-turn rewrites, and leftover executor tasks that run every call twice); replies stay in completion order, failures included (catches gather, and a catch that only knows LookupError); all 250 calls are in flight at once (catches a semaphore or batches loose enough to pass the timing)"
+    },
+    {
+      "part": 2,
+      "test": "test_call_log",
+      "kind": "model and persistence",
+      "lesson_anchor": "Out-of-order completion: a dropped or duplicated result; every result must carry its call's id; the host restarts with calls in flight",
+      "exactness": "records read back exactly across close and reopen, payloads with multi-byte UTF-8 (°C, Föhn, Zürich, an emoji), a bare \\n and a \\r\\n; the bytes on disk match the documented layout as soon as append returns",
+      "traps": ["length counted in characters", "no flush", "newline-delimited records or text-mode reads", "rejected records written before the check", "answered calls forgotten on reopen", "in-flight calls in id order instead of log order", "a torn tail cut inside the length, after it, or inside the body", "a torn tail found only by catching struct.error", "torn tail dropped but not truncated, so later appends are misaligned", "resume runs every started call", "resume logs a second started record"],
+      "clarifying_questions": ["fsync on every append", "corruption in the middle", "a second started record on resume", "order of resumed results"]
+    },
+    {
+      "part": 3,
+      "test": "test_plan_fanout",
+      "kind": "core algorithm",
+      "lesson_anchor": "Benchmark: sequential vs parallel (max, not sum); Enabling parallel (create_file then write_file; rate limiter cannot handle fan-out); Exercises 1 and 4",
+      "traps": ["any dependency instead of all", "declaration order instead of first come, first served", "simultaneous completions handled one at a time", "dependents queued in the order their dependencies finished", "skips spread in a single pass", "only direct dependents skipped", "skipped calls counted in serial_ms", "failed calls left out of serial_ms or wall_ms", "limit checked with <=", "an empty turn", "slots in start order instead of declaration order", "unknown dependency, cycle, duplicate id, limit below 1", "a cycle found only by what is still waiting after the simulation, which misses one behind a failing call"],
+      "clarifying_questions": ["which waiting call goes first", "whether a skipped call takes a slot", "self-dependency", "a cycle behind a failing call", "zero latency"]
+    },
+    {
+      "part": 4,
+      "test": "test_stream_results",
+      "kind": "streaming",
+      "lesson_anchor": "Streaming fan-out wall-clock; Completion-order reply; Partial JSON and the parse-early trap; Exercise 2 (cancelled mid-stream, finish_reason length)",
+      "wire_format": "NDJSON, one object per call with tool_call_id, name, status and content or error, decided by the test's join/splitlines/json.loads",
+      "traps": ["reading the whole turn before running", "awaiting each call inline at its call_stop", "lines written only between events", "polling the stream with wait_for timeouts, which cancels the model's generator", "content as JSON text instead of the executor's value", "missing newline or pretty-printed lines", "running a call whose arguments parse but never got call_stop", "call_cancel ignored, its buffer kept, or held back until finish", "incomplete lines held until the running calls answer", "a failing executor ending the stream", "the stream ending before running calls answer"],
+      "clarifying_questions": ["waiting for finish", "cancel after call_stop", "arguments that do not parse at call_stop", "finish_reason tool_calls with an open call"]
+    },
+    {
+      "part": 5,
+      "test": "test_partial_arguments",
+      "kind": "recursive structure",
+      "lesson_anchor": "Partial JSON and the parse-early trap: brace counting is unreliable (braces inside quoted strings or escaped content), an incremental JSON parser for a live UI",
+      "traps": ["braces and quotes inside strings", "an escape split between chunks", "\\\\ before a closing quote", "escapes ignored", "commas inside nested values or strings", "\\uXXXX keys and surrogate pairs split between chunks", "a number listed while it can still grow", "members decoded only when the object closes", "text after the object", "a top-level value that is not an object", "a bracket closed by the wrong partner", "a trailing comma", "a broken member reported only at the closing brace"],
+      "clarifying_questions": ["when a member counts as complete", "duplicate keys", "a top-level array"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the suggested KeyError on the second fragment becomes a defaultdict keyed by event.get('id'): the wrong key raises nothing where it happens, every id-less fragment lands in one buffer, and the error surfaces at call_stop as a JSONDecodeError one call away, which is the far-from-the-root failure the format asks for. Failure isolation is planted as a missing try in answer plus executors run directly by replay (the same effect as gather without return_exceptions). The overfix guard also requires a call to start before the turn finishes streaming, after the lesson's 'not after all streams end'. The concurrent batch includes a tool that raises ConnectionError so a catch that only knows LookupError fails.",
+    "Part 2: records are started or done, and done payloads are tool message contents. A resume function runs only the in-flight calls through Part 1's run_parallel and logs their answers, as the suggested 'only re-run calls without a result'. The layout is pinned by comparing the file bytes right after the appends, which also checks flushing. Each call is started once and done once, also across a reopen.",
+    "Part 3: waiting calls are served first come, first served, which matches an asyncio.Semaphore in the real host. Calls that become ready at the same moment queue in declaration order. A failed call counts in wall_ms and serial_ms; skipped calls take no slot and no time; an empty turn is valid. Cycles are checked on the dependency graph before the simulation, so a cycle behind a failing call is still a ValueError.",
+    "Part 4: every line carries a status (ok, error, cancelled, incomplete). The first-result probe is a handshake: the fake model stops mid-call until the first line is out, with a 1 s timeout. Any call still open at finish is incomplete whatever the finish_reason; the test uses length.",
+    "Part 5: tool arguments are always an object, so the top level must be one. Members are returned with their decoded values for the live UI. Structural errors are immediate, and an error inside a member is reported at the latest by the comma or brace that ends it. Whether a member appears at the end of its value or at the comma is left open, and the tests only look where both readings agree."
+  ]
+}

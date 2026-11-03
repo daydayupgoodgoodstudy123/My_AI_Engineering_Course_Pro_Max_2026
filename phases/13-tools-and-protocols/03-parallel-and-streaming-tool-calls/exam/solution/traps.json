@@ -1,0 +1,1148 @@
+{
+  "package": "fanout",
+  "tests": [
+    "test_replay_turn",
+    "test_call_log",
+    "test_plan_fanout",
+    "test_stream_results",
+    "test_partial_arguments"
+  ],
+  "layers": [
+    {
+      "test": "test_replay_turn",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "JSONDecodeError"
+        },
+        {
+          "name": "key the buffers by index",
+          "edits": [
+            {
+              "file": "stream.py",
+              "old": "        buf = self.buffers[event.get(\"id\")]\n",
+              "new": "        buf = self.buffers[event[\"index\"]]\n"
+            }
+          ],
+          "expect": "every answer goes back under the id of the call that produced it"
+        },
+        {
+          "name": "+ each task answers its own call",
+          "edits": [
+            {
+              "file": "host.py",
+              "old": "    in_flight: dict[str, asyncio.Task] = {}\n    async for event in events:\n        for buf in acc.on_event(event):\n            call = buf.to_call()\n            in_flight[call.id] = asyncio.create_task(executors[call.name](**call.arguments))\n    results = [await task for task in asyncio.as_completed(in_flight.values())]\n    return [tool_message(call_id, result) for call_id, result in zip(in_flight, results)]\n",
+              "new": "    tasks: list[asyncio.Task] = []\n    async for event in events:\n        for buf in acc.on_event(event):\n            tasks.append(asyncio.create_task(answer(buf.to_call(), executors)))\n    return [await task for task in asyncio.as_completed(tasks)]\n"
+            }
+          ],
+          "expect": "LookupError"
+        },
+        {
+          "name": "+ a failing executor is answered with its error",
+          "edits": [
+            {
+              "file": "host.py",
+              "old": "    result = await executors[call.name](**call.arguments)\n    return tool_message(call.id, result)\n",
+              "new": "    try:\n        result = await executors[call.name](**call.arguments)\n    except Exception as error:\n        return tool_message(call.id, error=error)\n    return tool_message(call.id, result)\n"
+            }
+          ],
+          "expect": "the calls of a turn run at the same time"
+        },
+        {
+          "name": "+ start every call before awaiting any",
+          "edits": [
+            {
+              "file": "host.py",
+              "old": "    messages = []\n    for call in calls:\n        messages.append(await asyncio.create_task(answer(call, executors)))\n    return messages\n",
+              "new": "    tasks = [asyncio.create_task(answer(call, executors)) for call in calls]\n    return [await task for task in asyncio.as_completed(tasks)]\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_replay_turn",
+      "name": "start a call once its arguments parse, before call_stop",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        elif kind == \"args_delta\":\n            buf.chunks.append(event[\"chunk\"])\n        else:\n            buf.done = True\n            return [buf]\n",
+          "new": "        elif kind == \"args_delta\":\n            buf.chunks.append(event[\"chunk\"])\n            try:\n                json.loads(\"\".join(buf.chunks))\n            except ValueError:\n                return []\n            buf.done = True\n            return [buf]\n"
+        }
+      ],
+      "expect": "a call starts only after its call_stop"
+    },
+    {
+      "test": "test_replay_turn",
+      "name": "collect the whole turn, then run every call",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    tasks: list[asyncio.Task] = []\n    async for event in events:\n        for buf in acc.on_event(event):\n            tasks.append(asyncio.create_task(answer(buf.to_call(), executors)))\n    return [await task for task in asyncio.as_completed(tasks)]\n",
+          "new": "    calls: list[ToolCall] = []\n    async for event in events:\n        for buf in acc.on_event(event):\n            calls.append(buf.to_call())\n    return await run_parallel(calls, executors)\n"
+        }
+      ],
+      "expect": "a call starts at its call_stop, while the rest of the turn is still streaming"
+    },
+    {
+      "test": "test_replay_turn",
+      "name": "old executor tasks left running beside the answer tasks",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "            tasks.append(asyncio.create_task(answer(buf.to_call(), executors)))\n",
+          "new": "            call = buf.to_call()\n            asyncio.ensure_future(executors[call.name](**call.arguments))\n            tasks.append(asyncio.create_task(answer(call, executors)))\n"
+        }
+      ],
+      "expect": "each call runs exactly once"
+    },
+    {
+      "test": "test_replay_turn",
+      "name": "replay gathers the answers in call_stop order",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "            tasks.append(asyncio.create_task(answer(buf.to_call(), executors)))\n    return [await task for task in asyncio.as_completed(tasks)]\n",
+          "new": "            tasks.append(asyncio.create_task(answer(buf.to_call(), executors)))\n    return list(await asyncio.gather(*tasks))\n"
+        }
+      ],
+      "expect": "reply in completion order"
+    },
+    {
+      "test": "test_replay_turn",
+      "name": "error answer without the exception type",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "        return tool_message(call.id, error=error)\n",
+          "new": "        return tool_message(call.id, {\"error\": str(error)})\n"
+        }
+      ],
+      "expect": "a failing tool is answered with its error"
+    },
+    {
+      "test": "test_replay_turn",
+      "name": "a failing call is dropped instead of answered",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    try:\n        result = await executors[call.name](**call.arguments)\n    except Exception as error:\n        return tool_message(call.id, error=error)\n    return tool_message(call.id, result)\n",
+          "new": "    result = await executors[call.name](**call.arguments)\n    return tool_message(call.id, result)\n"
+        },
+        {
+          "file": "host.py",
+          "old": "            tasks.append(asyncio.create_task(answer(buf.to_call(), executors)))\n    return [await task for task in asyncio.as_completed(tasks)]\n",
+          "new": "            tasks.append(asyncio.create_task(answer(buf.to_call(), executors)))\n    messages = []\n    for task in asyncio.as_completed(tasks):\n        try:\n            messages.append(await task)\n        except Exception:\n            pass\n    return messages\n"
+        }
+      ],
+      "expect": "a failing tool is answered with its error"
+    },
+    {
+      "test": "test_replay_turn",
+      "name": "run_parallel gathers the answers in call order",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    tasks = [asyncio.create_task(answer(call, executors)) for call in calls]\n    return [await task for task in asyncio.as_completed(tasks)]\n",
+          "new": "    return list(await asyncio.gather(*(answer(call, executors) for call in calls)))\n"
+        }
+      ],
+      "expect": "reply in completion order, failures included"
+    },
+    {
+      "test": "test_replay_turn",
+      "name": "run_parallel lets four calls run at a time",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    tasks = [asyncio.create_task(answer(call, executors)) for call in calls]\n    return [await task for task in asyncio.as_completed(tasks)]\n",
+          "new": "    gate = asyncio.Semaphore(4)\n\n    async def gated(call: ToolCall) -> dict:\n        async with gate:\n            return await answer(call, executors)\n\n    tasks = [asyncio.create_task(gated(call)) for call in calls]\n    return [await task for task in asyncio.as_completed(tasks)]\n"
+        }
+      ],
+      "expect": "the calls of a turn run at the same time"
+    },
+    {
+      "test": "test_replay_turn",
+      "name": "run_parallel returns before the calls finish",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    tasks = [asyncio.create_task(answer(call, executors)) for call in calls]\n    return [await task for task in asyncio.as_completed(tasks)]\n",
+          "new": "    tasks = [asyncio.create_task(answer(call, executors)) for call in calls]\n    return [task.result() for task in tasks if task.done()]\n"
+        }
+      ],
+      "expect": "one answer per call"
+    },
+    {
+      "test": "test_replay_turn",
+      "name": "only lookup failures answered",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    except Exception as error:\n",
+          "new": "    except LookupError as error:\n"
+        }
+      ],
+      "expect": "ConnectionError: clock service unreachable"
+    },
+    {
+      "test": "test_replay_turn",
+      "name": "buffers keyed by the id where there is one, else the index",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        buf = self.buffers[event[\"index\"]]\n",
+          "new": "        buf = self.buffers[event.get(\"id\", event[\"index\"])]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_replay_turn",
+      "name": "replay awaits each answer at its call_stop",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    tasks: list[asyncio.Task] = []\n    async for event in events:\n        for buf in acc.on_event(event):\n            tasks.append(asyncio.create_task(answer(buf.to_call(), executors)))\n    return [await task for task in asyncio.as_completed(tasks)]\n",
+          "new": "    messages: list[dict] = []\n    async for event in events:\n        for buf in acc.on_event(event):\n            messages.append(await answer(buf.to_call(), executors))\n    return messages\n"
+        }
+      ],
+      "expect": "reply in completion order"
+    },
+    {
+      "test": "test_replay_turn",
+      "name": "run_parallel behind a semaphore of 16",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    tasks = [asyncio.create_task(answer(call, executors)) for call in calls]\n    return [await task for task in asyncio.as_completed(tasks)]\n",
+          "new": "    gate = asyncio.Semaphore(16)\n\n    async def gated(call: ToolCall) -> dict:\n        async with gate:\n            return await answer(call, executors)\n\n    tasks = [asyncio.create_task(gated(call)) for call in calls]\n    return [await task for task in asyncio.as_completed(tasks)]\n"
+        }
+      ],
+      "expect": "every call of the turn is in flight at once"
+    },
+    {
+      "test": "test_replay_turn",
+      "name": "run_parallel in batches of 25",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    tasks = [asyncio.create_task(answer(call, executors)) for call in calls]\n    return [await task for task in asyncio.as_completed(tasks)]\n",
+          "new": "    messages = []\n    for i in range(0, len(calls), 25):\n        tasks = [asyncio.create_task(answer(call, executors)) for call in calls[i : i + 25]]\n        messages += [await task for task in asyncio.as_completed(tasks)]\n    return messages\n"
+        }
+      ],
+      "expect": "every call of the turn is in flight at once"
+    },
+    {
+      "test": "test_call_log",
+      "name": "record length counted in characters",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "        self._file.write(LENGTH.pack(len(body)) + body)\n",
+          "new": "        self._file.write(LENGTH.pack(HEADER.size + len(record.call_id) + len(record.payload)) + body)\n"
+        }
+      ],
+      "expect": "each record is in the file, in the documented layout, as soon as append returns"
+    },
+    {
+      "test": "test_call_log",
+      "name": "no flush after an append",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "        self._file.flush()\n",
+          "new": ""
+        }
+      ],
+      "expect": "each record is in the file, in the documented layout, as soon as append returns"
+    },
+    {
+      "test": "test_call_log",
+      "name": "little-endian length",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "LENGTH = struct.Struct(\">I\")",
+          "new": "LENGTH = struct.Struct(\"<I\")"
+        }
+      ],
+      "expect": "in the documented layout"
+    },
+    {
+      "test": "test_call_log",
+      "name": "torn tail left in the file",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "        self._file.truncate(pos)  # new records must follow the last whole one, not a torn tail\n",
+          "new": ""
+        }
+      ],
+      "expect": "records appended after a torn one read back"
+    },
+    {
+      "test": "test_call_log",
+      "name": "a short last record is read as if whole",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "            if end > len(data):\n                break\n",
+          "new": ""
+        }
+      ],
+      "expect": "struct.error"
+    },
+    {
+      "test": "test_call_log",
+      "name": "fewer than four bytes left read as a length",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "        while pos + LENGTH.size <= len(data):\n",
+          "new": "        while pos < len(data):\n"
+        }
+      ],
+      "expect": "struct.error"
+    },
+    {
+      "test": "test_call_log",
+      "name": "a torn record makes the whole log unreadable",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "            if end > len(data):\n                break\n",
+          "new": "            if end > len(data):\n                raise ValueError(f\"torn record at byte {pos}\")\n"
+        }
+      ],
+      "expect": "torn record at byte"
+    },
+    {
+      "test": "test_call_log",
+      "name": "answered calls forgotten on reopen",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "        self._done = {r.call_id for r in self._records if r.status == \"done\"}\n",
+          "new": "        self._done = set()\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_call_log",
+      "name": "a record is written before it is checked",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "        self._file.write(LENGTH.pack(len(body)) + body)\n        self._file.flush()\n        self._records.append(record)\n",
+          "new": "        self._records.append(record)\n"
+        },
+        {
+          "file": "calllog.py",
+          "old": "        if record.status == \"started\" and record.call_id in self._started:\n",
+          "new": "        call_id = record.call_id.encode(\"utf-8\")\n        body = HEADER.pack(STATUS_CODES[record.status], len(call_id)) + call_id\n        body += record.payload.encode(\"utf-8\")\n        self._file.write(LENGTH.pack(len(body)) + body)\n        self._file.flush()\n        if record.status == \"started\" and record.call_id in self._started:\n"
+        }
+      ],
+      "expect": "the log reads back exactly after a reopen"
+    },
+    {
+      "test": "test_call_log",
+      "name": "every started call counted as in flight",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "        return [r for r in self._records if r.status == \"started\" and r.call_id not in answered]\n",
+          "new": "        return [r for r in self._records if r.status == \"started\"]\n"
+        }
+      ],
+      "expect": "calls without an answer are in flight, in log order"
+    },
+    {
+      "test": "test_call_log",
+      "name": "resume runs every started call again",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "    calls = [call_from(record) for record in log.in_flight()]\n",
+          "new": "    calls = [call_from(record) for record in log.records() if record.status == \"started\"]\n"
+        }
+      ],
+      "expect": "already has an answer"
+    },
+    {
+      "test": "test_call_log",
+      "name": "resume logs a second started record",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "from .calllog import CallLog, call_from, done\n",
+          "new": "from .calllog import CallLog, call_from, done, started\n"
+        },
+        {
+          "file": "host.py",
+          "old": "    messages = await run_parallel(calls, executors)\n",
+          "new": "    for call in calls:\n        log.append(started(call))\n    messages = await run_parallel(calls, executors)\n"
+        }
+      ],
+      "expect": "has already started"
+    },
+    {
+      "test": "test_call_log",
+      "name": "CRLF read back as LF, the text-mode way",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "            payload = data[id_start + id_size : end].decode(\"utf-8\")\n",
+          "new": "            payload = data[id_start + id_size : end].decode(\"utf-8\").replace(\"\\r\\n\", \"\\n\")\n"
+        }
+      ],
+      "expect": "the log reads back exactly after a reopen"
+    },
+    {
+      "test": "test_call_log",
+      "name": "payload decoded as Latin-1",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "            payload = data[id_start + id_size : end].decode(\"utf-8\")\n",
+          "new": "            payload = data[id_start + id_size : end].decode(\"latin-1\")\n"
+        }
+      ],
+      "expect": "the log reads back exactly after a reopen"
+    },
+    {
+      "test": "test_call_log",
+      "name": "in-flight calls sorted by id",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "        return [r for r in self._records if r.status == \"started\" and r.call_id not in answered]\n",
+          "new": "        pending = [r for r in self._records if r.status == \"started\" and r.call_id not in answered]\n        return sorted(pending, key=lambda r: r.call_id)\n"
+        }
+      ],
+      "expect": "calls without an answer are in flight, in log order"
+    },
+    {
+      "test": "test_call_log",
+      "name": "a torn tail found by catching struct.error, the body length unchecked",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "        while pos + LENGTH.size <= len(data):\n            (size,) = LENGTH.unpack_from(data, pos)\n            end = pos + LENGTH.size + size\n            if end > len(data):\n                break\n            status, id_size = HEADER.unpack_from(data, pos + LENGTH.size)\n",
+          "new": "        while pos < len(data):\n            try:\n                (size,) = LENGTH.unpack_from(data, pos)\n                status, id_size = HEADER.unpack_from(data, pos + LENGTH.size)\n            except struct.error:\n                break\n            end = pos + LENGTH.size + size\n"
+        }
+      ],
+      "expect": "a torn last record is dropped and the ones before it kept (cut 9)"
+    },
+    {
+      "test": "test_call_log",
+      "name": "length field counts its own four bytes",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "        self._file.write(LENGTH.pack(len(body)) + body)\n",
+          "new": "        self._file.write(LENGTH.pack(LENGTH.size + len(body)) + body)\n"
+        },
+        {
+          "file": "calllog.py",
+          "old": "            end = pos + LENGTH.size + size\n",
+          "new": "            end = pos + size\n"
+        }
+      ],
+      "expect": "in the documented layout"
+    },
+    {
+      "test": "test_call_log",
+      "name": "appended records not added to the in-memory state",
+      "edits": [
+        {
+          "file": "calllog.py",
+          "old": "        (self._started if record.status == \"started\" else self._done).add(record.call_id)\n",
+          "new": ""
+        }
+      ],
+      "expect": "has not started"
+    },
+    {
+      "test": "test_call_log",
+      "name": "resume logs the whole tool message as the payload",
+      "edits": [
+        {
+          "file": "host.py",
+          "old": "        log.append(done(message[\"tool_call_id\"], message[\"content\"]))\n",
+          "new": "        log.append(done(message[\"tool_call_id\"], str(message)))\n"
+        }
+      ],
+      "expect": "resumed answers are logged as done records"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "the earliest-declared waiting call goes first",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "            cid = queue.pop(0)\n",
+          "new": "            cid = min(queue, key=order.__getitem__)\n            queue.remove(cid)\n"
+        }
+      ],
+      "expect": "waiting calls start first come, first served"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "ready once any dependency is done",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "            if state[call.id] == \"waiting\" and all(state[dep] == \"ok\" for dep in call.after):\n",
+          "new": "            if state[call.id] == \"waiting\" and (not call.after or any(state[dep] == \"ok\" for dep in call.after)):\n"
+        }
+      ],
+      "expect": "a call waits for every one of its dependencies"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "one completion per step, calls started in between",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "        now = running[0][0]\n        while running and running[0][0] == now:\n            _, _, cid = heapq.heappop(running)\n            end[cid] = now\n            state[cid] = \"failed\" if by_id[cid].fails else \"ok\"\n        settle()\n",
+          "new": "        now = running[0][0]\n        _, _, cid = heapq.heappop(running)\n        end[cid] = now\n        state[cid] = \"failed\" if by_id[cid].fails else \"ok\"\n        settle()\n"
+        }
+      ],
+      "expect": "calls that become ready at the same moment queue in declaration order"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "dependents queued in the order their dependencies finish",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "            state[cid] = \"failed\" if by_id[cid].fails else \"ok\"\n        settle()\n",
+          "new": "            state[cid] = \"failed\" if by_id[cid].fails else \"ok\"\n            settle()\n"
+        }
+      ],
+      "expect": "calls that become ready at the same moment queue in declaration order"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "skips spread in a single pass",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "        changed = True\n        while changed:\n",
+          "new": "        changed = True\n        if changed:\n"
+        }
+      ],
+      "expect": "a failure skips everything downstream of it, however far"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "only direct dependents of a failure skipped",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "state[dep] in (\"failed\", \"skipped\") for dep in call.after",
+          "new": "state[dep] == \"failed\" for dep in call.after"
+        }
+      ],
+      "expect": "a failure skips everything downstream of it, however far"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "serial time adds up every declared call",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "    serial = sum(by_id[cid].latency_ms for cid in start)\n",
+          "new": "    serial = sum(call.latency_ms for call in calls)\n"
+        }
+      ],
+      "expect": "every call that runs counts, failed ones too; skipped calls cost nothing"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "serial time leaves out failed calls",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "    serial = sum(by_id[cid].latency_ms for cid in start)\n",
+          "new": "    serial = sum(by_id[cid].latency_ms for cid in start if state[cid] == \"ok\")\n"
+        }
+      ],
+      "expect": "every call that runs counts, failed ones too; skipped calls cost nothing"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "wall clock leaves out failed calls",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "max(end.values(), default=0)",
+          "new": "max((end[cid] for cid in end if state[cid] == \"ok\"), default=0)"
+        }
+      ],
+      "expect": "a failed call still takes its time"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "limit checked with <=",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "        while queue and len(running) < limit:\n",
+          "new": "        while queue and len(running) <= limit:\n"
+        }
+      ],
+      "expect": "a limit of one runs the calls one after another"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "graph checks left to the simulation: an unknown dependency",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "    for call in calls:\n        unknown = [dep for dep in call.after if dep not in by_id]\n        if unknown:\n            raise ValueError(f\"{call.id} depends on unknown calls {unknown}\")\n    _reject_cycles(calls)\n",
+          "new": ""
+        },
+        {
+          "file": "schedule.py",
+          "old": "        settle()\n\n    slots = ",
+          "new": "        settle()\n\n    stuck = [cid for cid, s in state.items() if s == \"waiting\"]\n    if stuck:\n        raise ValueError(f\"dependency cycle among {stuck}\")\n    slots = "
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "duplicate ids overwrite each other",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "        if call.id in by_id:\n            raise ValueError(f\"duplicate call id {call.id!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "no cycle check",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "    _reject_cycles(calls)\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "no default for the wall clock of an empty turn",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "max(end.values(), default=0)",
+          "new": "max(end.values())"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "a limit of zero accepted",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "    if limit < 1:\n        raise ValueError(f\"limit must be at least 1, got {limit}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "cycles found only by what is still waiting after the simulation",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "    _reject_cycles(calls)\n",
+          "new": ""
+        },
+        {
+          "file": "schedule.py",
+          "old": "        settle()\n\n    slots = ",
+          "new": "        settle()\n\n    stuck = [cid for cid, s in state.items() if s == \"waiting\"]\n    if stuck:\n        raise ValueError(f\"dependency cycle among {stuck}\")\n    slots = "
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "slots listed in the order the calls start",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "    slots = {call.id: Slot(state[call.id], start.get(call.id), end.get(call.id)) for call in calls}\n",
+          "new": "    listed = sorted(calls, key=lambda c: (c.id not in start, start.get(c.id, 0)))\n    slots = {call.id: Slot(state[call.id], start.get(call.id), end.get(call.id)) for call in listed}\n"
+        }
+      ],
+      "expect": "slots are listed in declaration order"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "a failing call fails the moment it starts",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "            heapq.heappush(running, (now + by_id[cid].latency_ms, order[cid], cid))\n",
+          "new": "            heapq.heappush(running, (now + (0 if by_id[cid].fails else by_id[cid].latency_ms), order[cid], cid))\n"
+        }
+      ],
+      "expect": "a skipped call takes no slot"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "waiting calls served last in, first out",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "            cid = queue.pop(0)\n",
+          "new": "            cid = queue.pop()\n"
+        }
+      ],
+      "expect": "at most `limit` calls run at once, and a freed slot is taken at once"
+    },
+    {
+      "test": "test_plan_fanout",
+      "name": "dependents of a failed call left waiting",
+      "edits": [
+        {
+          "file": "schedule.py",
+          "old": "                if state[call.id] == \"waiting\" and any(\n                    state[dep] in (\"failed\", \"skipped\") for dep in call.after\n                ):\n",
+          "new": "                if False:\n"
+        }
+      ],
+      "expect": "a call whose dependency failed is skipped"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "calls run only once the whole turn has arrived",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "                    for buf in acc.on_event(event):\n                        running.append(asyncio.create_task(run(buf)))\n",
+          "new": "                    acc.on_event(event)\n"
+        },
+        {
+          "file": "live.py",
+          "old": "            for buf in sorted(acc.buffers.values(), key=lambda b: b.index):\n                if not buf.done:\n",
+          "new": "            for buf in sorted(acc.buffers.values(), key=lambda b: b.index):\n                if buf.done:\n                    running.append(asyncio.create_task(run(buf)))\n                if not buf.done:\n"
+        }
+      ],
+      "expect": "write each line as soon as it is known, while the model is still streaming"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "each call awaited inline at its call_stop",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "                        running.append(asyncio.create_task(run(buf)))\n",
+          "new": "                        await run(buf)\n"
+        }
+      ],
+      "expect": "one line per call, in the order each outcome becomes known"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "lines written only between events",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    reader = asyncio.create_task(read())\n    try:\n        while (line := await lines.get()) is not None:\n            yield json.dumps(line) + \"\\n\"\n        await reader\n    finally:\n        reader.cancel()\n        for task in running:\n            task.cancel()\n",
+          "new": "    async for event in events:\n        if event[\"type\"] == \"call_cancel\":\n            lines.put_nowait(_line(acc.buffers.pop(event[\"index\"]), \"cancelled\"))\n        elif event[\"type\"] == \"finish\":\n            break\n        else:\n            for buf in acc.on_event(event):\n                running.append(asyncio.create_task(run(buf)))\n        while not lines.empty():\n            yield json.dumps(lines.get_nowait()) + \"\\n\"\n    for buf in sorted(acc.buffers.values(), key=lambda b: b.index):\n        if not buf.done:\n            lines.put_nowait(_line(buf, \"incomplete\"))\n    await asyncio.gather(*running)\n    while not lines.empty():\n        yield json.dumps(lines.get_nowait()) + \"\\n\"\n"
+        }
+      ],
+      "expect": "write each line as soon as it is known, while the model is still streaming"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "no newline after a line",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "            yield json.dumps(line) + \"\\n\"\n",
+          "new": "            yield json.dumps(line)\n"
+        }
+      ],
+      "expect": "Extra data"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "pretty-printed lines",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "            yield json.dumps(line) + \"\\n\"\n",
+          "new": "            yield json.dumps(line, indent=2) + \"\\n\"\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "a call whose arguments parse runs without its call_stop",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "                if not buf.done:\n                    lines.put_nowait(_line(buf, \"incomplete\"))\n",
+          "new": "                if not buf.done:\n                    try:\n                        json.loads(\"\".join(buf.chunks))\n                    except ValueError:\n                        lines.put_nowait(_line(buf, \"incomplete\"))\n                    else:\n                        buf.done = True\n                        running.append(asyncio.create_task(run(buf)))\n"
+        }
+      ],
+      "expect": "one line per call, in the order each outcome becomes known"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "call_cancel ignored",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "                    lines.put_nowait(_line(acc.buffers.pop(event[\"index\"]), \"cancelled\"))\n",
+          "new": "                    pass\n"
+        }
+      ],
+      "expect": "one line per call, in the order each outcome becomes known"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "cancelled call's buffer kept",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "acc.buffers.pop(event[\"index\"])",
+          "new": "acc.buffers[event[\"index\"]]"
+        }
+      ],
+      "expect": "one line per call, in the order each outcome becomes known"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "cancellations held back until finish",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    async def read() -> None:\n        try:\n",
+          "new": "    async def read() -> None:\n        cancelled = []\n        try:\n"
+        },
+        {
+          "file": "live.py",
+          "old": "                    lines.put_nowait(_line(acc.buffers.pop(event[\"index\"]), \"cancelled\"))\n",
+          "new": "                    cancelled.append(acc.buffers.pop(event[\"index\"]))\n"
+        },
+        {
+          "file": "live.py",
+          "old": "            for buf in sorted(acc.buffers.values(), key=lambda b: b.index):\n",
+          "new": "            for buf in cancelled:\n                lines.put_nowait(_line(buf, \"cancelled\"))\n            for buf in sorted(acc.buffers.values(), key=lambda b: b.index):\n"
+        }
+      ],
+      "expect": "one line per call, in the order each outcome becomes known"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "incomplete calls reported after the running ones answer",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "            for buf in sorted(acc.buffers.values(), key=lambda b: b.index):\n                if not buf.done:\n                    lines.put_nowait(_line(buf, \"incomplete\"))\n            await asyncio.gather(*running)\n",
+          "new": "            await asyncio.gather(*running)\n            for buf in sorted(acc.buffers.values(), key=lambda b: b.index):\n                if not buf.done:\n                    lines.put_nowait(_line(buf, \"incomplete\"))\n"
+        }
+      ],
+      "expect": "one line per call, in the order each outcome becomes known"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "a failing executor ends the stream",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        try:\n            call = buf.to_call()\n            line[\"content\"] = await executors[call.name](**call.arguments)\n        except Exception as error:\n            line = _line(buf, \"error\")\n            line[\"error\"] = describe(error)\n",
+          "new": "        call = buf.to_call()\n        line[\"content\"] = await executors[call.name](**call.arguments)\n"
+        }
+      ],
+      "expect": "LookupError"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "answers gathered at the end, in call_stop order",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        lines.put_nowait(line)\n",
+          "new": "        return line\n"
+        },
+        {
+          "file": "live.py",
+          "old": "            await asyncio.gather(*running)\n",
+          "new": "            for line in await asyncio.gather(*running):\n                lines.put_nowait(line)\n"
+        }
+      ],
+      "expect": "write each line as soon as it is known, while the model is still streaming"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "the stream ends without waiting for running calls",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "            await asyncio.gather(*running)\n",
+          "new": ""
+        }
+      ],
+      "expect": "every call that runs gets a line"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "content sent as JSON text, the tool-message way",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "            line[\"content\"] = await executors[call.name](**call.arguments)\n",
+          "new": "            line[\"content\"] = json.dumps(await executors[call.name](**call.arguments))\n"
+        }
+      ],
+      "expect": "one line per call, in the order each outcome becomes known"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "running calls cancelled at finish",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "            await asyncio.gather(*running)\n",
+          "new": "            for task in running:\n                task.cancel()\n"
+        }
+      ],
+      "expect": "every call that runs gets a line"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "lines yielded as bytes",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "            yield json.dumps(line) + \"\\n\"\n",
+          "new": "            yield (json.dumps(line) + \"\\n\").encode()\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "strings not tracked: plain bracket counting",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "        if ch == '\"':\n            self._in_string = True\n",
+          "new": "        if False:\n            self._in_string = True\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "escape state reset at every chunk",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "    def feed(self, chunk: str) -> None:\n        for ch in chunk:\n",
+          "new": "    def feed(self, chunk: str) -> None:\n        self._escaped = False\n        for ch in chunk:\n"
+        }
+      ],
+      "expect": "an escape can be split between chunks"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "a quote after a backslash taken as escaped",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "            if self._escaped:\n                self._escaped = False\n            elif ch == \"\\\\\":\n                self._escaped = True\n            elif ch == '\"':\n                self._in_string = False\n",
+          "new": "            if ch == '\"' and not (self._member and self._member[-1] == \"\\\\\"):\n                self._in_string = False\n"
+        }
+      ],
+      "expect": "an escape can be split between chunks"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "escapes ignored: every quote ends the string",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "            if self._escaped:\n                self._escaped = False\n            elif ch == \"\\\\\":\n                self._escaped = True\n            elif ch == '\"':\n                self._in_string = False\n",
+          "new": "            if ch == '\"':\n                self._in_string = False\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "members split at every comma",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "        elif ch == \",\" and len(self._stack) == 1:\n",
+          "new": "        elif ch == \",\":\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "keys kept as raw text",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "        self.members.update(json.loads(\"{\" + text + \"}\"))\n",
+          "new": "        key, _, value = text.partition(\":\")\n        self.members[key.strip()[1:-1]] = json.loads(value)\n"
+        }
+      ],
+      "expect": "members hold only final values"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "anything accepted after the object",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "            if ch not in WHITESPACE:\n                raise ValueError(f\"{ch!r} after the end of the arguments\")\n            return\n",
+          "new": "            return\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "text before the object skipped",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "            if ch != \"{\":\n                raise ValueError(f\"arguments must be a JSON object, got {ch!r}\")\n",
+          "new": "            if ch != \"{\":\n                return\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "closing brackets not matched to their opener",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "            if CLOSER[self._stack[-1]] != ch:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "a trailing comma accepted",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "            if closing and not self.members:\n",
+          "new": "            if closing:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "members decoded only when the object closes",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "        self._in_string = False\n        self._escaped = False\n",
+          "new": "        self._in_string = False\n        self._escaped = False\n        self._pending: list[str] = []\n"
+        },
+        {
+          "file": "partial.py",
+          "old": "        self.members.update(json.loads(\"{\" + text + \"}\"))\n",
+          "new": "        self._pending.append(text)\n        if closing:\n            for item in self._pending:\n                self.members.update(json.loads(\"{\" + item + \"}\"))\n"
+        }
+      ],
+      "expect": "a member is final once the comma after it arrives"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "an open member listed as soon as its text parses",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "    def feed(self, chunk: str) -> None:\n        for ch in chunk:\n            self._step(ch)\n",
+          "new": "    def feed(self, chunk: str) -> None:\n        for ch in chunk:\n            self._step(ch)\n        if not self.complete and len(self._stack) == 1 and not self._in_string:\n            try:\n                self.members.update(json.loads(\"{\" + \"\".join(self._member) + \"}\"))\n            except ValueError:\n                pass\n"
+        }
+      ],
+      "expect": "an escape can be split between chunks, and a number can still grow"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "a broken member skipped at its comma, the whole object checked at the brace",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "        self._escaped = False\n\n    def feed",
+          "new": "        self._escaped = False\n        self._texts: list[str] = []\n\n    def feed"
+        },
+        {
+          "file": "partial.py",
+          "old": "        self.members.update(json.loads(\"{\" + text + \"}\"))\n",
+          "new": "        self._texts.append(text)\n        try:\n            self.members.update(json.loads(\"{\" + text + \"}\"))\n        except ValueError:\n            pass\n        if closing:\n            json.loads(\"{\" + \", \".join(self._texts) + \"}\")\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "a backslash toggles the escape, other characters leave it set",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "            if self._escaped:\n                self._escaped = False\n            elif ch == \"\\\\\":\n                self._escaped = True\n            elif ch == '\"':\n                self._in_string = False\n",
+          "new": "            if ch == \"\\\\\":\n                self._escaped = not self._escaped\n            elif ch == '\"' and not self._escaped:\n                self._in_string = False\n            elif ch == '\"':\n                self._escaped = False\n"
+        }
+      ],
+      "expect": "complete exactly when the closing brace arrives"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "only a space counts as whitespace",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "WHITESPACE = \" \\t\\n\\r\"\n",
+          "new": "WHITESPACE = \" \"\n"
+        }
+      ],
+      "expect": "after the end of the arguments"
+    },
+    {
+      "test": "test_partial_arguments",
+      "name": "arrays not tracked, only braces",
+      "edits": [
+        {
+          "file": "partial.py",
+          "old": "        elif ch in CLOSER:\n            self._stack.append(ch)\n        elif ch in \"]}\":\n",
+          "new": "        elif ch == \"{\":\n            self._stack.append(ch)\n        elif ch == \"}\":\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    }
+  ]
+}
