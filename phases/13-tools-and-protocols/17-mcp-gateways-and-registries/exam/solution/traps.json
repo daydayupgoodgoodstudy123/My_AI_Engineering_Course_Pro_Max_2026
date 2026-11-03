@@ -1,0 +1,1829 @@
+{
+  "package": "mcpgateway",
+  "tests": [
+    "test_forward_call",
+    "test_audit_log",
+    "test_runtime_policy",
+    "test_sse_relay",
+    "test_decision_chain"
+  ],
+  "layers": [
+    {
+      "test": "test_forward_call",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "Unauthenticated"
+        },
+        {
+          "name": "the backend gets only the routing headers and the gateway's credential",
+          "edits": [
+            {
+              "file": "gateway.py",
+              "old": "            \"Authorization\": f\"Bearer {self._credential(request.route.backend)}\",\n            **request.headers,\n        }\n",
+              "new": "            \"Authorization\": f\"Bearer {self._credential(request.route.backend)}\",\n        }\n"
+            }
+          ],
+          "expect": "cannot relay"
+        },
+        {
+          "name": "+ the gateway's own _meta",
+          "edits": [
+            {
+              "file": "gateway.py",
+              "old": "        params.setdefault(\"_meta\", request_meta(GATEWAY_INFO, request.capabilities))\n",
+              "new": "        params[\"_meta\"] = request_meta(GATEWAY_INFO, request.capabilities)\n"
+            }
+          ],
+          "expect": "do not spend the caller's quota"
+        },
+        {
+          "name": "+ spend the rate limit after the policy",
+          "edits": [
+            {
+              "file": "gateway.py",
+              "old": "        principal = self._authenticate(headers)\n        if not self._spend(principal, headers.get(\"Mcp-Name\", \"\")):\n            raise Refusal(429, ProtocolError(-32029, \"Rate limited\", {\"tool\": headers.get(\"Mcp-Name\")}))\n        request = self._validated(principal, body, headers)\n        if request.method != \"tools/call\":\n",
+              "new": "        principal = self._authenticate(headers)\n        request = self._validated(principal, body, headers)\n        if request.method != \"tools/call\":\n"
+            },
+            {
+              "file": "gateway.py",
+              "old": "        outcome = \"allow\" if decision.allowed else \"deny\"\n        self._audit_decision(request, decision, outcome)\n        if outcome == \"deny\":\n            raise Refusal(403, ProtocolError(-32003, \"Forbidden\", {\"tool\": public, \"reason\": decision.reason}))\n        return request\n",
+              "new": "        outcome = \"allow\" if decision.allowed else \"deny\"\n        if decision.allowed and not self._spend(principal, public):\n            outcome = \"rate_limit\"\n        self._audit_decision(request, decision, outcome)\n        if outcome == \"deny\":\n            raise Refusal(403, ProtocolError(-32003, \"Forbidden\", {\"tool\": public, \"reason\": decision.reason}))\n        if outcome == \"rate_limit\":\n            raise Refusal(429, ProtocolError(-32029, \"Rate limited\", {\"tool\": public}))\n        return request\n"
+            }
+          ],
+          "expect": "should not rescan the whole window"
+        },
+        {
+          "name": "+ prune the window from the front",
+          "edits": [
+            {
+              "file": "limits.py",
+              "old": "from typing import NamedTuple\n",
+              "new": "from collections import deque\nfrom typing import NamedTuple\n"
+            },
+            {
+              "file": "limits.py",
+              "old": "        self._calls: dict[LimitKey, list[float]] = {}\n",
+              "new": "        self._calls: dict[LimitKey, deque[float]] = {}\n"
+            },
+            {
+              "file": "limits.py",
+              "old": "        calls = self._calls.setdefault(key, [])\n        calls[:] = [t for t in calls if t > now - self.window_s]\n",
+              "new": "        calls = self._calls.setdefault(key, deque())\n        while calls and calls[0] <= now - self.window_s:\n            calls.popleft()\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_forward_call",
+      "name": "the caller's headers merged first: the gateway's win, the rest still goes along",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        headers = {\n            **routing_headers(\"tools/call\", params),\n            \"Authorization\": f\"Bearer {self._credential(request.route.backend)}\",\n        }\n",
+          "new": "        headers = {\n            **request.headers,\n            **routing_headers(\"tools/call\", params),\n            \"Authorization\": f\"Bearer {self._credential(request.route.backend)}\",\n        }\n"
+        }
+      ],
+      "expect": "nothing of the caller's"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "the caller's headers merged, then only Authorization replaced",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        headers = {\n            **routing_headers(\"tools/call\", params),\n            \"Authorization\": f\"Bearer {self._credential(request.route.backend)}\",\n        }\n",
+          "new": "        headers = {\n            **routing_headers(\"tools/call\", params),\n            **request.headers,\n        }\n        headers[\"Authorization\"] = f\"Bearer {self._credential(request.route.backend)}\"\n"
+        }
+      ],
+      "expect": "Mcp-Name header mismatch"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "the caller's _meta kept, with the gateway's envelope written over it",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        params[\"_meta\"] = request_meta(GATEWAY_INFO, request.capabilities)\n",
+          "new": "        params[\"_meta\"] = {**request.params[\"_meta\"], **request_meta(GATEWAY_INFO, request.capabilities)}\n"
+        }
+      ],
+      "expect": "the backend gets a fresh request"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "the caller's capabilities forwarded as declared",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        params[\"_meta\"] = request_meta(GATEWAY_INFO, request.capabilities)\n",
+          "new": "        params[\"_meta\"] = request_meta(GATEWAY_INFO, request.params[\"_meta\"][CLIENT_CAPABILITIES_META])\n"
+        }
+      ],
+      "expect": "cannot relay"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "everything the gateway mediates declared for every caller",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        params[\"_meta\"] = request_meta(GATEWAY_INFO, request.capabilities)\n",
+          "new": "        params[\"_meta\"] = request_meta(GATEWAY_INFO, self.mediates)\n"
+        }
+      ],
+      "expect": "nothing is declared for a caller that declared nothing"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "no client capabilities declared at all (overfix)",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        params[\"_meta\"] = request_meta(GATEWAY_INFO, request.capabilities)\n",
+          "new": "        params[\"_meta\"] = request_meta(GATEWAY_INFO, {})\n"
+        }
+      ],
+      "expect": "the backend gets a fresh request"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "the caller's clientInfo forwarded",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        params[\"_meta\"] = request_meta(GATEWAY_INFO, request.capabilities)\n",
+          "new": "        params[\"_meta\"] = request_meta(request.params[\"_meta\"][\"io.modelcontextprotocol/clientInfo\"], request.capabilities)\n"
+        }
+      ],
+      "expect": "the backend gets a fresh request"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "backend params rebuilt from the tool name and arguments only",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        params = dict(request.params, name=request.route.tool)\n",
+          "new": "        params = {\"name\": request.route.tool, \"arguments\": request.params.get(\"arguments\", {})}\n"
+        }
+      ],
+      "expect": "an MRTR retry reaches the backend with its inputResponses and requestState"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "a backend token looked up by issuer alone",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        token = self.credentials.get((backend.issuer, backend.resource))\n",
+          "new": "        token = next((t for (issuer, _), t in self.credentials.items() if issuer == backend.issuer), None)\n"
+        }
+      ],
+      "expect": "Unauthenticated"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "the caller's token used when the gateway has no credential for a backend",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "            \"Authorization\": f\"Bearer {self._credential(request.route.backend)}\",\n        }\n        return body, headers\n",
+          "new": "            \"Authorization\": f\"Bearer {self._credential(request.route.backend)}\"\n            if (self.backends[request.route.backend].issuer, self.backends[request.route.backend].resource) in self.credentials\n            else request.headers[\"Authorization\"],\n        }\n        return body, headers\n"
+        }
+      ],
+      "expect": "never called"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "a backend without a credential called anyway, with an empty token",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        token = self.credentials.get((backend.issuer, backend.resource))\n        if token is None:\n            raise ProtocolError(-32603, \"No credential for backend\", {\"backend\": backend_name})\n        return token\n",
+          "new": "        token = self.credentials.get((backend.issuer, backend.resource))\n        return token or \"\"\n"
+        }
+      ],
+      "expect": "never called"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "the rate limit spent after validation but before the policy",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        principal = self._authenticate(headers)\n        request = self._validated(principal, body, headers)\n        if request.method != \"tools/call\":\n",
+          "new": "        principal = self._authenticate(headers)\n        request = self._validated(principal, body, headers)\n        if not self._spend(principal, str(request.params.get(\"name\"))):\n            raise Refusal(429, ProtocolError(-32029, \"Rate limited\", {\"tool\": request.params.get(\"name\")}))\n        if request.method != \"tools/call\":\n"
+        },
+        {
+          "file": "gateway.py",
+          "old": "        if decision.allowed and not self._spend(principal, public):\n            outcome = \"rate_limit\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "forbidden every time and spends nothing"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "the rate limit checked once the backend has answered",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        if decision.allowed and not self._spend(principal, public):\n            outcome = \"rate_limit\"\n",
+          "new": ""
+        },
+        {
+          "file": "gateway.py",
+          "old": "        result = self._settle(self.backends[backend].handle(body, headers), request, backend, backend_id)\n",
+          "new": "        result = self._settle(self.backends[backend].handle(body, headers), request, backend, backend_id)\n        if not self._spend(request.principal, request.public):\n            raise Refusal(429, ProtocolError(-32029, \"Rate limited\", {\"tool\": request.public}))\n"
+        }
+      ],
+      "expect": "a rate-limited call is not forwarded"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "one window per cost class, shared by every caller and tool (overfix for speed)",
+      "edits": [
+        {
+          "file": "limits.py",
+          "old": "        calls = self._calls.setdefault(key, deque())\n",
+          "new": "        calls = self._calls.setdefault(key.cost_class, deque())\n"
+        }
+      ],
+      "expect": "Rate limited"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "the window keyed by principal alone, as in the lesson's code",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        key = LimitKey(principal.id, principal.issuer, principal.resource, public, route.operation)\n",
+          "new": "        key = LimitKey(principal.id, \"\", \"\", \"\", route.operation)\n"
+        }
+      ],
+      "expect": "an MRTR retry reaches the backend"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "the window keyed without the issuer",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        key = LimitKey(principal.id, principal.issuer, principal.resource, public, route.operation)\n",
+          "new": "        key = LimitKey(principal.id, \"\", principal.resource, public, route.operation)\n"
+        }
+      ],
+      "expect": "the same subject at another issuer is another principal"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "one limit for every cost class",
+      "edits": [
+        {
+          "file": "limits.py",
+          "old": "        if len(calls) >= self.limits[key.cost_class]:\n",
+          "new": "        if len(calls) >= self.limits[\"read\"]:\n"
+        }
+      ],
+      "expect": "writes have their own, smaller quota"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "a token bucket that refills the limit once per window, like the lesson's TokenBucket",
+      "edits": [
+        {
+          "file": "limits.py",
+          "old": "        calls = self._calls.setdefault(key, deque())\n        while calls and calls[0] <= now - self.window_s:\n            calls.popleft()\n        if len(calls) >= self.limits[key.cost_class]:\n            return False\n        calls.append(now)\n        return True\n",
+          "new": "        limit = self.limits[key.cost_class]\n        tokens, updated = self._calls.get(key, (limit, now))\n        tokens = min(limit, tokens + (now - updated) * limit / self.window_s)\n        if tokens < 1:\n            self._calls[key] = (tokens, now)\n            return False\n        self._calls[key] = (tokens - 1, now)\n        return True\n"
+        }
+      ],
+      "expect": "an allowed call counts for the whole window"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "fixed one-minute windows",
+      "edits": [
+        {
+          "file": "limits.py",
+          "old": "        calls = self._calls.setdefault(key, deque())\n        while calls and calls[0] <= now - self.window_s:\n            calls.popleft()\n        if len(calls) >= self.limits[key.cost_class]:\n            return False\n        calls.append(now)\n        return True\n",
+          "new": "        slot = (key, int(now // self.window_s))\n        count = self._calls.get(slot, 0)\n        if count >= self.limits[key.cost_class]:\n            return False\n        self._calls[slot] = count + 1\n        return True\n"
+        }
+      ],
+      "expect": "an allowed call counts for the whole window"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "refused calls counted in the window",
+      "edits": [
+        {
+          "file": "limits.py",
+          "old": "        if len(calls) >= self.limits[key.cost_class]:\n            return False\n        calls.append(now)\n        return True\n",
+          "new": "        calls.append(now)\n        return len(calls) <= self.limits[key.cost_class]\n"
+        }
+      ],
+      "expect": "refused calls never count"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "a call still counts at exactly window_s",
+      "edits": [
+        {
+          "file": "limits.py",
+          "old": "        while calls and calls[0] <= now - self.window_s:\n",
+          "new": "        while calls and calls[0] < now - self.window_s:\n"
+        }
+      ],
+      "expect": "a call stops counting window_s after it was allowed"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "the limiter reads the wall clock instead of the gateway's",
+      "edits": [
+        {
+          "file": "limits.py",
+          "old": "from collections import deque\n",
+          "new": "import time\nfrom collections import deque\n"
+        },
+        {
+          "file": "limits.py",
+          "old": "        calls = self._calls.setdefault(key, deque())\n",
+          "new": "        now = time.monotonic()\n        calls = self._calls.setdefault(key, deque())\n"
+        }
+      ],
+      "expect": "a call stops counting window_s after it was allowed"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "a deque, but rebuilt by filtering on every call",
+      "edits": [
+        {
+          "file": "limits.py",
+          "old": "        while calls and calls[0] <= now - self.window_s:\n            calls.popleft()\n",
+          "new": "        calls = self._calls[key] = deque(t for t in calls if t > now - self.window_s)\n"
+        }
+      ],
+      "expect": "should not rescan the whole window"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "the backend request built by editing the caller's params in place",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "        params = dict(request.params, name=request.route.tool)\n        params[\"_meta\"] = request_meta(GATEWAY_INFO, request.capabilities)\n",
+          "new": "        params = request.params\n        params[\"name\"] = request.route.tool\n        params[\"_meta\"] = request_meta(GATEWAY_INFO, request.capabilities)\n"
+        }
+      ],
+      "expect": "leaves the caller's request alone"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "the backend's routing headers built from the caller's params",
+      "edits": [
+        {
+          "file": "gateway.py",
+          "old": "            **routing_headers(\"tools/call\", params),\n",
+          "new": "            **routing_headers(\"tools/call\", request.params),\n"
+        }
+      ],
+      "expect": "Mcp-Name header mismatch"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "bisect for the cutoff, then keep a copy of the rest",
+      "edits": [
+        {
+          "file": "limits.py",
+          "old": "from collections import deque\n",
+          "new": "import bisect\nfrom collections import deque\n"
+        },
+        {
+          "file": "limits.py",
+          "old": "        while calls and calls[0] <= now - self.window_s:\n            calls.popleft()\n",
+          "new": "        kept = list(calls)[bisect.bisect_right(calls, now - self.window_s):]\n        calls.clear()\n        calls.extend(kept)\n"
+        }
+      ],
+      "expect": "should not rescan the whole window"
+    },
+    {
+      "test": "test_forward_call",
+      "name": "the window checked before expired calls are dropped",
+      "edits": [
+        {
+          "file": "limits.py",
+          "old": "        while calls and calls[0] <= now - self.window_s:\n            calls.popleft()\n        if len(calls) >= self.limits[key.cost_class]:\n            return False\n",
+          "new": "        if len(calls) >= self.limits[key.cost_class]:\n            return False\n        while calls and calls[0] <= now - self.window_s:\n            calls.popleft()\n"
+        }
+      ],
+      "expect": "refused calls never count"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "the log opened for writing, which truncates it",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        self._file = self.path.open(\"a\", encoding=\"utf-8\")\n",
+          "new": "        self._file = self.path.open(\"w\", encoding=\"utf-8\")\n"
+        }
+      ],
+      "expect": "on disk by the time record returns"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "no flush after each event",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        self._file.flush()\n",
+          "new": ""
+        }
+      ],
+      "expect": "on disk by the time record returns"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "events pretty-printed over several lines",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        self._file.write(json.dumps(stored) + \"\\n\")\n",
+          "new": "        self._file.write(json.dumps(stored, indent=1) + \"\\n\")\n"
+        }
+      ],
+      "expect": "each event is one line"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "the raw event written, the redacted one only returned",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        self._file.write(json.dumps(stored) + \"\\n\")\n",
+          "new": "        self._file.write(json.dumps({**event, \"seq\": stored[\"seq\"]}) + \"\\n\")\n"
+        }
+      ],
+      "expect": "no secret reaches the disk"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "redaction works on the caller's dict",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    stored = copy.deepcopy(event)\n",
+          "new": "    stored = event\n"
+        }
+      ],
+      "expect": "leaves the caller's dict alone"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "a shallow copy, scrubbed in place",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    stored = copy.deepcopy(event)\n",
+          "new": "    stored = dict(event)\n"
+        },
+        {
+          "file": "audit.py",
+          "old": "    if isinstance(value, dict):\n        return {\n            key: REDACTED if isinstance(key, str) and key.lower() in SECRET_KEYS else _scrub(item)\n            for key, item in value.items()\n        }\n",
+          "new": "    if isinstance(value, dict):\n        for key in value:\n            value[key] = REDACTED if isinstance(key, str) and key.lower() in SECRET_KEYS else _scrub(value[key])\n        return value\n"
+        }
+      ],
+      "expect": "leaves the caller's dict alone"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "header values masked but kept",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        stored[\"headers\"] = sorted(stored[\"headers\"])\n",
+          "new": "        stored[\"headers\"] = {name: REDACTED for name in stored[\"headers\"]}\n"
+        }
+      ],
+      "expect": "an event is stored as given"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "header names kept in arrival order",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        stored[\"headers\"] = sorted(stored[\"headers\"])\n",
+          "new": "        stored[\"headers\"] = list(stored[\"headers\"])\n"
+        }
+      ],
+      "expect": "an event is stored as given"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "secret keys matched case-sensitively",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "            key: REDACTED if isinstance(key, str) and key.lower() in SECRET_KEYS else _scrub(item)\n",
+          "new": "            key: REDACTED if key in SECRET_KEYS else _scrub(item)\n"
+        }
+      ],
+      "expect": "an event is stored as given"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "secret keys matched as substrings",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "            key: REDACTED if isinstance(key, str) and key.lower() in SECRET_KEYS else _scrub(item)\n",
+          "new": "            key: REDACTED if isinstance(key, str) and any(secret in key.lower() for secret in SECRET_KEYS) else _scrub(item)\n"
+        }
+      ],
+      "expect": "an event is stored as given"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "only the top level of the arguments scrubbed",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "            key: REDACTED if isinstance(key, str) and key.lower() in SECRET_KEYS else _scrub(item)\n",
+          "new": "            key: REDACTED if isinstance(key, str) and key.lower() in SECRET_KEYS else item\n"
+        }
+      ],
+      "expect": "an event is stored as given"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "lists inside the arguments not walked",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    if isinstance(value, list):\n        return [_scrub(item) for item in value]\n",
+          "new": ""
+        }
+      ],
+      "expect": "an event is stored as given"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "scrubbing that assumes every value is a dict",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    if isinstance(value, dict):\n        return {\n            key: REDACTED if isinstance(key, str) and key.lower() in SECRET_KEYS else _scrub(item)\n            for key, item in value.items()\n        }\n",
+          "new": "    return {\n        key: REDACTED if isinstance(key, str) and key.lower() in SECRET_KEYS else (_scrub(item) if isinstance(item, (dict, list)) else item)\n        for key, item in value.items()\n    }\n"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "inputResponses left alone",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "SCRUBBED_FIELDS = (\"arguments\", \"inputResponses\")\n",
+          "new": "SCRUBBED_FIELDS = (\"arguments\",)\n"
+        }
+      ],
+      "expect": "an event is stored as given"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "every field scrubbed, the gateway's own fields too",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    for field in SCRUBBED_FIELDS:\n        if field in stored:\n            stored[field] = _scrub(stored[field])\n    return stored\n",
+          "new": "    return _scrub(stored)\n"
+        }
+      ],
+      "expect": "reads back every event exactly"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "lines split on every Unicode line break",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        return [line for line in text.split(\"\\n\") if line]\n",
+          "new": "        return [line for line in text.splitlines() if line]\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "numbering starts again at every open",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        self._count = len(self.events())\n",
+          "new": "        self._count = 0\n"
+        }
+      ],
+      "expect": "numbered after the events already in the file"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "events read back in time order",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        return [json.loads(line) for line in self._lines()]\n",
+          "new": "        return sorted((json.loads(line) for line in self._lines()), key=lambda event: event[\"ts\"])\n"
+        }
+      ],
+      "expect": "in the order written"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "request ids stored as strings",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        stored = {**redact(event), \"seq\": self._count + 1}\n",
+          "new": "        stored = {**redact(event), \"seq\": self._count + 1}\n        if \"request_id\" in stored:\n            stored[\"request_id\"] = str(stored[\"request_id\"])\n"
+        }
+      ],
+      "expect": "an event is stored as given"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "latency rounded to the microsecond",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        stored = {**redact(event), \"seq\": self._count + 1}\n",
+          "new": "        stored = {**redact(event), \"seq\": self._count + 1}\n        if isinstance(stored.get(\"latency_ms\"), float):\n            stored[\"latency_ms\"] = round(stored[\"latency_ms\"], 3)\n"
+        }
+      ],
+      "expect": "reads back every event exactly"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "events served from memory instead of the file",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        self._file = self.path.open(\"a\", encoding=\"utf-8\")\n",
+          "new": "        self._file = self.path.open(\"a\", encoding=\"utf-8\")\n        self._seen: list = []\n"
+        },
+        {
+          "file": "audit.py",
+          "old": "        self._count += 1\n",
+          "new": "        self._count += 1\n        self._seen.append(stored)\n"
+        },
+        {
+          "file": "audit.py",
+          "old": "        return [json.loads(line) for line in self._lines()]\n",
+          "new": "        if hasattr(self, '_seen'):\n            return list(self._seen)\n        return [json.loads(line) for line in self._lines()]\n"
+        }
+      ],
+      "expect": "reads back every event exactly"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "only string values under secret keys redacted",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "            key: REDACTED if isinstance(key, str) and key.lower() in SECRET_KEYS else _scrub(item)\n",
+          "new": "            key: REDACTED if isinstance(key, str) and key.lower() in SECRET_KEYS and isinstance(item, str) else _scrub(item)\n"
+        }
+      ],
+      "expect": "an event is stored as given"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "header names sorted case-insensitively",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        stored[\"headers\"] = sorted(stored[\"headers\"])\n",
+          "new": "        stored[\"headers\"] = sorted(stored[\"headers\"], key=str.lower)\n"
+        }
+      ],
+      "expect": "an event is stored as given"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "existing events counted with str.splitlines()",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        self._count = len(self.events())\n",
+          "new": "        self._count = len(self.path.read_text(encoding=\"utf-8\").splitlines())\n"
+        }
+      ],
+      "expect": "numbered after the events already in the file"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "an admitted, pinned backend's calls allowed outright",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        roles = policy.roles.get((ctx.issuer, ctx.principal), frozenset())\n",
+          "new": "        if ctx.admitted and ctx.pinned:\n            return Decision(True, \"allowed\", policy.version, path)\n        roles = policy.roles.get((ctx.issuer, ctx.principal), frozenset())\n"
+        }
+      ],
+      "expect": "an approved, pinned tool still may not reach into another tenant"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "roles taken from the token",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        roles = policy.roles.get((ctx.issuer, ctx.principal), frozenset())\n",
+          "new": "        roles = ctx.token_roles\n"
+        }
+      ],
+      "expect": "a principal the policy does not list has no roles"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "roles looked up without a default",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        roles = policy.roles.get((ctx.issuer, ctx.principal), frozenset())\n",
+          "new": "        roles = policy.roles[(ctx.issuer, ctx.principal)]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "roles matched by principal name, whatever the issuer",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        roles = policy.roles.get((ctx.issuer, ctx.principal), frozenset())\n",
+          "new": "        roles = next((r for (_, name), r in policy.roles.items() if name == ctx.principal), frozenset())\n"
+        }
+      ],
+      "expect": "roles belong to a principal at its issuer"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "decisions cached per call context",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        now = self.clock()\n        try:\n            policy = self.fetch()\n",
+          "new": "        cached = self.__dict__.setdefault(\"_decisions\", {}).get(ctx)\n        if cached is not None:\n            return cached\n        now = self.clock()\n        try:\n            policy = self.fetch()\n"
+        },
+        {
+          "file": "policy.py",
+          "old": "        self._last_known = (policy, now)\n        return self._evaluate(policy, ctx, \"live\")\n",
+          "new": "        self._last_known = (policy, now)\n        decision = self._evaluate(policy, ctx, \"live\")\n        self._decisions[ctx] = decision\n        return decision\n"
+        }
+      ],
+      "expect": "a revoked role is denied at once"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "the policy fetched once and kept",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            policy = self.fetch()\n",
+          "new": "            policy = self._last_known[0] if self._last_known else self.fetch()\n"
+        }
+      ],
+      "expect": "a revoked role is denied at once"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "the tenant not checked for pinned tools",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            (\"tenant\", ctx.target_tenant is None or ctx.target_tenant == ctx.tenant),\n",
+          "new": "            (\"tenant\", ctx.pinned or ctx.target_tenant is None or ctx.target_tenant == ctx.tenant),\n"
+        }
+      ],
+      "expect": "an approved, pinned tool still may not reach into another tenant"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "a call that names no tenant taken as cross-tenant",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            (\"tenant\", ctx.target_tenant is None or ctx.target_tenant == ctx.tenant),\n",
+          "new": "            (\"tenant\", ctx.target_tenant == ctx.tenant),\n"
+        }
+      ],
+      "expect": "alice may search public notes in her own tenant"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "a tool missing from the policy raises",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            (\"role\", bool(roles & policy.tool_roles.get(ctx.tool, frozenset()))),\n",
+          "new": "            (\"role\", bool(roles & policy.tool_roles[ctx.tool])),\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "the role checked before admission",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            (\"admission\", ctx.admitted),\n            (\"role\", bool(roles & policy.tool_roles.get(ctx.tool, frozenset()))),\n",
+          "new": "            (\"role\", bool(roles & policy.tool_roles.get(ctx.tool, frozenset()))),\n            (\"admission\", ctx.admitted),\n"
+        }
+      ],
+      "expect": "the rules apply in order"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "health checked before the tenant",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            (\"tenant\", ctx.target_tenant is None or ctx.target_tenant == ctx.tenant),\n            (\"health\", ctx.healthy),\n",
+          "new": "            (\"health\", ctx.healthy),\n            (\"tenant\", ctx.target_tenant is None or ctx.target_tenant == ctx.tenant),\n"
+        }
+      ],
+      "expect": "the rules apply in order"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "the tenant checked before the pin",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            (\"pin\", ctx.pinned),\n            (\"tenant\", ctx.target_tenant is None or ctx.target_tenant == ctx.tenant),\n",
+          "new": "            (\"tenant\", ctx.target_tenant is None or ctx.target_tenant == ctx.tenant),\n            (\"pin\", ctx.pinned),\n"
+        }
+      ],
+      "expect": "the rules apply in order"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "sensitive data refused while the policy service answers",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            (\"admission\", ctx.admitted),\n",
+          "new": "            (\"admission\", ctx.admitted),\n            (\"classification\", ctx.classification != \"sensitive\"),\n"
+        }
+      ],
+      "expect": "sensitive data only changes what happens when the policy service is down"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "a quarantine that holds reads too",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            (\"quarantine\", not (ctx.operation == \"write\" and ctx.backend in policy.quarantined)),\n",
+          "new": "            (\"quarantine\", ctx.backend not in policy.quarantined),\n"
+        }
+      ],
+      "expect": "a quarantine holds writes only"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "backend health ignored",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            (\"health\", ctx.healthy),\n",
+          "new": ""
+        }
+      ],
+      "expect": "an unhealthy backend gets no calls"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "the descriptor pin ignored",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            (\"pin\", ctx.pinned),\n",
+          "new": ""
+        }
+      ],
+      "expect": "a changed descriptor is not callable"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "writes may run on the last-known policy",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            ctx.operation == \"read\"\n            and ctx.classification == \"public\"\n",
+          "new": "            ctx.classification == \"public\"\n"
+        }
+      ],
+      "expect": "fails closed while the policy service is down"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "only sensitive reads fail closed",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            and ctx.classification == \"public\"\n",
+          "new": "            and ctx.classification != \"sensitive\"\n"
+        }
+      ],
+      "expect": "fails closed while the policy service is down"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "any read of an approved tool may run on the last-known policy",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            and ctx.classification == \"public\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "fails closed while the policy service is down"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "any public read may run on the last-known policy",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            and ctx.tool in policy.stale_reads\n",
+          "new": ""
+        }
+      ],
+      "expect": "fails closed while the policy service is down"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "the last-known policy serves for exactly its ttl too",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            and now - fetched_at < self.last_known_ttl_s\n",
+          "new": "            and now - fetched_at <= self.last_known_ttl_s\n"
+        }
+      ],
+      "expect": "once the last-known policy is ttl old"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "the ttl counted from the first fetch that worked",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        self._last_known = (policy, now)\n",
+          "new": "        self._last_known = (policy, self._last_known[1] if self._last_known else now)\n"
+        }
+      ],
+      "expect": "the ttl counts from the last fetch that worked"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "the last-known policy kept only from decisions that allowed",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        self._last_known = (policy, now)\n        return self._evaluate(policy, ctx, \"live\")\n",
+          "new": "        decision = self._evaluate(policy, ctx, \"live\")\n        if decision.allowed:\n            self._last_known = (policy, now)\n        return decision\n"
+        }
+      ],
+      "expect": "the ttl counts from the last fetch that worked"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "the first policy fetched kept as the last-known one",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        self._last_known = (policy, now)\n",
+          "new": "        if self._last_known is None:\n            self._last_known = (policy, now)\n"
+        }
+      ],
+      "expect": "an approved public read may run on the last-known policy"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "a failed fetch refreshes the last-known policy",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        except PolicyUnavailable:\n",
+          "new": "        except PolicyUnavailable:\n            if self._last_known is not None:\n                self._last_known = (self._last_known[0], now)\n"
+        }
+      ],
+      "expect": "once the last-known policy is ttl old"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "the last-known policy allows without its rules",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "                return self._evaluate(self._last_known[0], ctx, \"last_known\")\n",
+          "new": "                return Decision(True, \"allowed\", self._last_known[0].version, \"last_known\")\n"
+        }
+      ],
+      "expect": "the last-known policy is applied in full"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "a last-known decision reported as live",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "                return self._evaluate(self._last_known[0], ctx, \"last_known\")\n",
+          "new": "                return self._evaluate(self._last_known[0], ctx, \"live\")\n"
+        }
+      ],
+      "expect": "an approved public read may run on the last-known policy"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "a fail-closed decision names the last-known version",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            return Decision(False, \"policy_unavailable\", None, \"fail_closed\")\n",
+          "new": "            return Decision(False, \"policy_unavailable\", self._last_known[0].version if self._last_known else None, \"fail_closed\")\n"
+        }
+      ],
+      "expect": "fails closed while the policy service is down"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "every read fails open during an outage",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            return Decision(False, \"policy_unavailable\", None, \"fail_closed\")\n",
+          "new": "            return Decision(ctx.operation == \"read\", \"policy_unavailable\", None, \"fail_closed\")\n"
+        }
+      ],
+      "expect": "fails closed while the policy service is down"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "an outage raises instead of following the failure policy",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        except PolicyUnavailable:\n",
+          "new": "        except ZeroDivisionError:\n"
+        }
+      ],
+      "expect": "PolicyUnavailable"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "the pin checked before the role",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            (\"role\", bool(roles & policy.tool_roles.get(ctx.tool, frozenset()))),\n            (\"pin\", ctx.pinned),\n",
+          "new": "            (\"pin\", ctx.pinned),\n            (\"role\", bool(roles & policy.tool_roles.get(ctx.tool, frozenset()))),\n"
+        }
+      ],
+      "expect": "the rules apply in order"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "the quarantine checked before health",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            (\"health\", ctx.healthy),\n            (\"quarantine\", not (ctx.operation == \"write\" and ctx.backend in policy.quarantined)),\n",
+          "new": "            (\"quarantine\", not (ctx.operation == \"write\" and ctx.backend in policy.quarantined)),\n            (\"health\", ctx.healthy),\n"
+        }
+      ],
+      "expect": "the rules apply in order"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "the last-known policy refreshed only when its version changes",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        self._last_known = (policy, now)\n",
+          "new": "        if self._last_known is None or self._last_known[0].version != policy.version:\n            self._last_known = (policy, now)\n"
+        }
+      ],
+      "expect": "the ttl counts from the last fetch that worked"
+    },
+    {
+      "test": "test_runtime_policy",
+      "name": "the principal must hold every role the tool lists",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            (\"role\", bool(roles & policy.tool_roles.get(ctx.tool, frozenset()))),\n",
+          "new": "            (\"role\", bool(policy.tool_roles.get(ctx.tool)) and policy.tool_roles.get(ctx.tool, frozenset()) <= roles),\n"
+        }
+      ],
+      "expect": "alice may search public notes"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "the response keeps the backend's id",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                    reply = {\"jsonrpc\": \"2.0\", \"id\": hop.client_id, \"result\": gateway_result(result)}\n",
+          "new": "                    reply = {\"jsonrpc\": \"2.0\", \"id\": message[\"id\"], \"result\": gateway_result(result)}\n"
+        }
+      ],
+      "expect": "the response under the client's id"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "an error response keeps the backend's id",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                    reply = {\"jsonrpc\": \"2.0\", \"id\": hop.client_id, \"error\": message[\"error\"]}\n",
+          "new": "                    reply = {\"jsonrpc\": \"2.0\", \"id\": message[\"id\"], \"error\": message[\"error\"]}\n"
+        }
+      ],
+      "expect": "an error response reaches the client under its own id too"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "progress under the client's request id instead of its token",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "\"progressToken\": hop.progress_token}})\n",
+          "new": "\"progressToken\": hop.client_id}})\n"
+        }
+      ],
+      "expect": "this request's progress under the client's token"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "progress relayed with the gateway's token",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                yield _event({**message, \"params\": {**params, \"progressToken\": hop.progress_token}})\n",
+          "new": "                yield _event(message)\n"
+        }
+      ],
+      "expect": "this request's progress under the client's token"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "progress for any token relayed",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                and params.get(\"progressToken\") == hop.backend_id\n",
+          "new": ""
+        }
+      ],
+      "expect": "this request's progress under the client's token"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "other notifications passed through",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                yield _event({**message, \"params\": {**params, \"progressToken\": hop.progress_token}})\n    finally:\n",
+          "new": "                yield _event({**message, \"params\": {**params, \"progressToken\": hop.progress_token}})\n            elif str(message.get(\"method\", \"\")).startswith(\"notifications/\") and \"id\" not in message:\n                yield _event(message)\n    finally:\n"
+        }
+      ],
+      "expect": "this request's progress under the client's token"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "progress relayed to a client that asked for none",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                and hop.progress_token is not None\n",
+          "new": ""
+        }
+      ],
+      "expect": "a client that asked for no progress gets none"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "progress only when the client's token is truthy",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                and hop.progress_token is not None\n",
+          "new": "                and hop.progress_token\n"
+        }
+      ],
+      "expect": "0 is a client id and a progress token like any other"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "any message with an id taken as the response",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "            if message.get(\"id\") == hop.backend_id and (\"result\" in message or \"error\" in message):\n",
+          "new": "            if \"id\" in message:\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "every event carries the client's id",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                yield _event({**message, \"params\": {**params, \"progressToken\": hop.progress_token}})\n",
+          "new": "                yield _event({**message, \"id\": hop.client_id, \"params\": {**params, \"progressToken\": hop.progress_token}})\n"
+        }
+      ],
+      "expect": "this request's progress under the client's token"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "the backend read to its end after the response",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                yield _event(reply)\n                return\n",
+          "new": "                yield _event(reply)\n                async for _ in messages:\n                    pass\n                return\n"
+        }
+      ],
+      "expect": "the stream ends with the response"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "the stream goes on after the response",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                yield _event(reply)\n                return\n",
+          "new": "                yield _event(reply)\n                continue\n"
+        }
+      ],
+      "expect": "this request's progress under the client's token"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "progress held back until the response",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "    try:\n        async for message in messages:\n",
+          "new": "    held: list[bytes] = []\n    try:\n        async for message in messages:\n"
+        },
+        {
+          "file": "relay.py",
+          "old": "                yield _event(reply)\n                return\n",
+          "new": "                for event in held:\n                    yield event\n                yield _event(reply)\n                return\n"
+        },
+        {
+          "file": "relay.py",
+          "old": "                yield _event({**message, \"params\": {**params, \"progressToken\": hop.progress_token}})\n",
+          "new": "                held.append(_event({**message, \"params\": {**params, \"progressToken\": hop.progress_token}}))\n"
+        }
+      ],
+      "expect": "StopAsyncIteration"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "the backend stream left open when the client goes",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "    finally:\n        await messages.aclose()\n",
+          "new": "    finally:\n        pass\n"
+        }
+      ],
+      "expect": "a client that hangs up cancels the backend request"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "the backend's serverInfo relayed",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "\"result\": gateway_result(result)}\n",
+          "new": "\"result\": result}\n"
+        }
+      ],
+      "expect": "the response under the client's id"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "the result rebuilt from the fields of a complete result",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "\"result\": gateway_result(result)}\n",
+          "new": "\"result\": gateway_result({key: result[key] for key in (\"resultType\", \"content\", \"isError\", \"taskId\", \"status\") if key in result})}\n"
+        }
+      ],
+      "expect": "passes through untouched"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "error responses dropped",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "            if message.get(\"id\") == hop.backend_id and (\"result\" in message or \"error\" in message):\n",
+          "new": "            if message.get(\"id\") == hop.backend_id and \"result\" in message:\n"
+        }
+      ],
+      "expect": "every event ends with a blank line"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "the task recorded once the client has read it",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                    if result.get(\"resultType\") == \"task\":\n                        tasks.record(result[\"taskId\"], hop.owner, hop.backend)\n",
+          "new": ""
+        },
+        {
+          "file": "relay.py",
+          "old": "                yield _event(reply)\n                return\n",
+          "new": "                yield _event(reply)\n                if \"result\" in message and message[\"result\"].get(\"resultType\") == \"task\":\n                    tasks.record(message[\"result\"][\"taskId\"], hop.owner, hop.backend)\n                return\n"
+        }
+      ],
+      "expect": "a task is routable before the client sees its taskId"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "the task recorded in a finally, once the client has the event",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                    if result.get(\"resultType\") == \"task\":\n                        tasks.record(result[\"taskId\"], hop.owner, hop.backend)\n",
+          "new": ""
+        },
+        {
+          "file": "relay.py",
+          "old": "                yield _event(reply)\n                return\n",
+          "new": "                try:\n                    yield _event(reply)\n                finally:\n                    if \"result\" in message and message[\"result\"].get(\"resultType\") == \"task\":\n                        tasks.record(message[\"result\"][\"taskId\"], hop.owner, hop.backend)\n                return\n"
+        }
+      ],
+      "expect": "a task is routable before the client sees its taskId"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "the stream's tasks forgotten when it closes",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "    try:\n        async for message in messages:\n",
+          "new": "    recorded: list[str] = []\n    try:\n        async for message in messages:\n"
+        },
+        {
+          "file": "relay.py",
+          "old": "                        tasks.record(result[\"taskId\"], hop.owner, hop.backend)\n",
+          "new": "                        tasks.record(result[\"taskId\"], hop.owner, hop.backend)\n                        recorded.append(result[\"taskId\"])\n"
+        },
+        {
+          "file": "relay.py",
+          "old": "    finally:\n        await messages.aclose()\n",
+          "new": "    finally:\n        await messages.aclose()\n        for task_id in recorded:\n            tasks._routes.pop(task_id, None)\n"
+        }
+      ],
+      "expect": "a task stays routable after the client hangs up"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "the task routed to the backend request id",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                        tasks.record(result[\"taskId\"], hop.owner, hop.backend)\n",
+          "new": "                        tasks.record(result[\"taskId\"], hop.owner, hop.backend_id)\n"
+        }
+      ],
+      "expect": "the route names the backend that holds the task"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "anyone who knows a task id reaches it",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        if route is None or route[0] != owner:\n",
+          "new": "        if route is None:\n"
+        }
+      ],
+      "expect": "only the task's owner reaches it"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "the owner matched on the principal name, not the issuer",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        if route is None or route[0] != owner:\n",
+          "new": "        if route is None or route[0][1] != owner[1]:\n"
+        }
+      ],
+      "expect": "only the task's owner reaches it"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "someone else's task refused as forbidden",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "        if route is None or route[0] != owner:\n            raise TaskNotFound(task_id)\n",
+          "new": "        if route is None:\n            raise TaskNotFound(task_id)\n        if route[0] != owner:\n            raise PermissionError(task_id)\n"
+        }
+      ],
+      "expect": "PermissionError"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "events written as str",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "    return b\"data: \" + json.dumps(message, ensure_ascii=False).encode(\"utf-8\") + b\"\\n\\n\"\n",
+          "new": "    return \"data: \" + json.dumps(message, ensure_ascii=False) + \"\\n\\n\"\n"
+        }
+      ],
+      "expect": "the stream is written as bytes"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "a single newline after each event",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": ".encode(\"utf-8\") + b\"\\n\\n\"\n",
+          "new": ".encode(\"utf-8\") + b\"\\n\"\n"
+        }
+      ],
+      "expect": "every event ends with a blank line"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "pretty-printed JSON",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "json.dumps(message, ensure_ascii=False)",
+          "new": "json.dumps(message, ensure_ascii=False, indent=2)"
+        }
+      ],
+      "expect": "each event is a single data line"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "an event: line before the data",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "    return b\"data: \" + ",
+          "new": "    return b\"event: message\\ndata: \" + "
+        }
+      ],
+      "expect": "each event is a single data line"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "an id: line for Last-Event-ID replay",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "    return b\"data: \" + ",
+          "new": "    return b\"id: \" + str(id(message)).encode() + b\"\\ndata: \" + "
+        }
+      ],
+      "expect": "each event is a single data line"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "events encoded as Latin-1",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": ".encode(\"utf-8\") + b\"\\n\\n\"\n",
+          "new": ".encode(\"latin-1\") + b\"\\n\\n\"\n"
+        }
+      ],
+      "expect": "UnicodeEncodeError"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "the backend's _meta merged with the gateway's serverInfo",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "                    reply = {\"jsonrpc\": \"2.0\", \"id\": hop.client_id, \"result\": gateway_result(result)}\n",
+          "new": "                    reply = {\"jsonrpc\": \"2.0\", \"id\": hop.client_id, \"result\": {**result, \"_meta\": {**result.get(\"_meta\", {}), **gateway_result(result)[\"_meta\"]}}}\n"
+        }
+      ],
+      "expect": "the response under the client's id"
+    },
+    {
+      "test": "test_sse_relay",
+      "name": "any response on the stream taken as this request's",
+      "edits": [
+        {
+          "file": "relay.py",
+          "old": "            if message.get(\"id\") == hop.backend_id and (\"result\" in message or \"error\" in message):\n",
+          "new": "            if \"result\" in message or \"error\" in message:\n"
+        }
+      ],
+      "expect": "the response under the client's id"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "a request identified without its trace",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        identity = (*who, event.get(\"trace_id\"), event.get(\"request_id\"))\n",
+          "new": "        identity = (*who, event.get(\"request_id\"))\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "a request identified without its principal",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        identity = (*who, event.get(\"trace_id\"), event.get(\"request_id\"))\n",
+          "new": "        identity = (event.get(\"trace_id\"), event.get(\"request_id\"))\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "a request identified by its id alone",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        identity = (*who, event.get(\"trace_id\"), event.get(\"request_id\"))\n",
+          "new": "        identity = event.get(\"request_id\")\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "events taken in log order",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "    for event in sorted(events, key=lambda e: (e[\"ts\"], e[\"seq\"])):\n",
+          "new": "    for event in sorted(events, key=lambda e: e[\"seq\"]):\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "events taken by time alone",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "    for event in sorted(events, key=lambda e: (e[\"ts\"], e[\"seq\"])):\n",
+          "new": "    for event in sorted(events, key=lambda e: e[\"ts\"]):\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "events taken as given",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "    for event in sorted(events, key=lambda e: (e[\"ts\"], e[\"seq\"])):\n",
+          "new": "    for event in events:\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "every retry hangs under the first request of its chain",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "                states[(*who, event[\"state_out\"])] = owner\n",
+          "new": "                states[(*who, event[\"state_out\"])] = states.get((*who, owner.event.get(\"state_in\")), owner)\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "a requestState links only one retry",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "            parent = states.get((*who, event[\"state_in\"]))\n",
+          "new": "            parent = states.pop((*who, event[\"state_in\"]), None)\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "a retry hung under the first call of its trace",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "            parent = states.get((*who, event[\"state_in\"]))\n",
+          "new": "            parent = next((c for c in calls if c.event.get(\"trace_id\") == event.get(\"trace_id\")), None)\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "requestStates shared between principals",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "                states[(*who, event[\"state_out\"])] = owner\n",
+          "new": "                states[event[\"state_out\"]] = owner\n"
+        },
+        {
+          "file": "chain.py",
+          "old": "            parent = states.get((*who, event[\"state_in\"]))\n",
+          "new": "            parent = states.get(event[\"state_in\"])\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "tasks shared between principals",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "                tasks[(*who, event[\"task_id\"])] = owner\n",
+          "new": "                tasks[event[\"task_id\"]] = owner\n"
+        },
+        {
+          "file": "chain.py",
+          "old": "            parent = tasks.get((*who, event.get(\"task_id\")))\n",
+          "new": "            parent = tasks.get(event.get(\"task_id\"))\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "any result that names a task links task requests",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "            if event.get(\"result\") == \"task\" and event.get(\"task_id\") is not None:\n",
+          "new": "            if event.get(\"task_id\") is not None:\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "task requests linked through the previous task request",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "            parent = tasks.get((*who, event.get(\"task_id\")))\n",
+          "new": "            parent = tasks.get((*who, event.get(\"task_id\")))\n            if parent is not None:\n                tasks[(*who, event.get(\"task_id\"))] = node\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "refused requests left out of the trees",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        node = Node(event)\n        requests[identity] = node\n",
+          "new": "        if event.get(\"decision\") != \"allow\":\n            continue\n        node = Node(event)\n        requests[identity] = node\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "a result without its decision dropped",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "            if owner is None:\n                orphans.append(Node(event))\n                continue\n",
+          "new": "            if owner is None:\n                continue\n"
+        }
+      ],
+      "expect": "events that belong to no call are orphans"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "a request whose link is missing starts a call",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        (orphans if parent is None else parent.children).append(node)\n",
+          "new": "        (calls if parent is None else parent.children).append(node)\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "an orphan request's result listed as a separate orphan",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        node = Node(event)\n        requests[identity] = node\n",
+          "new": "        node = Node(event)\n"
+        },
+        {
+          "file": "chain.py",
+          "old": "        else:\n            calls.append(node)\n            continue\n        (orphans if parent is None else parent.children).append(node)\n",
+          "new": "        else:\n            calls.append(node)\n            requests[identity] = node\n            continue\n        if parent is None:\n            orphans.append(node)\n        else:\n            parent.children.append(node)\n            requests[identity] = node\n"
+        }
+      ],
+      "expect": "events that belong to no call are orphans"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "MRTR rounds linked only within one trace",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "                states[(*who, event[\"state_out\"])] = owner\n",
+          "new": "                states[(*who, event.get(\"trace_id\"), event[\"state_out\"])] = owner\n"
+        },
+        {
+          "file": "chain.py",
+          "old": "            parent = states.get((*who, event[\"state_in\"]))\n",
+          "new": "            parent = states.get((*who, event.get(\"trace_id\"), event[\"state_in\"]))\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "a request identified without its issuer",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        identity = (*who, event.get(\"trace_id\"), event.get(\"request_id\"))\n",
+          "new": "        identity = (event.get(\"principal\"), event.get(\"trace_id\"), event.get(\"request_id\"))\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "states and tasks shared by the same name at every issuer",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        who = (event.get(\"issuer\"), event.get(\"principal\"))\n",
+          "new": "        who = (event.get(\"principal\"),)\n"
+        }
+      ],
+      "expect": "one tree per call"
+    },
+    {
+      "test": "test_decision_chain",
+      "name": "every decision placed before any result",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "    for event in sorted(events, key=lambda e: (e[\"ts\"], e[\"seq\"])):\n",
+          "new": "    for event in sorted(events, key=lambda e: (e[\"kind\"] != \"decision\", e[\"ts\"], e[\"seq\"])):\n"
+        }
+      ],
+      "expect": "one tree per call"
+    }
+  ]
+}

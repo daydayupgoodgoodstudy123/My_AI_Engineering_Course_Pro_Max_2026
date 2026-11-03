@@ -1,0 +1,154 @@
+{
+  "lesson": "phases/13-tools-and-protocols/17-mcp-gateways-and-registries",
+  "title": "Stateless MCP Gateways and Registry Admission",
+  "format": "staged-brownfield",
+  "service": "mcpgateway: a stateless MCP 2026-07-28 gateway in front of scripted in-process backends, with credential mediation, per-caller sliding-window rate limits, a redacting JSONL audit log, a runtime policy engine with a declared failure policy, a request-scoped SSE relay with task routing, and a rebuild of each public call from the audit trail",
+  "sources": {
+    "docs/en.md": "6c72285350d087babd97ec9907f94137be217337999ed1b4e44f299b4e3b1692",
+    "code/main.py": "20d8655d352fe696a788014bb786b24c6abb2324bfc2c1efe79ab80eaa8717af",
+    "code/tests/test_main.py": "343048e0ad7c9f4e56c51a3ae442451b75d350ba43992685c555d9820153b7c5"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_forward_call",
+      "kind": "debug",
+      "lesson_anchor": "The modern gateway path (steps 1-5); Per-request client capabilities (the gateway is the backend's client); Credential mediation (never pass the outer gateway token to a backend, never reuse a backend token at another issuer or resource); Rate limits without sessions (key by principal, issuer, resource, public tool, cost class and time window; cheap validation before expensive work); code/main.py Gateway.handle, _forward and TokenBucket",
+      "planted_bugs": [
+        "_backend_request spreads the caller's HTTP headers last, so the caller's Authorization (and Mcp-Session-Id, Cookie and the public Mcp-Name) replaces the gateway's backend credential; it surfaces one call away, as the backend's -32001 wrapped by the gateway's result check into a 502 Backend error",
+        "_backend_request uses params.setdefault('_meta', ...), which keeps the caller's own _meta, so the backend sees the caller's Tasks declaration and returns a task; it surfaces two steps away, as check_response refusing a result the gateway cannot relay (502)",
+        "_admit spends the caller's rate limit from the Mcp-Name routing header before the wire is validated and the policy is asked, so malformed requests drain the quota",
+        "RateLimiter.allow rebuilds the whole window with a list comprehension on every call, O(n) per call and quadratic for a busy key"
+      ],
+      "timing_assert": "12,001 allow() calls on one key with a 12,000-call window under 0.05 s. Measured on this machine at load average 6-8: the list version 0.93-1.37 s (18x the limit or more), the deque version 1.5-4.1 ms (12x under it or more)",
+      "overfix_guard": "the caller's request is left as it was sent; the backend request is compared field by field (a fresh id, the backend tool name, exactly the gateway's three _meta keys with the mediated capabilities) and its headers are exactly the routing headers built from its own params plus the gateway credential; credentials are looked up by (issuer, resource) and a backend without one is never called; an MRTR retry keeps inputResponses and requestState; refused calls spend nothing and a rate-limited call is not forwarded; windows are separate per principal, issuer, tool and cost class, so a global window for speed, one per cost class, the lesson code's principal-only key and a key without the issuer all fail; the lesson's TokenBucket, fixed minute windows, counting refused calls, a strict boundary, the wall clock, checking before pruning, a deque rebuilt by filtering and a bisect that copies the rest are caught"
+    },
+    {
+      "part": 2,
+      "test": "test_audit_log",
+      "kind": "model and persistence",
+      "lesson_anchor": "Audit the decision chain: request and trace ids, principal and issuer, public tool and backend route, decision and reason, latency and result class, MRTR round or task id; redact bearer tokens, authorization codes, refresh tokens, raw secrets and unnecessary sensitive arguments",
+      "storage": "an append-only JSONL file, one redacted event per line, flushed per event, with a seq that continues across reopens and counts lines other replicas wrote",
+      "exactness": "events read back after a reopen equal the redacted events exactly, in write order: JSON-RPC ids 7 and \"7\" stay distinct, a latency of 0.1 + 0.2 survives, None stays null, non-ASCII text survives, and another replica's line with a raw U+2028 reads back whole",
+      "traps": [
+        "the file opened with \"w\"",
+        "no flush per event",
+        "pretty-printed events over several lines",
+        "redaction only in the returned copy, so secrets reach the disk",
+        "the caller's dict changed, directly or by a shallow copy scrubbed in place",
+        "header values masked but kept, or names in arrival order",
+        "secret keys matched case-sensitively, at the top level only, without walking lists, or as substrings (max_tokens)",
+        "only string values under secret keys redacted (a dict under secret)",
+        "header names sorted case-insensitively",
+        "scrubbing that assumes every value is a dict",
+        "inputResponses left alone, or every field scrubbed including the gateway's error.code",
+        "str.splitlines() on read",
+        "seq restarting at every open",
+        "events sorted by ts, ids turned into strings, latency rounded, events served from memory"
+      ],
+      "integration": "the Part 1 gateway writes into an AuditLog; the file holds no caller token, backend credential or api_key, and reads back as one decision and one result",
+      "clarifying_questions": [
+        "header name normalization",
+        "secrets in free text",
+        "fsync",
+        "seq and other replicas",
+        "a torn last line"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_runtime_policy",
+      "kind": "core algorithm",
+      "lesson_anchor": "Runtime policy is the primary gateway decision: recomputed for every request from principal, issuer, tenant, name, arguments, admitted pin, backend health, data classification; a Registry record can stay active while a role is revoked; a pinned descriptor does not stop a destination crossing a tenant boundary; incident policy can quarantine state changes; no allow decision cached under a connection or session; fail closed for state changes and sensitive reads, a short-lived last-known policy only for explicitly approved public reads; record the policy version and failure path; MRTR through a gateway (re-authorize every retry)",
+      "traps": [
+        "admission and pin taken as authorization",
+        "roles from the token, looked up without a default, or matched by name across issuers",
+        "allow decisions cached per context, or the policy fetched once",
+        "the tenant skipped for pinned tools, or a call naming no tenant taken as cross-tenant",
+        "a tool missing from the policy raising KeyError",
+        "rule order (admission before role, role before pin, pin before tenant, tenant before health, health before quarantine)",
+        "sensitive data refused while the policy service answers",
+        "quarantine holding reads, health or pin ignored",
+        "writes, sensitive reads, internal reads or unapproved public reads running on the last-known policy",
+        "the first policy kept as the last-known one; the ttl boundary inclusive, counted from the first fetch, refreshed by failed fetches, or refreshed only by allowing decisions",
+        "the last-known policy skipping its rules or reported as live",
+        "fail-closed decisions carrying a version, reads failing open, PolicyUnavailable escaping"
+      ],
+      "integration": "the gateway with a PolicyEngine refuses an MRTR retry after the principal's role is revoked, without forwarding it",
+      "clarifying_questions": [
+        "caching the policy document",
+        "token roles",
+        "no last-known policy",
+        "refresh on a denying fetch",
+        "which reason wins"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_sse_relay",
+      "kind": "streaming",
+      "lesson_anchor": "Request-scoped SSE (a POST may answer with SSE, closing the stream cancels the request, no Last-Event-ID replay); MRTR through a gateway (preserve requestState byte for byte); Tasks extension routing (the backend alone returns resultType task, the task is durably readable before the result is sent, the gateway records principal and backend route per task id, tasks/get uses params.taskId as Mcp-Name); Exercise 2",
+      "wire_format": "client-side SSE bytes: each event is a single `data: <JSON>` line and a blank line in UTF-8, decided by the test's strict parser",
+      "traps": [
+        "the response or an error response under the backend's id",
+        "progress under the client's request id, under the gateway's token, for other tokens, with an id, to a client that asked for none, or not at all for token 0",
+        "other notifications passed through, or a stray server request on the stream taken as the response",
+        "the backend read on after the response, or events relayed after it",
+        "progress held back until the response",
+        "the backend stream not closed when the client hangs up",
+        "the backend's serverInfo relayed, its _meta merged with the gateway's, or the result rebuilt from known fields (drops inputRequests and requestState)",
+        "another request's response on the stream taken as this one's",
+        "error responses dropped",
+        "the task recorded after the client has the event, in a finally, forgotten when the stream closes, or routed to the backend request id",
+        "task owners not checked, matched by name across issuers, or another owner refused differently from an unknown task",
+        "str events, a single newline, indented JSON, event: or id: lines, Latin-1 bytes"
+      ],
+      "integration": "Gateway.open_stream relays a backend's progress and task, tasks/get then reaches the backend that holds the task by the taskId in Mcp-Name while bob and another issuer's alice get the same -32602 as an unknown task, and two streamed MRTR rounds pass the backend's HMAC check on requestState",
+      "clarifying_questions": [
+        "progress without a client token",
+        "ids inside the result",
+        "other notifications",
+        "batching events",
+        "task id collisions"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_decision_chain",
+      "kind": "graph",
+      "lesson_anchor": "Audit the decision chain (record enough to reconstruct a call: request and trace ids, MRTR round or task identifier); MRTR through a gateway (the retry has a fresh JSON-RPC id); Tasks extension routing (tasks/get long after the original request); Exercise 1 (trace context recorded in the audit event)",
+      "traps": [
+        "request identity without the trace, without the principal (bob's service inside alice's trace also starts at 1), or by request id alone",
+        "events in log order, by ts alone, or as given",
+        "retries hung under the first request of the chain, or under the first call of the trace",
+        "a requestState that links only one retry",
+        "states or tasks shared between principals, or between the same name at two issuers",
+        "request identity without the issuer",
+        "MRTR rounds linked only within one trace",
+        "task requests linked through any result with a taskId, or through the previous task request",
+        "refused requests left out of the trees",
+        "results without a decision dropped",
+        "unlinkable requests starting a call, or their results listed as separate orphans",
+        "every decision placed before any result"
+      ],
+      "integration": "the gateway's own audit trail for two MRTR rounds and a search folds back into two calls with no orphans",
+      "clarifying_questions": [
+        "two results per request",
+        "refused retries",
+        "a link to a later result",
+        "id types"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the suggested defect order was _meta, token, rate limit, timing. The fake backend checks its credential before it reads the request, so the token defect surfaces first (a 502 carrying the backend's -32001) and the _meta defect second (the backend returns a task because it saw the caller's Tasks declaration, and the gateway's result check refuses it). The token defect is the caller's headers merged over the gateway's; handle receives the HTTP headers, Authorization included, instead of a separate bearer argument, so the outer token can actually leak.",
+    "Part 1: the suggested limiter was a TokenBucket keeping a timestamp list. The lesson's sentence is 'Key limits by ... and time window', and a timestamp list is a sliding-window log, so the exam's RateLimiter is a sliding window with the lesson's key; the lesson's TokenBucket semantics are one of the wrong fixes. The suggested 50,000 calls take about 4 s quadratic on this machine, over the 3 s cap, so the timing case is 12,001 calls on one key with a 12,000-call window (about 1 s against 2 ms).",
+    "Part 1: the early spend is keyed off the Mcp-Name routing header, the shortcut the lesson's header routing invites. Besides the suggested global-bucket guard, the test checks that policy-refused calls are 403 every time and that a rate-limited call is not forwarded, which fixes the place of the spend between the policy and the forward.",
+    "Part 2: the log numbers events with seq (continuing across reopens and counting other replicas' lines) so Part 5 has a tie-breaker. Redaction is by key name under arguments and inputResponses, plus header names only; the gateway never puts requestState itself into an event, only a digest.",
+    "Part 3: roles come from the policy document keyed by (issuer, principal); CallContext.token_roles is a distractor, because a token outlives a revocation. 'Do not cache an allow decision per session' is tested as 'a revocation applies to the next decision'. The descriptor pin, admission and health are boolean inputs, since pins and registry admission belong to lessons 15 and 30.",
+    "Part 4: backends hand the relay parsed JSON-RPC messages (SSE decoding is lesson 09's Part 5) and the relay writes client-side SSE. The gateway gives the backend its own progress token, the backend request id, so 'id rewriting must not touch progressToken' becomes two separate mappings (token to the client's token, id to the client's id). requestState is an opaque string, so 'not re-serialized' is tested as the result passing through untouched apart from _meta, plus the backend's HMAC check on the retry. 'Task routes kept until the terminal state' is tested as routes surviving the stream's close; the route table has no expiry here.",
+    "Part 5: two event kinds, decision and result, with the identity (issuer, principal, trace_id, request_id). MRTR rounds link through state digests (state_in to an earlier state_out) because the retry has a new id and the gateway cannot read requestState; task requests link through (issuer, principal, taskId) to the result that returned the task.",
+    "Facts used beyond docs/en.md: the progress notification params (as in lesson 29's code) and the request's params._meta.progressToken (the MCP progress utility); task fields, the -32602 for an unknown task id and ownership checks (lesson 13); inputRequests and the elicitation, sampling and roots capability names (lessons 11 and 12); traceparent in _meta (lesson 20); -32001, -32003 and -32029 (this lesson's code/main.py). The -32603 and HTTP 502 for backend failures, the audit event fields and the SECRET_KEYS list are this gateway's own choices, stated in its docstrings."
+  ]
+}
