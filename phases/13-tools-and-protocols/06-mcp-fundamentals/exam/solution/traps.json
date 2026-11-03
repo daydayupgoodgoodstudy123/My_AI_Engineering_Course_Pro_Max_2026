@@ -1,0 +1,1453 @@
+{
+  "package": "mcpcore",
+  "tests": [
+    "test_stateless_requests",
+    "test_transcript_roundtrip",
+    "test_request_lifecycle",
+    "test_trace_stream",
+    "test_required_capabilities"
+  ],
+  "layers": [
+    {
+      "test": "test_stateless_requests",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a request for an unsupported version is refused with -32022"
+        },
+        {
+          "name": "make_request copies params",
+          "edits": [
+            {
+              "file": "wire.py",
+              "old": "    body_params = params if params is not None else {}\n",
+              "new": "    body_params = copy.deepcopy(params) if params is not None else {}\n"
+            }
+          ],
+          "expect": "a request declares only its own capabilities"
+        },
+        {
+          "name": "+ a fresh capability object per request",
+          "edits": [
+            {
+              "file": "wire.py",
+              "old": "NO_CAPABILITIES if capabilities is None else",
+              "new": "{} if capabilities is None else"
+            }
+          ],
+          "expect": "missing capabilities are invalid params; they are never taken from an earlier request"
+        },
+        {
+          "name": "+ nothing carried over from earlier requests",
+          "edits": [
+            {
+              "file": "server.py",
+              "old": "        params = message.get(\"params\")\n        meta = params.get(\"_meta\") if isinstance(params, dict) else None\n        if isinstance(meta, dict):\n            if CAPABILITIES_KEY in meta:\n                self._client_capabilities = meta[CAPABILITIES_KEY]\n            elif self._client_capabilities is not None:\n                meta[CAPABILITIES_KEY] = self._client_capabilities\n",
+              "new": ""
+            }
+          ],
+          "expect": "tools/list orders tools by name, whatever the registration order"
+        },
+        {
+          "name": "+ tools/list sorted by name",
+          "edits": [
+            {
+              "file": "server.py",
+              "old": "for definition, _ in self._tools]",
+              "new": "for definition, _ in sorted(self._tools, key=lambda tool: tool[0][\"name\"])]"
+            }
+          ],
+          "expect": "tools/call should stay fast with thousands of tools"
+        },
+        {
+          "name": "+ tools indexed by name",
+          "edits": [
+            {
+              "file": "server.py",
+              "old": "        self._names: set[str] = set()\n",
+              "new": "        self._names: set[str] = set()\n        self._by_name: dict[str, tuple[dict[str, Any], Handler]] = {}\n"
+            },
+            {
+              "file": "server.py",
+              "old": "        self._tools.append((copy.deepcopy(definition), handler))\n",
+              "new": "        self._tools.append((copy.deepcopy(definition), handler))\n        self._by_name[name] = self._tools[-1]\n"
+            },
+            {
+              "file": "server.py",
+              "old": "        for tool in sorted(self._tools, key=lambda tool: tool[0][\"name\"]):\n            if tool[0][\"name\"] == name:\n                return tool\n        return None\n",
+              "new": "        return self._by_name.get(name)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_stateless_requests",
+      "name": "params copied one level deep (dict(params))",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "copy.deepcopy(params) if params is not None else {}",
+          "new": "dict(params) if params is not None else {}"
+        }
+      ],
+      "expect": "the caller's params are neither shared with the request nor changed"
+    },
+    {
+      "test": "test_stateless_requests",
+      "name": "the finished request deep-copied, the caller's params still written to",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "copy.deepcopy(params) if params is not None else {}",
+          "new": "params if params is not None else {}"
+        },
+        {
+          "file": "wire.py",
+          "old": "    return {\"jsonrpc\": \"2.0\", \"id\": request_id, \"method\": method, \"params\": body_params}",
+          "new": "    return copy.deepcopy({\"jsonrpc\": \"2.0\", \"id\": request_id, \"method\": method, \"params\": body_params})"
+        }
+      ],
+      "expect": "the caller's params are neither shared with the request nor changed"
+    },
+    {
+      "test": "test_stateless_requests",
+      "name": "explicitly passed capabilities put in the request as they are",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "{} if capabilities is None else copy.deepcopy(capabilities)",
+          "new": "{} if capabilities is None else capabilities"
+        }
+      ],
+      "expect": "a request declares only its own capabilities"
+    },
+    {
+      "test": "test_stateless_requests",
+      "name": "one shared empty dict as the default capabilities",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "        CAPABILITIES_KEY: {} if capabilities is None else copy.deepcopy(capabilities),",
+          "new": "        CAPABILITIES_KEY: _NONE if capabilities is None else copy.deepcopy(capabilities),"
+        },
+        {
+          "file": "wire.py",
+          "old": "def request_meta(",
+          "new": "_NONE: dict[str, Any] = {}\n\n\ndef request_meta("
+        }
+      ],
+      "expect": "a request declares only its own capabilities"
+    },
+    {
+      "test": "test_stateless_requests",
+      "name": "missing capabilities read as an empty object (overfix)",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "    if not isinstance(meta.get(CAPABILITIES_KEY), dict):",
+          "new": "    if not isinstance(meta.get(CAPABILITIES_KEY, {}), dict):"
+        }
+      ],
+      "expect": "missing capabilities are invalid params"
+    },
+    {
+      "test": "test_stateless_requests",
+      "name": "dispatch fills in an empty capability object (overfix)",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        invalid = validate_request(message)\n",
+          "new": "        if isinstance(message.get(\"params\"), dict) and isinstance(message[\"params\"].get(\"_meta\"), dict):\n            message[\"params\"][\"_meta\"].setdefault(CAPABILITIES_KEY, {})\n        invalid = validate_request(message)\n"
+        },
+        {
+          "file": "server.py",
+          "old": "from .wire import SUPPORTED_VERSIONS,",
+          "new": "from .wire import CAPABILITIES_KEY, SUPPORTED_VERSIONS,"
+        }
+      ],
+      "expect": "missing capabilities are invalid params"
+    },
+    {
+      "test": "test_stateless_requests",
+      "name": "clientInfo required like the version and capabilities (overfix)",
+      "edits": [
+        {
+          "file": "wire.py",
+          "old": "    if client_info is not None and not (",
+          "new": "    if not ("
+        }
+      ],
+      "expect": "clientInfo is recommended, not required"
+    },
+    {
+      "test": "test_stateless_requests",
+      "name": "tools looked up in a scan of the registry",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            tool = self._tools.get(name)\n",
+          "new": "            tool = next((t for n, t in self._tools.items() if n == name), None)\n"
+        }
+      ],
+      "expect": "tools/call should stay fast with thousands of tools"
+    },
+    {
+      "test": "test_stateless_requests",
+      "name": "name checked against a freshly sorted list on every call",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            tool = self._tools.get(name)\n",
+          "new": "            tool = self._tools[name] if name in sorted(self._tools) else None\n"
+        }
+      ],
+      "expect": "tools/call should stay fast with thousands of tools"
+    },
+    {
+      "test": "test_stateless_requests",
+      "name": "lookup index built once in __init__ (overfix)",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        for definition, handler in tools:\n            self.register(definition, handler)\n",
+          "new": "        for definition, handler in tools:\n            self.register(definition, handler)\n        self._index = dict(self._tools)\n"
+        },
+        {
+          "file": "server.py",
+          "old": "            tool = self._tools.get(name)\n",
+          "new": "            tool = self._index.get(name)\n"
+        }
+      ],
+      "expect": "a tool registered later can be called"
+    },
+    {
+      "test": "test_stateless_requests",
+      "name": "a name index rebuilt on every call",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            tool = self._tools.get(name)\n",
+          "new": "            tool = {n: t for n, t in self._tools.items()}.get(name)\n"
+        }
+      ],
+      "expect": "tools/call should stay fast with thousands of tools"
+    },
+    {
+      "test": "test_stateless_requests",
+      "name": "sorted listing computed once and cached (overfix)",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            tools = [copy.deepcopy(self._tools[name][0]) for name in sorted(self._tools)]\n",
+          "new": "            if not hasattr(self, \"_order\"):\n                self._order = sorted(self._tools)\n            tools = [copy.deepcopy(self._tools[name][0]) for name in self._order]\n"
+        }
+      ],
+      "expect": "a tool registered later is listed"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "a null id stored as SQL NULL, like a missing one",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    return None if value is NO_ID else json.dumps(value, sort_keys=True)",
+          "new": "    return None if value is NO_ID or value is None else json.dumps(value, sort_keys=True)"
+        }
+      ],
+      "expect": "a reopened transcript gives back every entry exactly"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "SQL NULL read back as a null id",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "NO_ID if id_json is None else json.loads(id_json)",
+          "new": "None if id_json is None else json.loads(id_json)"
+        }
+      ],
+      "expect": "a reopened transcript gives back every entry exactly"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "a falsy id read back as missing (json.loads(...) or NO_ID)",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "NO_ID if id_json is None else json.loads(id_json)",
+          "new": "json.loads(id_json or \"null\") or NO_ID"
+        }
+      ],
+      "expect": "a reopened transcript gives back every entry exactly"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "numeric ids bound as SQLite INTEGER",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    id_json TEXT\n",
+          "new": "    id_json\n"
+        },
+        {
+          "file": "transcript.py",
+          "old": "    return None if value is NO_ID else json.dumps(value, sort_keys=True)",
+          "new": "    if isinstance(value, int):\n        return value\n    return None if value is NO_ID else json.dumps(value, sort_keys=True)"
+        },
+        {
+          "file": "transcript.py",
+          "old": "NO_ID if id_json is None else json.loads(id_json)",
+          "new": "NO_ID if id_json is None else id_json if isinstance(id_json, int) else json.loads(id_json)"
+        }
+      ],
+      "expect": "OverflowError"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "id JSON kept in an INTEGER column",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    id_json TEXT\n",
+          "new": "    id_json INTEGER\n"
+        },
+        {
+          "file": "transcript.py",
+          "old": "NO_ID if id_json is None else json.loads(id_json)",
+          "new": "NO_ID if id_json is None else json.loads(str(id_json))"
+        }
+      ],
+      "expect": "a reopened transcript gives back every entry exactly"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "ids stored with str()",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    return None if value is NO_ID else json.dumps(value, sort_keys=True)",
+          "new": "    return None if value is NO_ID else str(value)"
+        },
+        {
+          "file": "transcript.py",
+          "old": "NO_ID if id_json is None else json.loads(id_json)",
+          "new": "NO_ID if id_json is None else id_json"
+        },
+        {
+          "file": "transcript.py",
+          "old": "            (json.dumps(value, sort_keys=True),),",
+          "new": "            (str(value),),"
+        }
+      ],
+      "expect": "a reopened transcript gives back every entry exactly"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "id JSON kept in a NUMERIC column",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    id_json TEXT\n",
+          "new": "    id_json NUMERIC\n"
+        },
+        {
+          "file": "transcript.py",
+          "old": "NO_ID if id_json is None else json.loads(id_json)",
+          "new": "NO_ID if id_json is None else json.loads(str(id_json))"
+        }
+      ],
+      "expect": "a reopened transcript gives back every entry exactly"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "with_id compares str(value)",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "            (json.dumps(value, sort_keys=True),),",
+          "new": "            (str(value),),"
+        }
+      ],
+      "expect": "7 and \"7\" are different ids"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "raw lines decoded as UTF-8 text",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "(seq, direction, bytes(raw), method, _id_json(request_id))",
+          "new": "(seq, direction, raw.decode(\"utf-8\"), method, _id_json(request_id))"
+        },
+        {
+          "file": "transcript.py",
+          "old": "    return Entry(seq, direction, bytes(raw), method, NO_ID",
+          "new": "    return Entry(seq, direction, raw.encode(\"utf-8\"), method, NO_ID"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "raw lines decoded with errors=\"replace\"",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "(seq, direction, bytes(raw), method, _id_json(request_id))",
+          "new": "(seq, direction, raw.decode(\"utf-8\", errors=\"replace\"), method, _id_json(request_id))"
+        },
+        {
+          "file": "transcript.py",
+          "old": "    return Entry(seq, direction, bytes(raw), method, NO_ID",
+          "new": "    return Entry(seq, direction, raw.encode(\"utf-8\"), method, NO_ID"
+        }
+      ],
+      "expect": "every line comes back byte for byte"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "raw lines stripped before storing",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "(seq, direction, bytes(raw), method, _id_json(request_id))",
+          "new": "(seq, direction, bytes(raw).strip(), method, _id_json(request_id))"
+        }
+      ],
+      "expect": "every line comes back byte for byte"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "parsed message stored again as JSON instead of the raw line",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "(seq, direction, bytes(raw), method, _id_json(request_id))",
+          "new": "(seq, direction, _again(raw), method, _id_json(request_id))"
+        },
+        {
+          "file": "transcript.py",
+          "old": "def _to_entry(row: tuple) -> Entry:",
+          "new": "def _again(raw: bytes) -> bytes:\n    try:\n        return json.dumps(json.loads(raw)).encode()\n    except ValueError:\n        return bytes(raw)\n\n\ndef _to_entry(row: tuple) -> Entry:"
+        }
+      ],
+      "expect": "every line comes back byte for byte"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "entries ordered by insertion, not by seq",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    seq INTEGER PRIMARY KEY,\n",
+          "new": "    row INTEGER PRIMARY KEY AUTOINCREMENT,\n    seq INTEGER NOT NULL UNIQUE,\n"
+        },
+        {
+          "file": "transcript.py",
+          "old": "            \"SELECT seq, direction, raw, method, id_json FROM messages ORDER BY seq\"",
+          "new": "            \"SELECT seq, direction, raw, method, id_json FROM messages ORDER BY row\""
+        }
+      ],
+      "expect": "entries come back in seq order, whatever order they were recorded in"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "seq stored as text, so it sorts as text",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    seq INTEGER PRIMARY KEY,\n",
+          "new": "    seq TEXT PRIMARY KEY,\n"
+        },
+        {
+          "file": "transcript.py",
+          "old": "    seq, direction, raw, method, id_json = row\n",
+          "new": "    seq, direction, raw, method, id_json = row\n    seq = int(seq)\n"
+        }
+      ],
+      "expect": "entries come back in seq order, whatever order they were recorded in"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "with_id ordered by a separate insertion row id",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    seq INTEGER PRIMARY KEY,\n",
+          "new": "    row INTEGER PRIMARY KEY AUTOINCREMENT,\n    seq INTEGER NOT NULL UNIQUE,\n"
+        },
+        {
+          "file": "transcript.py",
+          "old": "\" WHERE id_json = ? ORDER BY seq\",",
+          "new": "\" WHERE id_json = ? ORDER BY row\","
+        }
+      ],
+      "expect": "an id past 64 bits finds its messages, in seq order"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "direction not checked",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "        if direction not in DIRECTIONS:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "version support checked before the headers",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n",
+          "new": ""
+        },
+        {
+          "file": "lifecycle.py",
+          "old": "    if headers is not None:\n        mirrored = [(VERSION_HEADER, version), (METHOD_HEADER, method)]\n        if method in NAME_PARAMS:\n            mirrored.append((NAME_HEADER, params.get(NAME_PARAMS[method])))\n        for header, body_value in mirrored:\n            value = headers.get(header)\n            if value is None or value != body_value:\n                return rpc_error(request_id, -32020, f\"{header} does not match the request body\")\n\n",
+          "new": "    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n    if headers is not None:\n        mirrored = [(VERSION_HEADER, version), (METHOD_HEADER, method)]\n        if method in NAME_PARAMS:\n            mirrored.append((NAME_HEADER, params.get(NAME_PARAMS[method])))\n        for header, body_value in mirrored:\n            value = headers.get(header)\n            if value is None or value != body_value:\n                return rpc_error(request_id, -32020, f\"{header} does not match the request body\")\n\n"
+        }
+      ],
+      "expect": "a header version that differs from the body is -32020, even when the body version is unsupported"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "validate_request reused before the headers are compared",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    if headers is not None:\n        mirrored = [(VERSION_HEADER, version), (METHOD_HEADER, method)]\n        if method in NAME_PARAMS:\n            mirrored.append((NAME_HEADER, params.get(NAME_PARAMS[method])))\n        for header, body_value in mirrored:\n            value = headers.get(header)\n            if value is None or value != body_value:\n                return rpc_error(request_id, -32020, f\"{header} does not match the request body\")\n\n",
+          "new": "    from .wire import validate_request\n\n    invalid = validate_request(message)\n    if invalid is not None:\n        return invalid\n    if headers is not None:\n        mirrored = [(VERSION_HEADER, version), (METHOD_HEADER, method)]\n        if method in NAME_PARAMS:\n            mirrored.append((NAME_HEADER, params.get(NAME_PARAMS[method])))\n        for header, body_value in mirrored:\n            value = headers.get(header)\n            if value is None or value != body_value:\n                return rpc_error(request_id, -32020, f\"{header} does not match the request body\")\n\n"
+        }
+      ],
+      "expect": "a header version that differs from the body is -32020, even when the body version is unsupported"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "the header's version checked for support",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    if headers is not None:\n        mirrored = [(VERSION_HEADER, version), (METHOD_HEADER, method)]\n        if method in NAME_PARAMS:\n            mirrored.append((NAME_HEADER, params.get(NAME_PARAMS[method])))\n        for header, body_value in mirrored:\n            value = headers.get(header)\n            if value is None or value != body_value:\n                return rpc_error(request_id, -32020, f\"{header} does not match the request body\")\n\n",
+          "new": "    if headers is not None and headers.get(VERSION_HEADER) not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, headers.get(VERSION_HEADER))\n    if headers is not None:\n        mirrored = [(VERSION_HEADER, version), (METHOD_HEADER, method)]\n        if method in NAME_PARAMS:\n            mirrored.append((NAME_HEADER, params.get(NAME_PARAMS[method])))\n        for header, body_value in mirrored:\n            value = headers.get(header)\n            if value is None or value != body_value:\n                return rpc_error(request_id, -32020, f\"{header} does not match the request body\")\n\n"
+        }
+      ],
+      "expect": "a header version that differs from the body is -32020, even when the header version is unsupported"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "the version header compared only when the body's version is supported",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "        mirrored = [(VERSION_HEADER, version), (METHOD_HEADER, method)]\n",
+          "new": "        mirrored = [(VERSION_HEADER, version), (METHOD_HEADER, method)] if version in SUPPORTED_VERSIONS else [(METHOD_HEADER, method)]\n"
+        }
+      ],
+      "expect": "a header version that differs from the body is -32020, even when the body version is unsupported"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "headers compared before the metadata types",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    meta = params.get(\"_meta\")\n",
+          "new": "    if headers is not None and headers.get(VERSION_HEADER) != (params.get(\"_meta\") or {}).get(VERSION_KEY):\n        return rpc_error(request_id, -32020, \"MCP-Protocol-Version does not match the request body\")\n    meta = params.get(\"_meta\")\n"
+        }
+      ],
+      "expect": "a version that is not a string is -32602, before any header is compared"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "capabilities checked after the version, as in the lesson's validate_request",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    capabilities = meta.get(CAPABILITIES_KEY)\n    if not isinstance(capabilities, dict):\n        return rpc_error(request_id, -32602, f\"{CAPABILITIES_KEY} must be an object\")\n",
+          "new": ""
+        },
+        {
+          "file": "lifecycle.py",
+          "old": "    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n",
+          "new": "    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n    capabilities = meta.get(CAPABILITIES_KEY)\n    if not isinstance(capabilities, dict):\n        return rpc_error(request_id, -32602, f\"{CAPABILITIES_KEY} must be an object\")\n"
+        }
+      ],
+      "expect": "missing capabilities are -32602, even with an unsupported version"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "clientInfo checked after the version",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    client_info = meta.get(CLIENT_INFO_KEY)\n    if client_info is not None and not (\n        isinstance(client_info, dict)\n        and isinstance(client_info.get(\"name\"), str)\n        and isinstance(client_info.get(\"version\"), str)\n    ):\n        return rpc_error(request_id, -32602, f\"{CLIENT_INFO_KEY} needs a string name and version\")\n",
+          "new": ""
+        },
+        {
+          "file": "lifecycle.py",
+          "old": "    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n",
+          "new": "    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n    client_info = meta.get(CLIENT_INFO_KEY)\n    if client_info is not None and not (\n        isinstance(client_info, dict)\n        and isinstance(client_info.get(\"name\"), str)\n        and isinstance(client_info.get(\"version\"), str)\n    ):\n        return rpc_error(request_id, -32602, f\"{CLIENT_INFO_KEY} needs a string name and version\")\n"
+        }
+      ],
+      "expect": "a malformed clientInfo is -32602, even with an unsupported version"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "clientInfo required",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    if client_info is not None and not (",
+          "new": "    if not ("
+        }
+      ],
+      "expect": "clientInfo is optional"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "method looked up before the version",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    if method not in methods:\n        return rpc_error(request_id, -32601, f\"Method not found: {method}\")\n",
+          "new": ""
+        },
+        {
+          "file": "lifecycle.py",
+          "old": "    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n",
+          "new": "    if method not in methods:\n        return rpc_error(request_id, -32601, f\"Method not found: {method}\")\n    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n"
+        }
+      ],
+      "expect": "the version is checked before the method"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "newer versions assumed compatible",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    if version not in SUPPORTED_VERSIONS:\n",
+          "new": "    if version < min(SUPPORTED_VERSIONS):\n"
+        }
+      ],
+      "expect": "a version that header and body agree on, but the server does not support, is -32022"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "Mcp-Name always compared with params.name",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "params.get(NAME_PARAMS[method])",
+          "new": "params.get(\"name\")"
+        }
+      ],
+      "expect": "for resources/read Mcp-Name mirrors params.uri"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "Mcp-Name compared only when it is sent",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "        if method in NAME_PARAMS:\n",
+          "new": "        if method in NAME_PARAMS and NAME_HEADER in headers:\n"
+        }
+      ],
+      "expect": "Mcp-Name is required for tools/call over HTTP"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "a missing header treated as agreeing",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "            if value is None or value != body_value:\n",
+          "new": "            if value is not None and value != body_value:\n"
+        }
+      ],
+      "expect": "over HTTP the mirrored headers are required, even when no headers came at all"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "Mcp-Method not compared",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "        mirrored = [(VERSION_HEADER, version), (METHOD_HEADER, method)]\n",
+          "new": "        mirrored = [(VERSION_HEADER, version)]\n"
+        }
+      ],
+      "expect": "Mcp-Method must equal the body's method"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "Mcp-Method compared after the version check",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "        mirrored = [(VERSION_HEADER, version), (METHOD_HEADER, method)]\n",
+          "new": "        mirrored = [(VERSION_HEADER, version)]\n"
+        },
+        {
+          "file": "lifecycle.py",
+          "old": "    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n",
+          "new": "    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n    if headers is not None and headers.get(METHOD_HEADER) != method:\n        return rpc_error(request_id, -32020, \"Mcp-Method does not match the request body\")\n"
+        }
+      ],
+      "expect": "Mcp-Method must equal the body's method, and it is compared before the version is checked"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "Mcp-Name compared after the version check, like a tools/call argument",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "        if method in NAME_PARAMS:\n            mirrored.append((NAME_HEADER, params.get(NAME_PARAMS[method])))\n",
+          "new": ""
+        },
+        {
+          "file": "lifecycle.py",
+          "old": "    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n",
+          "new": "    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n    if headers is not None and method in NAME_PARAMS:\n        value = headers.get(NAME_HEADER)\n        if value is None or value != params.get(NAME_PARAMS[method]):\n            return rpc_error(request_id, -32020, f\"{NAME_HEADER} does not match the request body\")\n"
+        }
+      ],
+      "expect": "Mcp-Name must equal params.name for tools/call, and it is compared before the version is checked"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "a notification's params checked first",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    notification = \"id\" not in message\n    if notification and headers is None:\n        return None\n",
+          "new": "    notification = \"id\" not in message\n"
+        },
+        {
+          "file": "lifecycle.py",
+          "old": "    meta = params.get(\"_meta\")\n",
+          "new": "    if notification and headers is None:\n        return None\n    meta = params.get(\"_meta\")\n"
+        }
+      ],
+      "expect": "a notification is never answered outside HTTP, however malformed"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "a notification's envelope checked first",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    notification = \"id\" not in message\n    if notification and headers is None:\n        return None\n",
+          "new": "    notification = \"id\" not in message\n"
+        },
+        {
+          "file": "lifecycle.py",
+          "old": "    params = message.get(\"params\")\n",
+          "new": "    if notification and headers is None:\n        return None\n    params = message.get(\"params\")\n"
+        }
+      ],
+      "expect": "a notification is never answered outside HTTP, whatever is wrong with it"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "every notification checked, even outside HTTP",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    if notification and headers is None:\n        return None\n",
+          "new": ""
+        }
+      ],
+      "expect": "a notification is never answered outside HTTP, however malformed"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "notifications never checked, even over HTTP",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    if notification and headers is None:\n        return None\n",
+          "new": "    if notification:\n        return None\n"
+        }
+      ],
+      "expect": "over HTTP a notification is checked like a request, and its error has a null id"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "an HTTP notification's error sent without an id member",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "                return rpc_error(request_id, -32020, f\"{header} does not match the request body\")\n",
+          "new": "                error = rpc_error(request_id, -32020, f\"{header} does not match the request body\")\n                if notification:\n                    del error[\"id\"]\n                return error\n"
+        }
+      ],
+      "expect": "over HTTP a notification is checked like a request, and its error has a null id"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "an HTTP notification let through before its version is checked",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n    if notification:\n        return None\n",
+          "new": "    if notification:\n        return None\n    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n"
+        }
+      ],
+      "expect": "over HTTP a notification's version is checked too"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "an HTTP notification put through the method check",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    if notification:\n        return None\n    needs",
+          "new": "    needs"
+        }
+      ],
+      "expect": "over HTTP a notification that passes the checks gets no response"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "a body that is not an object passed on",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "        return rpc_error(None, -32600, \"Invalid Request: expected one JSON object\")",
+          "new": "        return None"
+        }
+      ],
+      "expect": "a body that is not one JSON object is -32600 with a null id"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "a batch answered from its first message",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    if not isinstance(message, dict):\n",
+          "new": "    if isinstance(message, list) and message:\n        message = message[0]\n    if not isinstance(message, dict):\n"
+        }
+      ],
+      "expect": "a body that is not one JSON object is -32600 with a null id"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "headers compared only when any were sent",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    if headers is not None:\n        mirrored",
+          "new": "    if headers:\n        mirrored"
+        }
+      ],
+      "expect": "over HTTP the mirrored headers are required, even when no headers came at all"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "a parse error sent without an id member",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "        return rpc_error(None, -32700, \"Parse error\")",
+          "new": "        return {\"jsonrpc\": \"2.0\", \"error\": {\"code\": -32700, \"message\": \"Parse error\"}}"
+        }
+      ],
+      "expect": "a body that is not JSON is -32700 with a null id"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "a parse error reported as -32600",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "        return rpc_error(None, -32700, \"Parse error\")",
+          "new": "        return rpc_error(None, -32600, \"Parse error\")"
+        }
+      ],
+      "expect": "a body that is not JSON is -32700 with a null id"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "params that are not an object reported as -32600",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "        return rpc_error(request_id, -32602, \"params must be an object\")",
+          "new": "        return rpc_error(request_id, -32600, \"params must be an object\")"
+        }
+      ],
+      "expect": "params must be an object"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "errors sent with a null id",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    request_id = message.get(\"id\")\n",
+          "new": "    request_id = None\n"
+        }
+      ],
+      "expect": "jsonrpc must be \"2.0\""
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "the server's own version list put in the error data",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "        return unsupported_version(request_id, version)\n",
+          "new": "        return rpc_error(request_id, -32022, \"Unsupported protocol version\", {\"requested\": version, \"supported\": SUPPORTED_VERSIONS})\n"
+        }
+      ],
+      "expect": "error data is the server's answer to one request, not its own list of versions"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "supported versions sent as a tuple",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "        return unsupported_version(request_id, version)\n",
+          "new": "        return rpc_error(request_id, -32022, \"Unsupported protocol version\", {\"requested\": version, \"supported\": tuple(SUPPORTED_VERSIONS)})\n"
+        }
+      ],
+      "expect": "a version that header and body agree on, but the server does not support, is -32022"
+    },
+    {
+      "test": "test_request_lifecycle",
+      "name": "error data names the fields differently",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "        return unsupported_version(request_id, version)\n",
+          "new": "        return rpc_error(request_id, -32022, \"Unsupported protocol version\", {\"requestedVersion\": version, \"supportedVersions\": list(SUPPORTED_VERSIONS)})\n"
+        }
+      ],
+      "expect": "a version that header and body agree on, but the server does not support, is -32022"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "an answered request stays pending",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        answered = pending.pop(_key(message[\"id\"]), None)\n",
+          "new": "        answered = pending.get(_key(message[\"id\"]))\n"
+        }
+      ],
+      "expect": "a request answered once is no longer pending"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "a response matched to the oldest pending request",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        answered = pending.pop(_key(message[\"id\"]), None)\n",
+          "new": "        answered = pending.pop(next(iter(pending)), None) if pending else None\n"
+        }
+      ],
+      "expect": "a response answers the request with its id, not the oldest one pending"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "notifications kept as pending under their missing id",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        era = \"legacy\" if method == \"notifications/initialized\" else \"unknown\"\n",
+          "new": "        era = \"legacy\" if method == \"notifications/initialized\" else \"unknown\"\n        pending[_key(message.get(\"id\"))] = method\n"
+        }
+      ],
+      "expect": "a notification is never pending"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "every error labeled unknown, as in the lesson's trace_message",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "            era = \"modern\" if isinstance(code, int) and code in MODERN_ERRORS else \"unknown\"\n",
+          "new": "            era = \"unknown\"\n"
+        }
+      ],
+      "expect": "-32020, -32021 and -32022 are modern evidence; other codes are not"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "every error labeled modern",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "            era = \"modern\" if isinstance(code, int) and code in MODERN_ERRORS else \"unknown\"\n",
+          "new": "            era = \"modern\"\n"
+        }
+      ],
+      "expect": "-32020, -32021 and -32022 are modern evidence; other codes are not"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "-32021 left out of the modern codes",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "MODERN_ERRORS = frozenset({-32020, -32021, -32022})",
+          "new": "MODERN_ERRORS = frozenset({-32020, -32022})"
+        }
+      ],
+      "expect": "-32020, -32021 and -32022 are modern evidence; other codes are not"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "a result without resultType always legacy, as in the lesson's trace_message",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        else:\n            era = \"invalid\"\n",
+          "new": "        else:\n            era = \"legacy\"\n"
+        }
+      ],
+      "expect": "a result without resultType is legacy only when it answers initialize"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "only resultType complete taken as modern",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        if result_type is not None:\n            era = \"modern\"\n",
+          "new": "        if result_type == \"complete\":\n            era = \"modern\"\n"
+        }
+      ],
+      "expect": "any resultType is modern evidence, not only complete"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "legacy judged by the result's fields instead of the request it answers",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        elif request_method == \"initialize\":\n",
+          "new": "        elif isinstance(result, dict) and \"protocolVersion\" in result:\n"
+        }
+      ],
+      "expect": "a result is legacy only when it answers initialize, whatever its fields"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "legacy mode switched on by initialize",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        if method == \"initialize\":\n            era, detail = \"legacy\", \"connection-scoped handshake\"\n",
+          "new": "        if method == \"initialize\" or \"\\x00legacy\" in pending:\n            pending[\"\\x00legacy\"] = \"\"\n            era, detail = \"legacy\", \"connection-scoped handshake\" if method == \"initialize\" else \"legacy connection\"\n"
+        }
+      ],
+      "expect": "a result without resultType is legacy only when it answers initialize"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "only requests with modern metadata or initialize become pending",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        pending[_key(message[\"id\"])] = method\n",
+          "new": "        if era != \"invalid\":\n            pending[_key(message[\"id\"])] = method\n"
+        }
+      ],
+      "expect": "an invalid request still waits for its answer"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "anything answering initialize labeled legacy",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "            return kind, era, request_method, f\"code={code}\"\n",
+          "new": "            if request_method == \"initialize\":\n                era = \"legacy\"\n            return kind, era, request_method, f\"code={code}\"\n"
+        }
+      ],
+      "expect": "an error's era comes from its code, even when it answers initialize"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "the initialize result labeled invalid",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        elif request_method == \"initialize\":\n            era = \"legacy\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "initialize, its result and notifications/initialized are legacy"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "notifications/initialized not legacy",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        era = \"legacy\" if method == \"notifications/initialized\" else \"unknown\"\n",
+          "new": "        era = \"unknown\"\n"
+        }
+      ],
+      "expect": "initialize, its result and notifications/initialized are legacy"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "a missing resultType printed as None",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "f\"resultType={'absent' if result_type is None else result_type}\"",
+          "new": "f\"resultType={result_type}\""
+        }
+      ],
+      "expect": "initialize, its result and notifications/initialized are legacy"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "the version alone taken as modern metadata",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "VERSION_KEY in meta and CAPABILITIES_KEY in meta",
+          "new": "VERSION_KEY in meta"
+        }
+      ],
+      "expect": "a modern request carries both the protocol version and the capabilities"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "the server's own version printed in the detail",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "f\"version={meta[VERSION_KEY]} capabilities=current-request\"",
+          "new": "\"version=2026-07-28 capabilities=current-request\""
+        }
+      ],
+      "expect": "label every message as the docstring says"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "a response named after its own result or error, as in the lesson's trace_message",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        kind, request_method = (\"response\", answered) if answered is not None else (\"orphan\", \"?\")\n",
+          "new": "        kind, request_method = (\"response\" if answered is not None else \"orphan\"), (\"error\" if \"error\" in message else \"result\")\n"
+        }
+      ],
+      "expect": "a response answers the request with its id, not the oldest one pending"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "an orphan written as an ordinary response",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "if answered is not None else (\"orphan\", \"?\")",
+          "new": "if answered is not None else (\"response\", \"?\")"
+        }
+      ],
+      "expect": "a request answered once is no longer pending"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "an id never used twice",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        answered = pending.pop(_key(message[\"id\"]), None)\n",
+          "new": "        seen = pending.setdefault(\"\\x00answered\", set())\n        answered = None if _key(message[\"id\"]) in seen else pending.pop(_key(message[\"id\"]), None)\n        seen.add(_key(message[\"id\"]))\n"
+        }
+      ],
+      "expect": "an id can be used again once its request is answered"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "the whole stream read before the first line",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "    async for message in messages:\n",
+          "new": "    for message in [m async for m in messages]:\n"
+        }
+      ],
+      "expect": "write each line as soon as its message arrives"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "lines without a newline",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        yield f\"[{kind}/{era}] {method}: {detail}\\n\"",
+          "new": "        yield f\"[{kind}/{era}] {method}: {detail}\""
+        }
+      ],
+      "expect": "one line per message, each ending in a newline"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "a blank line after every line",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        yield f\"[{kind}/{era}] {method}: {detail}\\n\"",
+          "new": "        yield f\"[{kind}/{era}] {method}: {detail}\\n\\n\""
+        }
+      ],
+      "expect": "one line per message, each ending in a newline"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "a message that is not an object assumed to be one",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "    if not isinstance(message, dict):\n        return \"unknown\", \"invalid\", \"\", \"not a JSON-RPC message\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "any present value taken as a declaration",
+      "edits": [
+        {
+          "file": "capabilities.py",
+          "old": "        if not isinstance(have, dict):\n            missing[key] = copy.deepcopy(needs)\n            continue\n",
+          "new": "        if have is None:\n            missing[key] = copy.deepcopy(needs)\n            continue\n        if not isinstance(have, dict):\n            continue\n"
+        }
+      ],
+      "expect": "only an object declares a capability"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "key presence taken as a declaration",
+      "edits": [
+        {
+          "file": "capabilities.py",
+          "old": "        if not isinstance(have, dict):\n",
+          "new": "        if not isinstance(declared, dict) or key not in declared:\n"
+        },
+        {
+          "file": "capabilities.py",
+          "old": "        below = missing_capabilities(needs, have)\n",
+          "new": "        below = missing_capabilities(needs, have if isinstance(have, dict) else {}) if needs else {}\n"
+        }
+      ],
+      "expect": "only an object declares a capability"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "a list of extension names taken as declarations",
+      "edits": [
+        {
+          "file": "capabilities.py",
+          "old": "        if not isinstance(have, dict):\n",
+          "new": "        if isinstance(have, list):\n            have = {name: {} for name in have if isinstance(name, str)}\n        if not isinstance(have, dict):\n"
+        }
+      ],
+      "expect": "only an object declares a capability"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "requirements flattened to dotted paths",
+      "edits": [
+        {
+          "file": "capabilities.py",
+          "old": "    missing: dict[str, Any] = {}\n    for key, needs in required.items():\n        have = declared.get(key) if isinstance(declared, dict) else None\n        if not isinstance(have, dict):\n            missing[key] = copy.deepcopy(needs)\n            continue\n        below = missing_capabilities(needs, have)\n        if below:\n            missing[key] = below\n    return missing\n",
+          "new": "    def paths(tree, prefix=\"\"):\n        for key, value in tree.items():\n            path = f\"{prefix}.{key}\" if prefix else key\n            if isinstance(value, dict) and value:\n                yield from paths(value, path)\n            else:\n                yield path\n\n    def declares(tree, path):\n        for part in path.split(\".\"):\n            if not isinstance(tree, dict) or not isinstance(tree.get(part), dict):\n                return False\n            tree = tree[part]\n        return True\n\n    missing: dict[str, Any] = {}\n    for path in paths(required):\n        if not declares(declared, path):\n            node = missing\n            *parents, leaf = path.split(\".\")\n            for part in parents:\n                node = node.setdefault(part, {})\n            node[leaf] = {}\n    return missing\n"
+        }
+      ],
+      "expect": "nothing declared: the whole requirement is missing"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "an empty object taken to cover everything below it",
+      "edits": [
+        {
+          "file": "capabilities.py",
+          "old": "        below = missing_capabilities(needs, have)\n",
+          "new": "        if not have:\n            continue\n        below = missing_capabilities(needs, have)\n"
+        }
+      ],
+      "expect": "an empty object declares that capability only, not what a requirement nests below it"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "the whole requirement reported when any part is missing",
+      "edits": [
+        {
+          "file": "capabilities.py",
+          "old": "        if below:\n            missing[key] = below\n",
+          "new": "        if below:\n            missing[key] = copy.deepcopy(needs)\n"
+        }
+      ],
+      "expect": "report only what is missing"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "satisfied keys reported as empty objects",
+      "edits": [
+        {
+          "file": "capabilities.py",
+          "old": "        if below:\n            missing[key] = below\n",
+          "new": "        missing[key] = below\n"
+        }
+      ],
+      "expect": "an empty object declares support"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "the requirement itself put in the result",
+      "edits": [
+        {
+          "file": "capabilities.py",
+          "old": "            missing[key] = copy.deepcopy(needs)\n",
+          "new": "            missing[key] = needs\n"
+        }
+      ],
+      "expect": "the result shares no objects with the requirement"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "a missing subtree copied one level deep",
+      "edits": [
+        {
+          "file": "capabilities.py",
+          "old": "            missing[key] = copy.deepcopy(needs)\n",
+          "new": "            missing[key] = dict(needs)\n"
+        }
+      ],
+      "expect": "the result shares no objects with the requirement"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "the requirement itself sent when all of it is missing",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "                {\"requiredCapabilities\": missing},\n",
+          "new": "                {\"requiredCapabilities\": needs if missing == needs else missing},\n"
+        }
+      ],
+      "expect": "error data shares no objects with the server's requirements"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "a copy of the whole requirement used as the error data",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "import json\n",
+          "new": "import copy\nimport json\n"
+        },
+        {
+          "file": "lifecycle.py",
+          "old": "                {\"requiredCapabilities\": missing},\n",
+          "new": "                {\"requiredCapabilities\": copy.deepcopy(needs)},\n"
+        }
+      ],
+      "expect": "-32021 reports only the part of the requirement the request is missing"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "the missing part sent as the error data, unwrapped",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "                {\"requiredCapabilities\": missing},\n",
+          "new": "                missing,\n"
+        }
+      ],
+      "expect": "a request without the capabilities its method needs is -32021"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "-32021 only when no capability is declared at all",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "        if missing:\n            return rpc_error(\n",
+          "new": "        if not capabilities:\n            return rpc_error(\n"
+        }
+      ],
+      "expect": "a request without the capabilities its method needs is -32021"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "-32021 only when the whole requirement is missing",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "        if missing:\n            return rpc_error(\n",
+          "new": "        if missing == needs:\n            return rpc_error(\n"
+        }
+      ],
+      "expect": "-32021 reports only the part of the requirement the request is missing"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "capabilities checked before the version",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    needs = (required or {}).get(method)\n    if needs is not None:\n        missing = missing_capabilities(needs, capabilities)\n        if missing:\n            return rpc_error(\n                request_id,\n                -32021,\n                \"Missing required client capability\",\n                {\"requiredCapabilities\": missing},\n            )\n",
+          "new": ""
+        },
+        {
+          "file": "lifecycle.py",
+          "old": "    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n",
+          "new": "    needs = (required or {}).get(method)\n    if needs is not None:\n        missing = missing_capabilities(needs, capabilities)\n        if missing:\n            return rpc_error(\n                request_id,\n                -32021,\n                \"Missing required client capability\",\n                {\"requiredCapabilities\": missing},\n            )\n    if version not in SUPPORTED_VERSIONS:\n        return unsupported_version(request_id, version)\n\n"
+        }
+      ],
+      "expect": "the version is checked before the capabilities"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "capabilities checked before the headers",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    needs = (required or {}).get(method)\n    if needs is not None:\n        missing = missing_capabilities(needs, capabilities)\n        if missing:\n            return rpc_error(\n                request_id,\n                -32021,\n                \"Missing required client capability\",\n                {\"requiredCapabilities\": missing},\n            )\n",
+          "new": ""
+        },
+        {
+          "file": "lifecycle.py",
+          "old": "    if headers is not None:\n        mirrored = [(VERSION_HEADER, version), (METHOD_HEADER, method)]\n        if method in NAME_PARAMS:\n            mirrored.append((NAME_HEADER, params.get(NAME_PARAMS[method])))\n        for header, body_value in mirrored:\n            value = headers.get(header)\n            if value is None or value != body_value:\n                return rpc_error(request_id, -32020, f\"{header} does not match the request body\")\n\n",
+          "new": "    needs = (required or {}).get(method)\n    if needs is not None:\n        missing = missing_capabilities(needs, capabilities)\n        if missing:\n            return rpc_error(\n                request_id,\n                -32021,\n                \"Missing required client capability\",\n                {\"requiredCapabilities\": missing},\n            )\n    if headers is not None:\n        mirrored = [(VERSION_HEADER, version), (METHOD_HEADER, method)]\n        if method in NAME_PARAMS:\n            mirrored.append((NAME_HEADER, params.get(NAME_PARAMS[method])))\n        for header, body_value in mirrored:\n            value = headers.get(header)\n            if value is None or value != body_value:\n                return rpc_error(request_id, -32020, f\"{header} does not match the request body\")\n\n"
+        }
+      ],
+      "expect": "headers are compared before the capabilities"
+    },
+    {
+      "test": "test_required_capabilities",
+      "name": "capabilities of the wrong type treated as none declared",
+      "edits": [
+        {
+          "file": "lifecycle.py",
+          "old": "    if not isinstance(capabilities, dict):\n        return rpc_error(request_id, -32602,",
+          "new": "    if capabilities is None:\n        return rpc_error(request_id, -32602,"
+        }
+      ],
+      "expect": "capabilities that are not an object are -32602, not -32021"
+    }
+  ]
+}

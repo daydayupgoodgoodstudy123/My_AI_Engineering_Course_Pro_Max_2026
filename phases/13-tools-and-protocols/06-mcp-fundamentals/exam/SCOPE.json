@@ -1,0 +1,146 @@
+{
+  "lesson": "phases/13-tools-and-protocols/06-mcp-fundamentals",
+  "title": "MCP Fundamentals: Stateless Requests and JSON-RPC",
+  "format": "staged-brownfield",
+  "service": "MCPCore: the stateless core of a small MCP notes server: request builders, a dispatcher, a SQLite transcript, the request lifecycle checks, a stateless tracer and nested capability matching",
+  "sources": {
+    "docs/en.md": "9724abed6bec27050404bf895aa78579fb8b4d7ae70bb99a6a2edccf46eca7d6",
+    "code/main.py": "b7238a353821378b212c18bdb3c1742e6df1f05c1ead27ffe91507bf31d94b06",
+    "outputs/skill-mcp-handshake-tracer.md": "1f1e2e341129d0fe2f0b1b50d62e1f78a9b56a7d4ee097890b4b24c2b9a6bf91"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_stateless_requests",
+      "kind": "debug",
+      "lesson_anchor": "The Problem; Required request metadata; Exercises 1, 2, 3 and 5; code/main.py make_request, request_meta and dispatch",
+      "planted_bugs": [
+        "make_request writes _meta into the caller's params dict, so two requests built from the same params share one _meta (a deepcopy of the finished request still leaves _meta in the caller's dict); the failure surfaces two calls later, as the server answering a 2027-01-01 request instead of refusing it with -32022",
+        "request_meta puts the module-level NO_CAPABILITIES dict into every request that passes no capabilities, so a capability one caller adds to its own request appears in every later request",
+        "NotesServer.dispatch remembers the last declared capabilities and fills them into a request that has none (inferring from an earlier request, the legacy connection-scoped habit)",
+        "tools/list returns tools in registration order, so reversing the registry changes the result (exercise 3)",
+        "tools/call sorts the whole registry and scans it on every call"
+      ],
+      "timing_assert": "20000 tools registered in shuffled order, 500 tools/call requests timed after gc.collect(), under 0.04 s. Measured here: the sort-and-scan lookup takes 1.4-2.4 s (36x the limit or more), the dict index 0.4-1.2 ms (34x under it or more); a plain linear scan without the sort takes 65-190 ms and fails too",
+      "overfix_guard": "a request without capabilities is still -32602 when missing capabilities are read as {} (in validate_request or by setdefault in dispatch); a request without clientInfo stays valid when every _meta key is made required; a tool registered after construction is callable and listed, which rules out an index built once in __init__ and a cached sorted listing"
+    },
+    {
+      "part": 2,
+      "test": "test_transcript_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "JSON-RPC envelopes (the id correlates one response; a notification has no id); Ship It skill: preserve the original transcript",
+      "exactness": "every raw line round-trips byte for byte across close and reopen (a trailing \\r, a \\u00e9 escape, a line that is not valid UTF-8), and ids come back with their JSON type: 7 and \"7\" stay apart, an id-null error stays apart from an id-less notification (NO_ID), and 2**64 + 1 stays exact",
+      "traps": [
+        "SQL NULL for both a missing and a null id",
+        "Python ints bound to SQLite INTEGER (OverflowError past 2**63 - 1)",
+        "JSON text in an INTEGER or NUMERIC column (type affinity stores the JSON text 7 as the integer 7 and big ids as REAL)",
+        "ids stored with str()",
+        "raw lines decoded, stripped or re-serialized",
+        "entries, or with_id results, read back in insertion order instead of seq order",
+        "seq stored as TEXT, so 10 sorts before 2",
+        "WHERE id = NULL never matching"
+      ],
+      "clarifying_questions": [
+        "null id versus no id",
+        "ids past 64 bits",
+        "TEXT versus BLOB for raw lines",
+        "the same seq recorded twice"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_request_lifecycle",
+      "kind": "core algorithm",
+      "lesson_anchor": "The Concept: One request lifecycle, steps 1-6; Discovery without a handshake (-32022 with requested and supported); Lesson 09: a notification sent over HTTP is checked before it is accepted",
+      "traps": [
+        "-32022 reported before the header comparison, in either direction of the version mismatch",
+        "headers compared before the metadata types",
+        "capabilities or clientInfo checked after version support, as code/main.py validate_request does",
+        "the existing validate_request reused whole before the headers",
+        "a notification outside HTTP answered because its params or envelope are malformed",
+        "a notification over HTTP accepted unchecked or before its version is checked, or put through the -32021 and -32601 checks",
+        "Mcp-Name compared with params.name for resources/read, only when the header is sent, or after the version as if it were a tools/call argument",
+        "Mcp-Method not compared, or compared after the version",
+        "-32022 data aliasing SUPPORTED_VERSIONS, sent as a tuple or with other key names",
+        "a newer version accepted by date comparison",
+        "the method looked up before the version",
+        "batch arrays or non-object bodies passed on",
+        "if headers: treating an HTTP request without headers as stdio",
+        "a parse error sent without an id member",
+        "missing_capabilities called for methods without a requirement (NotImplementedError until Part 5)"
+      ],
+      "clarifying_questions": [
+        "batch arrays",
+        "header name case",
+        "malformed notifications, outside HTTP and over it",
+        "header and body agreeing on an unsupported version",
+        "tools/call name validation",
+        "requests with a null id",
+        "data on other errors"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_trace_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Ship It: the stateless request tracer (outputs/skill-mcp-handshake-tracer.md); code/main.py trace_message and show()",
+      "wire_format": "one text line per message in show()'s format, [kind/era] method: detail, each ending in exactly one newline, decided by the test's split and regular expression",
+      "traps": [
+        "a response matched to the oldest pending request instead of the one with its id",
+        "an answered request left pending",
+        "notifications put in pending, so the id-null -32700 response matches one",
+        "invalid requests kept out of pending",
+        "anything answering initialize labeled legacy, including -32601",
+        "a seen-ids set that turns a reused id into an orphan",
+        "every error labeled unknown, as code/main.py trace_message does",
+        "every result without resultType labeled legacy, as code/main.py trace_message does, or legacy judged by the result's fields instead of the request it answers",
+        "only resultType complete taken as modern, so a tasks result (resultType task) is invalid",
+        "a legacy mode switched on by initialize",
+        "the version alone taken as modern metadata",
+        "a response named result or error instead of its request's method",
+        "a non-object message crashing the tracer",
+        "reading the whole stream first",
+        "missing or doubled newlines"
+      ],
+      "clarifying_questions": [
+        "responses without a request",
+        "reused ids",
+        "legacy mode after initialize",
+        "message direction"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_required_capabilities",
+      "kind": "recursive structure",
+      "lesson_anchor": "One request lifecycle, step 6 (check required capabilities); Required request metadata (the client capabilities object)",
+      "traps": [
+        "dotted paths split on '.', breaking io.modelcontextprotocol/tasks",
+        "true, null, lists, strings or numbers taken as declarations",
+        "a list of extension names taken as declarations",
+        "an empty object taken to cover the keys a requirement nests below it",
+        "the whole requirement reported instead of the missing part",
+        "satisfied keys reported as empty objects",
+        "the result sharing objects with the requirement table",
+        "-32021 before -32020 or -32022",
+        "capabilities that are not an object reported as -32021 instead of -32602",
+        "data without the requiredCapabilities wrapper, holding the whole requirement, or sent only when all of it is missing"
+      ],
+      "integration": "check_request with a requirement table: tasks/get needs extensions -> io.modelcontextprotocol/tasks; -32021 carries {\"requiredCapabilities\": missing}, after the header and version checks",
+      "clarifying_questions": [
+        "an empty extensions object",
+        "true as a declaration",
+        "whole requirement or missing part"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: a fifth bug, make_request reusing the caller's params dict, is added so that the first failure surfaces at the server's version check, two calls from its root cause; the four suggested bugs and both suggested guards stay, and a third guard requires tools registered after construction to be callable and listed. The timing uses 20000 tools registered in shuffled order and 500 calls instead of 3000 x 3000, so that the per-call sort and a plain linear scan both fail while a dict index passes with margin on a loaded machine.",
+    "Part 3: -32021 moves into Part 5's end-to-end checks, because its data is exactly what Part 5 computes and Part 3 must pass without Part 5. check_request keeps the step-6 slot in its docstring; Part 3 covers -32700, -32600, -32602, -32020, -32022, -32601 and notifications, which are never answered outside HTTP and are checked like requests over HTTP.",
+    "Part 4: the stream carries parsed messages without a direction. An unanswered or doubly answered response gets the kind orphan and the method ?. Era rules follow the lesson's Ship It skill (-32020, -32021 and -32022 are modern evidence; initialize, its result and notifications/initialized are legacy) rather than code/main.py's trace_message, which labels every error unknown and every result without resultType legacy.",
+    "Part 5: matching is wired into check_request through a requirement table (method to nested capability object), so the part also checks where -32021 sits in the lifecycle.",
+    "Facts used beyond docs/en.md, all from this phase: -32700 with a null id (lessons 07 and 09); the header names MCP-Protocol-Version, Mcp-Method and Mcp-Name, Mcp-Name mirroring params.uri for resources/read, and a missing header being -32020 (lesson 09); -32021 Missing Required Client Capability with data.requiredCapabilities and the tasks extension requirement (lessons 11, 13, 14, 15 and 23); Mcp-Name mirroring params.taskId for tasks methods (lesson 13); an unknown tool name as a JSON-RPC error (lesson 28); a notification sent over HTTP checked like a request before it is accepted, an error for it carrying a null id, and an accepted one getting no response (lesson 09); a tasks result with resultType task (lesson 13).",
+    "Traps that would otherwise appear a third time in this phase are left out: a body that is not valid UTF-8 (lessons 07 and 09), ids conflated by str() (lesson 08's pending table and this pack's Part 2, which still keeps 7 and \"7\" apart in storage; the tracer's ids never collide under str()), and id 0 taken for a notification (lessons 07 and 14; the interviewer asks about it instead)."
+  ]
+}
