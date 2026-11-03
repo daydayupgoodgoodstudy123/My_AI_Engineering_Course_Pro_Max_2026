@@ -1,0 +1,931 @@
+{
+  "package": "skillcat",
+  "tests": [
+    "test_discovery_pipeline",
+    "test_discovery_cache",
+    "test_catalog_budget",
+    "test_disclosure_log",
+    "test_reference_graph"
+  ],
+  "layers": [
+    {
+      "test": "test_discovery_pipeline",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "ambiguous 'release-readiness'"
+        },
+        {
+          "name": "fix package_dirs: immediate children only",
+          "edits": [
+            {
+              "file": "discovery.py",
+              "old": "    return sorted(skill_md.parent for skill_md in root.rglob(\"SKILL.md\"))\n",
+              "new": "    packages = []\n    for child in sorted(root.iterdir(), key=lambda path: path.name):\n        skill_md = child / \"SKILL.md\"\n        if child.is_dir() and (skill_md.is_file() or skill_md.is_symlink()):\n            packages.append(child)\n    return packages\n"
+            }
+          ],
+          "expect": "the lower rank wins a collision"
+        },
+        {
+          "name": "+ sort collisions by rank first",
+          "edits": [
+            {
+              "file": "discovery.py",
+              "old": "key=lambda c: (str(c.source), c.rank)",
+              "new": "key=lambda c: (c.rank, str(c.source))"
+            }
+          ],
+          "expect": "a symlink that leaves the package is refused"
+        },
+        {
+          "name": "+ containment checked on the resolved target",
+          "edits": [
+            {
+              "file": "resources.py",
+              "old": "    candidate = root.joinpath(*relative.parts)\n    if root not in candidate.parents:\n        raise ReferencePathError(\"the reference escapes the skill package\")\n    target = candidate.resolve()\n",
+              "new": "    target = root.joinpath(*relative.parts).resolve()\n    if root not in target.parents:\n        raise ReferencePathError(\"the reference escapes the skill package\")\n"
+            }
+          ],
+          "expect": "publishing a big catalog should be fast"
+        },
+        {
+          "name": "+ one pass over entry sizes",
+          "edits": [
+            {
+              "file": "catalog.py",
+              "old": "    used = len(model_json(entries))\n    while used > budget.max_catalog_chars and entries:\n        omitted.insert(0, entries.pop().name)\n        used = len(model_json(entries))\n    if used > budget.max_catalog_chars:\n        raise ValueError(\"even an empty catalog exceeds max_catalog_chars\")\n    return Catalog(tuple(entries), collisions, tuple(omitted), used)\n",
+              "new": "    used = len(model_json([]))\n    if used > budget.max_catalog_chars:\n        raise ValueError(\"even an empty catalog exceeds max_catalog_chars\")\n    kept = 0\n    for entry in entries:\n        extra = len(model_json([entry])) - len(model_json([])) + (1 if kept else 0)\n        if used + extra > budget.max_catalog_chars:\n            break\n        used += extra\n        kept += 1\n    omitted[:0] = [entry.name for entry in entries[kept:]]\n    return Catalog(tuple(entries[:kept]), collisions, tuple(omitted), used)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_discovery_pipeline",
+      "name": "silence the CollisionError instead of fixing discovery",
+      "edits": [
+        {
+          "file": "discovery.py",
+          "old": "        if len(tied) > 1:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "two packages with one name at one rank are an error"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "skip examples/ directories only",
+      "edits": [
+        {
+          "file": "discovery.py",
+          "old": "    packages = []\n    for child in sorted(root.iterdir(), key=lambda path: path.name):\n        skill_md = child / \"SKILL.md\"\n        if child.is_dir() and (skill_md.is_file() or skill_md.is_symlink()):\n            packages.append(child)\n    return packages\n",
+          "new": "    return sorted(p.parent for p in root.rglob(\"SKILL.md\") if \"examples\" not in p.relative_to(root).parts)\n"
+        }
+      ],
+      "expect": "a SKILL.md deeper inside a package is not a package of its own"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "precedence from scope names",
+      "edits": [
+        {
+          "file": "discovery.py",
+          "old": "key=lambda c: (c.rank, str(c.source))",
+          "new": "key=lambda c: (c.scope, str(c.source))"
+        }
+      ],
+      "expect": "the lower rank wins a collision"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "the higher rank wins",
+      "edits": [
+        {
+          "file": "discovery.py",
+          "old": "key=lambda c: (c.rank, str(c.source))",
+          "new": "key=lambda c: (-c.rank, str(c.source))"
+        }
+      ],
+      "expect": "the lower rank wins a collision"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "shadowed candidates dropped from the collision record",
+      "edits": [
+        {
+          "file": "discovery.py",
+          "old": "collisions.append(Collision(name, options[0], tuple(options[1:])))",
+          "new": "collisions.append(Collision(name, options[0], ()))"
+        }
+      ],
+      "expect": "shadowed candidates stay in the diagnostics, best rank first"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "shadowed candidates kept in path order",
+      "edits": [
+        {
+          "file": "discovery.py",
+          "old": "collisions.append(Collision(name, options[0], tuple(options[1:])))",
+          "new": "collisions.append(Collision(name, options[0], tuple(sorted(options[1:], key=lambda c: str(c.source)))))"
+        }
+      ],
+      "expect": "shadowed candidates stay in the diagnostics, best rank first"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "missing files resolved strictly",
+      "edits": [
+        {
+          "file": "resources.py",
+          "old": "    target = root.joinpath(*relative.parts).resolve()\n",
+          "new": "    target = root.joinpath(*relative.parts).resolve(strict=True)\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "budget-cut names appended after the max_entries cut",
+      "edits": [
+        {
+          "file": "catalog.py",
+          "old": "    omitted[:0] = [entry.name for entry in entries[kept:]]\n",
+          "new": "    omitted += [entry.name for entry in entries[kept:]]\n"
+        }
+      ],
+      "expect": "omitted lists every left-out name in priority order"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "every symlink refused",
+      "edits": [
+        {
+          "file": "resources.py",
+          "old": "    root = package.resolve()\n",
+          "new": "    root = package.resolve()\n    if any(root.joinpath(*relative.parts[: i + 1]).is_symlink() for i in range(len(relative.parts))):\n        raise ReferencePathError(\"symlinks are not allowed\")\n"
+        }
+      ],
+      "expect": "a symlink that stays inside the package is fine"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "only a symlinked last component is checked",
+      "edits": [
+        {
+          "file": "resources.py",
+          "old": "    target = root.joinpath(*relative.parts).resolve()\n    if root not in target.parents:\n",
+          "new": "    candidate = root.joinpath(*relative.parts)\n    target = candidate.resolve()\n    if candidate.is_symlink() and root not in target.parents:\n"
+        }
+      ],
+      "expect": "a symlinked directory that leaves the package is refused"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "target resolved, package root not",
+      "edits": [
+        {
+          "file": "resources.py",
+          "old": "    root = package.resolve()\n",
+          "new": "    root = package\n"
+        }
+      ],
+      "expect": "a symlink that stays inside the package is fine"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "running total without the commas between entries",
+      "edits": [
+        {
+          "file": "catalog.py",
+          "old": "len(model_json([entry])) - len(model_json([])) + (1 if kept else 0)",
+          "new": "len(model_json([entry])) - len(model_json([]))"
+        }
+      ],
+      "expect": "catalog_chars is the length of the text the model receives"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "entry sizes measured with json.dumps defaults",
+      "edits": [
+        {
+          "file": "catalog.py",
+          "old": "len(model_json([entry])) - len(model_json([])) + (1 if kept else 0)",
+          "new": "len(json.dumps(asdict(entry))) + (1 if kept else 0)"
+        }
+      ],
+      "expect": "catalog_chars is the length of the text the model receives"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "an entry that does not fit is skipped and later ones still tried",
+      "edits": [
+        {
+          "file": "catalog.py",
+          "old": "    kept = 0\n    for entry in entries:\n        extra = len(model_json([entry])) - len(model_json([])) + (1 if kept else 0)\n        if used + extra > budget.max_catalog_chars:\n            break\n        used += extra\n        kept += 1\n    omitted[:0] = [entry.name for entry in entries[kept:]]\n    return Catalog(tuple(entries[:kept]), collisions, tuple(omitted), used)\n",
+          "new": "    kept = []\n    for entry in entries:\n        extra = len(model_json([entry])) - len(model_json([])) + (1 if kept else 0)\n        if used + extra > budget.max_catalog_chars:\n            continue\n        used += extra\n        kept.append(entry)\n    omitted[:0] = [entry.name for entry in entries if entry not in kept]\n    return Catalog(tuple(kept), collisions, tuple(omitted), used)\n"
+        }
+      ],
+      "expect": "entries are cut from the end, and omitted keeps priority order"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "omitted collected while popping from the end",
+      "edits": [
+        {
+          "file": "catalog.py",
+          "old": "    omitted[:0] = [entry.name for entry in entries[kept:]]\n",
+          "new": "    omitted[:0] = [entry.name for entry in reversed(entries[kept:])]\n"
+        }
+      ],
+      "expect": "entries are cut from the end, and omitted keeps priority order"
+    },
+    {
+      "test": "test_discovery_pipeline",
+      "name": "an entry that fills the budget exactly is dropped",
+      "edits": [
+        {
+          "file": "catalog.py",
+          "old": "        if used + extra > budget.max_catalog_chars:\n",
+          "new": "        if used + extra >= budget.max_catalog_chars:\n"
+        }
+      ],
+      "expect": "an entry that fits exactly is kept"
+    },
+    {
+      "test": "test_discovery_cache",
+      "name": "staleness by size and mtime",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "    return hashlib.sha256(skill_md.read_bytes()).hexdigest()\n",
+          "new": "    stat = skill_md.stat()\n    return f\"{stat.st_size}:{stat.st_mtime_ns}\"\n"
+        }
+      ],
+      "expect": "an edit is seen even when size and mtime are unchanged"
+    },
+    {
+      "test": "test_discovery_cache",
+      "name": "packages keyed by the digest of their SKILL.md",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "            key = str(directory)\n            present.add(key)\n            digest = _digest(directory / \"SKILL.md\")\n",
+          "new": "            digest = _digest(directory / \"SKILL.md\")\n            key = digest\n            present.add(key)\n"
+        }
+      ],
+      "expect": "a package is identified by its directory, not by its bytes"
+    },
+    {
+      "test": "test_discovery_cache",
+      "name": "cached results keep the scope they were found under",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        return {\"kind\": \"rejected\", \"reason\": found.reason}\n",
+          "new": "        return {\"kind\": \"rejected\", \"reason\": found.reason, \"scope\": found.scope, \"rank\": 0}\n"
+        },
+        {
+          "file": "cache.py",
+          "old": "        \"kind\": \"candidate\",\n",
+          "new": "        \"kind\": \"candidate\",\n        \"scope\": found.scope,\n        \"rank\": found.rank,\n"
+        },
+        {
+          "file": "cache.py",
+          "old": "        return Rejection(scope.name, directory, record[\"reason\"])\n",
+          "new": "        return Rejection(record[\"scope\"], directory, record[\"reason\"])\n"
+        },
+        {
+          "file": "cache.py",
+          "old": "    return SkillCandidate(record[\"name\"], record[\"description\"], scope.name, scope.rank, directory, metadata)\n",
+          "new": "    return SkillCandidate(record[\"name\"], record[\"description\"], record[\"scope\"], record[\"rank\"], directory, metadata)\n"
+        }
+      ],
+      "expect": "a policy change is never served from the snapshot"
+    },
+    {
+      "test": "test_discovery_cache",
+      "name": "metadata read back as JSON lists",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "    metadata = tuple((key, value) for key, value in record[\"metadata\"])\n",
+          "new": "    metadata = record[\"metadata\"]\n"
+        }
+      ],
+      "expect": "a reopened cache returns exactly what discovery returns"
+    },
+    {
+      "test": "test_discovery_cache",
+      "name": "source read back as text",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "scope.name, scope.rank, directory, metadata)",
+          "new": "scope.name, scope.rank, str(directory), metadata)"
+        }
+      ],
+      "expect": "a reopened cache returns exactly what discovery returns"
+    },
+    {
+      "test": "test_discovery_cache",
+      "name": "rejections not cached",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "                packages[key] = {\"digest\": digest, **_to_record(inspected)}\n",
+          "new": "                if isinstance(inspected, SkillCandidate):\n                    packages[key] = {\"digest\": digest, **_to_record(inspected)}\n"
+        }
+      ],
+      "expect": "unchanged packages are served from the snapshot"
+    },
+    {
+      "test": "test_discovery_cache",
+      "name": "the snapshot keeps only the last scope",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        for key in [key for key in packages if Path(key).parent == scope.root and key not in present]:\n",
+          "new": "        for key in [key for key in packages if key not in present]:\n"
+        }
+      ],
+      "expect": "one scope never overwrites another in the snapshot"
+    },
+    {
+      "test": "test_discovery_cache",
+      "name": "results listed from the snapshot, not the disk",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        for key in [key for key in packages if Path(key).parent == scope.root and key not in present]:\n            del packages[key]\n",
+          "new": "        for key in sorted(key for key in packages if Path(key).parent == scope.root and key not in present):\n            found.append(_from_record(packages[key], scope, Path(key)))\n"
+        }
+      ],
+      "expect": "a removed package is gone and a renamed one is found"
+    },
+    {
+      "test": "test_discovery_cache",
+      "name": "snapshot kept in memory only",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        os.replace(temporary, self.path)\n",
+          "new": "        temporary.unlink()\n"
+        }
+      ],
+      "expect": "the snapshot is saved at the path the cache was given"
+    },
+    {
+      "test": "test_discovery_cache",
+      "name": "digest from the built-in hash()",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "    return hashlib.sha256(skill_md.read_bytes()).hexdigest()\n",
+          "new": "    return str(hash(skill_md.read_bytes()))\n"
+        }
+      ],
+      "expect": "the snapshot records the SHA-256 of each SKILL.md"
+    },
+    {
+      "test": "test_catalog_budget",
+      "name": "the 2 percent budget capped at 8,000",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "    return Budget(context_window * CATALOG_PERCENT // 100, \"tokens\")\n",
+          "new": "    return Budget(min(context_window * CATALOG_PERCENT // 100, FALLBACK_CATALOG_CHARS), \"tokens\")\n"
+        }
+      ],
+      "expect": "a known window is never capped at 8,000"
+    },
+    {
+      "test": "test_catalog_budget",
+      "name": "a known window also held to 8,000 characters",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "    measure = count_tokens if budget.unit == \"tokens\" else len\n",
+          "new": "    measure = count_tokens if budget.unit == \"tokens\" else len\n    if budget.unit == \"tokens\" and len(model_json(entry_for(c) for c in winners)) > FALLBACK_CATALOG_CHARS:\n        budget, measure = catalog_budget(None), len\n"
+        }
+      ],
+      "expect": "a known window is not also held to 8,000 characters"
+    },
+    {
+      "test": "test_catalog_budget",
+      "name": "2 percent rounded to the nearest token",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "context_window * CATALOG_PERCENT // 100",
+          "new": "round(context_window * CATALOG_PERCENT / 100)"
+        }
+      ],
+      "expect": "2 percent is rounded down to a whole token"
+    },
+    {
+      "test": "test_catalog_budget",
+      "name": "a window of 0 read as unknown",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "    if context_window is None:\n",
+          "new": "    if not context_window:\n"
+        }
+      ],
+      "expect": "a window of 0 tokens is an error, not an unknown window"
+    },
+    {
+      "test": "test_catalog_budget",
+      "name": "a token budget measured in characters",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "    measure = count_tokens if budget.unit == \"tokens\" else len\n",
+          "new": "    measure = len\n"
+        }
+      ],
+      "expect": "a token budget is measured in tokens"
+    },
+    {
+      "test": "test_catalog_budget",
+      "name": "the fallback counted in UTF-8 bytes",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "    measure = count_tokens if budget.unit == \"tokens\" else len\n",
+          "new": "    measure = count_tokens if budget.unit == \"tokens\" else (lambda text: len(text.encode(\"utf-8\")))\n"
+        }
+      ],
+      "expect": "the fallback counts the characters of the exact text the model receives"
+    },
+    {
+      "test": "test_catalog_budget",
+      "name": "cost from name and description lengths",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "    measure = count_tokens if budget.unit == \"tokens\" else len\n",
+          "new": "    measure = count_tokens if budget.unit == \"tokens\" else (lambda text: sum(\n        len(e[\"name\"]) + len(e[\"description\"]) for e in __import__(\"json\").loads(text)[\"entries\"]))\n"
+        }
+      ],
+      "expect": "the fallback counts the characters of the exact text the model receives"
+    },
+    {
+      "test": "test_catalog_budget",
+      "name": "highest priority shortened first",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "    for index in reversed(range(len(entries))):\n",
+          "new": "    for index in range(len(entries)):\n"
+        }
+      ],
+      "expect": "descriptions are shortened lowest priority first, and only until the catalog fits"
+    },
+    {
+      "test": "test_catalog_budget",
+      "name": "every long description shortened at once",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "    for index in reversed(range(len(entries))):\n        if used <= budget.limit:\n            break\n        entry = entries[index]\n",
+          "new": "    for index in reversed(range(len(entries)) if used > budget.limit else range(0)):\n        entry = entries[index]\n"
+        }
+      ],
+      "expect": "descriptions are shortened lowest priority first, and only until the catalog fits"
+    },
+    {
+      "test": "test_catalog_budget",
+      "name": "entries omitted before any description is shortened",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "        if used <= budget.limit:\n            break\n        entry = entries[index]\n",
+          "new": "        break\n        entry = entries[index]\n"
+        }
+      ],
+      "expect": "descriptions are shortened lowest priority first, and only until the catalog fits"
+    },
+    {
+      "test": "test_catalog_budget",
+      "name": "omitted entries still listed as shortened",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "        tuple(name for name in reversed(shortened) if name not in gone),\n",
+          "new": "        tuple(reversed(shortened)),\n"
+        }
+      ],
+      "expect": "an omitted entry is listed as omitted only"
+    },
+    {
+      "test": "test_catalog_budget",
+      "name": "input order taken as priority",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "    ordered = sorted(winners, key=lambda c: (c.rank, c.name))\n",
+          "new": "    ordered = list(winners)\n"
+        }
+      ],
+      "expect": "entries come in priority order: rank, then name"
+    },
+    {
+      "test": "test_catalog_budget",
+      "name": "a catalog at exactly the budget treated as over it",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "        if used <= budget.limit:\n",
+          "new": "        if used < budget.limit:\n"
+        },
+        {
+          "file": "budget.py",
+          "old": "    while used > budget.limit and entries:\n",
+          "new": "    while used >= budget.limit and entries:\n"
+        }
+      ],
+      "expect": "a catalog that fits its budget exactly is published whole"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "values never quoted",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "    if BARE_VALUE.fullmatch(text):\n",
+          "new": "    if True:\n"
+        }
+      ],
+      "expect": "not a logfmt line"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "only double quotes escaped",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "    out = []\n    for char in text:\n",
+          "new": "    return '\"' + text.replace('\"', '\\\\\"') + '\"'\n    out = []\n    for char in text:\n"
+        }
+      ],
+      "expect": "not a logfmt line"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "double quotes not escaped",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "ESCAPES = {\"\\\\\": \"\\\\\\\\\", '\"': '\\\\\"', ",
+          "new": "ESCAPES = {\"\\\\\": \"\\\\\\\\\", "
+        }
+      ],
+      "expect": "not a logfmt line"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "control characters written raw",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "\"\\n\": \"\\\\n\", \"\\r\": \"\\\\r\", \"\\t\": \"\\\\t\"}",
+          "new": "}"
+        },
+        {
+          "file": "disclosure.py",
+          "old": "            out.append(f\"\\\\u{ord(char):04x}\")\n",
+          "new": "            out.append(char)\n"
+        }
+      ],
+      "expect": "not a logfmt line"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "an empty value written bare",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "    if BARE_VALUE.fullmatch(text):\n",
+          "new": "    if not re.search(r'[\\s\"=\\\\]', text):\n"
+        }
+      ],
+      "expect": "not a logfmt line"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "= left bare",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "BARE_VALUE = re.compile(r'[^\\s\"=\\\\\\x00-\\x1f\\x7f]+')",
+          "new": "BARE_VALUE = re.compile(r'[^\\s\"\\\\\\x00-\\x1f\\x7f]+')"
+        }
+      ],
+      "expect": "not a logfmt line"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "reads allowed before activation",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "    branches = active.get(request.skill)\n    if branches is None:\n        return \"not_active\"\n",
+          "new": "    if request.skill not in catalog:\n        return \"not_active\"\n    branches = decision_map(load_body(Path(catalog[request.skill].source) / \"SKILL.md\"))\n"
+        }
+      ],
+      "expect": "a read before activation is refused"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "any file in the package can be read",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "    if request.resource not in branches:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "only the branches SKILL.md declares are read"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "the read limit counted in characters",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "    with target.open(\"rb\") as handle:\n        data = handle.read(max_read_bytes + 1)\n    if len(data) > max_read_bytes:\n",
+          "new": "    data = target.read_bytes()\n    if len(data.decode(\"utf-8\")) > max_read_bytes:\n"
+        }
+      ],
+      "expect": "the read limit counts UTF-8 bytes"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "a file exactly at the limit refused",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "    if len(data) > max_read_bytes:\n",
+          "new": "    if len(data) >= max_read_bytes:\n"
+        }
+      ],
+      "expect": "a file of exactly max_read_bytes bytes is loaded"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "the path opened without validate_reference",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "        target = validate_reference(Path(catalog[request.skill].source), request.resource)\n",
+          "new": "        target = Path(catalog[request.skill].source) / request.resource\n"
+        }
+      ],
+      "expect": "a branch that leaves the package is refused"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "activation bytes of the whole SKILL.md",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "(\"bytes\", len(body.encode(\"utf-8\")))",
+          "new": "(\"bytes\", len((Path(entry.source) / \"SKILL.md\").read_bytes()))"
+        }
+      ],
+      "expect": "an activation logs the size of the body"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "activation bytes counted in characters",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "(\"bytes\", len(body.encode(\"utf-8\")))",
+          "new": "(\"bytes\", len(body))"
+        }
+      ],
+      "expect": "an activation logs the size of the body"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "every request read before the first event",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "    async for request in requests:\n",
+          "new": "    for request in [request async for request in requests]:\n"
+        }
+      ],
+      "expect": "every request is logged as soon as it is handled"
+    },
+    {
+      "test": "test_disclosure_log",
+      "name": "the path checked before the decision map",
+      "edits": [
+        {
+          "file": "disclosure.py",
+          "old": "    if request.resource not in branches:\n        return \"not_declared\"\n    try:\n        target = validate_reference(Path(catalog[request.skill].source), request.resource)\n    except ReferencePathError:\n        return \"invalid_path\"\n",
+          "new": "    try:\n        target = validate_reference(Path(catalog[request.skill].source), request.resource)\n    except ReferencePathError:\n        return \"invalid_path\"\n    if request.resource not in branches:\n        return \"not_declared\"\n"
+        }
+      ],
+      "expect": "a read is refused with the first reason that applies"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "a query kept on the path",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "            target = raw.split(\"#\", 1)[0].split(\"?\", 1)[0]\n",
+          "new": "            target = raw.split(\"#\", 1)[0]\n"
+        }
+      ],
+      "expect": "#fragments and ?queries do not name new files"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "broken links reported by resolved path",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "            elif not path.is_file():\n                broken.add((current, target))\n",
+          "new": "            elif not path.is_file():\n                broken.add((current, resolved))\n"
+        }
+      ],
+      "expect": "a broken link is reported with its target as written"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "deep means more than two links",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "        sorted(name for name, hops in depth.items() if hops >= 2),\n",
+          "new": "        sorted(name for name, hops in depth.items() if hops > 2),\n"
+        }
+      ],
+      "expect": "every file that takes two or more links is deep"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "./ left in the path",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "            resolved = posixpath.normpath(posixpath.join(base, target))\n",
+          "new": "            resolved = posixpath.join(base, target) if not target.startswith(\"../\") else posixpath.normpath(posixpath.join(base, target))\n"
+        }
+      ],
+      "expect": "a link is resolved against the directory of the file that holds it"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "links resolved against the package root",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "        base = posixpath.dirname(current)\n",
+          "new": "        base = \"\"\n"
+        }
+      ],
+      "expect": "a link is resolved against the directory of the file that holds it"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "#fragment and ?query kept in the path",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "            target = raw.split(\"#\", 1)[0].split(\"?\", 1)[0]\n",
+          "new": "            target = raw\n"
+        }
+      ],
+      "expect": "#fragments and ?queries do not name new files"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "depth-first walk keeps the first depth it finds",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "    while queue:\n        current = queue.popleft()\n        if not current.lower().endswith(\".md\"):\n            continue\n",
+          "new": "    def visit(current: str) -> None:\n        if not current.lower().endswith(\".md\"):\n            return\n"
+        },
+        {
+          "file": "refgraph.py",
+          "old": "                queue.append(resolved)\n",
+          "new": "                visit(resolved)\n"
+        },
+        {
+          "file": "refgraph.py",
+          "old": "    references = package / \"references\"\n",
+          "new": "    visit(\"SKILL.md\")\n    references = package / \"references\"\n"
+        }
+      ],
+      "expect": "depth is the fewest links it takes"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "fenced code blocks not skipped",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "        if marker:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "links in fenced code blocks are examples, not references"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "only ``` fences recognised",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "FENCE = re.compile(r\" {0,3}(```|~~~)\")",
+          "new": "FENCE = re.compile(r\" {0,3}(```)\")"
+        }
+      ],
+      "expect": "links in fenced code blocks are examples, not references"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "a directory link loads everything under it",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "                directory_links.add((current, resolved))\n",
+          "new": "                directory_links.add((current, resolved))\n                for inner in sorted(path.rglob(\"*.md\")):\n                    name = inner.relative_to(package).as_posix()\n                    if name not in depth:\n                        depth[name] = depth[current] + 1\n                        queue.append(name)\n"
+        }
+      ],
+      "expect": "a link to a whole directory is reported, not followed"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "every reachable file read for links",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "    while queue:\n        current = queue.popleft()\n        if not current.lower().endswith(\".md\"):\n            continue\n",
+          "new": "    while queue:\n        current = queue.popleft()\n"
+        }
+      ],
+      "expect": "only Markdown files are read for links"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "links with a scheme followed as paths",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "            if not target or SCHEME.match(target):\n",
+          "new": "            if not target:\n"
+        }
+      ],
+      "expect": "links with a scheme are not references"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "dead files searched in the whole package",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "    references = package / \"references\"\n",
+          "new": "    references = package\n"
+        }
+      ],
+      "expect": "dead files are the files under references/ that nothing reaches"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "broken targets reported with their fragment",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "            elif not path.is_file():\n                broken.add((current, target))\n",
+          "new": "            elif not path.is_file():\n                broken.add((current, raw))\n"
+        }
+      ],
+      "expect": "#fragments and ?queries do not name new files"
+    },
+    {
+      "test": "test_reference_graph",
+      "name": "an existing file outside the package followed",
+      "edits": [
+        {
+          "file": "refgraph.py",
+          "old": "            if target.startswith(\"/\") or resolved == \"..\" or resolved.startswith(\"../\"):\n",
+          "new": "            if target.startswith(\"/\"):\n"
+        }
+      ],
+      "expect": "every file that takes two or more links is deep"
+    }
+  ]
+}

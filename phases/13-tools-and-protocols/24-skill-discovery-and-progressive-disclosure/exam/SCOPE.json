@@ -1,0 +1,118 @@
+{
+  "lesson": "phases/13-tools-and-protocols/24-skill-discovery-and-progressive-disclosure",
+  "title": "Skill Discovery and Progressive Disclosure",
+  "format": "staged-brownfield",
+  "service": "SkillCat: the skill layer of an agent host, with shallow discovery over ranked scopes, collision policy with shadowed candidates kept in diagnostics, package containment for resource reads, the model-facing catalog, a JSON snapshot of discovery invalidated by SKILL.md digests, the 2 percent / 8,000-character catalog budget, logfmt disclosure events and the reference graph of a package",
+  "sources": {
+    "docs/en.md": "5880cb2e0c0d2bc5e83ad8e6e5633e7645db5f67fefd5c78323ff81ef974bc8c",
+    "code/main.py": "d74e0a551be532fa34a3d70375fba994c33ac23837408ea4d60107071ded6fea",
+    "quiz/quiz.md": "7457b6ed9c85bee37e26e7b0fb09beabfc1f2775573a72c320080ecbe1dbb14d",
+    "outputs/skill-catalog-builder/scripts/build_catalog.py": "5fe341b3bb3467a17aef82eaa3f319665af0c9888227f98a85b417d7e9425a6a"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_discovery_pipeline",
+      "kind": "debug",
+      "lesson_anchor": "Why discovery is shallow; Scope is runtime policy (explicit integer rank, never precedence from directory names); Collisions need identity beyond name (shadowed candidates kept in diagnostics); Resource paths are a trust boundary (resolve root and candidate, symlinks checked on the resolved target); code/main.py discover_scope, resolve_collisions, validate_reference and the build_catalog while loop",
+      "planted_bugs": [
+        "package_dirs uses root.rglob('SKILL.md'), so skill-author/examples/release-readiness becomes a second workspace package; the error surfaces in resolve_collisions as an equal-rank CollisionError, reached through SkillHost.catalog and build_catalog, while the cause sits on the discovery call chain",
+        "resolve_collisions sorts each name's candidates by (path, rank), so the alphabetically first directory wins: the builtin scope under agent-runtime/ beats the workspace under repo/; the tie check uses min(rank), so equal-rank duplicates are still caught",
+        "validate_reference checks containment on the unresolved path, which is always inside the root, so references/team-notes.md -> <tmp>/private/sign-off.md is accepted",
+        "build_catalog pops one entry at a time and serializes the whole catalog again after each pop (the lesson's while loop), O(n^2) in the number of entries"
+      ],
+      "timing_assert": "build_catalog on 1,800 candidates with max_catalog_chars 6,000 under 0.15 s, timed after gc.collect() so the collection of the freshly built candidates is not counted. In pytest at load 4 to 10: quadratic starter 1.78-2.77 s over 16 runs (at least 11.9x the limit); fixed reference 3.8-5.3 ms over 20 runs (at least 28x under it). Standalone, the fixed version takes 1.5-5.0 ms over 120 runs; binary-search and precomputed-size fixes take 4-8 ms",
+      "overfix_guard": "two rank-3 plugins with pdf-tools still raise CollisionError (catches deleting the tie check to silence the first error); tests/fixtures/minimal-skill (catches skipping examples/ only); a three-way collision with shadowed candidates best rank first; references/latest.md -> python-release.md must resolve (catches refusing every symlink); references/vendor is a symlinked directory leaving the package (catches checking only the last component); the package is reached through a symlinked root (catches resolving the target but not the root); a missing reference raises ReferencePathError, not FileNotFoundError (catches strict resolve); catalog_chars equals len(model_json(entries)), entries are a prefix, omitted keeps priority order, an exact fit is kept and budget-cut names come before max_entries-cut names (catches running totals without commas or with default separators, skip-and-continue, reversed omitted, >=, appended omitted)"
+    },
+    {
+      "part": 2,
+      "test": "test_discovery_cache",
+      "kind": "model and persistence",
+      "lesson_anchor": "Discovery is a compiler pipeline (structured data and structured failures: candidates, rejections and reasons); Use It 10 (rebuild the catalog when installations or policies change); Collisions need identity beyond name",
+      "exactness": "after a reopen, cache.discover(scope) equals discover_scope(scope) exactly: SkillCandidate with a Path source, metadata as a tuple of (key, value) tuples and a literal-block description with a newline, Rejection with its reason, under a root path with spaces and non-ASCII names; parsed lists exactly the packages inspected",
+      "traps": [
+        "staleness by size and mtime (same-length edit, mtime restored to the nanosecond with os.utime)",
+        "records keyed by the SKILL.md digest, so an identical copy in a directory whose name does not match becomes a valid candidate",
+        "scope name and rank stored in the snapshot and served after a policy change",
+        "metadata read back as JSON lists, source read back as text",
+        "rejections not cached, so unchanged rejected packages are inspected on every reopen",
+        "saving one scope drops the other scope's records",
+        "results listed from the snapshot instead of the disk (a removed package comes back)",
+        "snapshot kept in memory only",
+        "the digest taken with the built-in hash(), salted per process, instead of SHA-256"
+      ],
+      "clarifying_questions": ["snapshot location and layout", "mtime", "the same package in two scopes", "policy change", "caching rejections", "atomic write", "damaged snapshot"]
+    },
+    {
+      "part": 3,
+      "test": "test_catalog_budget",
+      "kind": "core algorithm",
+      "lesson_anchor": "Catalog budget and active context are different budgets (Codex: 2 percent of a known context window; the 8,000-character value only when the size is unknown, never a second cap; descriptions shortened or omitted); Measure the exact serialized catalog sent to the model (Use It 6)",
+      "traps": [
+        "min(2 percent, 8,000) in catalog_budget",
+        "a known window also held to 8,000 characters",
+        "round instead of rounding down",
+        "a window of 0 read as unknown",
+        "characters measured against a token budget",
+        "the fallback measured in UTF-8 bytes (a Chinese description makes 7,983 characters 8,063 bytes)",
+        "cost from name and description lengths instead of the serialized text",
+        "shortening from the highest priority, all at once, or after omitting",
+        "omitted entries also listed as shortened",
+        "input order taken as priority",
+        "a catalog at exactly its budget treated as over it (a window whose 2 percent equals the full 2,511-token cost)"
+      ],
+      "integration": "the same 33-skill fleet under four budgets: 1,000,000 tokens (everything, 8,415 characters), unknown (5 shortened), 120,000 tokens (7 shortened), 40,000 tokens (12 kept and shortened, 21 omitted)",
+      "clarifying_questions": ["rounding", "8,000 characters with a known window", "how to count tokens", "how to shorten", "restoring descriptions after omission", "an empty catalog over budget"]
+    },
+    {
+      "part": 4,
+      "test": "test_disclosure_log",
+      "kind": "streaming",
+      "lesson_anchor": "Three disclosure levels (Level 2 body on activation, Level 3 resources read on demand); Branch-specific references beat topic dumps (only declared branches); Loading must be observable (skill.resource.loaded with skill, resource, reason and bytes, no secrets); Exercise 3 (byte limit: exactly at the limit and one byte above)",
+      "wire_format": "logfmt: one line per request ending in a newline, key=value pairs one space apart in a fixed order, values bare or double-quoted with \\\\, \\\", \\n, \\r, \\t and \\u00XX escapes, decided by the test's strict parser; events skill.activated, skill.refused, skill.resource.loaded, skill.resource.refused",
+      "traps": [
+        "values with spaces, =, quotes, backslashes or newlines, or empty values, left unquoted or unescaped",
+        "a read before activation, or for another skill that is not active",
+        "any file in the package readable instead of the declared branches",
+        "the declared branch that is a symlink leaving the package (validate_reference from Part 1)",
+        "the limit counted in characters (1,000 characters, 1,088 bytes), a file of exactly 1,024 bytes refused",
+        "activation bytes counted in characters or over the whole SKILL.md",
+        "every request read before the first event (probe: at most one request pulled ahead)",
+        "refusal reasons checked out of order: an undeclared traversal path is not_declared, not invalid_path",
+        "the stub is an async def without yield: TypeError about __aiter__"
+      ],
+      "clarifying_questions": ["reading twice", "reason on refusals", "exactly at the limit", "quoting everything", "non-ASCII", "activating twice"]
+    },
+    {
+      "part": 5,
+      "test": "test_reference_graph",
+      "kind": "graph",
+      "lesson_anchor": "Branch-specific references beat topic dumps (direct links from SKILL.md, avoid deep chains, keep the graph one hop, 'Read references/ for more' has no load condition); Key Terms: reference graph",
+      "traps": [
+        "links resolved against the package root instead of the linking file's directory, or ./ left in the path",
+        "#fragment or ?query kept in the path",
+        "depth-first walk keeping the first depth found",
+        "links in ``` or ~~~ fenced blocks followed",
+        "a directory link expanded into every file under it",
+        "non-Markdown files read for links (CHECKS[name](version) in a script)",
+        "https: and mailto: links followed as paths",
+        "broken links reported by resolved path or with their fragment instead of as written",
+        "an existing file outside the package followed instead of reported as broken",
+        "dead files searched in the whole package",
+        "deep as more than two links instead of two or more"
+      ],
+      "clarifying_questions": ["images", "trailing slash on directories", "inline code", "an existing file outside the package", "scripts"]
+    }
+  ],
+  "deviations": [
+    "Part 1 defect 3 is a containment check made before resolve() rather than a string-prefix check after it. Chapter 13 already has the prefix-without-a-boundary trap in 12 (URI startswith), 15 (pins picked by prefix without the dot) and 09 (Origin matched by prefix), and a trap class may appear at most twice per chapter. The lesson's own two escapes are covered instead: a symlink to a file outside the package and a symlinked directory, with the host policy allowing in-package symlinks ('decide whether symlinks are allowed; if allowed, check the resolved target every time') and the package reached through a symlinked root. The prefix question is an interviewer follow-up.",
+    "Part 1 defect 1 lives in package_dirs, the helper discover_scope shares with the Part 2 cache. A nested example named release-readiness turns the recursion into an equal-rank CollisionError two calls away, on a different call chain.",
+    "Part 1 timing uses 1,800 entries instead of 5,000: the quadratic loop at 5,000 entries takes well over 3 seconds. 1,800 keeps the slow version near 2 s with at least 12x on both sides of the 0.15 s limit.",
+    "Part 2 does not test atomic replacement. Chapter 13 already tests that trap in 04 and 13, and 15 left it out for the same rule. The reference still writes a temporary file and os.replace, and the interviewer asks about it. Spaces and non-ASCII in paths and newlines in descriptions are in the fixture, but JSON round-trips them, so the traps come from the domain instead: identity by directory, scope policy not cached, JSON types restored, rejections cached, scopes isolated in one snapshot, removed packages and the os.utime mtime reset.",
+    "Part 3 counts the 2 percent budget in tokens with an injected count_tokens and the fallback in characters, because the lesson gives the first as a share of the context window and the second as 8,000 characters. The shortening order (lowest priority first, one entry at a time, stop when it fits, then omit lowest priority first) is this host's policy; the lesson only says descriptions may be shortened or omitted. model_json keeps non-ASCII text (ensure_ascii=False), so a Chinese character costs one character; the quiz points out that the lesson's escaped measure inflates such entries six times.",
+    "Part 4 gives decision_map (the 'For X, read [file](path).' branches); the candidate writes format_event and the async generator. Besides the lesson's skill.resource.loaded event, activations log the Level 2 body size, refusals carry a reason code and activations of names outside the catalog are refused.",
+    "Part 5 adds directory links (reported, not followed), broken links (missing or outside the package), Markdown-only parsing and scheme links to the suggested traps.",
+    "Frontmatter parsing is given and untested, to stay clear of lesson 22."
+  ]
+}
