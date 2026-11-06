@@ -1,0 +1,440 @@
+{
+  "package": "cotballot",
+  "tests": [
+    "test_worked_example_pipeline",
+    "test_example_bank_roundtrip",
+    "test_self_consistency_ballot",
+    "test_stream_running_ballots",
+    "test_thought_trace_accounting"
+  ],
+  "layers": [
+    {
+      "test": "test_worked_example_pipeline",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "TypeError"
+        },
+        {
+          "name": "return full worked-example records",
+          "edits": [
+            {
+              "file": "examples.py",
+              "old": "return [self.examples[index][\"answer\"] for index in chosen]",
+              "new": "return [copy.deepcopy(self.examples[index]) for index in chosen]"
+            }
+          ],
+          "expect": "read the explicit final answer, not an intermediate number"
+        },
+        {
+          "name": "+ read the terminal marked answer",
+          "edits": [
+            {
+              "file": "examples.py",
+              "old": "    match = re.search(r\"[+-]?[0-9][0-9,]*(?:\\.[0-9]+)?\", text)\n    return match.group(0) if match is not None else None",
+              "new": "    lines = [line.strip() for line in text.splitlines() if line.strip()]\n    if not lines:\n        return None\n    match = re.fullmatch(r\"(?:the answer is(?:\\s*:\\s*|\\s+)|####\\s+)(.+)\", lines[-1], re.IGNORECASE)\n    if match is None:\n        return None\n    answer = match.group(1).strip()\n    if answer.endswith(\".\"):\n        answer = answer[:-1]\n    return answer or None"
+            }
+          ],
+          "expect": "few-shot CoT includes every selected worked reasoning"
+        },
+        {
+          "name": "+ retain worked reasoning in each demonstration",
+          "edits": [
+            {
+              "file": "examples.py",
+              "old": "return f\"Q: {example['question']}\\nA: The answer is {example['answer']}.\\n\\n\"",
+              "new": "return f\"Q: {example['question']}\\nA: {example['reasoning']} The answer is {example['answer']}.\\n\\n\""
+            }
+          ],
+          "expect": "example selection should stay responsive for a large corpus"
+        },
+        {
+          "name": "+ rank once for all slots of this query",
+          "edits": [
+            {
+              "file": "examples.py",
+              "old": "        chosen = []\n        used = set()\n        seen_labels = set()\n        for _ in range(min(count, len(self.examples))):\n            ranking = self.rank(question, difficulty)\n            diverse = next((i for i in ranking if i not in used and self.examples[i][\"label\"] not in seen_labels), None)\n            index = diverse if diverse is not None else next(i for i in ranking if i not in used)\n            chosen.append(index)\n            used.add(index)\n            seen_labels.add(self.examples[index][\"label\"])\n        return [copy.deepcopy(self.examples[index]) for index in chosen]",
+              "new": "        ranking = self.rank(question, difficulty)\n        seen_labels = set()\n        diverse, rest = [], []\n        for index in ranking:\n            label = self.examples[index][\"label\"]\n            if label in seen_labels:\n                rest.append(index)\n            else:\n                seen_labels.add(label)\n                diverse.append(index)\n        chosen = (diverse + rest)[:count]\n        return [copy.deepcopy(self.examples[index]) for index in chosen]"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_worked_example_pipeline",
+      "name": "drop label diversity and take top K ranked examples",
+      "edits": [
+        {
+          "file": "examples.py",
+          "old": "chosen = (diverse + rest)[:count]",
+          "new": "chosen = ranking[:count]"
+        }
+      ],
+      "expect": "few-shot CoT includes every selected worked reasoning"
+    },
+    {
+      "test": "test_example_bank_roundtrip",
+      "name": "coerce retrieved answer text through float",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "        return dict(zip(COLUMNS, row))",
+          "new": "        record = dict(zip(COLUMNS, row))\n        record[\"answer\"] = str(float(record[\"answer\"]))\n        return record"
+        }
+      ],
+      "expect": "a worked example round-trips without numeric coercion"
+    },
+    {
+      "test": "test_example_bank_roundtrip",
+      "name": "leave successful example writes uncommitted",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "        with self._db:\n            self._db.execute(\"\"\"INSERT INTO examples",
+          "new": "        if True:\n            self._db.execute(\"\"\"INSERT INTO examples"
+        }
+      ],
+      "expect": "all worked fields and corpus order survive reopening"
+    },
+    {
+      "test": "test_example_bank_roundtrip",
+      "name": "replace an updated example and move its corpus position",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "self._db.execute(\"\"\"INSERT INTO examples (id, question, reasoning, answer, label, difficulty)\n                VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET\n                question=excluded.question, reasoning=excluded.reasoning, answer=excluded.answer,\n                label=excluded.label, difficulty=excluded.difficulty\"\"\", values)",
+          "new": "self._db.execute(\"\"\"INSERT OR REPLACE INTO examples (id, question, reasoning, answer, label, difficulty)\n                VALUES (?, ?, ?, ?, ?, ?)\"\"\", values)"
+        }
+      ],
+      "expect": "updating an example preserves its original corpus position"
+    },
+    {
+      "test": "test_example_bank_roundtrip",
+      "name": "sort corpus examples by id instead of first position",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "query + \" ORDER BY seq\"",
+          "new": "query + \" ORDER BY id\""
+        }
+      ],
+      "expect": "updating an example preserves its original corpus position"
+    },
+    {
+      "test": "test_example_bank_roundtrip",
+      "name": "treat the empty label as no filter",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "        if label is not None:",
+          "new": "        if label:"
+        }
+      ],
+      "expect": "an empty label is a real filter"
+    },
+    {
+      "test": "test_self_consistency_ballot",
+      "name": "normalize numeric values through binary float",
+      "edits": [
+        {
+          "file": "ballot.py",
+          "old": "return Fraction(Decimal(value.replace(\",\", \"\")))",
+          "new": "return Fraction(float(value.replace(\",\", \"\")))"
+        }
+      ],
+      "expect": "large integers do not pass through float"
+    },
+    {
+      "test": "test_self_consistency_ballot",
+      "name": "divide winner votes by attempted samples",
+      "edits": [
+        {
+          "file": "ballot.py",
+          "old": "counts[winner] / valid if winner is not None else 0.0",
+          "new": "counts[winner] / len(reasonings) if winner is not None else 0.0"
+        }
+      ],
+      "expect": "numeric aliases share votes and invalid samples stay outside confidence"
+    },
+    {
+      "test": "test_self_consistency_ballot",
+      "name": "break ballot ties by first encountered answer",
+      "edits": [
+        {
+          "file": "ballot.py",
+          "old": "winner = min(value for value, count in counts.items() if count == highest)",
+          "new": "winner = next(value for value, count in counts.items() if count == highest)"
+        }
+      ],
+      "expect": "ties and vote order use numeric value, not text or encounter order"
+    },
+    {
+      "test": "test_self_consistency_ballot",
+      "name": "drop zero values from the valid ballot",
+      "edits": [
+        {
+          "file": "ballot.py",
+          "old": "counts = Counter(value for value in values if value is not None)",
+          "new": "counts = Counter(value for value in values if value)"
+        }
+      ],
+      "expect": "zero is a valid ballot value"
+    },
+    {
+      "test": "test_self_consistency_ballot",
+      "name": "strip commas before checking decimal grammar",
+      "edits": [
+        {
+          "file": "ballot.py",
+          "old": "if DECIMAL.fullmatch(value) is None:",
+          "new": "if DECIMAL.fullmatch(value.replace(\",\", \"\")) is None:"
+        }
+      ],
+      "expect": "invalid finite-grammar answers abstain"
+    },
+    {
+      "test": "test_stream_running_ballots",
+      "name": "omit the NDJSON record terminator",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "return json.dumps(event, ensure_ascii=False) + \"\\n\"",
+          "new": "return json.dumps(event, ensure_ascii=False)"
+        }
+      ],
+      "expect": "each ballot event has one NDJSON terminator"
+    },
+    {
+      "test": "test_stream_running_ballots",
+      "name": "drop attempted events when extraction is invalid",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            event = ballot_event(sample, reasonings)",
+          "new": "            event = ballot_event(sample, reasonings)\n            if json.loads(event)[\"answer\"] is None:\n                continue"
+        }
+      ],
+      "expect": "emit attempted samples with cumulative valid-sample voting"
+    },
+    {
+      "test": "test_stream_running_ballots",
+      "name": "read the entire source before emitting sample events",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        async for sample in samples:",
+          "new": "        for sample in [sample async for sample in samples]:"
+        }
+      ],
+      "expect": "emit a sample event before pulling another sample"
+    },
+    {
+      "test": "test_stream_running_ballots",
+      "name": "reset the running ballot for every sample",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    reasonings.append(sample[\"text\"])",
+          "new": "    reasonings = [sample[\"text\"]]"
+        }
+      ],
+      "expect": "emit attempted samples with cumulative valid-sample voting"
+    },
+    {
+      "test": "test_thought_trace_accounting",
+      "name": "skip shared thought nodes after their first global visit",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "        seen[node_id] = signature",
+          "new": "        if node_id in seen:\n            return\n        seen[node_id] = signature"
+        }
+      ],
+      "expect": "audit every path but bill each supplied thought id once"
+    },
+    {
+      "test": "test_thought_trace_accounting",
+      "name": "bill terminal-path totals instead of unique executed nodes",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "sum(signature[2] + signature[3] for signature in seen.values())",
+          "new": "sum(row[\"tokens\"] for row in terminals)"
+        }
+      ],
+      "expect": "audit every path but bill each supplied thought id once"
+    },
+    {
+      "test": "test_thought_trace_accounting",
+      "name": "stop exploring a node after its terminal answer",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "        for child in node[\"children\"]:",
+          "new": "        if answer is not None:\n            return\n        for child in node[\"children\"]:"
+        }
+      ],
+      "expect": "audit every path but bill each supplied thought id once"
+    },
+    {
+      "test": "test_thought_trace_accounting",
+      "name": "count only one model call per path node",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "\"calls\": 2 * len(next_path)",
+          "new": "\"calls\": len(next_path)"
+        }
+      ],
+      "expect": "audit every path but bill each supplied thought id once"
+    },
+    {
+      "test": "test_thought_trace_accounting",
+      "name": "omit ancestor tokens from terminal paths",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "next_tokens = tokens + generation + evaluation",
+          "new": "next_tokens = generation + evaluation"
+        }
+      ],
+      "expect": "audit every path but bill each supplied thought id once"
+    },
+    {
+      "test": "test_example_bank_roundtrip",
+      "name": "validate integer difficulty but forget the nonnegative boundary",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "if type(example[\"difficulty\"]) is not int or example[\"difficulty\"] < 0:",
+          "new": "if type(example[\"difficulty\"]) is not int:"
+        }
+      ],
+      "expect": "invalid corpus records are rejected before changing stored state"
+    },
+    {
+      "test": "test_example_bank_roundtrip",
+      "name": "check required corpus keys but silently accept extra fields",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "if set(example) != set(COLUMNS):",
+          "new": "if not set(COLUMNS).issubset(example):"
+        }
+      ],
+      "expect": "invalid corpus records are rejected before changing stored state"
+    },
+    {
+      "test": "test_self_consistency_ballot",
+      "name": "strip fraction commas before validating their grouping",
+      "edits": [
+        {
+          "file": "ballot.py",
+          "old": "rational = RATIONAL.fullmatch(value)",
+          "new": "rational = RATIONAL.fullmatch(value.replace(\",\", \"\"))"
+        }
+      ],
+      "expect": "invalid finite-grammar answers abstain"
+    },
+    {
+      "test": "test_self_consistency_ballot",
+      "name": "search inside the last line instead of requiring a complete final marker line",
+      "edits": [
+        {
+          "file": "examples.py",
+          "old": "match = re.fullmatch(r\"(?:the answer is(?:\\s*:\\s*|\\s+)|####\\s+)(.+)\", lines[-1], re.IGNORECASE)",
+          "new": "match = re.search(r\"(?:the answer is(?:\\s*:\\s*|\\s+)|####\\s+)(.+)\", lines[-1], re.IGNORECASE)"
+        }
+      ],
+      "expect": "only a complete terminal marked line contributes a vote"
+    },
+    {
+      "test": "test_stream_running_ballots",
+      "name": "omit awaiting source closure when the consumer stops",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            await close()",
+          "new": "            pass"
+        }
+      ],
+      "expect": "close the sample source before client close returns"
+    },
+    {
+      "test": "test_stream_running_ballots",
+      "name": "emit the cumulative winner as the current sample answer",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "\"index\": ballot[\"attempted\"], \"answer\": ballot[\"answers\"][-1],",
+          "new": "\"index\": ballot[\"attempted\"], \"answer\": ballot[\"winner\"],"
+        }
+      ],
+      "expect": "emit attempted samples with cumulative valid-sample voting"
+    },
+    {
+      "test": "test_thought_trace_accounting",
+      "name": "validate finite thought scores but omit their unit interval",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": " or not 0 <= score <= 1:",
+          "new": ":"
+        }
+      ],
+      "expect": "trace scores and token counts obey their declared bounds"
+    },
+    {
+      "test": "test_thought_trace_accounting",
+      "name": "use isinstance int and accept booleans as billed token counts",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "if type(generation) is not int or type(evaluation) is not int or min(generation, evaluation) < 0:",
+          "new": "if not isinstance(generation, int) or not isinstance(evaluation, int) or min(generation, evaluation) < 0:"
+        }
+      ],
+      "expect": "trace scores and token counts obey their declared bounds"
+    },
+    {
+      "test": "test_stream_running_ballots",
+      "name": "number attempted ballot events using only the valid-answer count",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "\"index\": ballot[\"attempted\"]",
+          "new": "\"index\": ballot[\"valid\"]"
+        }
+      ],
+      "expect": "emit attempted samples with cumulative valid-sample voting"
+    },
+    {
+      "test": "test_stream_running_ballots",
+      "name": "report cumulative ballot confidence as a percentage instead of a fraction",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    return json.dumps(event, ensure_ascii=False)",
+          "new": "    event[\"confidence\"] *= 100\n    return json.dumps(event, ensure_ascii=False)"
+        }
+      ],
+      "expect": "emit attempted samples with cumulative valid-sample voting"
+    },
+    {
+      "test": "test_stream_running_ballots",
+      "name": "replace the complete cumulative vote distribution with only winning votes",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    return json.dumps(event, ensure_ascii=False)",
+          "new": "    event[\"votes\"] = {answer: count for answer, count in event[\"votes\"].items() if answer == event[\"winner\"]}\n    return json.dumps(event, ensure_ascii=False)"
+        }
+      ],
+      "expect": "emit attempted samples with cumulative valid-sample voting"
+    }
+  ]
+}

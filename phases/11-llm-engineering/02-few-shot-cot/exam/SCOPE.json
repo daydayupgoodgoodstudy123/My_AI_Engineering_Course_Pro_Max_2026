@@ -1,0 +1,163 @@
+{
+  "lesson": "phases/11-llm-engineering/02-few-shot-cot",
+  "title": "Few-Shot, Chain-of-Thought, Tree-of-Thought",
+  "format": "staged-brownfield",
+  "service": "CoTBallot: worked-example corpus, CoT prompt preview, exact replayed self-consistency ballots and supplied thought-trace accounting",
+  "sources": {
+    "docs/en.md": "74b50bbd6ed857280d5691db90fd7a5436584ea065f5b8eb145a67a7f8ca7e52",
+    "code/advanced_prompting.py": "c9a89b532a470dcead9974bd3c7ca589028572a75b7df09e6be56f39dd137751"
+  },
+  "runtime": "Python3.10+, standard library, pytest; deterministic offline replay; no openai/LLM SDK imported",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_worked_example_pipeline",
+      "kind": "debug",
+      "lesson_anchor": "docs55–63 example selection;335–374 worked example store/CoT builder;code104–139 extractor/builder",
+      "planted_bugs": [
+        "ExampleSelector.select returns answer strings instead of complete example records; TypeError surfaces1–2 builder calls below the projection root in ExampleService.preview -> build_cot_prompt -> format_example",
+        "extract_answer selects the first intermediate number rather than the terminal marked final lexeme",
+        "worked-example formatter drops reasoning, degrading few-shot CoT to question/answer demonstrations",
+        "one query selecting K slots repeatedly calls the complete rank/scoring routine, instead of scoring once then selecting"
+      ],
+      "timing_assert": "6000 preprocessed examples,160 slots,under0.075s. Complete isolated-pack final probe3slow=[1.1963083329610527, 0.7088500000536442, 0.7176211250480264]s;3fast=[0.007604790851473808, 0.00649637496098876, 0.007594125112518668]s; slowmin/limit=9.45133333404859x;limit/fastmax=9.862204163769343x; slowmax<3s. Measured with the same complete-pack selection workload as the Part 1 test.",
+      "overfix_guard": "Still retain label diversity before fills, difficulty/corpus tie order, distinct requested example positions, per-query ranking changes, full independent records, and zero-example behavior.",
+      "given_helpers": [
+        "Fixed-corpus token preprocessing is correct on both sides; this is not archive retokenization/cache optimization.",
+        "example_count correctly distinguishes None/default from zero."
+      ],
+      "deviation": "An explicit final marker on the last nonblank line replaces the source extractor fallback to intermediate numerals; this finite local contract is documented, not provider behavior."
+    },
+    {
+      "part": 2,
+      "test": "test_example_bank_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "docs335–350 example store fields question/reasoning/answer;55–63 label diversity/difficulty",
+      "storage": "SQLite example table with first-insert seq and upsert-by-id",
+      "exactness": "Question/reasoning CRLF and Unicode, exact answer lexeme incl signs/leading zeros/fractions/long decimals/large integers, label and integer difficulty survive reopening exactly.",
+      "traps": [
+        "coerce stored/read answer text to float/canonical value",
+        "update via replace changes corpus ordinal",
+        "lose committed state on close",
+        "sort by id instead of corpus order",
+        "empty label mistaken for no filter",
+        "silently accept extra/missing corpus fields or negative integer difficulty and corrupt an existing record"
+      ],
+      "clarifying_questions": [
+        "update position",
+        "when to normalize answers"
+      ],
+      "validation_contract": "Exactly the six COLUMNS, string text fields and nonempty id; difficulty is a nonnegative exact int, excluding bool; invalid writes leave existing records unchanged."
+    },
+    {
+      "part": 3,
+      "test": "test_self_consistency_ballot",
+      "kind": "core algorithm",
+      "lesson_anchor": "docs110–141 self-consistency;376–409 voting;code191–211 self_consistency_solve",
+      "algorithm": "Finite-grammar exact numeric normalization, valid-sample Counter vote, numeric tie rule, explicit attempted/valid/raw/normalized counts and confidence",
+      "traps": [
+        "binary float collapses exact large/decimal/fraction values",
+        "invalid answer strings accepted by partial parsing",
+        "attempted rather than valid denominator",
+        "zero rejected by truthiness",
+        "tie resolved by encounter/text order",
+        "remove fraction commas before validating numerator/denominator grouping",
+        "search an inline answer marker instead of matching the whole terminal nonblank line"
+      ],
+      "numeric_contract": "Optional leading $, signed ASCII integer/finite decimal or signed integer/positive unsigned integer fraction; properly grouped comma thousands; leading-dot decimals accepted; no exponents/units/underscores/NaN/Infinity/decimal-fraction terms/zero denominator. Use complete grammar matches and exact rational values. One sentence period is stripped by the terminal extractor.",
+      "source_contract": "Confidence = winning count / valid extracted numeric samples, following code answers length. It is vote share, not calibrated correctness.",
+      "deviation": "Source numeric regex is a simplified unsigned extractor; signs/fractions/comma validation are explicit bounded engineering extensions. No actual sampling or model efficacy claim.",
+      "clarifying_questions": [
+        "finite grammar",
+        "valid denominator",
+        "numeric ties"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_stream_running_ballots",
+      "kind": "streaming",
+      "lesson_anchor": "Self-consistency samplesN reasoning paths and retains reasonings; source loop191–211;docs short-batchN tradeoff",
+      "wire_format": "NDJSON: one newline-terminated JSON event per arriving sample; raw sample text inside JSON; cumulative ballot after that attempt",
+      "traps": [
+        "reset batch reasoning history per event",
+        "use valid rather than attempted event index",
+        "substitute cumulative winner for current answer",
+        "truncate full vote distribution to winning votes",
+        "convert confidence fraction to percentage",
+        "lose raw sample text or NDJSON record boundary"
+      ],
+      "clarifying_questions": [
+        "invalid event",
+        "empty stream",
+        "early close"
+      ],
+      "deviation": "Short deterministic sample stream is local replay, not a provider streaming protocol. Source cleanup is checked; no throughput guarantee for unbounded sampling.",
+      "algorithm": "Candidate synchronous ballot_event appends the exact current reasoning once to batch history, computes cumulative tally, distinguishes current answer from winner and projects attempted index, fractional confidence and complete vote distribution into one NDJSON record.",
+      "given_helpers": [
+        "complete source pull-through, event publication and fresh per-stream history",
+        "early-close source ownership"
+      ],
+      "integration_guards": [
+        "collect all source samples before event publication",
+        "drop the already-computed invalid-attempt event",
+        "defer source closure"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_thought_trace_accounting",
+      "kind": "nested structure",
+      "lesson_anchor": "docs143–194 ToT branching/evaluation/call cost;410–453 search/escalation;code213–286 supplied tree mechanics",
+      "structure": "Supplied thought-node roots/children, score and generation/evaluation token fields; repeated node ids may represent shared trace prefix/subgraph",
+      "algorithm": "DFS all explicit terminal-answer paths, accumulated per-path calls/tokens, exact chosen-answer comparison, unique-node global usage, path-local cycle and conflicting-id rejection",
+      "traps": [
+        "global visited suppresses a legitimate second terminal path",
+        "sum terminal path costs rather than unique actual nodes",
+        "stop children/siblings after finding an answer",
+        "forget evaluation calls",
+        "omit ancestor tokens or pruned-node usage",
+        "accept finite scores outside [0,1]",
+        "accept booleans as integer generation/evaluation token counts"
+      ],
+      "clarifying_questions": [
+        "answer node with children",
+        "shared paths versus global billing",
+        "same id on different branch"
+      ],
+      "deviation": "Inspecting supplied trace is the natural structured-data exercise; no ToT/MCTS/BFS search, branch policy, evaluator model or real usage measurement is implemented. Each local node represents one generation plus one evaluation call; usage values are fixture facts, not provider telemetry.",
+      "validation_contract": "Scores finite in [0,1]; supplied generation/evaluation token counts nonnegative exact integers excluding bool. These are local trace guards, not evaluator/search execution."
+    }
+  ],
+  "boundaries": [
+    "No coderpad select_context/token_f1 core.",
+    "No14/04 ToT/MCTS search; this P3 is exact observed terminal ballot and P5 only supplied trace accounting.",
+    "No14/07 fixed-corpus query retokenization bug: corpus token sets are already correctly prepared; repeated same-query K-slot ranking is the planted work.",
+    "11/01 prompt-variable insertion-order binding, role-history retention and empty-system default are not repeated here.",
+    "Worked reasoning omission is local demonstration formatting, distinct from14/01 opaque reasoning_item preservation across model turns.",
+    "No empirical GSM8K/model/latency/price claims from source are promoted into verified exam outcomes."
+  ],
+  "timed_session": "60minutes including2minuteopening and58minute parts(10+12+12+13+11); not human-calibrated",
+  "verification_boundary": "Local deterministic examples and replay only; no real LLM, sampling independence, quality uplift, mathematical correctness of reasoning, calibrated confidence, API billing or deployment established.",
+  "p4_driver_boundary": {
+    "candidate": "synchronous ballot_event domain history/projection",
+    "given": "complete stream_ballots async driver, fresh batch history and source close",
+    "evidence": "/tmp/exam-11-16-work/draft11-02/p4-driver-replacement/review.json",
+    "P1_unchanged": true
+  },
+  "status": "P4 candidate domain callback with complete correct GIVEN async driver; prescribed formal checker passed. Current assertions=54, registered wrong fixes=31.",
+  "p4_driver_validation": {
+    "status": "FORMAL_PRESCRIBED_CHECKER_WRITE_PASS",
+    "original_assertions": 54,
+    "current_assertions": 54,
+    "original_wrong_fixes": 28,
+    "current_wrong_fixes": 31,
+    "original_canonical_exact": 25,
+    "explicit_semantic_maps": 3,
+    "new_distinct_actual_wrong": 3,
+    "initial_misses": 0,
+    "P1_unchanged": true,
+    "report": "/tmp/exam-11-16-work/draft11-02/p4-driver-replacement/review.json"
+  },
+  "p4_driver_status": "FORMAL_PRESCRIBED_CHECKER_WRITE_PASS"
+}
