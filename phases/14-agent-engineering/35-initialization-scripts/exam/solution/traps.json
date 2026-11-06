@@ -1,0 +1,2152 @@
+{
+  "package": "initprobe",
+  "tests": [
+    "test_probe_runner",
+    "test_run_history",
+    "test_probe_plan",
+    "test_tap_stream",
+    "test_lkg_diff"
+  ],
+  "layers": [
+    {
+      "test": "test_probe_runner",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "init finds the repo's files wherever in the repo it starts"
+        },
+        {
+          "name": "paths pinned against the repo root",
+          "edits": [
+            {
+              "file": "paths.py",
+              "old": "    return {name: Path(rel).resolve() for name, rel in layout.items()}\n",
+              "new": "    return {name: (Path(root) / rel).resolve() for name, rel in layout.items()}\n"
+            }
+          ],
+          "expect": "a slow fail stays a fail, with the detail the probe gave"
+        },
+        {
+          "name": "+ only a slow pass becomes a warn",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "    if duration_ms > probe.budget_s * 1000:\n",
+              "new": "    if status == \"pass\" and duration_ms > probe.budget_s * 1000:\n"
+            }
+          ],
+          "expect": "a wall-clock step does not change how long a probe took"
+        },
+        {
+          "name": "+ durations from the monotonic clock",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "    started = time.time()\n",
+              "new": "    started = time.monotonic()\n"
+            },
+            {
+              "file": "runner.py",
+              "old": "int((time.time() - started) * 1000)",
+              "new": "int((time.monotonic() - started) * 1000)"
+            }
+          ],
+          "expect": "a lock stamped in the future is not trusted"
+        },
+        {
+          "name": "+ a lock from the future is stale",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "    return age < LOCK_TTL_S\n",
+              "new": "    return 0 <= age < LOCK_TTL_S\n"
+            }
+          ],
+          "expect": "writing and checking the lock stay fast with thousands of probes"
+        },
+        {
+          "name": "+ the manifest and the sorted names hashed once",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "    names: list[str] = []\n    digest = hashlib.sha256(manifest.encode())\n    for name in sorted(probe.name for probe in probes):\n        names.append(name)\n        digest = hashlib.sha256(manifest.encode() + b\"\\0\" + json.dumps(names).encode())\n    return digest.hexdigest()[:16]\n",
+              "new": "    h = hashlib.sha256()\n    h.update(manifest.encode())\n    h.update(b\"\\0\" + json.dumps(sorted(probe.name for probe in probes)).encode())\n    return h.hexdigest()[:16]\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_probe_runner",
+      "name": "a probe that raises is returned at once, with no duration",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    try:\n        status, detail = await probe.check()\n    except Exception as exc:\n        status, detail = \"fail\", f\"{type(exc).__name__}: {exc}\"\n",
+          "new": "    try:\n        status, detail = await probe.check()\n    except Exception as exc:\n        return Result(probe.name, \"fail\", f\"{type(exc).__name__}: {exc}\", 0)\n"
+        }
+      ],
+      "expect": "a probe that raises is timed like any other"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "exceptions collected by gather(return_exceptions=True) in run_probes, untimed",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    try:\n        status, detail = await probe.check()\n    except Exception as exc:\n        status, detail = \"fail\", f\"{type(exc).__name__}: {exc}\"\n",
+          "new": "    status, detail = await probe.check()\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "    return list(await asyncio.gather(*(_timed(probe) for probe in probes)))\n",
+          "new": "    done = await asyncio.gather(*(_timed(probe) for probe in probes), return_exceptions=True)\n    return [r if isinstance(r, Result) else Result(p.name, \"fail\", f\"{type(r).__name__}: {r}\", 0)\n            for p, r in zip(probes, done)]\n"
+        }
+      ],
+      "expect": "a probe that raises is timed like any other"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "the exception's repr as the detail",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "f\"{type(exc).__name__}: {exc}\"",
+          "new": "repr(exc)"
+        }
+      ],
+      "expect": "a probe that raises fails on its own, and the other probes still run"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "the exception's message alone as the detail",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "f\"{type(exc).__name__}: {exc}\"",
+          "new": "str(exc)"
+        }
+      ],
+      "expect": "a probe that raises fails on its own, and the other probes still run"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "the slow note added to every slow result, fails included",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    if status == \"pass\" and duration_ms > probe.budget_s * 1000:\n        status = \"warn\"\n",
+          "new": "    if duration_ms > probe.budget_s * 1000:\n        status = \"warn\" if status == \"pass\" else status\n"
+        }
+      ],
+      "expect": "a slow fail stays a fail, with the detail the probe gave"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "a slow probe cancelled at its budget (asyncio.wait_for)",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        status, detail = await probe.check()\n",
+          "new": "        status, detail = await asyncio.wait_for(probe.check(), probe.budget_s)\n"
+        }
+      ],
+      "expect": "a slow fail stays a fail, with the detail the probe gave"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "durations from CPU time (time.process_time)",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    started = time.monotonic()\n",
+          "new": "    started = time.process_time()\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "int((time.monotonic() - started) * 1000)",
+          "new": "int((time.process_time() - started) * 1000)"
+        }
+      ],
+      "expect": "a probe that raises is timed like any other"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "durations from the wall clock in nanoseconds (time.time_ns)",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    started = time.monotonic()\n",
+          "new": "    started = time.time_ns()\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "int((time.monotonic() - started) * 1000)",
+          "new": "(time.time_ns() - started) // 1_000_000"
+        }
+      ],
+      "expect": "a wall-clock step does not change how long a probe took"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "a lock's age taken as abs(now - written_at)",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    return 0 <= age < LOCK_TTL_S\n",
+          "new": "    return abs(age) < LOCK_TTL_S\n"
+        }
+      ],
+      "expect": "a lock stamped in the future is not trusted"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "a minute of clock skew forgiven",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    return 0 <= age < LOCK_TTL_S\n",
+          "new": "    return -60 <= age < LOCK_TTL_S\n"
+        }
+      ],
+      "expect": "a lock stamped in the future is not trusted"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "a lock written this very second treated as from the future",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    return 0 <= age < LOCK_TTL_S\n",
+          "new": "    return 0 < age < LOCK_TTL_S\n"
+        }
+      ],
+      "expect": "a lock written this second is fresh"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "a lock still fresh at exactly LOCK_TTL_S",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    return 0 <= age < LOCK_TTL_S\n",
+          "new": "    return 0 <= age <= LOCK_TTL_S\n"
+        }
+      ],
+      "expect": "a lock is stale once it is LOCK_TTL_S old"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "probe names hashed in the order they are listed",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "json.dumps(sorted(probe.name for probe in probes))",
+          "new": "json.dumps([probe.name for probe in probes])"
+        }
+      ],
+      "expect": "the order the probes are listed in does not matter"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "each probe's repr hashed, so a new process never matches",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "json.dumps(sorted(probe.name for probe in probes))",
+          "new": "json.dumps(sorted(repr(probe) for probe in probes))"
+        }
+      ],
+      "expect": "a lock written by an earlier init process still counts"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "only the number of probes hashed",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "json.dumps(sorted(probe.name for probe in probes))",
+          "new": "json.dumps(len(probes))"
+        }
+      ],
+      "expect": "a lock covers only the probes it was written for"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "the probe names hashed without the manifest",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    h.update(manifest.encode())\n",
+          "new": ""
+        }
+      ],
+      "expect": "editing the manifest makes the lock stale"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "at most four probes at a time (asyncio.Semaphore)",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    return list(await asyncio.gather(*(_timed(probe) for probe in probes)))\n",
+          "new": "    gate = asyncio.Semaphore(4)\n\n    async def one(probe: Probe) -> Result:\n        async with gate:\n            return await _timed(probe)\n\n    return list(await asyncio.gather(*(one(probe) for probe in probes)))\n"
+        }
+      ],
+      "expect": "probes run side by side"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "one duration for the whole run, given to every probe",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    return list(await asyncio.gather(*(_timed(probe) for probe in probes)))\n",
+          "new": "    started = time.monotonic()\n    results = list(await asyncio.gather(*(_timed(probe) for probe in probes)))\n    took = int((time.monotonic() - started) * 1000)\n    return [Result(r.name, r.status, r.detail, took) for r in results]\n"
+        }
+      ],
+      "expect": "each probe is timed on its own, not with the whole run"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "init moved into the repo root before the paths are resolved (os.chdir)",
+      "edits": [
+        {
+          "file": "paths.py",
+          "old": "    return {name: (Path(root) / rel).resolve() for name, rel in layout.items()}\n",
+          "new": "    __import__(\"os\").chdir(root)\n    return {name: Path(rel).resolve() for name, rel in layout.items()}\n"
+        }
+      ],
+      "expect": "pinning the paths leaves the working directory where it was"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "the root joined to each path but never resolved",
+      "edits": [
+        {
+          "file": "paths.py",
+          "old": "    return {name: (Path(root) / rel).resolve() for name, rel in layout.items()}\n",
+          "new": "    return {name: Path(root) / rel for name, rel in layout.items()}\n"
+        }
+      ],
+      "expect": "pinned paths are absolute and normalized, whether the root comes absolute or relative"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "absolute() instead of resolve(), so a relative root keeps its '..'",
+      "edits": [
+        {
+          "file": "paths.py",
+          "old": "    return {name: (Path(root) / rel).resolve() for name, rel in layout.items()}\n",
+          "new": "    return {name: (Path(root) / rel).absolute() for name, rel in layout.items()}\n"
+        }
+      ],
+      "expect": "pinned paths are absolute and normalized, whether the root comes absolute or relative"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "paths pinned against the package's own directory, like the lesson's HERE",
+      "edits": [
+        {
+          "file": "paths.py",
+          "old": "    return {name: (Path(root) / rel).resolve() for name, rel in layout.items()}\n",
+          "new": "    here = Path(__file__).resolve().parent.parent\n    return {name: (here / rel).resolve() for name, rel in layout.items()}\n"
+        }
+      ],
+      "expect": "init finds the repo's files wherever in the repo it starts"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "a probe that raises returns before the budget check; every other slow result still becomes a warn",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        status, detail = \"fail\", f\"{type(exc).__name__}: {exc}\"\n",
+          "new": "        took = int((time.monotonic() - started) * 1000)\n        return Result(probe.name, \"fail\", f\"{type(exc).__name__}: {exc}\", took)\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "    if status == \"pass\" and duration_ms > probe.budget_s * 1000:\n",
+          "new": "    if duration_ms > probe.budget_s * 1000:\n"
+        }
+      ],
+      "expect": "a slow fail stays a fail, with the detail the probe gave"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "a slow result downgraded unless it failed, so a slow warn gets the note too",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    if status == \"pass\" and duration_ms > probe.budget_s * 1000:\n",
+          "new": "    if status != \"fail\" and duration_ms > probe.budget_s * 1000:\n"
+        }
+      ],
+      "expect": "a probe's own warn stays as it is"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "a slow fail turned into a warn with its detail kept",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    if status == \"pass\" and duration_ms > probe.budget_s * 1000:\n        status = \"warn\"\n        detail = f\"{detail} (slow: {duration_ms}ms > {int(probe.budget_s * 1000)}ms)\"\n",
+          "new": "    if duration_ms > probe.budget_s * 1000:\n        if status == \"pass\":\n            detail = f\"{detail} (slow: {duration_ms}ms > {int(probe.budget_s * 1000)}ms)\"\n        status = \"warn\"\n"
+        }
+      ],
+      "expect": "a slow fail stays a fail, with the detail the probe gave"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "the per-name fingerprint cached for the process (functools.lru_cache)",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    h = hashlib.sha256()\n    h.update(manifest.encode())\n    h.update(b\"\\0\" + json.dumps(sorted(probe.name for probe in probes)).encode())\n    return h.hexdigest()[:16]\n",
+          "new": "    return _fingerprint(manifest, tuple(sorted(probe.name for probe in probes)))\n\n\n@__import__(\"functools\").lru_cache(maxsize=None)\ndef _fingerprint(manifest: str, sorted_names: tuple[str, ...]) -> str:\n    names: list[str] = []\n    digest = hashlib.sha256(manifest.encode())\n    for name in sorted_names:\n        names.append(name)\n        digest = hashlib.sha256(manifest.encode() + b\"\\0\" + json.dumps(names).encode())\n    return digest.hexdigest()[:16]\n"
+        }
+      ],
+      "expect": "writing and checking the lock stay fast with thousands of probes"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "the manifest hashed once, the names so far serialized again for every name",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    h = hashlib.sha256()\n    h.update(manifest.encode())\n    h.update(b\"\\0\" + json.dumps(sorted(probe.name for probe in probes)).encode())\n    return h.hexdigest()[:16]\n",
+          "new": "    base = hashlib.sha256(manifest.encode() + b\"\\0\")\n    names: list[str] = []\n    h = base.copy()\n    for name in sorted(probe.name for probe in probes):\n        names.append(name)\n        h = base.copy()\n        h.update(json.dumps(names).encode())\n    return h.hexdigest()[:16]\n"
+        }
+      ],
+      "expect": "writing and checking the lock stay fast with thousands of probes"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "one hasher, fed every name so far at each step",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    h = hashlib.sha256()\n    h.update(manifest.encode())\n    h.update(b\"\\0\" + json.dumps(sorted(probe.name for probe in probes)).encode())\n    return h.hexdigest()[:16]\n",
+          "new": "    h = hashlib.sha256(manifest.encode() + b\"\\0\")\n    names: list[str] = []\n    for name in sorted(probe.name for probe in probes):\n        names.append(name)\n        h.update(json.dumps(names).encode())\n    return h.hexdigest()[:16]\n"
+        }
+      ],
+      "expect": "writing and checking the lock stay fast with thousands of probes"
+    },
+    {
+      "test": "test_run_history",
+      "name": "the timestamp written as ISO 8601 for people to read",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        \"timestamp\": report.timestamp,\n",
+          "new": "        \"timestamp\": __import__(\"datetime\").datetime.fromtimestamp(report.timestamp, __import__(\"datetime\").timezone.utc).isoformat(),\n"
+        },
+        {
+          "file": "history.py",
+          "old": "        timestamp=obj[\"timestamp\"],\n",
+          "new": "        timestamp=__import__(\"datetime\").datetime.fromisoformat(obj[\"timestamp\"]).timestamp(),\n"
+        }
+      ],
+      "expect": "a run is on disk as soon as append returns, and comes back exactly"
+    },
+    {
+      "test": "test_run_history",
+      "name": "the timestamp rounded to microseconds",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        \"timestamp\": report.timestamp,\n",
+          "new": "        \"timestamp\": round(report.timestamp, 6),\n"
+        }
+      ],
+      "expect": "a run is on disk as soon as append returns, and comes back exactly"
+    },
+    {
+      "test": "test_run_history",
+      "name": "durations written in seconds and read back as floats",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "\"duration_ms\": r.duration_ms}",
+          "new": "\"duration_ms\": r.duration_ms / 1000}"
+        },
+        {
+          "file": "history.py",
+          "old": "r[\"duration_ms\"]) for r in",
+          "new": "r[\"duration_ms\"] * 1000) for r in"
+        }
+      ],
+      "expect": "a run is on disk as soon as append returns, and comes back exactly"
+    },
+    {
+      "test": "test_run_history",
+      "name": "durations written in seconds and read back with int()",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "\"duration_ms\": r.duration_ms}",
+          "new": "\"duration_ms\": r.duration_ms / 1000}"
+        },
+        {
+          "file": "history.py",
+          "old": "r[\"duration_ms\"]) for r in",
+          "new": "int(r[\"duration_ms\"] * 1000)) for r in"
+        }
+      ],
+      "expect": "a run is on disk as soon as append returns, and comes back exactly"
+    },
+    {
+      "test": "test_run_history",
+      "name": "results read back as plain dicts",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        results=[Result(r[\"name\"], r[\"status\"], r[\"detail\"], r[\"duration_ms\"]) for r in obj[\"results\"]],\n",
+          "new": "        results=obj[\"results\"],\n"
+        }
+      ],
+      "expect": "a run is on disk as soon as append returns, and comes back exactly"
+    },
+    {
+      "test": "test_run_history",
+      "name": "blocking and warnings read back as tuples",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        blocking=list(obj[\"blocking\"]),\n        warnings=list(obj[\"warnings\"]),\n",
+          "new": "        blocking=tuple(obj[\"blocking\"]),\n        warnings=tuple(obj[\"warnings\"]),\n"
+        }
+      ],
+      "expect": "a run is on disk as soon as append returns, and comes back exactly"
+    },
+    {
+      "test": "test_run_history",
+      "name": "the file read with split(\"\\n\"), so the newline after the last run is an empty line",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        with self.path.open(encoding=\"utf-8\") as f:\n            for number, line in enumerate(f, 1):\n",
+          "new": "        if True:\n            for number, line in enumerate(self.path.read_text(encoding=\"utf-8\").split(\"\\n\"), 1):\n"
+        }
+      ],
+      "expect": "line 2 is not an init run"
+    },
+    {
+      "test": "test_run_history",
+      "name": "a history file that does not exist yet raises",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        if not self.path.exists():\n            return []\n",
+          "new": ""
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_run_history",
+      "name": "last_ready returns the first ready run",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "for run in reversed(self.runs()) if",
+          "new": "for run in self.runs() if"
+        }
+      ],
+      "expect": "last_ready is the most recent run with exit_code 0"
+    },
+    {
+      "test": "test_run_history",
+      "name": "last_ready returns the latest run, ready or not",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        return next((run for run in reversed(self.runs()) if run.exit_code == 0), None)\n",
+          "new": "        runs = self.runs()\n        return runs[-1] if runs else None\n"
+        }
+      ],
+      "expect": "last_ready is the most recent run with exit_code 0"
+    },
+    {
+      "test": "test_run_history",
+      "name": "the run is written before it is checked",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        _check(report)\n        line = json.dumps(_encode(report)) + \"\\n\"\n        with self.path.open(\"a\", encoding=\"utf-8\") as f:\n            f.write(line)\n",
+          "new": "        line = json.dumps(_encode(report)) + \"\\n\"\n        with self.path.open(\"a\", encoding=\"utf-8\") as f:\n            f.write(line)\n        _check(report)\n"
+        }
+      ],
+      "expect": "a refused run leaves the history as it was"
+    },
+    {
+      "test": "test_run_history",
+      "name": "negative durations accepted",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": " or isinstance(r.duration_ms, bool) or r.duration_ms < 0:",
+          "new": " or isinstance(r.duration_ms, bool):"
+        }
+      ],
+      "expect": "append refuses a run with a negative duration"
+    },
+    {
+      "test": "test_run_history",
+      "name": "durations checked as numbers, not whole milliseconds",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "if not isinstance(r.duration_ms, int) or",
+          "new": "if not isinstance(r.duration_ms, (int, float)) or"
+        }
+      ],
+      "expect": "append refuses a run with a duration that is not whole milliseconds"
+    },
+    {
+      "test": "test_run_history",
+      "name": "fractional durations rounded on the way in",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "if not isinstance(r.duration_ms, int) or",
+          "new": "if not isinstance(round(r.duration_ms), int) or"
+        }
+      ],
+      "expect": "append refuses a run with a duration that is not whole milliseconds"
+    },
+    {
+      "test": "test_run_history",
+      "name": "any status accepted",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        if r.status not in STATUSES:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "append refuses a run with a status that is not pass, warn, fail or skip"
+    },
+    {
+      "test": "test_run_history",
+      "name": "a line that is not a run skipped",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "                    raise ValueError(f\"{self.path} line {number} is not an init run: {exc}\") from None\n",
+          "new": "                    continue\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_run_history",
+      "name": "a line that is not a run raises whatever the decoder raised",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "                except (ValueError, KeyError, TypeError) as exc:\n",
+          "new": "                except () as exc:\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_run_history",
+      "name": "a bad line reported without its line number",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "raise ValueError(f\"{self.path} line {number} is not an init run: {exc}\")",
+          "new": "raise ValueError(f\"{self.path} has a line that is not an init run: {exc}\")"
+        }
+      ],
+      "expect": "Regex pattern did not match"
+    },
+    {
+      "test": "test_run_history",
+      "name": "line numbers counted from 0",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "enumerate(f, 1)",
+          "new": "enumerate(f)"
+        }
+      ],
+      "expect": "Regex pattern did not match"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "only a failed need stops a probe, a skipped one does not",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "            elif result.status == \"skip\":\n                behind |= causes\n",
+          "new": ""
+        }
+      ],
+      "expect": "a probe whose needs did not pass is skipped"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "a skip names the needs it was waiting on, not the failures behind them",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "            elif result.status == \"skip\":\n                behind |= causes\n",
+          "new": "            elif result.status == \"skip\":\n                behind.add(need)\n"
+        }
+      ],
+      "expect": "a probe whose needs did not pass is skipped"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "failed probes named in alphabetical order",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "            names = sorted(behind, key=position.__getitem__)\n",
+          "new": "            names = sorted(behind)\n"
+        }
+      ],
+      "expect": "a probe whose needs did not pass is skipped"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "failed probes named in the order of needs",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "        behind: set[str] = set()  # the failed probes that keep this one from running\n",
+          "new": "        behind: dict[str, None] = {}  # the failed probes that keep this one from running\n"
+        },
+        {
+          "file": "plan.py",
+          "old": "                behind.add(need)\n",
+          "new": "                behind[need] = None\n"
+        },
+        {
+          "file": "plan.py",
+          "old": "                behind |= causes\n",
+          "new": "                behind.update(dict.fromkeys(sorted(causes, key=position.__getitem__)))\n"
+        },
+        {
+          "file": "plan.py",
+          "old": "            names = sorted(behind, key=position.__getitem__)\n",
+          "new": "            names = list(behind)\n"
+        }
+      ],
+      "expect": "a probe whose needs did not pass is skipped"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "failed probes named in the order they failed",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "    queue: asyncio.Queue[tuple[int, Result]] = asyncio.Queue()\n",
+          "new": "    queue: asyncio.Queue[tuple[int, Result]] = asyncio.Queue()\n    failed_at: dict[str, int] = {}\n"
+        },
+        {
+          "file": "plan.py",
+          "old": "        settled[probe.name].set_result((result, frozenset(behind)))\n",
+          "new": "        if result.status == \"fail\":\n            failed_at[probe.name] = len(failed_at)\n        settled[probe.name].set_result((result, frozenset(behind)))\n"
+        },
+        {
+          "file": "plan.py",
+          "old": "            names = sorted(behind, key=position.__getitem__)\n",
+          "new": "            names = sorted(behind, key=failed_at.__getitem__)\n"
+        }
+      ],
+      "expect": "two runs of one workbench differ only in the timestamp, however their probes finish"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "a failure reached along two paths is named twice",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "        behind: set[str] = set()  # the failed probes that keep this one from running\n",
+          "new": "        behind: list[str] = []  # the failed probes that keep this one from running\n"
+        },
+        {
+          "file": "plan.py",
+          "old": "                behind.add(need)\n",
+          "new": "                behind.append(need)\n"
+        },
+        {
+          "file": "plan.py",
+          "old": "                behind |= causes\n",
+          "new": "                behind += sorted(causes, key=position.__getitem__)\n"
+        }
+      ],
+      "expect": "a probe whose needs did not pass is skipped"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "a skipped probe still runs, and its result is replaced",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "        if behind:\n            names = sorted(behind, key=position.__getitem__)\n",
+          "new": "        ran = await _timed(probe)\n        if behind:\n            names = sorted(behind, key=position.__getitem__)\n"
+        },
+        {
+          "file": "plan.py",
+          "old": "        else:\n            result = await _timed(probe)\n",
+          "new": "        else:\n            result = ran\n"
+        }
+      ],
+      "expect": "a skipped probe never runs"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "a skipped probe timed from when it started waiting",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "    async def one(index: int, probe: Probe) -> None:\n",
+          "new": "    async def one(index: int, probe: Probe) -> None:\n        waited = loop.time()\n"
+        },
+        {
+          "file": "plan.py",
+          "old": "            result = Result(probe.name, \"skip\", \"needs \" + \", \".join(names))\n",
+          "new": "            result = Result(probe.name, \"skip\", \"needs \" + \", \".join(names), int((loop.time() - waited) * 1000))\n"
+        }
+      ],
+      "expect": "a skipped probe takes no time"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "results in the order probes settle",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "    results: list[Result | None] = [None] * len(probes)\n    async for index, result in settle(probes):\n        results[index] = result\n    blocking, warnings = verdict(probes, results)\n",
+          "new": "    results = [result async for _, result in settle(probes)]\n    order = {r.name: i for i, r in enumerate(results)}\n    blocking, warnings = verdict(sorted(probes, key=lambda p: order[p.name]), results)\n"
+        }
+      ],
+      "expect": "results follow the order the probes are listed"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "blocking and warnings in the order probes settle",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "    results: list[Result | None] = [None] * len(probes)\n    async for index, result in settle(probes):\n        results[index] = result\n    blocking, warnings = verdict(probes, results)\n",
+          "new": "    results: list[Result | None] = [None] * len(probes)\n    order = []\n    async for index, result in settle(probes):\n        results[index] = result\n        order.append(index)\n    blocking, warnings = verdict([probes[i] for i in order], [results[i] for i in order])\n"
+        }
+      ],
+      "expect": "block probes that failed or were skipped block the launch"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "only a failed block probe blocks, a skipped one does not",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "        if probe.severity == \"block\" and result.status in (\"fail\", \"skip\"):\n",
+          "new": "        if probe.severity == \"block\" and result.status == \"fail\":\n"
+        }
+      ],
+      "expect": "block probes that failed or were skipped block the launch"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "any failure blocks, whatever its severity",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "        if probe.severity == \"block\" and result.status in (\"fail\", \"skip\"):\n",
+          "new": "        if result.status == \"fail\" or (probe.severity == \"block\" and result.status == \"skip\"):\n"
+        }
+      ],
+      "expect": "block probes that failed or were skipped block the launch"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "info probes reported as warnings",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "        elif probe.severity != \"info\" and result.status != \"pass\":\n",
+          "new": "        elif result.status != \"pass\":\n"
+        }
+      ],
+      "expect": "block probes that failed or were skipped block the launch"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "warnings only from warn-severity probes",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "        elif probe.severity != \"info\" and result.status != \"pass\":\n",
+          "new": "        elif probe.severity == \"warn\" and result.status != \"pass\":\n"
+        }
+      ],
+      "expect": "warnings never block the launch"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "a warn on a block probe blocks",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "result.status in (\"fail\", \"skip\"):\n            blocking.append",
+          "new": "result.status in (\"fail\", \"skip\", \"warn\"):\n            blocking.append"
+        }
+      ],
+      "expect": "warnings never block the launch"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "exit_code 1 whenever anything warned",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "1 if blocking else 0",
+          "new": "1 if blocking or warnings else 0"
+        }
+      ],
+      "expect": "warnings never block the launch"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "a need that warned keeps its probes from running",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "            if result.status == \"fail\":\n                behind.add(need)\n",
+          "new": "            if result.status in (\"fail\", \"warn\"):\n                behind.add(need)\n"
+        }
+      ],
+      "expect": "a probe that warned still counts as done for the probes that need it"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "probes run in waves, one dependency level at a time",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "    tasks = [asyncio.create_task(one(i, probe)) for i, probe in enumerate(probes)]\n",
+          "new": "    depth: dict[str, int] = {}\n\n    def level(name: str) -> int:\n        if name not in depth:\n            needs = next(p for p in probes if p.name == name).needs\n            depth[name] = 1 + max((level(n) for n in needs), default=-1)\n        return depth[name]\n\n    async def waves() -> None:\n        for d in sorted({level(p.name) for p in probes}):\n            await asyncio.gather(*(one(i, p) for i, p in enumerate(probes) if level(p.name) == d))\n\n    tasks = [asyncio.create_task(waves())]\n"
+        }
+      ],
+      "expect": "probes run side by side, and a probe starts as soon as what it needs has finished"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "probes run one at a time, each after the probes it needs",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "    tasks = [asyncio.create_task(one(i, probe)) for i, probe in enumerate(probes)]\n",
+          "new": "    async def in_turn() -> None:\n        done: set[str] = set()\n\n        async def visit(i: int, p: Probe) -> None:\n            if p.name in done:\n                return\n            for need in p.needs:\n                await visit(position[need], probes[position[need]])\n            done.add(p.name)\n            await one(i, p)\n\n        for i, p in enumerate(probes):\n            await visit(i, p)\n\n    tasks = [asyncio.create_task(in_turn())]\n"
+        }
+      ],
+      "expect": "probes run side by side, and a probe starts as soon as what it needs has finished"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "no loop check, so needs that loop wait for each other forever",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "    for probe in probes:\n        visit(probe.name, [])\n",
+          "new": ""
+        }
+      ],
+      "expect": "needs that loop back are refused before anything runs"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "unknown needs not checked up front",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "            if need not in by_name:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "two probes with one name: the last one wins",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "        if probe.name in by_name:\n            raise ProbeConfigError(f\"two probes are named {probe.name}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "two probes with one name are refused"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "an unknown severity let through",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "        if probe.severity not in SEVERITIES:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "a severity that is not block, warn or info is refused, not taken for a warning"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "the report stamped with the wall clock instead of now",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "    return InitReport(\n        now,",
+          "new": "    return InitReport(\n        __import__(\"time\").time(),"
+        }
+      ],
+      "expect": "the report is stamped with now and the lock fingerprint"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "the report's fingerprint covers the manifest only",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "fingerprint(manifest, probes), results",
+          "new": "fingerprint(manifest, []), results"
+        }
+      ],
+      "expect": "the report is stamped with now and the lock fingerprint"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "a refused run leaves the lock in place, as code/main.py does",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        else:\n            self.lock_path.unlink(missing_ok=True)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a refused run takes the lock away"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "numbers given in the order lines go out",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    async for index, result in settle(probes):\n        results[index] = result\n        yield _test_line(index + 1, result)\n",
+          "new": "    sent = 0\n    async for index, result in settle(probes):\n        results[index] = result\n        sent += 1\n        yield _test_line(sent, result)\n"
+        }
+      ],
+      "expect": "a probe's number is its place in the list, whatever order the lines come in"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "every line held back until all probes have settled",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    async for index, result in settle(probes):\n        results[index] = result\n        yield _test_line(index + 1, result)\n",
+          "new": "    settled = [pair async for pair in settle(probes)]\n    for index, result in settled:\n        results[index] = result\n        yield _test_line(index + 1, result)\n"
+        }
+      ],
+      "expect": "a line goes out as soon as its probe settles, skips included, while other probes still run"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "skips held back until the probes that ran are done",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    async for index, result in settle(probes):\n        results[index] = result\n        yield _test_line(index + 1, result)\n",
+          "new": "    skipped = []\n    async for index, result in settle(probes):\n        results[index] = result\n        if result.status == \"skip\":\n            skipped.append(_test_line(index + 1, result))\n        else:\n            yield _test_line(index + 1, result)\n    for line in skipped:\n        yield line\n"
+        }
+      ],
+      "expect": "a line goes out as soon as its probe settles, skips included, while other probes still run"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "a warn is not ok",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    ok = \"not ok\" if result.status == \"fail\" else \"ok\"\n",
+          "new": "    ok = \"ok\" if result.status == \"pass\" else \"not ok\"\n"
+        }
+      ],
+      "expect": "fail is not ok, pass and warn are ok, a skip is ok # SKIP with its reason"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "a skip is not ok",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "        return f\"ok {number} - {result.name} # SKIP",
+          "new": "        return f\"not ok {number} - {result.name} # SKIP"
+        }
+      ],
+      "expect": "fail is not ok, pass and warn are ok, a skip is ok # SKIP with its reason"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "SKIP followed by a colon",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "# SKIP {_escape(result.detail)}",
+          "new": "# SKIP: {_escape(result.detail)}"
+        }
+      ],
+      "expect": "each probe gets one line: ok|not ok N - name # ..."
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "the skip directive in lower case",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "# SKIP {_escape(result.detail)}",
+          "new": "# skip {_escape(result.detail)}"
+        }
+      ],
+      "expect": "each probe gets one line: ok|not ok N - name # ..."
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "a skip line with a duration",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "# SKIP {_escape(result.detail)}",
+          "new": "# SKIP {result.duration_ms}ms {_escape(result.detail)}"
+        }
+      ],
+      "expect": "fail is not ok, pass and warn are ok, a skip is ok # SKIP with its reason"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "a skip reported as status skip, not as a SKIP directive",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    if result.status == \"skip\":\n        return f\"ok {number} - {result.name} # SKIP {_escape(result.detail)}\\n\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "each probe gets one line: ok|not ok N - name # ..."
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "only line feeds escaped",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    return detail.replace(\"\\\\\", \"\\\\\\\\\").replace(\"\\n\", \"\\\\n\").replace(\"\\r\", \"\\\\r\")\n",
+          "new": "    return detail.replace(\"\\n\", \"\\\\n\")\n"
+        }
+      ],
+      "expect": "every item is one line ending in a newline"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "line breaks escaped, backslashes left alone",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    return detail.replace(\"\\\\\", \"\\\\\\\\\").replace(\"\\n\", \"\\\\n\").replace(\"\\r\", \"\\\\r\")\n",
+          "new": "    return detail.replace(\"\\n\", \"\\\\n\").replace(\"\\r\", \"\\\\r\")\n"
+        }
+      ],
+      "expect": "a detail escapes backslash, line feed and carriage return, and nothing else"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "backslashes escaped after the line breaks",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    return detail.replace(\"\\\\\", \"\\\\\\\\\").replace(\"\\n\", \"\\\\n\").replace(\"\\r\", \"\\\\r\")\n",
+          "new": "    return detail.replace(\"\\n\", \"\\\\n\").replace(\"\\r\", \"\\\\r\").replace(\"\\\\\", \"\\\\\\\\\")\n"
+        }
+      ],
+      "expect": "fail is not ok, pass and warn are ok, a skip is ok # SKIP with its reason"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "details escaped as JSON strings",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    return detail.replace(\"\\\\\", \"\\\\\\\\\").replace(\"\\n\", \"\\\\n\").replace(\"\\r\", \"\\\\r\")\n",
+          "new": "    return __import__(\"json\").dumps(detail)[1:-1]\n"
+        }
+      ],
+      "expect": "a detail escapes backslash, line feed and carriage return, and nothing else"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "details escaped with repr()",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    return detail.replace(\"\\\\\", \"\\\\\\\\\").replace(\"\\n\", \"\\\\n\").replace(\"\\r\", \"\\\\r\")\n",
+          "new": "    return repr(detail)[1:-1]\n"
+        }
+      ],
+      "expect": "a detail escapes backslash, line feed and carriage return, and nothing else"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "line breaks in a detail replaced by spaces",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    return detail.replace(\"\\\\\", \"\\\\\\\\\").replace(\"\\n\", \"\\\\n\").replace(\"\\r\", \"\\\\r\")\n",
+          "new": "    return \" \".join(detail.split())\n"
+        }
+      ],
+      "expect": "a detail escapes backslash, line feed and carriage return, and nothing else"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "the plan line first, as TAP also allows",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    results: list[Result | None] = [None] * len(probes)\n",
+          "new": "    yield f\"1..{len(probes)}\\n\"\n    results: list[Result | None] = [None] * len(probes)\n"
+        },
+        {
+          "file": "tap.py",
+          "old": "    yield f\"1..{len(probes)}\\n\"\n    blocking, _ =",
+          "new": "    blocking, _ ="
+        }
+      ],
+      "expect": "the plan line and the verdict come after the last probe"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "a TAP version line first",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    results: list[Result | None] = [None] * len(probes)\n",
+          "new": "    yield \"TAP version 13\\n\"\n    results: list[Result | None] = [None] * len(probes)\n"
+        }
+      ],
+      "expect": "each probe gets one line: ok|not ok N - name # ..."
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "the verdict names blocking probes in the order they settled",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    async for index, result in settle(probes):\n        results[index] = result\n        yield _test_line(index + 1, result)\n",
+          "new": "    order = []\n    async for index, result in settle(probes):\n        results[index] = result\n        order.append(index)\n        yield _test_line(index + 1, result)\n"
+        },
+        {
+          "file": "tap.py",
+          "old": "    blocking, _ = verdict(probes, results)\n",
+          "new": "    blocking, _ = verdict([probes[i] for i in order], [results[i] for i in order])\n"
+        }
+      ],
+      "expect": "the plan line and the verdict come after the last probe"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "the verdict without its newline",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    yield f\"# refuse to launch: {', '.join(blocking)}\\n\" if blocking",
+          "new": "    yield f\"# refuse to launch: {', '.join(blocking)}\" if blocking"
+        }
+      ],
+      "expect": "every item is one line ending in a newline"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "a broken probe set raises instead of bailing out",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    try:\n        check_probes(probes)\n    except ProbeConfigError as exc:\n        yield f\"Bail out! {_escape(str(exc))}\\n\"\n        return\n",
+          "new": ""
+        }
+      ],
+      "expect": "ProbeConfigError"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "Bail out! without the reason",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "        yield f\"Bail out! {_escape(str(exc))}\\n\"\n",
+          "new": "        yield \"Bail out!\\n\"\n"
+        }
+      ],
+      "expect": "a broken probe set is a single Bail out! line"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "the verdict ready only when nothing failed at all",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    blocking, _ = verdict(probes, results)\n",
+          "new": "    blocking = [r.name for r in results if r.status in (\"fail\", \"skip\")]\n"
+        }
+      ],
+      "expect": "the plan line and the verdict come after the last probe"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "both trees flattened in full, then compared path by path",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "    changes: list[tuple[str, str]] = []\n    _walk(store, old, new, \"\", changes)\n",
+          "new": "    def files(oid: str, prefix: str = \"\") -> dict[str, Entry]:\n        out: dict[str, Entry] = {}\n        for name, entry in store.tree(oid).items():\n            if entry.mode == TREE:\n                out.update(files(entry.oid, prefix + name + \"/\"))\n            else:\n                out[prefix + name] = entry\n        return out\n\n    before, after = files(old), files(new)\n    changes = [(\"D\", p) for p in before.keys() - after.keys()] + [(\"A\", p) for p in after.keys() - before.keys()]\n    changes += [(\"M\", p) for p in before.keys() & after.keys() if before[p] != after[p]]\n"
+        }
+      ],
+      "expect": "only the trees on the way to a change are read, and blobs never are"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "file contents compared by reading both blobs",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "            if a != b:\n",
+          "new": "            if a.mode != b.mode or store.blob(a.oid) != store.blob(b.oid):\n"
+        }
+      ],
+      "expect": "only the trees on the way to a change are read, and blobs never are"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "no shortcut for subtrees with the same oid",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "    if old == new:\n        return\n",
+          "new": ""
+        }
+      ],
+      "expect": "only the trees on the way to a change are read, and blobs never are"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "the shortcut taken below the root only",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "    if old == new:\n        return\n",
+          "new": "    if old == new and prefix:\n        return\n"
+        }
+      ],
+      "expect": "two trees with the same oid are not read at all"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "a name that is a directory on one side and a file on the other is a modification",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "        a, b = before.get(name), after.get(name)\n",
+          "new": "        a, b = before.get(name), after.get(name)\n        if a is not None and b is not None and (a.mode == TREE) != (b.mode == TREE):\n            out.append((\"M\", path))\n            continue\n"
+        }
+      ],
+      "expect": "when a directory and a file swap places, every file under the directory goes or comes"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "whatever holds the name is walked as a tree",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "            _walk(store, a.oid if a_dir else None, b.oid if b_dir else None, path + \"/\", out)\n",
+          "new": "            _walk(store, a.oid if a else None, b.oid if b else None, path + \"/\", out)\n"
+        }
+      ],
+      "expect": "is a blob, not a tree"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "an added or removed directory listed as well as its files",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "        a_file = a is not None and not a_dir\n",
+          "new": "        if a_dir and b is None:\n            out.append((\"D\", path))\n        if b_dir and a is None:\n            out.append((\"A\", path))\n        a_file = a is not None and not a_dir\n"
+        }
+      ],
+      "expect": "only files are listed; a directory, empty or not, never is"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "an empty directory that comes or goes counts as a change",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "    for name in before.keys() | after.keys():\n",
+          "new": "    if not before and not after:\n        out.append((\"A\" if new is not None else \"D\", prefix.rstrip(\"/\")))\n    for name in before.keys() | after.keys():\n"
+        }
+      ],
+      "expect": "only files are listed; a directory, empty or not, never is"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "only the blob oid compared, not the mode",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "            if a != b:\n",
+          "new": "            if a.oid != b.oid:\n"
+        }
+      ],
+      "expect": "a file whose mode changed is modified"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "a move detected and counted once",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "    return sorted(changes, key=lambda change: change[1])\n",
+          "new": "    def oid(change: tuple[str, str], tree: str) -> str | None:\n        entries = store.tree(tree)\n        *dirs, name = change[1].split(\"/\")\n        for d in dirs:\n            entry = entries.get(d)\n            if entry is None or entry.mode != TREE:\n                return None\n            entries = store.tree(entry.oid)\n        entry = entries.get(name)\n        return entry.oid if entry is not None and entry.mode != TREE else None\n\n    added = {oid(c, new) for c in changes if c[0] == \"A\"}\n    changes = [c for c in changes if not (c[0] == \"D\" and oid(c, old) in added)]\n    return sorted(changes, key=lambda change: change[1])\n"
+        }
+      ],
+      "expect": "a file that moved is deleted at its old path and added at its new one"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "changes sorted as (status, path) tuples",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "    return sorted(changes, key=lambda change: change[1])\n",
+          "new": "    return sorted(changes)\n"
+        }
+      ],
+      "expect": "changes are sorted by path"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "names walked in sorted order, with no sort at the end",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "    for name in before.keys() | after.keys():\n",
+          "new": "    for name in sorted(before.keys() | after.keys()):\n"
+        },
+        {
+          "file": "lkg.py",
+          "old": "    return sorted(changes, key=lambda change: change[1])\n",
+          "new": "    return changes\n"
+        }
+      ],
+      "expect": "changes are sorted by path"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "exactly the budget is already too many",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "    status = \"fail\" if len(changed) > budget else \"pass\"\n",
+          "new": "    status = \"fail\" if len(changed) >= budget else \"pass\"\n"
+        }
+      ],
+      "expect": "a diff of exactly the budget is still a pass"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "init's directory matched without its slash, so .initrc is left out too",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "        if not path.startswith(INIT_DIR + \"/\")\n",
+          "new": "        if not path.startswith(INIT_DIR)\n"
+        }
+      ],
+      "expect": "init's own files under .init/ do not count toward the budget; every other file does"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "init's own files counted",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "        if not path.startswith(INIT_DIR + \"/\")\n",
+          "new": "        if True\n"
+        }
+      ],
+      "expect": "init's own files under .init/ do not count toward the budget; every other file does"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "the detail names HEAD instead of the LKG commit",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "files changed since {lkg[:7]} (budget",
+          "new": "files changed since {head[:7]} (budget"
+        }
+      ],
+      "expect": "the detail names the LKG commit and the budget, 50 files by default"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "a budget of 100 files by default",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "LKG_FILE_BUDGET = 50\n",
+          "new": "LKG_FILE_BUDGET = 100\n"
+        }
+      ],
+      "expect": "the detail names the LKG commit and the budget, 50 files by default"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "no LKG pinned yet refuses the launch",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "        return \"warn\", \"no last-known-good commit; pin one after the first successful merge\"\n",
+          "new": "        return \"fail\", \"no last-known-good commit; pin one after the first successful merge\"\n"
+        }
+      ],
+      "expect": "no LKG pinned yet is a warn, not a reason to refuse"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "an LKG commit that is not in the store raises KeyError",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "    try:\n        base = store.commit_tree(lkg)\n    except KeyError:\n        return \"fail\", f\"last-known-good commit {lkg[:7]} not found\"\n",
+          "new": "    base = store.commit_tree(lkg)\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "an unknown LKG commit only warns, as code/main.py does for an invalid one",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "        return \"fail\", f\"last-known-good commit {lkg[:7]} not found\"\n",
+          "new": "        return \"warn\", f\"last-known-good commit {lkg[:7]} not found\"\n"
+        }
+      ],
+      "expect": "an LKG commit that is not in the store needs a human to pin a new one"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "paths joined without a slash",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "b.oid if b_dir else None, path + \"/\", out)",
+          "new": "b.oid if b_dir else None, path, out)"
+        }
+      ],
+      "expect": "a file that moved is deleted at its old path and added at its new one"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "Python's hash() of the names, which changes from one process to the next",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "json.dumps(sorted(probe.name for probe in probes)).encode()",
+          "new": "str(hash(frozenset(probe.name for probe in probes))).encode()"
+        }
+      ],
+      "expect": "another init process computes the same fingerprint"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "an info probe's failure ignored by the probes that need it",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "            if result.status == \"fail\":\n                behind.add(need)\n",
+          "new": "            if result.status == \"fail\" and probes[position[need]].severity != \"info\":\n                behind.add(need)\n"
+        }
+      ],
+      "expect": "a need that failed stops the probes that need it, whatever its severity"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "exit_code is the number of blocking probes",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "1 if blocking else 0",
+          "new": "len(blocking)"
+        }
+      ],
+      "expect": "block probes that failed or were skipped block the launch"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "a skipped probe's status written as \"skipped\"",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "            result = Result(probe.name, \"skip\", \"needs \" + \", \".join(names))\n",
+          "new": "            result = Result(probe.name, \"skipped\", \"needs \" + \", \".join(names))\n"
+        }
+      ],
+      "expect": "a probe whose needs did not pass is skipped"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "# escaped in a detail, as TAP wants in a description",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": ".replace(\"\\r\", \"\\\\r\")\n",
+          "new": ".replace(\"\\r\", \"\\\\r\").replace(\"#\", \"\\\\#\")\n"
+        }
+      ],
+      "expect": "a detail escapes backslash, line feed and carriage return, and nothing else"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "lines sent in number order, each waiting for the ones before it",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    async for index, result in settle(probes):\n        results[index] = result\n        yield _test_line(index + 1, result)\n",
+          "new": "    pending: dict[int, Result] = {}\n    upto = 0\n    async for index, result in settle(probes):\n        results[index] = result\n        pending[index] = result\n        while upto in pending:\n            yield _test_line(upto + 1, pending.pop(upto))\n            upto += 1\n"
+        }
+      ],
+      "expect": "a line goes out as soon as its probe settles, skips included, while other probes still run"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "a mode change taken as a delete and an add",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "            if a != b:\n                out.append((\"M\", path))\n",
+          "new": "            if a.mode != b.mode:\n                out += [(\"D\", path), (\"A\", path)]\n            elif a != b:\n                out.append((\"M\", path))\n"
+        }
+      ],
+      "expect": "a file whose mode changed is modified"
+    },
+    {
+      "test": "test_run_history",
+      "name": "last_ready picks the ready run with the latest timestamp",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        return next((run for run in reversed(self.runs()) if run.exit_code == 0), None)\n",
+          "new": "        ready = [run for run in self.runs() if run.exit_code == 0]\n        return max(ready, key=lambda run: run.timestamp, default=None)\n"
+        }
+      ],
+      "expect": "the most recent run is the last one appended"
+    },
+    {
+      "test": "test_run_history",
+      "name": "runs sorted by timestamp",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        return runs\n",
+          "new": "        return sorted(runs, key=lambda run: run.timestamp)\n"
+        }
+      ],
+      "expect": "runs come back in the order they were appended, whatever their timestamps say"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "skipped probes left out of warnings",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "        elif probe.severity != \"info\" and result.status != \"pass\":\n",
+          "new": "        elif probe.severity != \"info\" and result.status in (\"warn\", \"fail\"):\n"
+        }
+      ],
+      "expect": "block probes that failed or were skipped block the launch"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "a skip blocks only when a block probe failed behind it",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "        if probe.severity == \"block\" and result.status in (\"fail\", \"skip\"):\n",
+          "new": "        behind = result.detail[len(\"needs \"):].split(\", \") if result.status == \"skip\" else []\n        severity = {p.name: p.severity for p in probes}\n        if probe.severity == \"block\" and (\n            result.status == \"fail\" or any(severity[n] == \"block\" for n in behind)\n        ):\n"
+        }
+      ],
+      "expect": "block probes that failed or were skipped block the launch"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "a lock's age taken in whole seconds with int()",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    age = now - written_at\n",
+          "new": "    age = int(now - written_at)\n"
+        }
+      ],
+      "expect": "a lock stamped in the future is not trusted"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "a lock's age rounded to whole seconds",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    age = now - written_at\n",
+          "new": "    age = round(now - written_at)\n"
+        }
+      ],
+      "expect": "a lock stamped in the future is not trusted"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "severity and budget_s hashed into the fingerprint as well",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "json.dumps(sorted(probe.name for probe in probes))",
+          "new": "json.dumps(sorted([probe.name, probe.severity, probe.budget_s] for probe in probes))"
+        }
+      ],
+      "expect": "another init process computes the same fingerprint"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "results collected with as_completed, in the order probes finish",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    return list(await asyncio.gather(*(_timed(probe) for probe in probes)))\n",
+          "new": "    return [await done for done in asyncio.as_completed([_timed(probe) for probe in probes])]\n"
+        }
+      ],
+      "expect": "results come back in the order the probes are listed"
+    },
+    {
+      "test": "test_probe_runner",
+      "name": "the wall clock kept, a negative duration clamped to 0",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    started = time.monotonic()\n",
+          "new": "    started = time.time()\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "    duration_ms = int((time.monotonic() - started) * 1000)\n",
+          "new": "    duration_ms = max(0, int((time.time() - started) * 1000))\n"
+        }
+      ],
+      "expect": "a wall-clock step does not change how long a probe took"
+    },
+    {
+      "test": "test_run_history",
+      "name": "skip left out of the statuses append accepts",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        if r.status not in STATUSES:\n",
+          "new": "        if r.status not in (\"pass\", \"warn\", \"fail\"):\n"
+        }
+      ],
+      "expect": "got 'skip'"
+    },
+    {
+      "test": "test_run_history",
+      "name": "one file handle opened at the first append and never flushed",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        self.path = Path(path)\n",
+          "new": "        self.path = Path(path)\n        self._f = None\n"
+        },
+        {
+          "file": "history.py",
+          "old": "        with self.path.open(\"a\", encoding=\"utf-8\") as f:\n            f.write(line)\n",
+          "new": "        if self._f is None:\n            self._f = self.path.open(\"a\", encoding=\"utf-8\")\n        self._f.write(line)\n"
+        },
+        {
+          "file": "history.py",
+          "old": "        \"\"\"Release anything the history holds open.\"\"\"\n",
+          "new": "        \"\"\"Release anything the history holds open.\"\"\"\n        if self._f is not None:\n            self._f.close()\n            self._f = None\n"
+        }
+      ],
+      "expect": "a run is on disk as soon as append returns"
+    },
+    {
+      "test": "test_run_history",
+      "name": "the history rewritten with \"w\" on every append",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "self.path.open(\"a\", encoding=\"utf-8\")",
+          "new": "self.path.open(\"w\", encoding=\"utf-8\")"
+        }
+      ],
+      "expect": "runs() reads what is on disk now"
+    },
+    {
+      "test": "test_run_history",
+      "name": "each run written with indent=2, like init_report.json",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "json.dumps(_encode(report)) + \"\\n\"",
+          "new": "json.dumps(_encode(report), indent=2) + \"\\n\""
+        }
+      ],
+      "expect": "line 1 is not an init run"
+    },
+    {
+      "test": "test_run_history",
+      "name": "runs cached by the first read",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        self.path = Path(path)\n",
+          "new": "        self.path = Path(path)\n        self._cache = None\n"
+        },
+        {
+          "file": "history.py",
+          "old": "        if not self.path.exists():\n            return []\n        runs = []\n",
+          "new": "        if self._cache is not None:\n            return list(self._cache)\n        if not self.path.exists():\n            return []\n        runs = []\n"
+        },
+        {
+          "file": "history.py",
+          "old": "        return runs\n",
+          "new": "        self._cache = runs\n        return runs\n"
+        }
+      ],
+      "expect": "runs() reads what is on disk now"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "blocking probes listed under warnings too",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "        elif probe.severity != \"info\" and result.status != \"pass\":\n",
+          "new": "        if probe.severity != \"info\" and result.status != \"pass\":\n"
+        }
+      ],
+      "expect": "block probes that failed or were skipped block the launch"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "only a probe that needs itself counts as a loop",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "    for probe in probes:\n        visit(probe.name, [])\n",
+          "new": "    for probe in probes:\n        if probe.name in probe.needs:\n            raise ProbeConfigError(f\"{probe.name} needs itself\")\n"
+        }
+      ],
+      "expect": "needs that loop back are refused before anything runs"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "a broken probe set raised as a plain ValueError",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "                raise ProbeConfigError(f\"{probe.name} needs {need}, which is not a listed probe\")",
+          "new": "                raise ValueError(f\"{probe.name} needs {need}, which is not a listed probe\")"
+        }
+      ],
+      "expect": "ValueError: lkg_diff needs git"
+    },
+    {
+      "test": "test_probe_plan",
+      "name": "a probe reached along two paths taken for a loop (one visited set, no path)",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "    done: set[str] = set()\n\n    def visit(name: str, path: list[str]) -> None:\n        if name in done:\n            return\n        if name in path:\n            loop = path[path.index(name):] + [name]\n            raise ProbeConfigError(\"needs go round in a loop: \" + \" -> \".join(loop))\n        for need in by_name[name].needs:\n            visit(need, path + [name])\n        done.add(name)\n\n    for probe in probes:\n        visit(probe.name, [])\n",
+          "new": "    seen: set[str] = set()\n\n    def visit(name: str) -> None:\n        if name in seen:\n            raise ProbeConfigError(f\"needs go round in a loop at {name}\")\n        seen.add(name)\n        for need in by_name[name].needs:\n            visit(need)\n\n    for probe in probes:\n        if probe.name not in seen:\n            visit(probe.name)\n"
+        }
+      ],
+      "expect": "needs go round in a loop at"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "test numbers counted from 0",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "        yield _test_line(index + 1, result)\n",
+          "new": "        yield _test_line(index, result)\n"
+        }
+      ],
+      "expect": "a probe's number is its place in the list"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "the plan line counts only the probes that ran",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    yield f\"1..{len(probes)}\\n\"\n",
+          "new": "    yield f\"1..{sum(r.status != 'skip' for r in results)}\\n\"\n"
+        }
+      ],
+      "expect": "the plan line and the verdict come after the last probe"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "tabs escaped as well",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": ".replace(\"\\r\", \"\\\\r\")\n",
+          "new": ".replace(\"\\r\", \"\\\\r\").replace(\"\\t\", \"\\\\t\")\n"
+        }
+      ],
+      "expect": "a detail escapes backslash, line feed and carriage return, and nothing else"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "Bail out! without its newline",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "        yield f\"Bail out! {_escape(str(exc))}\\n\"\n",
+          "new": "        yield f\"Bail out! {_escape(str(exc))}\"\n"
+        }
+      ],
+      "expect": "every item is one line ending in a newline"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "CRLF folded into LF before escaping",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    return detail.replace(\"\\\\\", \"\\\\\\\\\")",
+          "new": "    return detail.replace(\"\\r\\n\", \"\\n\").replace(\"\\\\\", \"\\\\\\\\\")"
+        }
+      ],
+      "expect": "details come back exactly"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "a skip sent at the first need that did not pass, naming only that one",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "            if result.status == \"fail\":\n                behind.add(need)\n            elif result.status == \"skip\":\n                behind |= causes\n",
+          "new": "            if result.status == \"fail\":\n                behind.add(need)\n                break\n            elif result.status == \"skip\":\n                behind |= causes\n                break\n"
+        }
+      ],
+      "expect": "details come back exactly"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "the verdict leaves out skipped block probes",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "    blocking, _ = verdict(probes, results)\n",
+          "new": "    blocking = [p.name for p, r in zip(probes, results) if p.severity == \"block\" and r.status == \"fail\"]\n"
+        }
+      ],
+      "expect": "the plan line and the verdict come after the last probe"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "changes sorted by path segments",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "    return sorted(changes, key=lambda change: change[1])\n",
+          "new": "    return sorted(changes, key=lambda change: change[1].split(\"/\"))\n"
+        }
+      ],
+      "expect": "changes are sorted by path"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "init's files left out by diff_trees itself",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "    return sorted(changes, key=lambda change: change[1])\n",
+          "new": "    return sorted((c for c in changes if not c[1].startswith(INIT_DIR + \"/\")), key=lambda change: change[1])\n"
+        }
+      ],
+      "expect": "every changed file once, as A, D or M, sorted by path"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "names walked in git order (a directory as name + \"/\"), with no sort at the end",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "    return sorted(changes, key=lambda change: change[1])\n",
+          "new": "    return changes\n"
+        },
+        {
+          "file": "lkg.py",
+          "old": "    for name in before.keys() | after.keys():\n",
+          "new": "    def key(name: str) -> str:\n        a, b = before.get(name), after.get(name)\n        return name + \"/\" if TREE in (a and a.mode, b and b.mode) else name\n\n    for name in sorted(before.keys() | after.keys(), key=key):\n"
+        },
+        {
+          "file": "lkg.py",
+          "old": "        if a_dir or b_dir:\n            _walk(store, a.oid if a_dir else None, b.oid if b_dir else None, path + \"/\", out)\n        a_file = a is not None and not a_dir\n        b_file = b is not None and not b_dir\n        if a_file and b_file:\n            if a != b:\n                out.append((\"M\", path))\n        elif a_file:\n            out.append((\"D\", path))\n        elif b_file:\n            out.append((\"A\", path))\n",
+          "new": "        a_file = a is not None and not a_dir\n        b_file = b is not None and not b_dir\n        if a_file and b_file:\n            if a != b:\n                out.append((\"M\", path))\n        elif a_file:\n            out.append((\"D\", path))\n        elif b_file:\n            out.append((\"A\", path))\n        if a_dir or b_dir:\n            _walk(store, a.oid if a_dir else None, b.oid if b_dir else None, path + \"/\", out)\n"
+        }
+      ],
+      "expect": "changes are sorted by path"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "init's files matched as /.init/ anywhere in the path",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "        if not path.startswith(INIT_DIR + \"/\")\n",
+          "new": "        if \"/\" + INIT_DIR + \"/\" not in path\n"
+        }
+      ],
+      "expect": "init's own files under .init/ do not count toward the budget"
+    },
+    {
+      "test": "test_lkg_diff",
+      "name": "a name that swaps between file and directory reported as M, its directory still walked",
+      "edits": [
+        {
+          "file": "lkg.py",
+          "old": "        a_file = a is not None and not a_dir\n        b_file = b is not None and not b_dir\n",
+          "new": "        a_file = a is not None and not a_dir\n        b_file = b is not None and not b_dir\n        if (a_dir and b_file) or (a_file and b_dir):\n            out.append((\"M\", path))\n            continue\n"
+        }
+      ],
+      "expect": "every file under the directory goes or comes"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "not ok only for a failure that blocks the launch, so the failed warn and info probes are ok",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "        yield _test_line(index + 1, result)\n",
+          "new": "        yield _test_line(index + 1, result, probes[index].severity)\n"
+        },
+        {
+          "file": "tap.py",
+          "old": "def _test_line(number: int, result: Result) -> str:\n",
+          "new": "def _test_line(number: int, result: Result, severity: str = \"block\") -> str:\n"
+        },
+        {
+          "file": "tap.py",
+          "old": "    ok = \"not ok\" if result.status == \"fail\" else \"ok\"\n",
+          "new": "    ok = \"not ok\" if result.status == \"fail\" and severity == \"block\" else \"ok\"\n"
+        }
+      ],
+      "expect": "fail is not ok, pass and warn are ok, a skip is ok # SKIP with its reason"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "a skipped block probe written as not ok, since it blocks the launch",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "        yield _test_line(index + 1, result)\n",
+          "new": "        yield _test_line(index + 1, result, probes[index].severity)\n"
+        },
+        {
+          "file": "tap.py",
+          "old": "def _test_line(number: int, result: Result) -> str:\n",
+          "new": "def _test_line(number: int, result: Result, severity: str = \"block\") -> str:\n"
+        },
+        {
+          "file": "tap.py",
+          "old": "        return f\"ok {number} - {result.name} # SKIP",
+          "new": "        return f\"{'not ok' if severity == 'block' else 'ok'} {number} - {result.name} # SKIP"
+        }
+      ],
+      "expect": "fail is not ok, pass and warn are ok, a skip is ok # SKIP with its reason"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "a warn on a block probe written as not ok",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "        yield _test_line(index + 1, result)\n",
+          "new": "        yield _test_line(index + 1, result, probes[index].severity)\n"
+        },
+        {
+          "file": "tap.py",
+          "old": "def _test_line(number: int, result: Result) -> str:\n",
+          "new": "def _test_line(number: int, result: Result, severity: str = \"block\") -> str:\n"
+        },
+        {
+          "file": "tap.py",
+          "old": "    ok = \"not ok\" if result.status == \"fail\" else \"ok\"\n",
+          "new": "    ok = \"not ok\" if result.status == \"fail\" or (result.status, severity) == (\"warn\", \"block\") else \"ok\"\n"
+        }
+      ],
+      "expect": "a block probe that warns is still ok"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "Bail out! with no return, so the stream goes on into the broken probe set",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "        yield f\"Bail out! {_escape(str(exc))}\\n\"\n        return\n",
+          "new": "        yield f\"Bail out! {_escape(str(exc))}\\n\"\n"
+        }
+      ],
+      "expect": "ProbeConfigError"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "a broken probe set reported as an empty plan, 1..0 # SKIP, instead of Bail out!",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "        yield f\"Bail out! {_escape(str(exc))}\\n\"\n",
+          "new": "        yield f\"1..0 # SKIP {_escape(str(exc))}\\n\"\n"
+        }
+      ],
+      "expect": "a broken probe set is a single Bail out! line"
+    },
+    {
+      "test": "test_tap_stream",
+      "name": "Bail out! printed to stderr, as hook() reports a broken probe set, and nothing in the stream",
+      "edits": [
+        {
+          "file": "tap.py",
+          "old": "        yield f\"Bail out! {_escape(str(exc))}\\n\"\n        return\n",
+          "new": "        print(f\"Bail out! {_escape(str(exc))}\", file=__import__(\"sys\").stderr)\n        return\n"
+        }
+      ],
+      "expect": "a broken probe set is a single Bail out! line"
+    }
+  ]
+}

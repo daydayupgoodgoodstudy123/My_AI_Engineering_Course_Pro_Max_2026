@@ -1,0 +1,152 @@
+{
+  "lesson": "phases/14-agent-engineering/35-initialization-scripts",
+  "title": "Initialization Scripts for Agents",
+  "format": "staged-brownfield",
+  "service": "InitProbe: an agent's init script with repo paths pinned once against the repo root, async probes timed on the monotonic clock whose slow passes become warns while their failures stay failures, a prereqs.lock with TTL and a manifest-and-probe-set fingerprint hashed in one pass, an append-only JSONL run history, dependency- and severity-aware probe orchestration with an idempotent init report, a TAP stream with pre-assigned test numbers, and a last-known-good drift check over git-style content-addressed trees",
+  "sources": {
+    "docs/en.md": "4ee89ee7aa2b7b40145524afac0b71d6291f8f2ec789297cccf22ed04dce2b9b",
+    "code/main.py": "095fe856b39521a6fad63ff76e3a3c3ee48fc7e5654f0151a4b0f9280da4128f",
+    "quiz/quiz.md": "5cf9f918ebaa66defc6d73f1f735dbf1319d012e88d5fc2655a69aa1d2f0ec52"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network, no git, no real environment probing: every probe is an async function the tests script (outcome, delay, and an asyncio.Event gate where a test needs to hold one back), Part 1's repo is a temporary directory the test builds and starts init inside, and git objects live in an in-memory store",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_probe_runner",
+      "kind": "debug",
+      "lesson_anchor": "What the init script probes: Repo paths (hard-coded paths drift; resolve them once and pin); Fail loud, fail fast, fail in one place; No network, no LLM, no surprises in the hot path (a probe slower than three seconds is a workbench smell); Lock files with TTL (prereqs.lock trusted for 24h while the manifest hash matches); Exercise 5 (a timing budget per probe); code/main.py paths pinned off HERE, _timed, lock_is_fresh, _deps_fingerprint and run_probes; quiz Q6 (only a slow pass is downgraded, a slow fail stays a fail), Q9 (the fingerprint covers only part of what the conclusion depends on) and Q13 (repo paths resolved once and pinned); code walkthrough 3.2 (time.time() can be stepped by NTP; a slow fail is left as it is)",
+      "planted_bugs": [
+        "pin_paths resolves each layout path with Path(rel).resolve(), against the directory init started in, and never uses root: started from repo/src/app the way a pre-task hook starts it, it pins repo/src/app/requirements.txt without complaint, and the FileNotFoundError surfaces in the test's dependencies probe, which reads the pinned manifest, as that probe's fail (run_probes -> _timed -> dependencies, away from pin_paths)",
+        "_timed turns every result over its budget into a warn, although its docstring downgrades only a pass: the slow test_command fail comes back as a warn with the slow note, which no longer stops the launch",
+        "_timed measures durations with time.time(): a wall-clock step an hour forward while a probe runs turns an instant pass into a 3600000ms 'slow' warn, a step back gives a negative duration",
+        "lock_is_fresh checks only age < LOCK_TTL_S, so a lock stamped in the future (clock set back, hand-edited file) has a negative age and is fresh forever",
+        "fingerprint hashes the manifest and every name so far again for each probe name, O(n^2) in the number of probes, where its docstring hashes the manifest and the sorted names once each; the timing assertion is on write_lock and lock_is_fresh, one call above the root cause"
+      ],
+      "timing_assert": "write_lock plus lock_is_fresh for 5000 probes (one per locked package of a monorepo) under 0.05 s, timed after gc.collect() on a probe set no fingerprint has seen yet. Measured inside pytest on this machine: per-name rehashing 0.76-0.81 s at load average 5 to 6 (15x the limit or more) and 1.9-2.4 s with twelve busy processes on ten cores (load average up to 24); hashing once a median of 0.67 ms over 300 runs at load 5 to 6 (slowest 3.7 ms, 13x under the limit) and 0.75 ms under the heavy load (99th percentile 14 ms). The per-name version behind functools.lru_cache still takes 0.38-0.81 s in the checker's runs. Kept as a guard: 200 probes of 10 ms through run_probes, whose asyncio.gather is given, must finish under 0.2 s after gc.collect(); one after another they take 2.18-2.39 s, together a median of 12-14 ms",
+      "overfix_guard": "pin_paths: an os.chdir(root) before resolving fails the working-directory check, joining without resolving or absolute() fail against a root given relative (git rev-parse --show-cdup's '../../'), and paths pinned off the package's own directory (the lesson's HERE) fail the dependencies probe; _timed: the slow note on every slow result, a slow fail downgraded with its detail kept, an early return for a probe that raised (a returned slow fail is still downgraded), status != 'fail' (a slow warn gets the note) and asyncio.wait_for at the budget all fail; time.process_time measures 0 ms for a sleeping probe, time.time_ns is still the wall clock, and clamping a negative wall-clock duration to 0 still turns the forward step into a slow warn; abs(age), a minute of skew, an age in whole seconds (int() or round() take a lock half a second in the future for age 0), 0 < age and age <= TTL fail the boundary checks; fingerprint: functools.lru_cache over the per-name version, the manifest hoisted out of the loop with the names still serialized per name, and one hasher fed every name so far at each step all stay quadratic. Given behaviour the test still guards: each probe is timed on its own (the whole run's duration given to every probe fails) and results keep the listed order (asyncio.as_completed fails); a probe that raises is still timed (returning 0 from the except, or gather(return_exceptions=True) and patching results afterwards, fails); the detail is exactly 'KeyError: ...' (repr or str(exc) alone fail); names hashed unsorted, repr(probe), the probe count, Python's hash() (checked against a second interpreter), severity and budget_s hashed as well (the second interpreter builds its probes with the defaults) or the names without the manifest all fail; a Semaphore(4) takes about 0.6 s"
+    },
+    {
+      "part": 2,
+      "test": "test_run_history",
+      "kind": "model and persistence",
+      "lesson_anchor": "Learning objective 3 (persist the probe result so the agent reads it instead of re-running checks); Fail loud (halt and surface to the human: the history is where the human looks); Key Terms (init report, idempotent)",
+      "exactness": "every run comes back exactly, compared with a typed() walk: the float timestamp 1761955200.1234567 (lost by ISO 8601 or rounding to microseconds), durations as int milliseconds including 1003 and 2002 (lost by seconds and int()), a detail with quotes, a line break, a tab, backslashes and an em dash, results in list order, blocking and warnings as lists; the raw file holds one JSON object per line",
+      "traps": [
+        "the timestamp as ISO 8601 or rounded",
+        "durations stored in seconds",
+        "values read back as dicts or tuples",
+        "split('\\n') turning the final newline into an empty, broken line",
+        "a missing file raising FileNotFoundError",
+        "last_ready returning the first ready run, the latest run, or the ready run with the newest timestamp (the last run appended was made after the clock was set back); runs() sorted by timestamp",
+        "the run written before it is checked",
+        "negative, fractional or second-valued durations, or unknown statuses, accepted",
+        "a broken line skipped, raised as KeyError, or reported without its file line number (JSON's own 'line 1' is not it), or counted from 0",
+        "skip left out of the statuses append accepts (BLOCKED holds a skipped probe)"
+      ],
+      "clarifying_questions": [
+        "one file or one per run",
+        "human-readable timestamps",
+        "cached runs",
+        "broken lines",
+        "what ready means"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_probe_plan",
+      "kind": "core algorithm",
+      "lesson_anchor": "Build It (each probe returns (name, status, detail); exit non-zero if any block-severity probe fails); Fail loud, fail fast, fail in one place; Idempotent (two runs identical modulo timestamp); Init versus startup rules (block/warn/info from Phase 14 \u00b7 33); quiz Q8 (duration_ms breaks 'modulo timestamp') and Q10 (a severity field)",
+      "traps": [
+        "a skip that does not propagate through skipped probes",
+        "a skip naming the needs it waited on instead of the failed probes behind them",
+        "failed probes named alphabetically, in needs order or in the order they failed, or named twice when reached along two paths",
+        "a skipped probe run anyway, or timed while it waited",
+        "results, blocking or warnings in the order probes settle (two runs with different delays must give the same init_report.json text apart from the timestamp)",
+        "a skipped block probe not blocking, or blocking only when a block probe failed behind it",
+        "any failure blocking whatever its severity; a warn on a block probe blocking; exit_code 1 for warnings or the count of blocking probes",
+        "info probes in warnings; skipped probes left out of warnings; warnings taken only from warn-severity probes",
+        "a need that warned stopping its dependents; an info probe's failure not stopping them",
+        "probes run in dependency waves, or one at a time in topological order",
+        "unknown needs found at run time (KeyError), loops not checked (the probes wait forever), duplicate names or an unknown severity accepted",
+        "the report stamped with the wall clock, or a fingerprint without the probe set",
+        "a refused run leaving the lock, as code/main.py does",
+        "blocking probes listed under warnings as well",
+        "a loop check that only catches a probe needing itself, or one visited set that takes a shared need for a loop and refuses the lesson's probe set",
+        "a broken probe set raised as a plain ValueError, which neither the test nor the hook catches"
+      ],
+      "integration": "InitService runs the lesson's probe table through Part 1's lock, Part 2's history and run_init: a ready run writes init_report.json and the lock, a fresh lock skips every probe, a refused --no-cache run removes the lock so the next plain run probes again, the history holds the three runs that probed and last_ready() is the first one exactly, and a broken probe set makes hook() exit 2",
+      "clarifying_questions": [
+        "warn status for dependents",
+        "a failed warn-severity need",
+        "skipped block probes",
+        "info failures",
+        "exit code for a broken probe set",
+        "running in waves",
+        "what a skip names"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_tap_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Use It (a GitHub Actions setup-agent job and a Claude Code pre-task hook run the init script; logs surface on failure); Fail loud, fail fast, fail in one place (a broken probe set stops the stream before anything runs, its reason on one Bail out! line; quiz Q11.2: a traceback is not a structured failure); quiz Q10 (status is what a probe found, severity is whether a failure blocks, so a line is ok or not ok by its status and only the verdict weighs severity); the probe table and severities of Part 3",
+      "wire_format": "TAP decided by the test's join/split('\\n') and the regex '(ok|not ok) (\\d+) - (\\w+) # (?:SKIP (.+)|(pass|warn|fail) (\\d+)ms (.*))': one line per probe as it settles, numbered by its position in the list, not ok only for a fail and a skip as 'ok N - name # SKIP <reason>', then '1..N' and '# ready' or '# refuse to launch: <blocking>'; a broken probe set is one 'Bail out! <reason>' line; details escape backslash first, then line feed and carriage return, and nothing else, as the docstring spells out, checked by a strict unescape",
+      "traps": [
+        "numbers given in output order, or counted from 0",
+        "ok or not ok taken from anything but the status: a warn or a skip written as not ok, a failure written as ok because its probe does not block the launch (git is warn, coverage info), a block probe's warn or skip written as not ok; or the skip written with 'SKIP:', in lower case, with a duration, or as a 'skip' status instead of the SKIP directive",
+        "a broken probe set not reduced to one 'Bail out! <reason>' line: ProbeConfigError raised out of the stream, the generator going on after 'Bail out!' with no return, 'Bail out!' without its reason or its newline, an empty plan '1..0 # SKIP' in its place, or the reason printed to stderr with nothing in the stream",
+        "lines held back until every probe settled, skips held back, or lines sent in number order; a skip sent at its first failed need, naming only that need",
+        "the plan line first, a TAP version line, or a plan that counts only the probes that ran",
+        "the verdict in settle order, from every failure regardless of severity, without the skipped block probes, or without its newline",
+        "incidental, since the docstring spells out the order: only line feeds escaped (the carriage return splits the line), backslashes not escaped or escaped last, JSON or repr escaping, line breaks turned into spaces, '#' or tabs escaped, '\\r\\n' folded into one escaped line feed"
+      ],
+      "clarifying_questions": [
+        "out-of-order numbers",
+        "ok or not ok for a failed info probe",
+        "where the plan goes",
+        "a TAP version line",
+        "a broken probe set",
+        "escaping #",
+        "when a skip goes out"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_lkg_diff",
+      "kind": "recursive structure",
+      "lesson_anchor": "Production patterns: last-known-good commit anchoring (refuse to start when the diff against LKG exceeds a 50-file budget, a human ratifies the new baseline); Exercise 1; code/main.py probe_lkg_diff; quiz Q11 (the LKG file counted in its own diff, a bad LKG commit only warned about)",
+      "traps": [
+        "both trees flattened, blobs read to compare contents, no oid shortcut, or the shortcut only below the root (counted with the store's reads)",
+        "a name that is a directory on one side and a file on the other taken as a modification (even with the directory still walked), or the blob walked as a tree",
+        "directories listed as changes, including empty ones",
+        "a mode change (100644 to 100755) missed or taken as a delete and an add",
+        "moves detected as renames instead of a delete and an add",
+        "changes sorted as (status, path) tuples or by path segments, or left in traversal order, sorted or git's ('a/x.py' must come after 'a-b.txt' and 'a.txt', and 'notes.md' sits between the file 'notes' and 'notes/a.md')",
+        "the budget compared with >=",
+        "init's own files under .init/ counted, matched without the slash so .initrc is dropped, matched as '/.init/' anywhere in the path, or dropped by diff_trees itself",
+        "HEAD's id in the detail, or another default budget",
+        "no LKG treated as a failure; an unknown LKG commit raising KeyError or only warning"
+      ],
+      "clarifying_questions": [
+        "rename detection",
+        "empty directories",
+        "mode-only changes",
+        "the LKG file itself",
+        "exactly the budget"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the starter already catches a probe's exception, runs the probes with asyncio.gather and covers the probe names in the fingerprint, because those defects repeat 13/03 (an executor that raises loses the turn; run_parallel awaits each call in turn), lesson 12 of this chapter (parallel_vote waiting for every vote) and 13/15 (a digest over only part of what the decision depends on). Their assertions stay as guards, including the 200 probes of 10 ms that must finish under 0.2 s. The defects planted in their place come from the lesson as well: the probe table's Repo paths row, the three-second budget that downgrades only a pass (Fail loud, quiz Q6), and a lock check that has to stay cheap on the hot path.",
+    "Part 1: probes are async callables, so running them together is asyncio.gather, the per-probe budget is Probe.budget_s (the lesson's Exercise 5), and the wall-clock step is simulated by patching time.time and time.time_ns while a probe runs. The lock functions take the wall-clock time as an argument, so the lock tests need no patching. Because a fingerprint built on Python's hash() passes every in-process check, the test also computes the fingerprint in a second interpreter. The repo paths come as a layout relative to the repo root, the way an init config lists them; the test builds a repo under tmp_path, starts init in repo/src/app with monkeypatch.chdir, and also passes the root relative, as git rev-parse --show-cdup prints it. Finding the root (walking up to .git) is left out: the hook passes it in.",
+    "Part 1: run_probes' contract (results in the listed order, each probe timed on its own) is asserted but not counted as a trap: results in completion order are already a trap in lessons 11 and 12 of this chapter.",
+    "Part 1 does not plant the quiz's 'a failed run keeps the old lock' bug; InitService (given) removes the lock after a refused run, and Part 3's end-to-end check covers it.",
+    "Part 1: the quadratic fingerprint is timed through write_lock and lock_is_fresh on a probe set no fingerprint has seen, so caching the slow version does not pass: init is a new process at every start, and its first lock check is the one that counts.",
+    "Part 2: the JSON-lines basics (one run per line, a run readable as soon as append returns, earlier runs kept on reopen, results in list order) are asserted as part of the format but not counted as this lesson's traps, because chapter 14 already uses indent=2, truncation with 'w', a missing flush and sort_keys at least twice each.",
+    "Part 2: no torn-tail recovery, because chapter 14 already uses that trap twice (08 and 14). A line that is not a run raises ValueError with its file line number instead, which is the lesson's fail loud applied to the history.",
+    "Part 3: the 'slow pass becomes warn' rule stays in Part 1's _timed, where the lesson's code has it; Part 3 checks that such a warn neither blocks nor stops the probes that need it. Exit codes are 0 and 1 in the report; a broken probe set raises ProbeConfigError before anything runs and the hook maps it to 2. An unknown severity is a configuration error rather than a silent warn. A skipped block probe blocks even when the failure behind it is only warn severity.",
+    "Part 3: InitReport.to_json (given) leaves durations out of init_report.json, so two runs can be identical apart from the timestamp (quiz Q8); the history keeps the timings.",
+    "Part 4: the stream bails out with TAP's 'Bail out!' on a broken probe set. Cancelling running probes when the reader stops early is not tested; that trap already appears several times in this chapter. Unlike lesson 06's TAP, numbers are positions in the probe list fixed before anything runs, not output order. stream_tap's docstring spells out how a detail is escaped (each backslash first, then line feeds and carriage returns, nothing else), because escaping the escape character first is already a main trap of other lessons in this chapter; the git detail with a carriage return, a tab and C:\\new, the em dash in state_freshness and the strict unescape still check it in passing. The main traps are the numbers fixed up front, ok or not ok from the status alone with TAP's SKIP directive (the last run adds a block probe that only warns, which stays ok), and a broken probe set reduced to one Bail out! line.",
+    "Part 5: blobs and trees are hashed as git hashes them (SHA-1 of the git encoding, trees in git order); commits are simplified to 'tree <oid>' and a message. diff_trees reports A/D/M like git diff --name-status --no-renames. lkg_drift leaves out init's own files under .init/ (quiz Q11) and fails on an LKG commit the store does not have, where code/main.py only warns."
+  ]
+}
