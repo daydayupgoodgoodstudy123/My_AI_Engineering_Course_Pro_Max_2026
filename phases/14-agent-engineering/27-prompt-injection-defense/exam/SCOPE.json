@@ -1,0 +1,143 @@
+{
+  "lesson": "phases/14-agent-engineering/27-prompt-injection-defense",
+  "title": "Prompt Injection and the PVE Defense",
+  "format": "staged-brownfield",
+  "service": "PVEGate: a Prompt-Validator-Executor layer with source-tagged content, a SQLite memory that carries taint, a provenance check for tool arguments, a JSON-RPC front end that validates each call as it arrives, and a scanner for nested retrieved content",
+  "sources": {
+    "docs/en.md": "1b00eb02f351e1cc3286f3e9f26859da8a9ed4d254cc426772dcf18424d4cc31",
+    "code/main.py": "904f413aa75754249d5d82940ae128da950f55b5eb2ad98801f33ea8e348b229"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no model and no network: the tests supply the tools, the human who confirms, and in Part 4 the validator",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_pve_session",
+      "kind": "debug",
+      "lesson_anchor": "PVE: Prompt-Validator-Executor (if the validator rejects, the main model is told 'that action was refused; try a different approach.'); 2026 defense doctrine 1 (retrieved content is untrusted) and 5 (send-message: human decides); Build It (Validator, Executor, looks_like_directive from code/main.py)",
+      "planted_bugs": [
+        "Session.step puts the refusal reason into the observation; the reason quotes the injection marker, the observation joins the history as tool_output, and the next clean call is refused for 'tool_output content contains injection marker', one step after the root cause",
+        "normalize only lower()s: no NFKC and no strip, so fullwidth letters, a fullwidth colon and leading spaces get past looks_like_directive, while the docstring asks for NFKC, invisible characters removed, casefold and strip",
+        "_drop_invisible copies the rest of the string for every invisible character it removes, O(n*k)",
+        "Validator.assess never reads sensitive_tools, so send_message runs without a human"
+      ],
+      "timing_assert": "one step against a retrieved page of 14,000 items joined by three zero-width characters (156,887 characters, 41,997 of them invisible) under 0.1 s. Measured on this machine (Python 3.12.14, 10 cores, load average 7 to 11 from other agents): the per-character slicing loop 1.05-2.52 s in 28 runs (10x or more over the limit, and under 3 s), the reference one-pass filter 3.4-9.7 ms in 63 runs (10x or more under); str.translate with a dict 5.7-16 ms, re.sub with a character class 11-37 ms, str.replace per invisible character 1.1-1.8 ms",
+      "overfix_guard": "a tool output carrying an injection still blocks the calls after it (rules out skipping tool_output in the scan), while the user's own directive-shaped message does not (rules out scanning every source); the audit keeps a reason that names the marker (rules out fixing the leak by dropping the marker from the reason); a clean query with fullwidth letters, CJK and a zero-width space reaches the tool exactly as written (rules out normalizing the arguments, or refusing non-ASCII); a zero-width space in front of two spaces and 'execute' is still caught (rules out stripping before the invisible characters are dropped); an injection at the end of the long page is still refused (rules out scanning only the head); a call the validator refuses never reaches the human, including send_message after an injected page, and clean non-sensitive calls never ask (rules out confirming before validating, confirming before the history scan, or confirming everything); the validator's own verdict for send_message is confirm (rules out asking the human from Session.step while assess() still says allow, which any other caller of the validator would act on)"
+    },
+    {
+      "part": 2,
+      "test": "test_memory_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "Where defenses fail: Overtrust of retrieved memory; Exercise 2 (memory-write guardrail); exploit classes persistent memory poisoning and information ecosystem contamination; doctrine 6 (content capture, incidents are auditable)",
+      "storage": "SQLite: one notes table (note_id INTEGER PRIMARY KEY, text, source, tainted as 0/1, derived_from as a JSON list); the parent check and the insert share one transaction",
+      "exactness": "a note's text comes back byte for byte, across a close and reopen: CRLF, leading and trailing whitespace, a trailing newline, fullwidth letters, a zero-width space, single and double quotes; source, taint and derived_from (a tuple in the order given: (3, 1) stays (3, 1)) also round-trip, and recall() returns Content with the stored taint",
+      "traps": [
+        "normalized or stripped text stored",
+        "taint computed from the parents' source tags instead of their stored taint, so a digest of a summary of a page comes out clean",
+        "taint taken from the first parent only: the reopened store derives a note from (5, 4), a clean parent and then a tainted one",
+        "the guard applied only to non-user sources",
+        "the note committed before its parents are checked, leaving a row behind on KeyError",
+        "any() over the parents' taint, which stops at the first tainted parent and never looks up the unknown id after it",
+        "recall() letting Content infer taint from the source tag",
+        "parents read back in id order instead of the order given",
+        "text formatted into the SQL"
+      ],
+      "clarifying_questions": [
+        "does the guard apply to user writes",
+        "original or normalized text",
+        "unknown parent id",
+        "order of derived_from"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_provenance_check",
+      "kind": "core algorithm",
+      "lesson_anchor": "Exercise 1 (source tags propagated through the history); PVE validator checks (consistent with the user's stated intent, touches a sensitive surface); Exercise 5 (near-zero rejection on legitimate calls); data theft",
+      "traps": [
+        "windows that also occur in untainted content not subtracted (the user's own address, sent as 'Bob <bob@example.com>', repeated on a page)",
+        "trust granted only when the whole argument occurs in untainted content instead of window by window",
+        "trust read from the source tag instead of the tainted flag (a user-sourced note derived from a page)",
+        "only top-level string arguments checked",
+        "range(len - n) dropping the last window",
+        "case-sensitive windows",
+        "only the history casefolded, so an argument in capitals slips through",
+        "names returned sorted instead of in argument order",
+        "tainted arguments refused for non-sensitive tools too",
+        "an unknown intent raising KeyError",
+        "ProvenanceCheck.assess not passing its own min_run to tainted_args (a min_run=24 check must not flag a 20-character address)"
+      ],
+      "integration": "a page and a user-sourced summary of it go through Part 2's MemoryStore; a later session recalls only the summary, and send_message to the address it carries is refused",
+      "clarifying_questions": [
+        "case sensitivity",
+        "text both in the user's message and on a page",
+        "tainted arguments to a non-sensitive tool",
+        "unknown intent",
+        "how the reason names the arguments"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_rpc_per_call",
+      "kind": "streaming",
+      "lesson_anchor": "Where defenses fail: All guardrails at the end (if validation runs only on the final output, the model already touched the world); doctrine 3 (per-step safety evaluation: assess each action before execution); Exercise 1 source tags propagated through message history; PVE validator before executor",
+      "wire_format": "JSON-RPC 2.0, one request per input line and one reply per output line ({jsonrpc, id, result} or {jsonrpc, id, error: {code, message}}), decided by the test's join, splitlines and json.loads; the standard codes and messages -32700 Parse error, -32600 Invalid Request, -32601 Method not found and -32602 Invalid params, and REFUSED = -32001 from the -32000 to -32099 range the spec reserves for implementation-defined server errors",
+      "traps": [
+        "each call must validate against live history, not only the initial user item; real tool output stays untrusted and joins the original history before the next call",
+        "notifications still validate and may execute/update evidence although no reply is returned",
+        "refuse/human-no produce no effect; confirm/human-yes allows this call, ordinary allow asks nobody",
+        "notifications answered, including a refused notification and one for an unknown method",
+        "a reply without its newline",
+        "id 0 taken for a notification",
+        "ids sent back as strings",
+        "blank lines answered as parse errors",
+        "params required although they may be left out",
+        "tool output kept out of the history, so the second call is checked against a stale history",
+        "refusals added to the history, as Part 1's Session does",
+        "the tool run before the verdict is looked at",
+        "a call the human approves still refused",
+        "the refusal reason sent back in error.data",
+        "every line read before the first reply"
+      ],
+      "clarifying_questions": [
+        "handle_line is synchronous; serve and reply encoders are provided correct",
+        "are notifications validated",
+        "batch requests",
+        "do refused calls enter the history",
+        "a method that is not a string",
+        "a tool that raises or does not take the arguments"
+      ],
+      "implementation_boundary": "Correct async serve transport and JSON reply encoders are supplied. The candidate implements synchronous handle_line: live evidence history commit, notification effect versus reply, and verdict-to-human/executor wiring.",
+      "overfix_guard": "Supplied async transport and encoders preserve immediate replies, close without prefetch, JSON line endings and id types. Their original tests and wrong fixes remain boundary guards; async-generator shape is already correct."
+    },
+    {
+      "part": 5,
+      "test": "test_nested_scan",
+      "kind": "recursive structure",
+      "lesson_anchor": "Greshake et al.: indirect prompt injection planted in content the agent retrieves (web page, PDF, email); Where defenses fail: No content-source metadata",
+      "traps": [
+        "a part's own source taken as its trust (a 'user_message' part inside a retrieved email)",
+        "the user's own directives reported",
+        "the root's own text skipped when the root is not user_message",
+        "breadth-first or stack order instead of document order",
+        "nodes visited once by identity, so a shared attachment is reported once",
+        "max_depth itself counted as too deep",
+        "content past max_depth skipped silently",
+        "a too-deep node's own text read, or its parts entered, after it is reported",
+        "a part that contains itself"
+      ],
+      "clarifying_questions": [
+        "order of findings",
+        "a shared attachment",
+        "nodes deeper than max_depth"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: three planned defects kept in substance (sensitive_tools never used; normalization bypass by fullwidth text and leading whitespace; the overfix guard that normalization is only for detection). The planned frozen-copy defect (arguments changed after approval) is left out: chapter 14 already uses shallow-copy traps in lessons 06, 10, 13, 14, 18, 19 and 34. Its place goes to a defect taken from the lesson's own refusal rule: the refusal reason leaks into the observation and poisons the next step, which also gives the failure one step away from its cause. Zero-width characters are removed correctly but in quadratic time, so they are the timing defect rather than a bypass.",
+    "Part 1: the timing case is not per-marker substring search compiled into one regex, as planned. Lesson 05 already times per-item lower() and substring search, and an alternation of literals in Python's re is not faster than repeated 'in'. The timed cost is an attacker's padding of invisible characters, which fits the lesson's 'cheap, fast validator'. The limit is 0.1 s so that both sides keep an 8x margin on this machine.",
+    "Part 2: SQLite as assigned. Missing commit and CREATE TABLE IF NOT EXISTS are not designed traps (lessons 07 and 09 already use the missing commit), and neither is 0/1 versus bool. The designed traps are verbatim text, transitive taint, the guard for every source, atomic refusal, taint kept by recall(), parent order and parameter binding.",
+    "Part 3: windows of min_run characters instead of word runs, because exfiltration targets are addresses and URLs. Directive scanning stays in Part 1; Part 3 is the intent and provenance half of the validator. 'Only allowed calls reach the executor' is tested in Parts 1 and 4 instead.",
+    "Part 4: JSON-RPC 2.0 as assigned. The method is the tool name and params are its arguments; the lesson does not describe a wire protocol, so no MCP method names are used. Codes, messages, notifications and id null follow the JSON-RPC 2.0 specification, and REFUSED = -32001 comes from the range it leaves to implementations. Only tool output joins the history; the model learns about a refusal from the error reply. The validator is a test-supplied function, so this part does not depend on Part 1. The async generator is supplied correct; the candidate handles one request synchronously, focusing on live tool-output evidence, notifications and PVE effect authorization. Transport prefetch and line format remain tested helper boundaries.",
+    "Part 5: as planned (least trust on the path, every occurrence reported, empty nodes, paths as index tuples), plus document order, and a depth limit that reports instead of skipping, which also stops self-containing content."
+  ]
+}

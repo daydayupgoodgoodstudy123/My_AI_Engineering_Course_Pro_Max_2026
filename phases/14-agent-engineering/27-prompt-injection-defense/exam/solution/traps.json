@@ -1,0 +1,1093 @@
+{
+  "package": "pvegate",
+  "tests": [
+    "test_pve_session",
+    "test_memory_store",
+    "test_provenance_check",
+    "test_rpc_per_call",
+    "test_nested_scan"
+  ],
+  "layers": [
+    {
+      "test": "test_pve_session",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "clean calls keep working after a refusal"
+        },
+        {
+          "name": "the model hears only REFUSAL",
+          "edits": [
+            {
+              "file": "gate.py",
+              "old": "            observation = f\"{REFUSAL} ({verdict.reason})\"\n",
+              "new": "            observation = REFUSAL\n"
+            }
+          ],
+          "expect": "obfuscated directives are still directives"
+        },
+        {
+          "name": "+ NFKC, casefold and strip before matching",
+          "edits": [
+            {
+              "file": "content.py",
+              "old": "from dataclasses import dataclass\n",
+              "new": "import unicodedata\nfrom dataclasses import dataclass\n"
+            },
+            {
+              "file": "content.py",
+              "old": "    return _drop_invisible(text).lower()\n",
+              "new": "    return _drop_invisible(unicodedata.normalize(\"NFKC\", text)).casefold().strip()\n"
+            }
+          ],
+          "expect": "the validator has to stay cheap on long pages"
+        },
+        {
+          "name": "+ invisible characters dropped in one pass",
+          "edits": [
+            {
+              "file": "content.py",
+              "old": "    i = 0\n    while i < len(text):\n        if text[i] in INVISIBLE:\n            text = text[:i] + text[i + 1 :]\n        else:\n            i += 1\n    return text\n",
+              "new": "    return \"\".join(ch for ch in text if ch not in INVISIBLE)\n"
+            }
+          ],
+          "expect": "send_message runs only after a human confirms it"
+        },
+        {
+          "name": "+ sensitive tools need a human",
+          "edits": [
+            {
+              "file": "gate.py",
+              "old": "        return Verdict(\"allow\", \"ok\")\n",
+              "new": "        if call.name in self.sensitive_tools:\n            return Verdict(\"confirm\", f\"{call.name!r} is a sensitive tool\")\n        return Verdict(\"allow\", \"ok\")\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_pve_session",
+      "name": "tool outputs left out of the history scan",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            if not content.tainted:\n",
+          "new": "            if not content.tainted or content.source == \"tool_output\":\n"
+        }
+      ],
+      "expect": "an injected tool output blocks the steps after it"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "the user's own message scanned too",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            if not content.tainted:\n                continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "the user's own instructions are not an injection"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "the marker left out of the reason",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "f\"arg {key!r} contains injection marker {hit!r}\"",
+          "new": "f\"arg {key!r} contains an injection marker\""
+        }
+      ],
+      "expect": "the reason still goes to the audit log"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "arguments normalized before the call runs",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        verdict = self.validator.assess(call, self.history)\n",
+          "new": "        from .content import normalize\n        call = ToolCall(call.name, {k: normalize(v) if isinstance(v, str) else v for k, v in call.args.items()}, call.intent)\n        verdict = self.validator.assess(call, self.history)\n"
+        }
+      ],
+      "expect": "tools get the arguments exactly as the model wrote them"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "stripped before invisible characters are dropped",
+      "edits": [
+        {
+          "file": "content.py",
+          "old": "    return _drop_invisible(unicodedata.normalize(\"NFKC\", text)).casefold().strip()\n",
+          "new": "    return _drop_invisible(unicodedata.normalize(\"NFKC\", text).strip()).casefold()\n"
+        }
+      ],
+      "expect": "obfuscated directives are still directives"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "only the head of a long text is scanned",
+      "edits": [
+        {
+          "file": "content.py",
+          "old": "    t = normalize(text)\n",
+          "new": "    t = normalize(text[:20000])\n"
+        }
+      ],
+      "expect": "an injection at the end of a long page still counts"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "sensitive tools sent to the human before the other checks",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if call.name in self.sensitive_tools:\n            return Verdict(\"confirm\", f\"{call.name!r} is a sensitive tool\")\n",
+          "new": ""
+        },
+        {
+          "file": "gate.py",
+          "old": "            return Verdict(\"refuse\", f\"tool {call.name!r} not in allowlist\")\n",
+          "new": "            return Verdict(\"refuse\", f\"tool {call.name!r} not in allowlist\")\n        if call.name in self.sensitive_tools:\n            return Verdict(\"confirm\", f\"{call.name!r} is a sensitive tool\")\n"
+        }
+      ],
+      "expect": "the human only sees calls the validator passed"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "the human asked before the history is scanned",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if call.name in self.sensitive_tools:\n            return Verdict(\"confirm\", f\"{call.name!r} is a sensitive tool\")\n",
+          "new": ""
+        },
+        {
+          "file": "gate.py",
+          "old": "        for content in history:\n",
+          "new": "        if call.name in self.sensitive_tools:\n            return Verdict(\"confirm\", f\"{call.name!r} is a sensitive tool\")\n        for content in history:\n"
+        }
+      ],
+      "expect": "the human only sees calls the validator passed"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "every clean call asks the human",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if call.name in self.sensitive_tools:\n            return Verdict(\"confirm\", f\"{call.name!r} is a sensitive tool\")\n        return Verdict(\"allow\", \"ok\")\n",
+          "new": "        return Verdict(\"confirm\", \"ask the user\")\n"
+        }
+      ],
+      "expect": "clean calls keep working after a refusal"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "NFC instead of NFKC",
+      "edits": [
+        {
+          "file": "content.py",
+          "old": "unicodedata.normalize(\"NFKC\", text)",
+          "new": "unicodedata.normalize(\"NFC\", text)"
+        }
+      ],
+      "expect": "obfuscated directives are still directives"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "invisible characters deleted from a list one by one",
+      "edits": [
+        {
+          "file": "content.py",
+          "old": "    return \"\".join(ch for ch in text if ch not in INVISIBLE)\n",
+          "new": "    chars = list(text)\n    i = 0\n    while i < len(chars):\n        if chars[i] in INVISIBLE:\n            del chars[i]\n        else:\n            i += 1\n    return \"\".join(chars)\n"
+        }
+      ],
+      "expect": "the validator has to stay cheap on long pages"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "refusals kept out of the history",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        else:\n            observation = REFUSAL\n        self.history.append(",
+          "new": "        else:\n            return REFUSAL\n        self.history.append("
+        }
+      ],
+      "expect": "the model is told only that it was refused"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "reason kept in the observation, refusals skipped by the history scan",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            observation = REFUSAL\n",
+          "new": "            observation = f\"{REFUSAL} ({verdict.reason})\"\n"
+        },
+        {
+          "file": "gate.py",
+          "old": "            if not content.tainted:\n",
+          "new": "            if not content.tainted or content.text.startswith(REFUSAL):\n"
+        }
+      ],
+      "expect": "the model is told only that it was refused"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "only the latest history item scanned",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        for content in history:\n",
+          "new": "        for content in history[-1:]:\n"
+        }
+      ],
+      "expect": "the human only sees calls the validator passed"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "non-ASCII arguments refused",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            if not isinstance(value, str):\n                continue\n",
+          "new": "            if not isinstance(value, str):\n                continue\n            if not value.isascii():\n                return Verdict(\"refuse\", f\"arg {key!r} is not ASCII\")\n"
+        }
+      ],
+      "expect": "tools get the arguments exactly as the model wrote them"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "the human's answer ignored",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            if self.confirm(call):",
+          "new": "            if self.confirm(call) or True:"
+        }
+      ],
+      "expect": "a call the human declines is refused"
+    },
+    {
+      "test": "test_pve_session",
+      "name": "the human asked from Session.step instead of the validator",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if call.name in self.sensitive_tools:\n            return Verdict(\"confirm\", f\"{call.name!r} is a sensitive tool\")\n",
+          "new": ""
+        },
+        {
+          "file": "gate.py",
+          "old": "        verdict = self.validator.assess(call, self.history)\n",
+          "new": "        verdict = self.validator.assess(call, self.history)\n        if verdict.action == \"allow\" and call.name in self.validator.sensitive_tools:\n            verdict = Verdict(\"confirm\", f\"{call.name!r} is a sensitive tool\")\n"
+        }
+      ],
+      "expect": "the validator itself asks for a human on a sensitive tool"
+    },
+    {
+      "test": "test_memory_store",
+      "name": "normalized text stored",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "from .content import SOURCES, Content, looks_like_directive\n",
+          "new": "from .content import SOURCES, Content, looks_like_directive, normalize\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "                (text, source, int(tainted), json.dumps(parents)),\n",
+          "new": "                (normalize(text), source, int(tainted), json.dumps(parents)),\n"
+        }
+      ],
+      "expect": "a note comes back exactly as written"
+    },
+    {
+      "test": "test_memory_store",
+      "name": "text stripped before storing",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "                (text, source, int(tainted), json.dumps(parents)),\n",
+          "new": "                (text.strip(), source, int(tainted), json.dumps(parents)),\n"
+        }
+      ],
+      "expect": "a note comes back exactly as written"
+    },
+    {
+      "test": "test_memory_store",
+      "name": "taint taken from the parents' source tags",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "                tainted = self.get(parent).tainted or tainted\n",
+          "new": "                tainted = self.get(parent).source != \"user_message\" or tainted\n"
+        }
+      ],
+      "expect": "a note is tainted when its source or anything it was derived from is"
+    },
+    {
+      "test": "test_memory_store",
+      "name": "note committed before its parents are checked",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        with self._db:\n            for parent in parents:\n                tainted = self.get(parent).tainted or tainted\n            cur = self._db.execute(\n                \"INSERT INTO notes (text, source, tainted, derived_from) VALUES (?, ?, ?, ?)\",\n                (text, source, int(tainted), json.dumps(parents)),\n            )\n",
+          "new": "        cur = self._db.execute(\n            \"INSERT INTO notes (text, source, tainted, derived_from) VALUES (?, ?, ?, ?)\",\n            (text, source, int(tainted), json.dumps(parents)),\n        )\n        self._db.commit()\n        for parent in parents:\n            tainted = self.get(parent).tainted or tainted\n        with self._db:\n            self._db.execute(\"UPDATE notes SET tainted = ? WHERE note_id = ?\", (int(tainted), cur.lastrowid))\n"
+        }
+      ],
+      "expect": "refused writes leave nothing behind"
+    },
+    {
+      "test": "test_memory_store",
+      "name": "guard skipped for the user's own writes",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        hit = looks_like_directive(text)\n",
+          "new": "        hit = looks_like_directive(text) if source != \"user_message\" else None\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_memory_store",
+      "name": "recall rebuilds taint from the source tag",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "Content(n.text, n.source, n.tainted)",
+          "new": "Content(n.text, n.source)"
+        }
+      ],
+      "expect": "recalled notes keep their source and their taint"
+    },
+    {
+      "test": "test_memory_store",
+      "name": "parents read back in id order",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "tuple(json.loads(derived_from))",
+          "new": "tuple(sorted(json.loads(derived_from)))"
+        }
+      ],
+      "expect": "a reopened store has every note, exactly as written"
+    },
+    {
+      "test": "test_memory_store",
+      "name": "text formatted into the SQL",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        with self._db:\n            for parent in parents:\n                tainted = self.get(parent).tainted or tainted\n            cur = self._db.execute(\n                \"INSERT INTO notes (text, source, tainted, derived_from) VALUES (?, ?, ?, ?)\",\n                (text, source, int(tainted), json.dumps(parents)),\n            )\n",
+          "new": "        with self._db:\n            for parent in parents:\n                tainted = self.get(parent).tainted or tainted\n            cur = self._db.execute(\n                f\"INSERT INTO notes (text, source, tainted, derived_from) VALUES ('{text}', '{source}', {int(tainted)}, '{json.dumps(parents)}')\"\n            )\n"
+        }
+      ],
+      "expect": "OperationalError"
+    },
+    {
+      "test": "test_memory_store",
+      "name": "taint taken from the first parent only",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "            for parent in parents:\n                tainted = self.get(parent).tainted or tainted\n",
+          "new": "            for parent in parents:\n                self.get(parent)\n            if parents:\n                tainted = self.get(parents[0]).tainted or tainted\n"
+        }
+      ],
+      "expect": "any tainted parent taints the note"
+    },
+    {
+      "test": "test_memory_store",
+      "name": "taint taken from the last parent only",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "            for parent in parents:\n                tainted = self.get(parent).tainted or tainted\n",
+          "new": "            for parent in parents:\n                last = self.get(parent).tainted\n                tainted = (source != \"user_message\") or last\n"
+        }
+      ],
+      "expect": "a note is tainted when its source or anything it was derived from is"
+    },
+    {
+      "test": "test_memory_store",
+      "name": "any() stops before an unknown parent id",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "            for parent in parents:\n                tainted = self.get(parent).tainted or tainted\n",
+          "new": "            tainted = tainted or any(self.get(parent).tainted for parent in parents)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_memory_store",
+      "name": "taint stored as the text 'True' or 'False'",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "(text, source, int(tainted), json.dumps(parents))",
+          "new": "(text, source, str(tainted), json.dumps(parents))"
+        }
+      ],
+      "expect": "a note comes back exactly as written"
+    },
+    {
+      "test": "test_memory_store",
+      "name": "stored taint taken from the source tag, returned taint computed",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "(text, source, int(tainted), json.dumps(parents))",
+          "new": "(text, source, int(source != \"user_message\"), json.dumps(parents))"
+        }
+      ],
+      "expect": "a note is tainted when its source or anything it was derived from is"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "untainted content not subtracted",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "    suspect = untrusted - trusted\n",
+          "new": "    suspect = untrusted\n"
+        }
+      ],
+      "expect": "text the user wrote is the user's, even when a page repeats it"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "trust read from the source tag",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "(untrusted if content.tainted else trusted)",
+          "new": "(untrusted if content.source != \"user_message\" else trusted)"
+        }
+      ],
+      "expect": "taint comes from the flag, not from the source tag"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "top-level strings only",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "for s in _strings(value))",
+          "new": "for s in ([value] if isinstance(value, str) else []))"
+        }
+      ],
+      "expect": "strings are checked at any depth"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "last window dropped",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "range(len(folded) - n + 1)",
+          "new": "range(len(folded) - n)"
+        }
+      ],
+      "expect": "every window counts, the last one too"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "case-sensitive windows",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "    folded = text.casefold()\n",
+          "new": "    folded = text\n"
+        }
+      ],
+      "expect": "windows are compared casefolded"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "history casefolded, arguments not",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "        if any(_windows(s, min_run) & suspect for s in _strings(value))\n",
+          "new": "        if any({s[i : i + min_run] for i in range(len(s) - min_run + 1)} & suspect for s in _strings(value))\n"
+        }
+      ],
+      "expect": "windows are compared casefolded"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "tainted arguments refused for every tool",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "        if call.name in self.sensitive_tools:\n            tainted = tainted_args(call.args, history, self.min_run)\n            if tainted:\n                return Verdict(\"refuse\", \"untrusted text in \" + \", \".join(repr(a) for a in tainted))\n",
+          "new": "        tainted = tainted_args(call.args, history, self.min_run)\n        if tainted:\n            return Verdict(\"refuse\", \"untrusted text in \" + \", \".join(repr(a) for a in tainted))\n        if call.name in self.sensitive_tools:\n"
+        }
+      ],
+      "expect": "searching for what a page says is fine"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "intent looked up with []",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "self.intents.get(call.intent, ())",
+          "new": "self.intents[call.intent]"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "trust granted only when the whole string is in untainted content",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "    suspect = untrusted - trusted\n    return [\n        name\n        for name, value in args.items()\n        if any(_windows(s, min_run) & suspect for s in _strings(value))\n    ]\n",
+          "new": "    texts = [c.text.casefold() for c in history if not c.tainted]\n    return [\n        name\n        for name, value in args.items()\n        if any((_windows(s, min_run) & untrusted) and not any(s.casefold() in t for t in texts) for s in _strings(value))\n    ]\n"
+        }
+      ],
+      "expect": "text the user wrote is the user's, even when a page repeats it"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "whole strings matched instead of windows",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "        if any(_windows(s, min_run) & suspect for s in _strings(value))\n",
+          "new": "        if any(len(s) >= min_run and any(s.casefold() in c.text.casefold() for c in history if c.tainted) and not any(s.casefold() in c.text.casefold() for c in history if not c.tainted) for s in _strings(value))\n"
+        }
+      ],
+      "expect": "every window counts, the last one too"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "windows one character too long",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "{folded[i : i + n] for i in range(len(folded) - n + 1)}",
+          "new": "{folded[i : i + n + 1] for i in range(len(folded) - n)}"
+        }
+      ],
+      "expect": "every window counts, the last one too"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "only retrieved content counted as untrusted",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "(untrusted if content.tainted else trusted)",
+          "new": "(untrusted if content.source == \"retrieved\" else trusted)"
+        }
+      ],
+      "expect": "every window counts, the last one too"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "only the first item of a list checked",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "        for item in value:\n            yield from _strings(item)\n",
+          "new": "        for item in value[:1]:\n            yield from _strings(item)\n"
+        }
+      ],
+      "expect": "strings are checked at any depth"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "an unknown intent serves every allowed tool",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "self.intents.get(call.intent, ())",
+          "new": "self.intents.get(call.intent, self.allowed_tools)"
+        }
+      ],
+      "expect": "an unknown intent serves no tool"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "intent checked only for sensitive tools",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "        if call.name not in self.intents.get(call.intent, ()):\n",
+          "new": "        if call.name in self.sensitive_tools and call.name not in self.intents.get(call.intent, ()):\n"
+        }
+      ],
+      "expect": "an unknown intent serves no tool"
+    },
+    {
+      "test": "test_provenance_check",
+      "name": "the check's own min_run not passed on",
+      "edits": [
+        {
+          "file": "provenance.py",
+          "old": "tainted_args(call.args, history, self.min_run)",
+          "new": "tainted_args(call.args, history)"
+        }
+      ],
+      "expect": "the check compares windows of its own min_run"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "notifications answered",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "    if answer:\n        return reply\n    return None\n",
+          "new": "    return reply\n"
+        }
+      ],
+      "expect": "never answer a notification"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "no newline after a reply",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "    return json.dumps({\"jsonrpc\": \"2.0\", \"id\": request_id, **body}) + \"\\n\"\n",
+          "new": "    return json.dumps({\"jsonrpc\": \"2.0\", \"id\": request_id, **body})\n"
+        }
+      ],
+      "expect": "Extra data"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "id 0 taken for a notification",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "    answer = \"id\" in request\n",
+          "new": "    answer = bool(request.get(\"id\"))\n"
+        }
+      ],
+      "expect": "answer every request that has an id"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "ids sent back as strings",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "    request_id = request.get(\"id\")\n",
+          "new": "    request_id = None if request.get(\"id\") is None else str(request.get(\"id\"))\n"
+        }
+      ],
+      "expect": "echoing the id as sent"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "blank lines parsed as requests",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "    if not line.strip():\n        return None\n",
+          "new": ""
+        }
+      ],
+      "expect": "answer every request that has an id"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "params required",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "    params = request.get(\"params\", {})\n",
+          "new": "    params = request[\"params\"]\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "tool output kept out of the history",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "            history.append(Content(result, \"tool_output\"))\n",
+          "new": ""
+        }
+      ],
+      "expect": "each call is checked against the history as of that call"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "refusals added to the history, as Session does",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "            reply = _error(request_id, REFUSED, REFUSAL)\n",
+          "new": "            history.append(Content(REFUSAL, \"tool_output\"))\n            reply = _error(request_id, REFUSED, REFUSAL)\n"
+        }
+      ],
+      "expect": "each call is checked against the history as of that call"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "tool run before the verdict is looked at",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "        if verdict.action == \"allow\":\n            result = tools[method](**params)\n",
+          "new": "        result = tools[method](**params)\n        if verdict.action == \"allow\":\n"
+        }
+      ],
+      "expect": "a refused or declined call never runs"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "every line read before the first reply",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "    async for line in lines:\n",
+          "new": "    for line in [line async for line in lines]:\n"
+        }
+      ],
+      "expect": "reply to each request before reading the next one"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "a notification answered on the error paths",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "    if method not in tools:\n        reply = _error(request_id, METHOD_NOT_FOUND, \"Method not found\")\n    elif not isinstance(params, dict):\n        reply = _error(request_id, INVALID_PARAMS, \"Invalid params\")\n    else:\n",
+          "new": "    if method not in tools:\n        return _error(request_id, METHOD_NOT_FOUND, \"Method not found\")\n    elif not isinstance(params, dict):\n        return _error(request_id, INVALID_PARAMS, \"Invalid params\")\n    else:\n"
+        }
+      ],
+      "expect": "never answer a notification"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "a refused notification answered",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "        else:\n            reply = _error(request_id, REFUSED, REFUSAL)\n",
+          "new": "        else:\n            return _error(request_id, REFUSED, REFUSAL)\n"
+        }
+      ],
+      "expect": "never answer a notification"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "the refusal reason sent as error.data",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "            reply = _error(request_id, REFUSED, REFUSAL)\n",
+          "new": "            reply = _line(request_id, error={\"code\": REFUSED, \"message\": REFUSAL, \"data\": verdict.reason})\n"
+        }
+      ],
+      "expect": "replies follow JSON-RPC 2.0"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "the caller's history copied",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "    async for line in lines:\n",
+          "new": "    history = list(history)\n    async for line in lines:\n"
+        }
+      ],
+      "expect": "tool output joins the caller's history"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "missing params taken as an empty array",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "request.get(\"params\", {})",
+          "new": "request.get(\"params\", [])"
+        }
+      ],
+      "expect": "each call is checked against the history as of that call"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "every call sent to the human",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "        if verdict.action == \"confirm\":\n",
+          "new": "        if verdict.action == \"confirm\" or True:\n"
+        }
+      ],
+      "expect": "each call is checked against the history as of that call"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "a confirm verdict run without asking",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "            verdict = Verdict(\"allow\" if confirm(call) else \"refuse\", verdict.reason)\n",
+          "new": "            verdict = Verdict(\"allow\", verdict.reason)\n"
+        }
+      ],
+      "expect": "each call is checked against the history as of that call"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "a call the human approves still refused",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "        if verdict.action == \"confirm\":\n            verdict = Verdict(\"allow\" if confirm(call) else \"refuse\", verdict.reason)\n",
+          "new": "        if verdict.action == \"confirm\" and not confirm(call):\n            verdict = Verdict(\"refuse\", verdict.reason)\n"
+        }
+      ],
+      "expect": "a call the human confirms runs"
+    },
+    {
+      "test": "test_nested_scan",
+      "name": "a part's own source taken as its trust",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "        source = max(inherited, own, key=SOURCES.index)\n",
+          "new": "        source = own\n"
+        }
+      ],
+      "expect": "a part is never trusted more than what contains it"
+    },
+    {
+      "test": "test_nested_scan",
+      "name": "the user's own directives reported",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "        if source != \"user_message\":\n",
+          "new": "        if True:\n"
+        }
+      ],
+      "expect": "a part is never trusted more than what contains it"
+    },
+    {
+      "test": "test_nested_scan",
+      "name": "nodes visited once, by identity",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "    findings: list[Finding] = []\n",
+          "new": "    findings: list[Finding] = []\n    seen: set[int] = set()\n"
+        },
+        {
+          "file": "nested.py",
+          "old": "        own = node.get(\"source\", inherited)\n",
+          "new": "        if id(node) in seen:\n            return\n        seen.add(id(node))\n        own = node.get(\"source\", inherited)\n"
+        }
+      ],
+      "expect": "a shared part is checked everywhere it appears"
+    },
+    {
+      "test": "test_nested_scan",
+      "name": "breadth-first order",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "    def visit(node: Node, path: tuple[int, ...], inherited: str) -> None:\n",
+          "new": "    queue = [(root, (), root[\"source\"])]\n    while queue:\n        node, path, inherited = queue.pop(0)\n"
+        },
+        {
+          "file": "nested.py",
+          "old": "            findings.append(Finding(path, source, TOO_DEEP))\n            return\n",
+          "new": "            findings.append(Finding(path, source, TOO_DEEP))\n            continue\n"
+        },
+        {
+          "file": "nested.py",
+          "old": "            visit(part, path + (i,), source)\n",
+          "new": "            queue.append((part, path + (i,), source))\n"
+        },
+        {
+          "file": "nested.py",
+          "old": "    visit(root, (), root[\"source\"])\n",
+          "new": ""
+        }
+      ],
+      "expect": "findings come in document order"
+    },
+    {
+      "test": "test_nested_scan",
+      "name": "max_depth itself counted as too deep",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "        if len(path) > max_depth:\n",
+          "new": "        if len(path) >= max_depth:\n"
+        }
+      ],
+      "expect": "max_depth is the deepest level read"
+    },
+    {
+      "test": "test_nested_scan",
+      "name": "deep content skipped silently",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "            findings.append(Finding(path, source, TOO_DEEP))\n            return\n",
+          "new": "            return\n"
+        }
+      ],
+      "expect": "anything deeper is reported, not skipped"
+    },
+    {
+      "test": "test_nested_scan",
+      "name": "children taken from a stack",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "    def visit(node: Node, path: tuple[int, ...], inherited: str) -> None:\n",
+          "new": "    stack = [(root, (), root[\"source\"])]\n    while stack:\n        node, path, inherited = stack.pop()\n"
+        },
+        {
+          "file": "nested.py",
+          "old": "            findings.append(Finding(path, source, TOO_DEEP))\n            return\n",
+          "new": "            findings.append(Finding(path, source, TOO_DEEP))\n            continue\n"
+        },
+        {
+          "file": "nested.py",
+          "old": "            visit(part, path + (i,), source)\n",
+          "new": "            stack.append((part, path + (i,), source))\n"
+        },
+        {
+          "file": "nested.py",
+          "old": "    visit(root, (), root[\"source\"])\n",
+          "new": ""
+        }
+      ],
+      "expect": "findings come in document order"
+    },
+    {
+      "test": "test_nested_scan",
+      "name": "a part without a source counted as retrieved",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "        own = node.get(\"source\", inherited)\n",
+          "new": "        own = node.get(\"source\", \"retrieved\")\n"
+        }
+      ],
+      "expect": "a shared part is checked everywhere it appears"
+    },
+    {
+      "test": "test_nested_scan",
+      "name": "paths kept as lists",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "                findings.append(Finding(path, source, hit))\n",
+          "new": "                findings.append(Finding(list(path), source, hit))\n"
+        }
+      ],
+      "expect": "a part is never trusted more than what contains it"
+    },
+    {
+      "test": "test_nested_scan",
+      "name": "the root's own text skipped",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "        if source != \"user_message\":\n",
+          "new": "        if source != \"user_message\" and path:\n"
+        }
+      ],
+      "expect": "the root's own text is checked too"
+    },
+    {
+      "test": "test_nested_scan",
+      "name": "a too-deep node's text still read",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "        if len(path) > max_depth:\n            findings.append(Finding(path, source, TOO_DEEP))\n            return\n        if source != \"user_message\":\n            hit = looks_like_directive(node.get(\"text\", \"\"))\n            if hit:\n                findings.append(Finding(path, source, hit))\n",
+          "new": "        if source != \"user_message\":\n            hit = looks_like_directive(node.get(\"text\", \"\"))\n            if hit:\n                findings.append(Finding(path, source, hit))\n        if len(path) > max_depth:\n            findings.append(Finding(path, source, TOO_DEEP))\n            return\n"
+        }
+      ],
+      "expect": "max_depth is the deepest level read"
+    },
+    {
+      "test": "test_nested_scan",
+      "name": "a too-deep node's parts still visited",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "        if len(path) > max_depth:\n            findings.append(Finding(path, source, TOO_DEEP))\n            return\n        if source != \"user_message\":\n",
+          "new": "        if len(path) > max_depth:\n            findings.append(Finding(path, source, TOO_DEEP))\n        elif source != \"user_message\":\n"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_nested_scan",
+      "name": "a part that contains itself skipped",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "            visit(part, path + (i,), source)\n",
+          "new": "            if part is not node:\n                visit(part, path + (i,), source)\n"
+        }
+      ],
+      "expect": "content that contains itself stops at max_depth"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "only the first history item reaches the validator",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "        verdict = validate(call, history)\n",
+          "new": "        verdict = validate(call, history[:1])\n"
+        }
+      ],
+      "expect": "each call is checked against the history as of that call"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "notifications skipped before validation and execution",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "    answer = \"id\" in request\n",
+          "new": "    answer = \"id\" in request\n    if not answer:\n        return None\n"
+        }
+      ],
+      "expect": "each call is checked against the history as of that call"
+    },
+    {
+      "test": "test_rpc_per_call",
+      "name": "tool output promoted to trusted user content",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "            history.append(Content(result, \"tool_output\"))\n",
+          "new": "            history.append(Content(result, \"user_message\"))\n"
+        }
+      ],
+      "expect": "each call is checked against the history as of that call"
+    }
+  ]
+}
