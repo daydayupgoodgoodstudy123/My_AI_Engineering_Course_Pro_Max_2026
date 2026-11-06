@@ -1,0 +1,1189 @@
+{
+  "package": "failtag",
+  "tests": [
+    "test_detectors",
+    "test_trace_store",
+    "test_drift_and_gate",
+    "test_online_syslog",
+    "test_cascade_radius"
+  ],
+  "layers": [
+    {
+      "test": "test_detectors",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a write verb only counts as a whole word of the request"
+        },
+        {
+          "name": "fix mentions: whole words",
+          "edits": [
+            {
+              "file": "detectors.py",
+              "old": "    return any(re.search(verb, request, re.IGNORECASE) for verb in verbs)\n",
+              "new": "    return any(re.search(rf\"\\b{verb}\\b\", request, re.IGNORECASE) for verb in verbs)\n"
+            }
+          ],
+          "expect": "TypeError"
+        },
+        {
+          "name": "+ parse_constraint returns None for an unknown verb",
+          "edits": [
+            {
+              "file": "detectors.py",
+              "old": "    target = words[3] if len(words) > 3 else \"\"\n    return Rule(VERB_TOOLS.get(words[2]), target if target.endswith(\"/\") else None)\n",
+              "new": "    tools = VERB_TOOLS.get(words[2])\n    if tools is None:\n        return None\n    target = words[3] if len(words) > 3 else \"\"\n    return Rule(tools, target if target.endswith(\"/\") else None)\n"
+            }
+          ],
+          "expect": "only calls that use the failed result are downstream of it"
+        },
+        {
+          "name": "+ count only calls that use the failed step",
+          "edits": [
+            {
+              "file": "detectors.py",
+              "old": "and references(later)",
+              "new": "and i in references(later)"
+            }
+          ],
+          "expect": "tagging should be fast on long traces"
+        },
+        {
+          "name": "+ references computed once per step",
+          "edits": [
+            {
+              "file": "detectors.py",
+              "old": "    for i, step in enumerate(trace.steps):\n        if step.kind == \"tool_call\" and step.status == \"error\":\n            consumers = sum(\n                1 for later in trace.steps[i + 1 :] if later.kind == \"tool_call\" and i in references(later)\n            )\n            if consumers >= 2:\n                return \"cascading_errors\"\n",
+              "new": "    consumers: dict[int, int] = {}\n    for step in trace.steps:\n        if step.kind == \"tool_call\":\n            for ref in references(step):\n                consumers[ref] = consumers.get(ref, 0) + 1\n    for i, step in enumerate(trace.steps):\n        if step.kind == \"tool_call\" and step.status == \"error\" and consumers.get(i, 0) >= 2:\n            return \"cascading_errors\"\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_detectors",
+      "name": "words split on whitespace only",
+      "edits": [
+        {
+          "file": "detectors.py",
+          "old": "    words = set(re.findall(r\"[a-z]+\", request.lower()))\n",
+          "new": "    words = set(request.lower().split())\n"
+        }
+      ],
+      "expect": "write verbs count whatever their case or punctuation"
+    },
+    {
+      "test": "test_detectors",
+      "name": "words matched without lowercasing",
+      "edits": [
+        {
+          "file": "detectors.py",
+          "old": "    words = set(re.findall(r\"[a-z]+\", request.lower()))\n",
+          "new": "    words = set(re.findall(r\"[a-z]+\", request))\n"
+        }
+      ],
+      "expect": "write verbs count whatever their case or punctuation"
+    },
+    {
+      "test": "test_detectors",
+      "name": "a path target ignored: every write is forbidden",
+      "edits": [
+        {
+          "file": "detectors.py",
+          "old": "    return rule.prefix is None or str(step.args.get(\"path\", \"\")).startswith(rule.prefix)\n",
+          "new": "    return True\n"
+        }
+      ],
+      "expect": "a rule on a path/ only covers that path"
+    },
+    {
+      "test": "test_detectors",
+      "name": "consumers counted by ${N} occurrences",
+      "edits": [
+        {
+          "file": "detectors.py",
+          "old": "            consumers.update(references(step))\n",
+          "new": "            consumers.update(int(n) for n in re.findall(r\"\\$\\{(\\d+)\\}\", str(step.args)))\n"
+        }
+      ],
+      "expect": "a call that uses the failed result twice is one consumer"
+    },
+    {
+      "test": "test_detectors",
+      "name": "speed-up that only looks 50 steps ahead",
+      "edits": [
+        {
+          "file": "detectors.py",
+          "old": "    for step in trace.steps:\n        if step.kind == \"tool_call\":\n            consumers.update(references(step))\n",
+          "new": "    for j, step in enumerate(trace.steps):\n        if step.kind == \"tool_call\":\n            consumers.update(r for r in references(step) if j - r <= 50)\n"
+        }
+      ],
+      "expect": "a failed result used far downstream still cascades"
+    },
+    {
+      "test": "test_detectors",
+      "name": "write verbs matched with a leading word boundary only",
+      "edits": [
+        {
+          "file": "detectors.py",
+          "old": "    words = set(re.findall(r\"[a-z]+\", request.lower()))\n    return any(verb in words for verb in verbs)\n",
+          "new": "    return any(re.search(rf\"\\b{verb}\", request, re.IGNORECASE) for verb in verbs)\n"
+        }
+      ],
+      "expect": "a write verb only counts as a whole word of the request"
+    },
+    {
+      "test": "test_detectors",
+      "name": "inflected forms counted as the verb (startswith)",
+      "edits": [
+        {
+          "file": "detectors.py",
+          "old": "    words = set(re.findall(r\"[a-z]+\", request.lower()))\n    return any(verb in words for verb in verbs)\n",
+          "new": "    words = re.findall(r\"[a-z]+\", request.lower())\n    return any(w.startswith(verb) for w in words for verb in verbs)\n"
+        }
+      ],
+      "expect": "a write verb only counts as a whole word of the request"
+    },
+    {
+      "test": "test_detectors",
+      "name": "violates patched to accept Rule(tools=None)",
+      "edits": [
+        {
+          "file": "detectors.py",
+          "old": "    tools = VERB_TOOLS.get(words[2])\n    if tools is None:\n        return None\n",
+          "new": "    tools = VERB_TOOLS.get(words[2])\n"
+        },
+        {
+          "file": "detectors.py",
+          "old": "    if step.kind != \"tool_call\" or step.name not in rule.tools:\n",
+          "new": "    if step.kind != \"tool_call\" or not rule.tools or step.name not in rule.tools:\n"
+        }
+      ],
+      "expect": "a verb missing from VERB_TOOLS makes no tool rule"
+    },
+    {
+      "test": "test_detectors",
+      "name": "messages counted as consumers",
+      "edits": [
+        {
+          "file": "detectors.py",
+          "old": "    for step in trace.steps:\n        if step.kind == \"tool_call\":\n            consumers.update(references(step))\n",
+          "new": "    for step in trace.steps:\n        consumers.update(references(step))\n"
+        }
+      ],
+      "expect": "a failure cascades only when two later tool calls use its own result"
+    },
+    {
+      "test": "test_detectors",
+      "name": "consumers pooled over every failed call",
+      "edits": [
+        {
+          "file": "detectors.py",
+          "old": "    consumers: Counter[int] = Counter()\n    for step in trace.steps:\n        if step.kind == \"tool_call\":\n            consumers.update(references(step))\n    for i, step in enumerate(trace.steps):\n        if step.kind == \"tool_call\" and step.status == \"error\" and consumers[i] >= 2:\n            return \"cascading_errors\"\n    return None\n",
+          "new": "    failed = {i for i, s in enumerate(trace.steps) if s.kind == \"tool_call\" and s.status == \"error\"}\n    uses = sum(1 for s in trace.steps if s.kind == \"tool_call\" and references(s) & failed)\n    return \"cascading_errors\" if uses >= 2 else None\n"
+        }
+      ],
+      "expect": "a failure cascades only when two later tool calls use its own result"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "trace id used as the file name",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return self._traces / (hashlib.sha256(tid.encode(\"utf-8\")).hexdigest() + \".json\")\n",
+          "new": "        return self._traces / (tid + \".json\")\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "percent-encoded file name (collides on a case-insensitive disk)",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return self._traces / (hashlib.sha256(tid.encode(\"utf-8\")).hexdigest() + \".json\")\n",
+          "new": "        return self._traces / (__import__(\"urllib.parse\").parse.quote(tid, safe=\"\") + \".json\")\n"
+        }
+      ],
+      "expect": "trace ids are case-sensitive"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "steps read back as dicts",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        steps = [TraceStep(**step) for step in raw.pop(\"steps\")]\n",
+          "new": "        steps = raw.pop(\"steps\")\n"
+        }
+      ],
+      "expect": "a stored trace round-trips exactly"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "labels sorted on the way in",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "\"labels\": list(labels)",
+          "new": "\"labels\": sorted(labels)"
+        }
+      ],
+      "expect": "a stored trace round-trips exactly"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "tids sorted by file name",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return sorted(\n            json.loads(p.read_text(encoding=\"utf-8\"))[\"trace\"][\"tid\"]\n            for p in self._traces.glob(\"*.json\")\n        )\n",
+          "new": "        return [\n            json.loads(p.read_text(encoding=\"utf-8\"))[\"trace\"][\"tid\"]\n            for p in sorted(self._traces.glob(\"*.json\"))\n        ]\n"
+        }
+      ],
+      "expect": "a reopened store lists every trace once, sorted"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "missing baseline file not handled",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        except FileNotFoundError:\n            return None\n",
+          "new": "        except IsADirectoryError:\n            return None\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "baseline ids not checked against the store",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if missing:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "baseline written in place",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        self._write(self._baseline, list(tids))\n",
+          "new": "        self._baseline.write_text(json.dumps(list(tids)), encoding=\"utf-8\")\n"
+        }
+      ],
+      "expect": "the baseline is replaced in one atomic step"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "temporary file kept when the replace fails",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        except BaseException:\n            os.unlink(tmp)\n            raise\n",
+          "new": "        except BaseException:\n            raise\n"
+        }
+      ],
+      "expect": "no temporary files are left behind"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "BASELINE stored one id per line",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        self._write(self._baseline, list(tids))\n",
+          "new": "        fd, tmp = tempfile.mkstemp(dir=self.root, prefix=\".tmp-\")\n        try:\n            with os.fdopen(fd, \"w\", encoding=\"utf-8\") as f:\n                f.write(\"\\n\".join(tids))\n            os.replace(tmp, self._baseline)\n        except BaseException:\n            os.unlink(tmp)\n            raise\n"
+        },
+        {
+          "file": "store.py",
+          "old": "            return json.loads(self._baseline.read_text(encoding=\"utf-8\"))\n",
+          "new": "            return self._baseline.read_text(encoding=\"utf-8\").splitlines()\n"
+        }
+      ],
+      "expect": "the baseline survives a reopen, in order"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "baseline written before the ids are checked",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        missing = [tid for tid in tids if not self._path(tid).exists()]\n        if missing:\n            raise ValueError(f\"not in the store: {missing}\")\n        self._write(self._baseline, list(tids))\n",
+          "new": "        self._write(self._baseline, list(tids))\n        missing = [tid for tid in tids if not self._path(tid).exists()]\n        if missing:\n            raise ValueError(f\"not in the store: {missing}\")\n"
+        }
+      ],
+      "expect": "a rejected baseline is not stored"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "unknown id raises FileNotFoundError",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        except FileNotFoundError:\n            raise KeyError(tid) from None\n",
+          "new": "        except KeyError:\n            raise\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "baseline ids sorted and deduplicated",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        self._write(self._baseline, list(tids))\n",
+          "new": "        self._write(self._baseline, sorted(set(tids)))\n"
+        }
+      ],
+      "expect": "the baseline survives a reopen, in order"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "tids sorted ignoring case",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return sorted(\n            json.loads(p.read_text(encoding=\"utf-8\"))[\"trace\"][\"tid\"]\n            for p in self._traces.glob(\"*.json\")\n        )\n",
+          "new": "        return sorted(\n            (json.loads(p.read_text(encoding=\"utf-8\"))[\"trace\"][\"tid\"]\n            for p in self._traces.glob(\"*.json\")), key=str.lower\n        )\n"
+        }
+      ],
+      "expect": "a reopened store lists every trace once, sorted"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "labels read back as a tuple",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return Trace(steps=steps, **raw), data[\"labels\"]\n",
+          "new": "        return Trace(steps=steps, **raw), tuple(data[\"labels\"])\n"
+        }
+      ],
+      "expect": "a stored trace round-trips exactly"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "rates over tagged traces only",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "    n = len(label_lists)\n",
+          "new": "    n = sum(1 for labels in label_lists if labels)\n"
+        }
+      ],
+      "expect": "clean traces count in the denominator"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "gate uses > instead of >=",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "if rate >= threshold)",
+          "new": "if rate > threshold)"
+        }
+      ],
+      "expect": "a mode on exactly 5% fails the build"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "gate compares count with threshold * n",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "    return sorted(mode for mode, rate in mode_rates(label_lists).items() if rate >= threshold)\n",
+          "new": "    counts = Counter(m for labels in label_lists for m in set(labels))\n    return sorted(m for m, c in counts.items() if c >= threshold * len(label_lists))\n"
+        }
+      ],
+      "expect": "a mode on exactly the threshold fails the build"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "no baseline treated as all zeros",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "        if good is None:\n            raise LookupError(\"no last-known-good baseline to compare against\")\n",
+          "new": "        if good is None:\n            good = []\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "rolling baseline: every check becomes the new reference",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "            alerts.append(Alert(mode, base, now_rates[mode]))\n        return alerts\n",
+          "new": "            alerts.append(Alert(mode, base, now_rates[mode]))\n        self.store.set_baseline(tids)\n        return alerts\n"
+        }
+      ],
+      "expect": "drift is measured against the last-known-good baseline"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "falling rates alert too (abs)",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "        for mode in sorted(now_rates):\n            base = before.get(mode, 0.0)\n            if now_rates[mode] - base <= self.tolerance:\n",
+          "new": "        for mode in sorted(set(now_rates) | set(before)):\n            base = before.get(mode, 0.0)\n            if abs(now_rates.get(mode, 0.0) - base) <= self.tolerance:\n"
+        },
+        {
+          "file": "drift.py",
+          "old": "            alerts.append(Alert(mode, base, now_rates[mode]))\n",
+          "new": "            alerts.append(Alert(mode, base, now_rates.get(mode, 0.0)))\n"
+        }
+      ],
+      "expect": "falling rates are not drift"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "one cooldown shared by every mode",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "            last = self._last_page.get(mode)\n",
+          "new": "            last = self._last_page.get(\"*\")\n"
+        },
+        {
+          "file": "drift.py",
+          "old": "            self._last_page[mode] = now\n",
+          "new": "            self._last_page[\"*\"] = now\n"
+        }
+      ],
+      "expect": "each mode has its own cooldown"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "a suppressed alert restarts the cooldown",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "            last = self._last_page.get(mode)\n            if last is not None and now - last < self.cooldown_s:\n                continue\n            self._last_page[mode] = now\n",
+          "new": "            last = self._last_page.get(mode)\n            self._last_page[mode] = now\n            if last is not None and now - last < self.cooldown_s:\n                continue\n"
+        }
+      ],
+      "expect": "a suppressed alert does not restart the cooldown"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "cooldown boundary <=",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "now - last < self.cooldown_s",
+          "new": "now - last <= self.cooldown_s"
+        }
+      ],
+      "expect": "a mode pages again once cooldown_s has passed"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "min_traces off by one",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "        if len(tids) < self.min_traces:\n",
+          "new": "        if len(tids) <= self.min_traces:\n"
+        }
+      ],
+      "expect": "a window of exactly min_traces traces gets a verdict"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "a repeated label counted twice",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "for mode in set(labels))",
+          "new": "for mode in labels)"
+        }
+      ],
+      "expect": "a trace counts once per mode"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "gate compares exact fractions with the float threshold",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "    return sorted(mode for mode, rate in mode_rates(label_lists).items() if rate >= threshold)\n",
+          "new": "    from fractions import Fraction\n    counts = Counter(m for labels in label_lists for m in set(labels))\n    return sorted(m for m, c in counts.items() if Fraction(c, len(label_lists)) >= Fraction(threshold))\n"
+        }
+      ],
+      "expect": "a mode on exactly 5% fails the build"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "no baseline: the first window becomes the baseline",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "        if good is None:\n            raise LookupError(\"no last-known-good baseline to compare against\")\n",
+          "new": "        if good is None:\n            self.store.set_baseline(tids)\n            return []\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "min_traces checked against the baseline size",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "        if len(tids) < self.min_traces:\n",
+          "new": "        if len(good) < self.min_traces:\n"
+        }
+      ],
+      "expect": "fewer than min_traces traces give no verdict"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "tolerance taken as relative to the baseline rate",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "            if now_rates[mode] - base <= self.tolerance:\n",
+          "new": "            if now_rates[mode] <= base * (1 + self.tolerance):\n"
+        }
+      ],
+      "expect": "4% above the baseline is within tolerance"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "baseline rates over every stored trace",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "        before = mode_rates([self.store.get(tid)[1] for tid in good]) if good else {}\n",
+          "new": "        before = mode_rates([self.store.get(tid)[1] for tid in self.store.tids()])\n"
+        }
+      ],
+      "expect": "drift is measured against the last-known-good baseline"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "cooldown counted from the first page (setdefault)",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "            self._last_page[mode] = now\n",
+          "new": "            self._last_page.setdefault(mode, now)\n"
+        }
+      ],
+      "expect": "the cooldown counts from the latest page"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "alerts in first-seen order",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "        for mode in sorted(now_rates):\n",
+          "new": "        for mode in now_rates:\n"
+        }
+      ],
+      "expect": "alerts come sorted by mode"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "cooldown state kept on the class",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "        self._last_page: dict[str, float] = {}\n",
+          "new": ""
+        },
+        {
+          "file": "drift.py",
+          "old": "    \"\"\"Pages when a failure mode gets worse than it was on the last-known-good traces.\"\"\"\n",
+          "new": "    \"\"\"Pages when a failure mode gets worse than it was on the last-known-good traces.\"\"\"\n\n    _last_page: dict = {}\n"
+        }
+      ],
+      "expect": "a window of exactly min_traces traces gets a verdict"
+    },
+    {
+      "test": "test_drift_and_gate",
+      "name": "a rate exactly tolerance above the baseline pages (>=)",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "            if now_rates[mode] - base <= self.tolerance:\n",
+          "new": "            if now_rates[mode] - base < self.tolerance:\n"
+        }
+      ],
+      "expect": "a mode exactly tolerance above its baseline has not drifted"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "reported modes shared across traces",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "    open_traces: dict[str, _Open] = {}\n",
+          "new": "    open_traces: dict[str, _Open] = {}\n    reported: set[str] = set()\n"
+        },
+        {
+          "file": "online.py",
+          "old": "            if mode not in state.reported:\n                state.reported.add(mode)\n",
+          "new": "            if mode not in reported:\n                reported.add(mode)\n"
+        }
+      ],
+      "expect": "traces are tagged independently, each finding when its event arrives"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "one reported set, reset at every Start",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "    open_traces: dict[str, _Open] = {}\n",
+          "new": "    open_traces: dict[str, _Open] = {}\n    reported: set[str] = set()\n"
+        },
+        {
+          "file": "online.py",
+          "old": "            open_traces[event.tid] = _Open(event.user_request, rules)\n",
+          "new": "            open_traces[event.tid] = _Open(event.user_request, rules)\n            reported = set()\n"
+        },
+        {
+          "file": "online.py",
+          "old": "            if mode not in state.reported:\n                state.reported.add(mode)\n",
+          "new": "            if mode not in reported:\n                reported.add(mode)\n"
+        }
+      ],
+      "expect": "each mode is reported once per trace"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "failed steps and consumer counts shared by all traces",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "    open_traces: dict[str, _Open] = {}\n",
+          "new": "    open_traces: dict[str, _Open] = {}\n    shared_failed: set[int] = set()\n    shared_consumers: Counter = Counter()\n"
+        },
+        {
+          "file": "online.py",
+          "old": "            open_traces[event.tid] = _Open(event.user_request, rules)\n",
+          "new": "            open_traces[event.tid] = _Open(event.user_request, rules, failed=shared_failed, consumers=shared_consumers)\n"
+        }
+      ],
+      "expect": "traces are tagged independently, each finding when its event arrives"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "one step counter for all traces",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "            index = state.steps\n            state.steps += 1\n",
+          "new": "            index = counter[0]\n            counter[0] += 1\n"
+        },
+        {
+          "file": "online.py",
+          "old": "    open_traces: dict[str, _Open] = {}\n",
+          "new": "    open_traces: dict[str, _Open] = {}\n    counter = [0]\n"
+        }
+      ],
+      "expect": "traces are tagged independently, each finding when its event arrives"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "a mode reported again on every step",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "            if mode not in state.reported:\n",
+          "new": "            if True:\n"
+        }
+      ],
+      "expect": "each mode is reported once per trace"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "modes deduplicated within one step only",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "        for mode in modes:\n            if mode not in state.reported:\n                state.reported.add(mode)\n",
+          "new": "        seen_now: set[str] = set()\n        for mode in modes:\n            if mode not in seen_now:\n                seen_now.add(mode)\n"
+        }
+      ],
+      "expect": "each mode is reported once per trace"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "one finding per step (first match only)",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "        for mode in modes:\n",
+          "new": "        for mode in modes[:1]:\n"
+        }
+      ],
+      "expect": "traces are tagged independently, each finding when its event arrives"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "success_hallucination checked with WRITE_VERBS",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "                mentions(state.request, SUCCESS_VERBS)\n",
+          "new": "                mentions(state.request, WRITE_VERBS)\n"
+        }
+      ],
+      "expect": "traces are tagged independently, each finding when its event arrives"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "findings at End carry a step and a tool",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "            params = {\"tid\": event.tid}\n",
+          "new": "            params = {\"tid\": event.tid, \"step\": str(state.steps), \"tool\": \"-\"}\n"
+        }
+      ],
+      "expect": "structured data values round-trip"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "End only closes the trace",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "            del open_traces[event.tid]\n            modes = []\n",
+          "new": "            del open_traces[event.tid]\n            continue\n"
+        }
+      ],
+      "expect": "traces are tagged independently, each finding when its event arrives"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "PRI as facility + severity",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "    pri = FACILITY * 8 + SEVERITY[mode]\n",
+          "new": "    pri = FACILITY + SEVERITY[mode]\n"
+        }
+      ],
+      "expect": "PRI is FACILITY * 8 + SEVERITY[mode]"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "PRI as severity * 8 + facility",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "    pri = FACILITY * 8 + SEVERITY[mode]\n",
+          "new": "    pri = SEVERITY[mode] * 8 + FACILITY\n"
+        }
+      ],
+      "expect": "PRI is FACILITY * 8 + SEVERITY[mode]"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "PRI as facility and severity written side by side",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "    pri = FACILITY * 8 + SEVERITY[mode]\n",
+          "new": "    pri = int(f\"{FACILITY}{SEVERITY[mode]}\")\n"
+        }
+      ],
+      "expect": "PRI is FACILITY * 8 + SEVERITY[mode]"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "step numbered from 1",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "\"step\": str(index)",
+          "new": "\"step\": str(index + 1)"
+        }
+      ],
+      "expect": "structured data values round-trip"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "timestamp without milliseconds",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": ".strftime(\"%Y-%m-%dT%H:%M:%S.%f\")[:-3]",
+          "new": ".strftime(\"%Y-%m-%dT%H:%M:%S\")"
+        }
+      ],
+      "expect": "TIMESTAMP is the clock in UTC, with milliseconds"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "timestamp cut to the second",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": ".strftime(\"%Y-%m-%dT%H:%M:%S.%f\")[:-3]",
+          "new": ".strftime(\"%Y-%m-%dT%H:%M:%S\") + \".000\""
+        }
+      ],
+      "expect": "TIMESTAMP is the clock in UTC, with milliseconds"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "record without the trailing newline",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "{MESSAGES[mode]}\\n\"\n",
+          "new": "{MESSAGES[mode]}\"\n"
+        }
+      ],
+      "expect": "every record ends with a newline"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "online consumers pooled over every failed call",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "        for ref in references(step) & state.failed:\n            state.consumers[ref] += 1\n            if state.consumers[ref] == 2:\n                found.append(\"cascading_errors\")\n",
+          "new": "        if references(step) & state.failed:\n            state.consumers[-1] += 1\n            if state.consumers[-1] == 2:\n                found.append(\"cascading_errors\")\n"
+        }
+      ],
+      "expect": "a failure cascades only when two later tool calls use its own result"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "online messages counted as consumers",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "    if step.kind == \"tool_call\":\n        for ref in references(step) & state.failed:\n            state.consumers[ref] += 1\n            if state.consumers[ref] == 2:\n                found.append(\"cascading_errors\")\n        if step.status == \"error\":\n",
+          "new": "    for ref in references(step) & state.failed:\n        state.consumers[ref] += 1\n        if state.consumers[ref] == 2:\n            found.append(\"cascading_errors\")\n    if step.kind == \"tool_call\":\n        if step.status == \"error\":\n"
+        }
+      ],
+      "expect": "a failure cascades only when two later tool calls use its own result"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "tool_misuse not checked online",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "    if is_misused(step):\n        found.append(\"tool_misuse\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "traces are tagged independently, each finding when its event arrives"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "lines held back until the feed ends",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "    open_traces: dict[str, _Open] = {}\n",
+          "new": "    open_traces: dict[str, _Open] = {}\n    pending = []\n"
+        },
+        {
+          "file": "online.py",
+          "old": "                yield syslog_line(mode, clock(), host, params)\n",
+          "new": "                pending.append(syslog_line(mode, clock(), host, params))\n    for line in pending:\n        yield line\n"
+        }
+      ],
+      "expect": "report a finding as soon as its step arrives"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "findings held until their trace ends",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "        for mode in modes:\n            if mode not in state.reported:\n                state.reported.add(mode)\n                yield syslog_line(mode, clock(), host, params)\n",
+          "new": "        for mode in modes:\n            if mode not in state.reported:\n                state.reported.add(mode)\n                held.setdefault(event.tid, []).append(syslog_line(mode, clock(), host, params))\n        if isinstance(event, End):\n            for line in held.pop(event.tid, []):\n                yield line\n"
+        },
+        {
+          "file": "online.py",
+          "old": "    open_traces: dict[str, _Open] = {}\n",
+          "new": "    open_traces: dict[str, _Open] = {}\n    held: dict = {}\n"
+        }
+      ],
+      "expect": "traces are tagged independently, each finding when its event arrives"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "a coroutine that returns the lines",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "    open_traces: dict[str, _Open] = {}\n",
+          "new": "    open_traces: dict[str, _Open] = {}\n    out = []\n"
+        },
+        {
+          "file": "online.py",
+          "old": "                yield syslog_line(mode, clock(), host, params)\n",
+          "new": "                out.append(syslog_line(mode, clock(), host, params))\n    return out\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "only the double quote escaped",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "    return value.replace(\"\\\\\", \"\\\\\\\\\").replace('\"', '\\\\\"').replace(\"]\", \"\\\\]\")\n",
+          "new": "    return value.replace('\"', '\\\\\"')\n"
+        }
+      ],
+      "expect": "every line is an RFC 5424 record"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "quote escaped before the backslash",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "    return value.replace(\"\\\\\", \"\\\\\\\\\").replace('\"', '\\\\\"').replace(\"]\", \"\\\\]\")\n",
+          "new": "    return value.replace('\"', '\\\\\"').replace(\"\\\\\", \"\\\\\\\\\").replace(\"]\", \"\\\\]\")\n"
+        }
+      ],
+      "expect": "every line is an RFC 5424 record"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "] left unescaped",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": ".replace('\"', '\\\\\"').replace(\"]\", \"\\\\]\")",
+          "new": ".replace('\"', '\\\\\"')"
+        }
+      ],
+      "expect": "every line is an RFC 5424 record"
+    },
+    {
+      "test": "test_online_syslog",
+      "name": "param values escaped with json.dumps",
+      "edits": [
+        {
+          "file": "online.py",
+          "old": "    return value.replace(",
+          "new": "    return __import__(\"json\").dumps(value)[1:-1]\n    return value.replace("
+        }
+      ],
+      "expect": "every line is an RFC 5424 record"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "every failure reported as a root",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "        if root in caused:\n            continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "a failure caused by an earlier failure is not a root cause"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "root = no failed direct parent",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "        if root in caused:\n",
+          "new": "        if any(i in failed for i in references(steps[root])):\n"
+        }
+      ],
+      "expect": "a failure caused by an earlier failure is not a root cause"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "radius counts edges, so a diamond counts twice",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "Cascade(root, len(reach),",
+          "new": "Cascade(root, sum(len(children[j]) for j in [root, *reach]),"
+        }
+      ],
+      "expect": "each affected step counts once, messages included"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "radius skips messages",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "Cascade(root, len(reach),",
+          "new": "Cascade(root, sum(1 for j in reach if steps[j].kind == \"tool_call\"),"
+        }
+      ],
+      "expect": "each affected step counts once, messages included"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "depth as the shortest hop count (BFS)",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "            depth[j] = 1 + max(depth[i]",
+          "new": "            depth[j] = 1 + min(depth[i]"
+        }
+      ],
+      "expect": "depth follows the longest chain of affected steps"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "systems include messages",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "for j in reach if steps[j].kind == \"tool_call\"})",
+          "new": "for j in reach})"
+        }
+      ],
+      "expect": "systems come from the affected tool calls"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "a step claimed by an earlier root not counted again",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "        affected[root] = seen\n",
+          "new": "        affected[root] = seen - set().union(*affected.values())\n"
+        }
+      ],
+      "expect": "a step affected by two root causes counts for both"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "forward and self references accepted",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "            if not 0 <= i < j:\n",
+          "new": "            if i >= len(steps):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "recursive depth-first search",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "        seen: set[int] = set()\n        stack = list(children[root])\n        while stack:\n            j = stack.pop()\n            if j not in seen:\n                seen.add(j)\n                stack.extend(children[j])\n",
+          "new": "        seen: set[int] = set()\n\n        def visit(i: int) -> None:\n            for j in children[i]:\n                if j not in seen:\n                    seen.add(j)\n                    visit(j)\n\n        visit(root)\n"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "radius counts the root itself",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "Cascade(root, len(reach),",
+          "new": "Cascade(root, len(reach) + 1,"
+        }
+      ],
+      "expect": "each affected step counts once, messages included"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "depth counts steps instead of hops",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "max(depth.values()), systems",
+          "new": "max(depth.values()) + 1, systems"
+        }
+      ],
+      "expect": "depth follows the longest chain of affected steps"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "systems include the root's own",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "for j in reach if steps[j].kind == \"tool_call\"})",
+          "new": "for j in [root, *reach] if steps[j].kind == \"tool_call\"})"
+        }
+      ],
+      "expect": "systems come from the affected tool calls"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "a root nothing used left out",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "        reach = affected[root]\n",
+          "new": "        reach = affected[root]\n        if not reach:\n            continue\n"
+        }
+      ],
+      "expect": "a failure nothing used is still a root cause"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "roots sorted by radius",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "    return report\n",
+          "new": "    return sorted(report, key=lambda c: -c.radius)\n"
+        }
+      ],
+      "expect": "a failure nothing used is still a root cause"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "traversal stops at downstream failures",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "                seen.add(j)\n                stack.extend(children[j])\n",
+          "new": "                seen.add(j)\n                if steps[j].status != \"error\":\n                    stack.extend(children[j])\n"
+        }
+      ],
+      "expect": "a cascade runs on through the failures it causes"
+    },
+    {
+      "test": "test_cascade_radius",
+      "name": "no failures: return before checking references",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "    steps = trace.steps\n    children",
+          "new": "    steps = trace.steps\n    if not any(s.kind == \"tool_call\" and s.status == \"error\" for s in steps):\n        return []\n    children"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    }
+  ]
+}

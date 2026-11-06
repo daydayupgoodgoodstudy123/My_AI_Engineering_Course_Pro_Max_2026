@@ -1,0 +1,147 @@
+{
+  "lesson": "phases/14-agent-engineering/26-failure-modes-agentic",
+  "title": "Failure Modes: Why Agents Break",
+  "format": "staged-brownfield",
+  "service": "FailTag: failure-mode detectors for agent traces, a directory store with one JSON file per trace and an atomically replaced last-known-good baseline, a CI gate and baseline drift alerts with per-mode cooldowns, an online tagger that reports findings as RFC 5424 syslog lines, and cascade radius over the trace's data-dependency DAG",
+  "sources": {
+    "docs/en.md": "588b80e7011058fe627db20be59a8ccb2fea5d54940340c4ba226b67d1209dd3",
+    "code/main.py": "ac882ebad474f1c4c23756974c2e5eabde876d25c6287eaa6c7e4e07d50a40b9"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no agent, no LLM, no network: every trace is data written in the test, a step uses an earlier step's result by writing ${N} in its arguments, and the clock is a function the test injects",
+  "deviations_from_plan": [
+    "Part 1: the timing defect sits in detect_cascading_errors (references() recomputed for every failed step x later step) instead of detect_context_loss, because a per-step precompute there would still be O(constraints x steps) and could not give 8x on both sides; the constraint defect is parse_constraint returning Rule(tools=None) for an unknown verb, which surfaces as a TypeError in violates",
+    "Part 1: the scope-creep example is 'summarize the credit memo' (edit inside credit) rather than 'find the update notes', since update is a whole word there and word matching would not change the verdict",
+    "Part 2: the baseline pointer is a BASELINE file holding the ordered list of last-known-good trace ids; traces are named by the sha256 of the tid so '/' and case-only differences are safe",
+    "Part 3: alerts are rate-limited per mode; the lesson's traces carry no cluster id, so the mode is the cluster",
+    "Part 4: the main traps are the per-trace checks of 'gates at every step' (state kept per tid while traces interleave, each mode once per trace, success_hallucination only at End with SUCCESS_VERBS, PRI = FACILITY * 8 + SEVERITY); the tag_online docstring spells out the SD-PARAM escape order, since escaping the escape character first is already a main Part 4 trap elsewhere in this chapter",
+    "Part 5: besides radius and root causes, the report has depth (longest dependency chain) and the systems reached, taken from dotted tool names such as billing.charge"
+  ],
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_detectors",
+      "kind": "debug",
+      "lesson_anchor": "The five industry-recurring modes; code/main.py detect_scope_creep (substring w in request), detect_context_loss (the word after 'do not' used as a token) and detect_cascading_errors (every call after an error counted as downstream)",
+      "planted_bugs": [
+        "mentions matches write verbs with re.search(verb, request), a substring match: 'summarize the credit memo' contains 'edit', so an unrequested write is not scope creep",
+        "parse_constraint returns Rule(tools=None) for a verb missing from VERB_TOOLS ('do not exceed 5 searches') instead of None; the TypeError surfaces in violates, two calls from the root cause (tag -> detect_context_loss -> violates)",
+        "detect_cascading_errors counts every later call with any reference as downstream, although the docstring counts only calls that reference the failed step",
+        "once that is fixed, every failed step recomputes references() for every later step, O(S^2)"
+      ],
+      "timing_assert": "tag() on a 4000-step trace under 0.12 s. Measured on this machine with other jobs running (load average 4 to 15): the quadratic version 1.17-2.22 s over 29 runs and 1.25-2.54 s inside the checker runs (at least 9.8x the limit), 4.2 s in a checker run at load average 22; the fixed version a median of 3.0-3.3 ms over 4000 runs (36x under the limit), the slowest of each 400 runs 6.7-26 ms. A half fix that caches references() but keeps the double loop is still O(S^2) at 42-127 ms, so it passes or fails with the load; INTERVIEWER.md tells the interviewer to ask for the one-pass count",
+      "overfix_guard": "write verbs must match whatever their case or punctuation ('Edit the README.', 'then SAVE.'), which rules out split() and a match without lower(), and only as whole words ('list the saved searches' is scope creep), which rules out a leading-only \\b and startswith; parse_constraint itself must return None for an unknown verb, which rules out patching violates around Rule(tools=None); a consumer 1999 steps after the failure must still count, which rules out a look-ahead window; a call that uses the failed result twice is one consumer, which rules out counting ${N} occurrences; only tool calls count, per failed step ('look up both invoices'), which rules out counting a message or one counter pooled over every failure"
+    },
+    {
+      "part": 2,
+      "test": "test_trace_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "Where failure monitoring goes wrong: No baseline (drift detection needs a last-known-good); Ship It (detectors wired to a trace store)",
+      "exactness": "stored as one JSON file per trace under traces/ plus a BASELINE file replaced atomically (temporary file in the same directory, then os.replace); a trace comes back equal as dataclasses: nested args with lists, dicts, None, 0.1 + 0.2 and a 20-digit integer, status, a result with a line break, a tab and non-ASCII text, the step kinds, and labels in their original order; the baseline comes back in order after a reopen, including the tid 'run/7\\n' that ends in a newline",
+      "traps": [
+        "the tid used as the file name ('run/7\\n' becomes a subdirectory: FileNotFoundError)",
+        "percent-encoded file names colliding for 'T001' and 't001' on a case-insensitive file system (macOS, Windows; Linux does not catch it)",
+        "steps read back as dicts",
+        "labels sorted or turned into a set",
+        "tids() in file-name order instead of sorted by tid",
+        "baseline() raising FileNotFoundError before a baseline is set",
+        "a baseline with unknown tids accepted",
+        "the baseline written in place, so a failing os.replace does not fail the update",
+        "the temporary file left behind when the replace fails",
+        "the baseline written before its ids are checked (a rejected baseline must not be stored)",
+        "BASELINE stored one id per line (the tid 'run/7\\n' loses its newline)"
+      ],
+      "clarifying_questions": [
+        "characters in trace ids",
+        "where the temporary file goes",
+        "unknown ids in the baseline",
+        "putting the same tid again"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_drift_and_gate",
+      "kind": "core algorithm",
+      "lesson_anchor": "Where failure monitoring goes wrong: No baseline, Over-alerting (cluster and rate-limit); Exercise 5 (fail the build if >=5% of traces tag a mode)",
+      "traps": [
+        "clean traces left out of the denominator",
+        "the gate using > instead of >=",
+        "the gate comparing count >= threshold * n (0.07 * 200 = 14.000000000000002)",
+        "no baseline treated as all zeros instead of LookupError",
+        "a rolling baseline that swallows a slow 4% -> 8% -> 12% climb",
+        "abs() making a falling rate page",
+        "one cooldown shared by every mode",
+        "a suppressed alert restarting the cooldown",
+        "the cooldown boundary (exactly cooldown_s later must page)",
+        "min_traces off by one",
+        "a repeated label counted twice in mode_rates",
+        "a rate exactly tolerance above the baseline paging (>= instead of >)",
+        "the cooldown counted from the first page only (setdefault)",
+        "alerts in first-seen order instead of sorted by mode"
+      ],
+      "integration": "the lesson's seven traces (t004's later calls changed to use the failed search's result) are tagged by Part 1, stored by Part 2 and confirmed as the baseline; seven later traces that write and break 'do not modify any files' page context_loss and scope_creep from 2/7 to 1.0, and every mode in the lesson set fails the 5% gate",
+      "clarifying_questions": [
+        "no baseline yet",
+        "falling rates",
+        "suppressed alerts and the cooldown",
+        "exactly 5%",
+        "whether check moves the baseline"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_online_syslog",
+      "kind": "streaming",
+      "lesson_anchor": "Mitigation: gates at every step (per-step checks); main.py's 'detect early, stop the loop'; Use It (findings go to an observability platform)",
+      "wire_format": "RFC 5424 syslog, one record per line ending in a newline, decided by the test's regex '<PRI>1 TIMESTAMP HOST APP PROCID MSGID [failtag@32473 name=\"value\" ...] MSG' and a strict unescape that only allows \\\", \\\\ and \\]; PRI = 16 * 8 + severity; TIMESTAMP in UTC with milliseconds and Z; the tag_online docstring gives the escape order (backslash first, then the quote and ]), so the tid b\"]\\ and the tool magic\"scan] are an incidental check",
+      "traps": [
+        "reported modes or failure state shared between interleaved traces: one reported set swallows c's scope_creep",
+        "one reported set reset at every Start (a's write after c starts reports scope_creep and context_loss again), or failed steps shared across traces (a's ${1} is its own step)",
+        "one step counter for all traces (odd's ${1} no longer names its own failed search)",
+        "a mode reported again on later steps of the same trace (a's second write raises scope_creep and context_loss again next to tool_misuse)",
+        "modes deduplicated within one step only, or only one finding per step (a's first write reports scope_creep and context_loss, in DETECTORS order)",
+        "success_hallucination only decidable at End, carrying only the tid (no step, no tool)",
+        "success_hallucination checked with WRITE_VERBS ('make a README')",
+        "End used only to drop the trace, so success_hallucination is never checked",
+        "PRI as facility + severity, as severity * 8 + facility, or the two numbers written side by side (163)",
+        "the step index counted from 1",
+        "a timestamp without milliseconds",
+        "a timestamp in local time (caught only when the machine is not on UTC)",
+        "tool_misuse left out of the online checks (a's second write has no content)",
+        "messages counted as consumers, or one consumer counter pooled over every failure (the quiet trace stays silent)",
+        "lines held back until the feed ends (the probe counts pulled events)",
+        "a plain coroutine instead of an async generator",
+        "incidental: param values escaped in the order the docstring gives (backslash first, then the quote and ]); only the double quote escaped, the quote escaped before the backslash, ] left unescaped or json.dumps breaks the record for the tid b\"]\\ and the tool magic\"scan]"
+      ],
+      "clarifying_questions": [
+        "time zone",
+        "order of findings from one step",
+        "state after End",
+        "a Step before its Start"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_cascade_radius",
+      "kind": "graph",
+      "lesson_anchor": "Exercise 3 (cascade radius: given a failure at step N, how many downstream steps did it affect); 'a phantom SKU hallucination triggers four API calls, a multi-system incident'; 'Cascading is the killer'",
+      "traps": [
+        "every failure reported as a root, or roots found by looking only at direct parents (the email.send failure is two hops from the root)",
+        "a diamond counted twice",
+        "messages left out of the radius, or counted as systems",
+        "depth as the shortest hop count instead of the longest chain",
+        "a step reached by two roots counted for only one",
+        "self, forward and missing references accepted",
+        "recursive DFS hitting RecursionError on a 3000-step chain",
+        "a root cause nothing used left out (radius 0, depth 0)",
+        "the traversal stopping at a downstream failure (relay: email.send is reached only through the failed payments.refund)",
+        "references not checked when the trace has no failure"
+      ],
+      "clarifying_questions": [
+        "messages in the radius",
+        "bad references",
+        "the root's own system",
+        "a root cause nothing used"
+      ]
+    }
+  ]
+}
