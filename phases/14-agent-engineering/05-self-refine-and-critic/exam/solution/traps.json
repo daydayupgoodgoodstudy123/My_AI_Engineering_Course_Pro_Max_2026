@@ -1,0 +1,578 @@
+{
+  "package": "critic",
+  "tests": [
+    "test_refine_loop",
+    "test_revision_chain",
+    "test_claim_verification",
+    "test_stream_guardrail",
+    "test_outline_critique"
+  ],
+  "layers": [
+    {
+      "test": "test_refine_loop",
+      "steps": [
+        {"name": "as shipped", "edits": [], "expect": "CRITIC never passes a draft that states a known wrong fact"},
+        {
+          "name": "check the loop's fact, not two hard-coded ones",
+          "edits": [{"file": "loop.py",
+                     "old": "        key = fact.split(\" is \")[0] if \" is \" in fact else fact\n        if \"paris\" in text and \"germany\" in text:\n            return \"verifier: 'paris is the capital of germany' contradicts reference data\", False\n        if \"everest\" in text and \"europe\" in text:\n            return \"verifier: 'mt everest is in europe' contradicts reference data\", False\n",
+                     "new": "        if fact in text:\n            return f\"verifier: '{fact}' contradicts reference data\", False\n"}],
+          "expect": "a bullet's text, without its marker, must be under 60 chars"
+        },
+        {
+          "name": "+ length of the text without its marker, strictly under",
+          "edits": [{"file": "loop.py", "old": "        if len(line) > MAX_CHARS:\n", "new": "        if len(line) - 2 >= MAX_CHARS:\n"}],
+          "expect": "the model's own 'no issues' can end the loop from round 2 on, never in round 1"
+        },
+        {
+          "name": "+ the 2026 stop rule",
+          "edits": [{"file": "loop.py",
+                     "old": "        if ok:\n            break\n",
+                     "new": "        if ok and (verifier is not None or i >= 2) or i >= max_iters:\n            break\n"}],
+          "expect": "verify_external should be fast on long drafts"
+        },
+        {
+          "name": "+ normalize each bullet once, look facts up in a set",
+          "edits": [{"file": "loop.py",
+                     "old": "    for fact in wrong_facts:\n        text = output.lower()\n        if fact in text:\n            return f\"verifier: '{fact}' contradicts reference data\", False\n    bullets = bullet_lines(output)\n",
+                     "new": "    wrong = set(wrong_facts)\n    bullets = bullet_lines(output)\n    for line in bullets:\n        if normalize_claim(line) in wrong:\n            return f\"verifier: '{normalize_claim(line)}' contradicts reference data\", False\n"}],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_refine_loop",
+      "name": "claims compared as bags of words",
+      "edits": [{"file": "loop.py",
+                 "old": "    for line in bullets:\n        claim = normalize_claim(line)\n        if claim in wrong:\n",
+                 "new": "    by_words = {frozenset(fact.split()): fact for fact in wrong}\n    for line in bullets:\n        claim = by_words.get(frozenset(normalize_claim(line).split()))\n        if claim is not None:\n"}],
+      "expect": "a bullet is wrong only when its claim is a known wrong fact, word for word"
+    },
+    {
+      "test": "test_refine_loop",
+      "name": "facts taken in reference order, not bullet order",
+      "edits": [{"file": "loop.py",
+                 "old": "    for line in bullets:\n        claim = normalize_claim(line)\n        if claim in wrong:\n",
+                 "new": "    claims = {normalize_claim(line) for line in bullets}\n    for claim in wrong_facts:\n        if claim in claims:\n"}],
+      "expect": "the critique names the first wrong bullet"
+    },
+    {
+      "test": "test_refine_loop",
+      "name": "under 60 read as at most 60",
+      "edits": [{"file": "loop.py", "old": "        if len(line) - len(\"- \") >= MAX_CHARS:\n", "new": "        if len(line) - len(\"- \") > MAX_CHARS:\n"}],
+      "expect": "a bullet's text, without its marker, must be under 60 chars"
+    },
+    {
+      "test": "test_refine_loop",
+      "name": "the marker counted in the length",
+      "edits": [{"file": "loop.py", "old": "        if len(line) - len(\"- \") >= MAX_CHARS:\n", "new": "        if len(line) >= MAX_CHARS:\n"}],
+      "expect": "a bullet's text, without its marker, must be under 60 chars"
+    },
+    {
+      "test": "test_refine_loop",
+      "name": "self-critique matched exactly against 'no issues'",
+      "edits": [{"file": "loop.py",
+                 "old": "    return critique, critique.strip().lower().startswith(\"no issues\")\n",
+                 "new": "    return critique, critique == \"no issues\"\n"}],
+      "expect": "the model's own 'no issues' can end the loop from round 2 on, never in round 1"
+    },
+    {
+      "test": "test_refine_loop",
+      "name": "the two-round rule applied to the verifier too",
+      "edits": [{"file": "loop.py",
+                 "old": "    return verifier_passes or model_says_fine and attempt.iteration >= 2 or attempt.iteration >= max_iters\n",
+                 "new": "    return attempt.passed and attempt.iteration >= 2 or attempt.iteration >= max_iters\n"}],
+      "expect": "a passing verifier ends the loop at once"
+    },
+    {
+      "test": "test_refine_loop",
+      "name": "rubber stamp fixed, but the last round is still refined",
+      "edits": [{"file": "loop.py",
+                 "old": "        if should_stop(attempt, max_iters):\n",
+                 "new": "        if attempt.passed and (attempt.grounded or attempt.iteration >= 2):\n"}],
+      "expect": "the round that ends the loop is not refined"
+    },
+    {
+      "test": "test_refine_loop",
+      "name": "claims compared without dropping trailing punctuation",
+      "edits": [{"file": "loop.py",
+                 "old": "        claim = normalize_claim(line)\n        if claim in wrong:\n",
+                 "new": "        claim = line[2:].strip().lower()\n        if claim in wrong:\n"}],
+      "expect": "CRITIC never passes a draft that states a known wrong fact"
+    },
+    {
+      "test": "test_refine_loop",
+      "name": "length measured on the normalized claim, which drops the final period",
+      "edits": [{"file": "loop.py",
+                 "old": "        if len(line) - len(\"- \") >= MAX_CHARS:\n",
+                 "new": "        if len(normalize_claim(line)) >= MAX_CHARS:\n"}],
+      "expect": "a bullet's text, without its marker, must be under 60 chars"
+    },
+    {
+      "test": "test_refine_loop",
+      "name": "the cap grouped under the model's 'no issues'",
+      "edits": [{"file": "loop.py",
+                 "old": "    return verifier_passes or model_says_fine and attempt.iteration >= 2 or attempt.iteration >= max_iters\n",
+                 "new": "    return verifier_passes or model_says_fine and (attempt.iteration >= 2 or attempt.iteration >= max_iters)\n"}],
+      "expect": "the round that ends the loop is not refined"
+    },
+    {
+      "test": "test_refine_loop",
+      "name": "the two-round rule written as more than 2",
+      "edits": [{"file": "loop.py",
+                 "old": "model_says_fine and attempt.iteration >= 2",
+                 "new": "model_says_fine and attempt.iteration > 2"}],
+      "expect": "the model's own 'no issues' can end the loop from round 2 on, never in round 1"
+    },
+    {
+      "test": "test_revision_chain",
+      "name": "lines split without their line breaks",
+      "edits": [
+        {"file": "revisions.py", "old": "    return text.splitlines(keepends=True)\n", "new": "    return text.splitlines()\n"},
+        {"file": "revisions.py", "old": "    return \"\".join(lines)\n", "new": "    return \"\\n\".join(lines)\n"}
+      ],
+      "expect": "CorruptChain"
+    },
+    {
+      "test": "test_revision_chain",
+      "name": "diff blocks applied front to back",
+      "edits": [{"file": "revisions.py", "old": "    for i1, i2, new in reversed(ops):\n", "new": "    for i1, i2, new in ops:\n"}],
+      "expect": "CorruptChain"
+    },
+    {
+      "test": "test_revision_chain",
+      "name": "readable non-ASCII written raw, records split with str.splitlines",
+      "edits": [
+        {"file": "revisions.py", "old": "            f.write(json.dumps(record) + \"\\n\")\n", "new": "            f.write(json.dumps(record, ensure_ascii=False) + \"\\n\")\n"},
+        {"file": "revisions.py", "old": "for line in text.split(\"\\n\") if line]", "new": "for line in text.splitlines() if line]"}
+      ],
+      "expect": "round 7 is malformed"
+    },
+    {
+      "test": "test_revision_chain",
+      "name": "rebuilt text never checked against a digest",
+      "edits": [{"file": "revisions.py",
+                 "old": "            intact = record[\"round\"] == expected and _digest(output, record[\"critique\"]) == record[\"sha256\"]\n",
+                 "new": "            intact = record[\"round\"] == expected\n"}],
+      "expect": "a damaged record raises CorruptChain instead of returning different text"
+    },
+    {
+      "test": "test_revision_chain",
+      "name": "unchanged blocks stored too",
+      "edits": [{"file": "revisions.py",
+                 "old": "for tag, i1, i2, j1, j2 in matcher.get_opcodes() if tag != \"equal\"]",
+                 "new": "for tag, i1, i2, j1, j2 in matcher.get_opcodes()]"}],
+      "expect": "after round 0 the chain stores what changed, not whole outputs"
+    },
+    {
+      "test": "test_revision_chain",
+      "name": "append opens the file for writing",
+      "edits": [{"file": "revisions.py", "old": "        with self.path.open(\"a\", encoding=\"utf-8\", newline=\"\\n\") as f:\n", "new": "        with self.path.open(\"w\", encoding=\"utf-8\", newline=\"\\n\") as f:\n"}],
+      "expect": "CorruptChain"
+    },
+    {
+      "test": "test_revision_chain",
+      "name": "negative rounds count from the end",
+      "edits": [{"file": "revisions.py",
+                 "old": "        if not 0 <= number < len(records):\n            raise IndexError(f\"no round {number}; the chain has {len(records)}\")\n",
+                 "new": "        number = range(len(records))[number]\n"}],
+      "expect": "rounds run from 0 to len - 1"
+    },
+    {
+      "test": "test_revision_chain",
+      "name": "an empty round 0 read as a diff round",
+      "edits": [{"file": "revisions.py",
+                 "old": "            output = record[\"text\"] if expected == 0 else _patch(outputs[-1], record[\"ops\"])\n",
+                 "new": "            output = record[\"text\"] if record.get(\"text\") else _patch(outputs[-1], record[\"ops\"])\n"}],
+      "expect": "round 0 is malformed"
+    },
+    {
+      "test": "test_revision_chain",
+      "name": "the whole chain verified on open",
+      "edits": [{"file": "revisions.py",
+                 "old": "    def __init__(self, path: str | Path) -> None:\n        self.path = Path(path)\n",
+                 "new": "    def __init__(self, path: str | Path) -> None:\n        self.path = Path(path)\n        _rebuild(self._records())\n"}],
+      "expect": "round 2 does not match what was appended"
+    },
+    {
+      "test": "test_revision_chain",
+      "name": "every round diffed against round 0",
+      "edits": [
+        {"file": "revisions.py",
+         "old": "            record[\"ops\"] = _diff(_rebuild(records)[-1], output)\n",
+         "new": "            record[\"ops\"] = _diff(records[0][\"text\"], output)\n"},
+        {"file": "revisions.py",
+         "old": "_patch(outputs[-1], record[\"ops\"])",
+         "new": "_patch(outputs[0], record[\"ops\"])"}
+      ],
+      "expect": "after round 0 the chain stores what changed, not whole outputs"
+    },
+    {
+      "test": "test_revision_chain",
+      "name": "the digest covers the output only, not the critique",
+      "edits": [
+        {"file": "revisions.py",
+         "old": "        record[\"sha256\"] = _digest(output, critique)\n",
+         "new": "        record[\"sha256\"] = _digest(output, \"\")\n"},
+        {"file": "revisions.py",
+         "old": "_digest(output, record[\"critique\"]) == record[\"sha256\"]",
+         "new": "_digest(output, \"\") == record[\"sha256\"]"}
+      ],
+      "expect": "a damaged critique raises CorruptChain too"
+    },
+    {
+      "test": "test_revision_chain",
+      "name": "round 0 trusted without its digest",
+      "edits": [{"file": "revisions.py",
+                 "old": "            intact = record[\"round\"] == expected and _digest(output, record[\"critique\"]) == record[\"sha256\"]\n",
+                 "new": "            intact = record[\"round\"] == expected and (expected == 0 or _digest(output, record[\"critique\"]) == record[\"sha256\"])\n"}],
+      "expect": "a damaged record raises CorruptChain instead of returning different text"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "findings collected tool by tool",
+      "edits": [
+        {"file": "evaluator.py", "old": "    findings: list[Finding | None] = [None] * len(claims)\n", "new": "    findings: list[Finding] = []\n"},
+        {"file": "evaluator.py", "old": "            findings[i] = Finding(i + 1, claims[i], kind, status, check.evidence)\n", "new": "            findings.append(Finding(i + 1, claims[i], kind, status, check.evidence))\n"}
+      ],
+      "expect": "one finding per bullet, in bullet order"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "one tool call per claim",
+      "edits": [{"file": "evaluator.py",
+                 "old": "                answers = tool([claims[i] for i in positions])\n",
+                 "new": "                answers = [tool([claims[i]])[0] for i in positions]\n"}],
+      "expect": "each tool gets one call per draft, with its claims in bullet order"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "an outage counts as support",
+      "edits": [{"file": "evaluator.py",
+                 "old": "                answers = [Check(\"unknown\", str(exc))] * len(positions)\n",
+                 "new": "                answers = [Check(\"supported\", str(exc))] * len(positions)\n"}],
+      "expect": "a claim whose tool is down is unverified, never supported"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "no contradiction read as support",
+      "edits": [{"file": "evaluator.py",
+                 "old": "            status = \"unverified\" if check.status == \"unknown\" else check.status\n",
+                 "new": "            status = \"supported\" if check.status == \"unknown\" else check.status\n"}],
+      "expect": "a claim whose tool is down is unverified, never supported"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "every registered tool called, even with nothing to check",
+      "edits": [{"file": "evaluator.py", "old": "    for kind in dict.fromkeys(kinds):\n", "new": "    for kind in dict.fromkeys([*kinds, *tools]):\n"}],
+      "expect": "a tool with nothing to check is not called"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "unverified claims sent back to the optimizer",
+      "edits": [{"file": "evaluator.py",
+                 "old": "        if \"contradicted\" not in statuses and \"unverified\" in statuses:\n",
+                 "new": "        if False:\n"}],
+      "expect": "refining cannot fix a claim no tool could check: hand it to a person"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "any unverified claim escalates, even next to a contradiction",
+      "edits": [{"file": "evaluator.py",
+                 "old": "        if \"contradicted\" not in statuses and \"unverified\" in statuses:\n",
+                 "new": "        if \"unverified\" in statuses:\n"}],
+      "expect": "a contradicted claim is still worth a refine"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "budget checked before unverified claims",
+      "edits": [
+        {"file": "evaluator.py",
+         "old": "        statuses = [f.status for f in critique.findings]\n",
+         "new": "        if number >= max_rounds:\n            return Outcome(\"escalated\", f\"budget: round {number} of {max_rounds}\", tuple(history))\n        statuses = [f.status for f in critique.findings]\n"}
+      ],
+      "expect": "refining cannot fix a claim no tool could check: hand it to a person"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "no progress compared with the previous round only",
+      "edits": [
+        {"file": "evaluator.py", "old": "        earlier = [a.output for a in history]\n", "new": "        earlier = [history[-1].output]\n"},
+        {"file": "evaluator.py", "old": "            repeated = earlier.index(output) + 1\n", "new": "            repeated = number\n"}
+      ],
+      "expect": "an output the loop has already verified is not verified again"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "no progress judged by a repeated critique",
+      "edits": [
+        {"file": "evaluator.py",
+         "old": "        statuses = [f.status for f in critique.findings]\n",
+         "new": "        seen = [a.critique for a in history[:-1]]\n        if critique.text() in seen:\n            return Outcome(\"escalated\", f\"no progress: round {number} repeats round {seen.index(critique.text()) + 1}\", tuple(history))\n        statuses = [f.status for f in critique.findings]\n"},
+        {"file": "evaluator.py",
+         "old": "        if output in earlier:\n",
+         "new": "        if False:\n"}
+      ],
+      "expect": "an output the loop has already verified is not verified again"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "outage evidence replaced by a fixed string",
+      "edits": [{"file": "evaluator.py",
+                 "old": "                answers = [Check(\"unknown\", str(exc))] * len(positions)\n",
+                 "new": "                answers = [Check(\"unknown\", \"tool unavailable\")] * len(positions)\n"}],
+      "expect": "a claim whose tool is down is unverified, never supported"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "passed read as nothing contradicted",
+      "edits": [{"file": "evaluator.py",
+                 "old": "        if critique.passed:\n",
+                 "new": "        if all(f.status != \"contradicted\" for f in critique.findings):\n"}],
+      "expect": "refining cannot fix a claim no tool could check: hand it to a person"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "the no-progress reason names the last verified round",
+      "edits": [{"file": "evaluator.py",
+                 "old": "f\"no progress: round {number + 1} repeats round {repeated}\"",
+                 "new": "f\"no progress: round {number} repeats round {repeated}\""}],
+      "expect": "an output the loop has already verified is not verified again"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "claims without a tool dropped from the findings",
+      "edits": [
+        {"file": "evaluator.py",
+         "old": "            answers = [Check(\"unknown\", f\"no {kind} tool\")] * len(positions)\n",
+         "new": "            continue\n"},
+        {"file": "evaluator.py",
+         "old": "    return Critique(tuple(findings))\n",
+         "new": "    return Critique(tuple(f for f in findings if f is not None))\n"}
+      ],
+      "expect": "a claim no tool confirms is unverified"
+    },
+    {
+      "test": "test_claim_verification",
+      "name": "refine shown the history without the current round",
+      "edits": [{"file": "evaluator.py",
+                 "old": "        output = model.refine(task, output, critique.text(), list(history))\n",
+                 "new": "        output = model.refine(task, output, critique.text(), list(history[:-1]))\n"}],
+      "expect": "the optimizer gets the critique and the history"
+    },
+    {
+      "test": "test_stream_guardrail",
+      "name": "line sent before the guardrail sees it",
+      "edits": [
+        {"file": "guardrail.py",
+         "old": "                reason = _check(guardrail, line)\n                if reason is not None:\n                    yield _frame(\"tripwire\", {\"line\": sent + 1, \"reason\": reason})\n                    return\n                sent += 1\n                yield _frame(\"delta\", {\"text\": line})\n",
+         "new": "                yield _frame(\"delta\", {\"text\": line})\n                reason = _check(guardrail, line)\n                if reason is not None:\n                    yield _frame(\"tripwire\", {\"line\": sent + 1, \"reason\": reason})\n                    return\n                sent += 1\n"}
+      ],
+      "expect": "the tripwire is the last event: the rejected line and everything after it stay unsent"
+    },
+    {
+      "test": "test_stream_guardrail",
+      "name": "relaying goes on after a tripwire",
+      "edits": [{"file": "guardrail.py",
+                 "old": "                    yield _frame(\"tripwire\", {\"line\": sent + 1, \"reason\": reason})\n                    return\n",
+                 "new": "                    yield _frame(\"tripwire\", {\"line\": sent + 1, \"reason\": reason})\n                    continue\n"}],
+      "expect": "the tripwire is the last event: the rejected line and everything after it stay unsent"
+    },
+    {
+      "test": "test_stream_guardrail",
+      "name": "whole stream read before relaying",
+      "edits": [{"file": "guardrail.py",
+                 "old": "        async for token in tokens:\n            buffer += token\n",
+                 "new": "        buffer = \"\".join([token async for token in tokens])\n        if True:\n"}],
+      "expect": "a tripwire stops pulling tokens and closes the token stream"
+    },
+    {
+      "test": "test_stream_guardrail",
+      "name": "token stream left open",
+      "edits": [{"file": "guardrail.py",
+                 "old": "        aclose = getattr(tokens, \"aclose\", None)\n        if aclose is not None:\n            await aclose()\n",
+                 "new": "        pass\n"}],
+      "expect": "a tripwire stops pulling tokens and closes the token stream"
+    },
+    {
+      "test": "test_stream_guardrail",
+      "name": "last line sent without a check",
+      "edits": [{"file": "guardrail.py",
+                 "old": "        if buffer:\n            reason = _check(guardrail, buffer)\n",
+                 "new": "        if buffer:\n            reason = None\n"}],
+      "expect": "the guardrail checks each line once, without its line break"
+    },
+    {
+      "test": "test_stream_guardrail",
+      "name": "only the \\n stripped before the check",
+      "edits": [{"file": "guardrail.py",
+                 "old": "    if line.endswith(\"\\r\\n\"):\n        text = line[:-2]\n    elif line.endswith(\"\\n\"):\n",
+                 "new": "    if line.endswith(\"\\n\"):\n"}],
+      "expect": "the guardrail checks each line once, without its line break"
+    },
+    {
+      "test": "test_stream_guardrail",
+      "name": "the empty rest after a final line break checked as a line",
+      "edits": [{"file": "guardrail.py", "old": "        if buffer:\n", "new": "        if True:\n"}],
+      "expect": "a final line break does not start another line"
+    },
+    {
+      "test": "test_stream_guardrail",
+      "name": "event data written by hand, not as JSON",
+      "edits": [{"file": "guardrail.py",
+                 "old": "                yield _frame(\"delta\", {\"text\": line})\n",
+                 "new": "                yield f'event: delta\\ndata: {{\"text\": \"{line}\"}}\\n\\n'\n"}],
+      "expect": "an event is one event line and one data line"
+    },
+    {
+      "test": "test_stream_guardrail",
+      "name": "every guardrail error treated as a tripwire",
+      "edits": [{"file": "guardrail.py",
+                 "old": "    except OutputGuardrailTripwireTriggered as exc:\n",
+                 "new": "    except Exception as exc:\n"}],
+      "expect": "a guardrail that crashes is an error, not a tripwire"
+    },
+    {
+      "test": "test_stream_guardrail",
+      "name": "trailing spaces stripped along with the line break",
+      "edits": [{"file": "guardrail.py",
+                 "old": "    try:\n        guardrail(text)\n",
+                 "new": "    try:\n        guardrail(line.rstrip())\n"}],
+      "expect": "the guardrail checks each line once, without its line break"
+    },
+    {
+      "test": "test_stream_guardrail",
+      "name": "splitlines with the unfinished tail held back",
+      "edits": [{"file": "guardrail.py",
+                 "old": "            while \"\\n\" in buffer:\n                end = buffer.index(\"\\n\") + 1\n                line, buffer = buffer[:end], buffer[end:]\n",
+                 "new": "            parts = buffer.splitlines(keepends=True)\n            buffer = parts.pop() if parts and not parts[-1].endswith(\"\\n\") else \"\"\n            for line in parts:\n"}],
+      "expect": "only LF ends a line; a bare CR is part of the line"
+    },
+    {
+      "test": "test_stream_guardrail",
+      "name": "at most one line taken from each token",
+      "edits": [{"file": "guardrail.py",
+                 "old": "            while \"\\n\" in buffer:\n",
+                 "new": "            if \"\\n\" in buffer:\n"}],
+      "expect": "the same events however the tokens are split"
+    },
+    {
+      "test": "test_stream_guardrail",
+      "name": "token stream closed only after a tripwire",
+      "edits": [
+        {"file": "guardrail.py",
+         "old": "                    yield _frame(\"tripwire\", {\"line\": sent + 1, \"reason\": reason})\n                    return\n",
+         "new": "                    await tokens.aclose()\n                    yield _frame(\"tripwire\", {\"line\": sent + 1, \"reason\": reason})\n                    return\n"},
+        {"file": "guardrail.py",
+         "old": "        aclose = getattr(tokens, \"aclose\", None)\n        if aclose is not None:\n            await aclose()\n",
+         "new": "        pass\n"}
+      ],
+      "expect": "a client that disconnects closes the token stream"
+    },
+    {
+      "test": "test_stream_guardrail",
+      "name": "tripwire line numbered from 0",
+      "edits": [{"file": "guardrail.py",
+                 "old": "                    yield _frame(\"tripwire\", {\"line\": sent + 1, \"reason\": reason})\n                    return\n",
+                 "new": "                    yield _frame(\"tripwire\", {\"line\": sent, \"reason\": reason})\n                    return\n"}],
+      "expect": "the tripwire is the last event: the rejected line and everything after it stay unsent"
+    },
+    {
+      "test": "test_outline_critique",
+      "name": "a bullet's line written after its sub-bullets'",
+      "edits": [
+        {"file": "outline.py",
+         "old": "        slot = len(lines)\n        lines.append(\"\")  # this bullet's line goes before its sub-bullets' lines\n",
+         "new": ""},
+        {"file": "outline.py",
+         "old": "            lines[slot] = f\"{path}: \" + \"; \".join(problems)\n",
+         "new": "            lines.append(f\"{path}: \" + \"; \".join(problems))\n"}
+      ],
+      "expect": "the critique lists bullets in document order"
+    },
+    {
+      "test": "test_outline_critique",
+      "name": "a failing sub-bullet does not fail its parent",
+      "edits": [{"file": "outline.py", "old": "        if failed:\n", "new": "        if False:\n"}],
+      "expect": "every failing bullet is named by its path, with its own problems and its failing sub-bullets"
+    },
+    {
+      "test": "test_outline_critique",
+      "name": "empty sub-list not checked",
+      "edits": [{"file": "outline.py", "old": "        if node.text.endswith(\":\") and not node.children:\n", "new": "        if False:\n"}],
+      "expect": "every failing bullet is named by its path, with its own problems and its failing sub-bullets"
+    },
+    {
+      "test": "test_outline_critique",
+      "name": "a tab read as one space",
+      "edits": [{"file": "outline.py", "old": "        unit = 1 if style == \"\\t\" else 2\n", "new": "        unit = 2\n"}],
+      "expect": "line 2: indentation is not a whole number of levels"
+    },
+    {
+      "test": "test_outline_critique",
+      "name": "tabs and spaces mixed without complaint",
+      "edits": [{"file": "outline.py",
+                 "old": "            if len(set(indent)) > 1 or (style and indent[0] != style):\n",
+                 "new": "            if False:\n"}],
+      "expect": "a malformed outline is a ValueError naming its line"
+    },
+    {
+      "test": "test_outline_critique",
+      "name": "a skipped level attached to the bullet above",
+      "edits": [{"file": "outline.py",
+                 "old": "        if depth > len(stack):\n",
+                 "new": "        depth = min(depth, len(stack))\n        if depth > len(stack):\n"}],
+      "expect": "a malformed outline is a ValueError naming its line"
+    },
+    {
+      "test": "test_outline_critique",
+      "name": "line numbers count only non-blank lines",
+      "edits": [{"file": "outline.py",
+                 "old": "    for number, raw in enumerate(text.splitlines(), 1):\n",
+                 "new": "    for number, raw in enumerate([l for l in text.splitlines() if l.strip()], 1):\n"}],
+      "expect": "a malformed outline is a ValueError naming its line"
+    },
+    {
+      "test": "test_outline_critique",
+      "name": "depth by floor division, so an odd indent is accepted",
+      "edits": [{"file": "outline.py",
+                 "old": "        if len(indent) % unit:\n",
+                 "new": "        if False:\n"}],
+      "expect": "a malformed outline is a ValueError naming its line"
+    },
+    {
+      "test": "test_outline_critique",
+      "name": "a bullet's own problems in another order",
+      "edits": [{"file": "outline.py",
+                 "old": "        if len(node.text) >= limits[depth]:\n            problems.append(f\"not under {limits[depth]} chars\")\n        if normalize_claim(node.text) in wrong:\n            problems.append(\"contradicts reference data\")\n        if node.text.endswith(\":\") and not node.children:\n            problems.append(\"empty sub-list\")\n",
+                 "new": "        if node.text.endswith(\":\") and not node.children:\n            problems.append(\"empty sub-list\")\n        if normalize_claim(node.text) in wrong:\n            problems.append(\"contradicts reference data\")\n        if len(node.text) >= limits[depth]:\n            problems.append(f\"not under {limits[depth]} chars\")\n"}],
+      "expect": "every failing bullet is named by its path, with its own problems and its failing sub-bullets"
+    },
+    {
+      "test": "test_outline_critique",
+      "name": "a dedent pops one level only",
+      "edits": [{"file": "outline.py",
+                 "old": "        del stack[depth:]\n",
+                 "new": "        if len(stack) > depth:\n            stack.pop()\n"}],
+      "expect": "every failing bullet is named by its path, with its own problems and its failing sub-bullets"
+    },
+    {
+      "test": "test_outline_critique",
+      "name": "length counted with the marker",
+      "edits": [{"file": "outline.py",
+                 "old": "        if len(node.text) >= limits[depth]:\n",
+                 "new": "        if len(\"- \" + node.text) >= limits[depth]:\n"}],
+      "expect": "every failing bullet is named by its path, with its own problems and its failing sub-bullets"
+    },
+    {
+      "test": "test_outline_critique",
+      "name": "not under the limit read as at most the limit",
+      "edits": [{"file": "outline.py",
+                 "old": "        if len(node.text) >= limits[depth]:\n",
+                 "new": "        if len(node.text) > limits[depth]:\n"}],
+      "expect": "every failing bullet is named by its path, with its own problems and its failing sub-bullets"
+    }
+  ]
+}

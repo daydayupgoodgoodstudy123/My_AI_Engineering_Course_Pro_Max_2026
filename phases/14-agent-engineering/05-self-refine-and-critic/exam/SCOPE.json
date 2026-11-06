@@ -1,0 +1,112 @@
+{
+  "lesson": "phases/14-agent-engineering/05-self-refine-and-critic",
+  "title": "Self-Refine and CRITIC: Iterative Output Improvement",
+  "format": "staged-brownfield",
+  "service": "Critic: an evaluator-optimizer service with a CRITIC verifier, a diff chain of revisions, tool-routed claim checks, a streaming output guardrail and nested-outline critiques",
+  "sources": {
+    "docs/en.md": "9c7f53947f9886f431c8f1a5d51f4f1c97af01ff68887f33275dbd64892f93e3",
+    "code/main.py": "83180d9695228d693d7033c2e2a592f21104fb3c363c2bd9456808fd8a5013c4"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; the model and the tools are scripted fakes in the tests",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_refine_loop",
+      "kind": "debug",
+      "lesson_anchor": "Build It (code/main.py: verify_external, feedback_self, run_loop); CRITIC; The stop condition; 2026 pitfalls: Rubber-stamp loops",
+      "planted_bugs": [
+        "verify_external loops over wrong_facts but its body runs only the lesson's two hard-coded checks, so 'the sun orbits the earth' is never caught; the wrong verdict surfaces one call away, in run_loop's history",
+        "the length check counts the '- ' marker and uses > 60, although the docstring and the lesson say under 60 characters of text",
+        "run_loop stops on the first ok, so the model's own 'No issues.' ends round 1 (rubber stamp), and a failing last round is still refined; the lesson's 2026 rule fixes both",
+        "verify_external lower()s the whole output once per reference fact and searches it, O(facts x length)"
+      ],
+      "timing_assert": "2,000 bullets against 20,000 reference facts under 0.04 s (the shipped per-fact lower() and substring search takes about 0.55 s, the fix about 1 ms)",
+      "overfix_guard": "'The earth orbits the sun' must pass, which rules out comparing claims as bags of words; the guard runs before the timing block, so a slow over-fix is still reported by it",
+      "traps": [
+        "the critique names the first wrong bullet in bullet order (a fast loop over the reference facts names the wrong one)",
+        "known wrong facts are reported before format problems",
+        "a passing verifier ends the loop in round 1; refine sees the critique and every earlier output; with a verifier the model is never asked for feedback",
+        "the 60-character bullet ends with a period, so a length measured with normalize_claim lets it through"
+      ]
+    },
+    {
+      "part": 2,
+      "test": "test_revision_chain",
+      "kind": "model and persistence",
+      "lesson_anchor": "Self-Refine: refine sees the full history, all prior outputs and critiques",
+      "storage": "diff chain file: UTF-8 text, round 0 in full, then one record per round holding only the changed lines (difflib, no context lines) and the critique; a digest per record",
+      "exactness": "every round's output and critique reads back exactly, from a second instance opened while the writer is still in use: empty round 0, empty middle round, final newline present or missing, CRLF, bare CR, U+2028, non-ASCII, trailing spaces, lines that look like diff markers, a revision with three separate hunks",
+      "traps": [
+        "splitlines() without keepends joined with \\n",
+        "an empty round 0 read as a diff round",
+        "difflib opcodes applied front to back",
+        "whole outputs or equal blocks stored (file size bound); context lines (a changed line stored twice)",
+        "no digest, no digest on round 0, or a digest that leaves out the critique, so damage returns different text",
+        "the whole chain verified on open, so rounds before the damage cannot be read",
+        "ensure_ascii=False together with str.splitlines() on the JSON records",
+        "negative rounds counted from the end"
+      ],
+      "clarifying_questions": ["file format", "damaged file", "concurrent writers"]
+    },
+    {
+      "part": 3,
+      "test": "test_claim_verification",
+      "kind": "core algorithm",
+      "lesson_anchor": "CRITIC (verification routed through external tools); Evaluator-Optimizer; 2026 pitfalls: Over-refinement, CRITIC on trivial tasks",
+      "traps": [
+        "findings grouped by tool instead of bullet order",
+        "one call per claim instead of one batched call per tool",
+        "ToolUnavailable skipped or counted as support",
+        "a claim the fact store does not know counted as support",
+        "a tool called with nothing to check",
+        "refining when only unverified claims remain",
+        "escalating on any unverified claim, even next to a contradiction",
+        "the budget reason checked before the unverified reason",
+        "no progress compared with the previous round only (outputs A, B, A)"
+      ],
+      "clarifying_questions": ["other tool exceptions", "a draft with no bullets", "claims the store does not know"]
+    },
+    {
+      "part": 4,
+      "test": "test_stream_guardrail",
+      "kind": "streaming",
+      "lesson_anchor": "OpenAI Agents SDK output guardrails (OutputGuardrailTripwireTriggered), applied to each completed line of a token stream",
+      "wire_format": "SSE, one event per frame: event delta / tripwire / done with one data line of JSON, decided by the test's parser, which splits lines on CRLF, CR or LF as SSE clients do",
+      "traps": [
+        "a delta sent before the guardrail check",
+        "relaying after the tripwire",
+        "reading the whole stream first (pull count)",
+        "the token stream left open after a tripwire or a client disconnect",
+        "the last line without a line break never checked; the empty rest after a final line break checked",
+        "\\r\\n split across tokens, a bare \\r taken as a line end (at a token boundary or inside a line), the line break passed to the guardrail, trailing spaces stripped along with it",
+        "event data written by hand instead of JSON",
+        "any guardrail exception turned into a tripwire"
+      ],
+      "clarifying_questions": ["lines or tokens", "bare CR", "blank lines"]
+    },
+    {
+      "part": 5,
+      "test": "test_outline_critique",
+      "kind": "recursive structure",
+      "lesson_anchor": "Build It task (bullets under a length limit, known wrong facts) extended to a nested Markdown outline; structured critique that says where the problem is",
+      "traps": [
+        "post-order output instead of document order",
+        "a parent passing although a sub-bullet fails; every failing descendant listed instead of the direct sub-bullets",
+        "an empty sub-list",
+        "a tab counted as one space or expanded; tabs and spaces mixed across lines or on one line; an odd number of spaces floor-divided into a level",
+        "a skipped level or an indented first bullet accepted; line numbers that skip blank lines",
+        "a two-level dedent",
+        "length counted with the indentation or the marker; a bullet exactly at its limit passed",
+        "a bullet's own problems out of the docstring's order (1.3 is both too long and an empty sub-list)"
+      ],
+      "clarifying_questions": ["indent width", "deeper than the limits", "empty sub-list and its parent"]
+    }
+  ],
+  "deviations": [
+    "Part 1 keeps the three suggested defects and the suggested timing bug. The lesson code's wasted refine after a failing last round is part of the stop-rule defect, because the lesson's full rule (iterations >= max_iterations) fixes it too; a wrong fix that only adds the two-round rule is caught separately. With a verifier the model is not asked for feedback (the lesson: CRITIC replaces feedback with verify), so the two-round rule applies to the self-critique only, as in the quiz's reading of the rule. The suggested bag-of-words guard runs before the timing block, so a slow over-fix is still reported by the guard rather than by the timer.",
+    "Part 3 does not test the stop rule's and/or precedence again: the lesson's stop rule is Part 1's. Part 3's loop is the evaluator-optimizer with a tool-backed evaluator, and its traps are the ones that only exist there: unverified is never a pass (CRITIC on trivial tasks), one batched call per tool with findings put back in bullet order, no call for a kind with nothing to check, and three escalation reasons in a fixed order (only unverified claims left, budget of max_rounds, an output that repeats any earlier round, not just the previous one), each returned as a reason string.",
+    "Part 2 stores each round's critique next to its output, since the lesson's refine history is prior outputs plus critiques. Damage is detected with a digest per record; rounds before the damage must still read back, and the file must be readable text that stores each changed line once (no context lines), so the test can damage one record without knowing the format.",
+    "Part 4 sends whole lines, each only after the guardrail passed it, rather than raw tokens, so a rejected line never reaches the client. The lesson says the SDK runs output guardrails on the final output; checking each completed line is this service's design and is described as such, not as an SDK feature. The test also requires the upstream token stream to be closed on a tripwire and on a client disconnect.",
+    "Part 5 leaves an outline deeper than the limits to a clarifying question; the tests do not cover it."
+  ]
+}
