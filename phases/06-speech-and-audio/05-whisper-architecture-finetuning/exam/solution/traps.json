@@ -1,0 +1,770 @@
+{
+  "package": "longform",
+  "tests": [
+    "test_window_plan",
+    "test_decoding_roundtrip",
+    "test_stitch_windows",
+    "test_stream_transcript",
+    "test_lora_budget"
+  ],
+  "layers": [
+    {
+      "test": "test_window_plan",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "mel frames, got -1"
+        },
+        {
+          "name": "fix mel_frames",
+          "edits": [
+            {
+              "file": "windows.py",
+              "old": "    return 1 + (n_samples - N_FFT) // HOP_LENGTH\n",
+              "new": "    return n_samples // HOP_LENGTH\n"
+            }
+          ],
+          "expect": "a 10 ms clip is one window"
+        },
+        {
+          "name": "+ positions round up",
+          "edits": [
+            {
+              "file": "windows.py",
+              "old": "    return n_frames // 2\n",
+              "new": "    return (n_frames + 1) // 2\n"
+            }
+          ],
+          "expect": "planning a long recording should be fast"
+        },
+        {
+          "name": "+ no scan over earlier windows",
+          "edits": [
+            {
+              "file": "windows.py",
+              "old": "        if any(w.start <= start and end <= w.end for w in windows):\n            continue\n",
+              "new": ""
+            }
+          ],
+          "expect": "30 s is one window"
+        },
+        {
+          "name": "+ stop at the window that reaches the end",
+          "edits": [
+            {
+              "file": "windows.py",
+              "old": "    for start in range(0, n_samples, N_SAMPLES - overlap):\n",
+              "new": "    for start in range(0, n_samples, N_SAMPLES - overlap):\n        if windows and windows[-1].end == n_samples:\n            break\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_window_plan",
+      "name": "windows end on the last whole mel frame",
+      "edits": [
+        {
+          "file": "windows.py",
+          "old": "    windows: list[Window] = []\n    start = 0\n",
+          "new": "    n_samples -= n_samples % HOP_LENGTH\n    windows: list[Window] = []\n    start = 0\n"
+        }
+      ],
+      "expect": "every sample is covered, down to the last one"
+    },
+    {
+      "test": "test_window_plan",
+      "name": "a last window that adds under a second is skipped",
+      "edits": [
+        {
+          "file": "windows.py",
+          "old": "        if end == n_samples:\n            return windows\n",
+          "new": "        if n_samples - end < SAMPLE_RATE:\n            return windows\n"
+        }
+      ],
+      "expect": "every sample is covered, down to the last one"
+    },
+    {
+      "test": "test_window_plan",
+      "name": "the lesson's early return for short clips, loop unchanged",
+      "edits": [
+        {
+          "file": "windows.py",
+          "old": "    windows: list[Window] = []\n    start = 0\n    while True:\n        end = min(start + N_SAMPLES, n_samples)\n        frames = mel_frames(end - start)\n        windows.append(Window(start, end, frames, encoder_positions(frames)))\n        if end == n_samples:\n            return windows\n        start += N_SAMPLES - overlap\n",
+          "new": "    if n_samples <= N_SAMPLES:\n        frames = mel_frames(n_samples)\n        return [Window(0, n_samples, frames, encoder_positions(frames))]\n    windows: list[Window] = []\n    for start in range(0, n_samples, N_SAMPLES - overlap):\n        end = min(start + N_SAMPLES, n_samples)\n        frames = mel_frames(end - start)\n        windows.append(Window(start, end, frames, encoder_positions(frames)))\n    return windows\n"
+        }
+      ],
+      "expect": "no window lies inside another"
+    },
+    {
+      "test": "test_window_plan",
+      "name": "round(n / 2), which rounds half to even",
+      "edits": [
+        {
+          "file": "windows.py",
+          "old": "    return (n_frames + 1) // 2\n",
+          "new": "    return round(n_frames / 2)\n"
+        }
+      ],
+      "expect": "a 10 ms clip is one window"
+    },
+    {
+      "test": "test_window_plan",
+      "name": "at least one position, otherwise floor",
+      "edits": [
+        {
+          "file": "windows.py",
+          "old": "    return (n_frames + 1) // 2\n",
+          "new": "    return max(1, n_frames // 2)\n"
+        }
+      ],
+      "expect": "positions follow the stride-2 conv"
+    },
+    {
+      "test": "test_window_plan",
+      "name": "the lesson's frame formula, clamped at zero",
+      "edits": [
+        {
+          "file": "windows.py",
+          "old": "    return n_samples // HOP_LENGTH\n",
+          "new": "    return max(0, 1 + (n_samples - N_FFT) // HOP_LENGTH)\n"
+        }
+      ],
+      "expect": "a 10 ms clip is one window"
+    },
+    {
+      "test": "test_window_plan",
+      "name": "the last window moved back to hold a full 30 s",
+      "edits": [
+        {
+          "file": "windows.py",
+          "old": "        end = min(start + N_SAMPLES, n_samples)\n",
+          "new": "        end = min(start + N_SAMPLES, n_samples)\n        if end == n_samples and n_samples > N_SAMPLES:\n            start = n_samples - N_SAMPLES\n"
+        }
+      ],
+      "expect": "a window starts every 30 - 5 s, and the last one stops at the end"
+    },
+    {
+      "test": "test_decoding_roundtrip",
+      "name": "text stripped when parsing",
+      "edits": [
+        {
+          "file": "tokens.py",
+          "old": "        return items.pop() if items and not _SPECIAL.fullmatch(items[-1]) else \"\"\n",
+          "new": "        return items.pop().strip() if items and not _SPECIAL.fullmatch(items[-1]) else \"\"\n"
+        },
+        {
+          "file": "tokens.py",
+          "old": "    if to_text(decoding) != text:\n        raise ValueError(\"not the text to_text writes for this decoding\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a decoding must round-trip exactly"
+    },
+    {
+      "test": "test_decoding_roundtrip",
+      "name": "timestamps written with str()",
+      "edits": [
+        {
+          "file": "tokens.py",
+          "old": "    return f\"<|{tick * TIME_PRECISION:.2f}|>\"\n",
+          "new": "    return f\"<|{tick * TIME_PRECISION}|>\"\n"
+        }
+      ],
+      "expect": "timestamps are tokens with two decimals"
+    },
+    {
+      "test": "test_decoding_roundtrip",
+      "name": "the grid checked with %",
+      "edits": [
+        {
+          "file": "tokens.py",
+          "old": "abs(seconds - tick * TIME_PRECISION) > 1e-9",
+          "new": "seconds % TIME_PRECISION > 1e-9"
+        }
+      ],
+      "expect": "is not on the 0.02 s grid"
+    },
+    {
+      "test": "test_decoding_roundtrip",
+      "name": "timestamps rebuilt as tick * 0.02 when parsing",
+      "edits": [
+        {
+          "file": "tokens.py",
+          "old": "    seconds = float(match.group(1))\n",
+          "new": "    seconds = round(float(match.group(1)) / TIME_PRECISION) * TIME_PRECISION\n"
+        }
+      ],
+      "expect": "a decoding must round-trip exactly"
+    },
+    {
+      "test": "test_decoding_roundtrip",
+      "name": "any other task becomes translate, as in the lesson's build_prompt",
+      "edits": [
+        {
+          "file": "tokens.py",
+          "old": "    if decoding.task not in TASKS:\n        raise ValueError(f\"task must be one of {TASKS}, got {decoding.task!r}\")\n",
+          "new": ""
+        },
+        {
+          "file": "tokens.py",
+          "old": "f\"<|{decoding.task}|>\"",
+          "new": "\"<|transcribe|>\" if decoding.task == \"transcribe\" else \"<|translate|>\""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_decoding_roundtrip",
+      "name": "language looked up in a dict, as in the lesson's LANG[language]",
+      "edits": [
+        {
+          "file": "tokens.py",
+          "old": "    if decoding.language not in LANGUAGES:\n        raise ValueError(f\"unknown language {decoding.language!r}\")\n",
+          "new": ""
+        },
+        {
+          "file": "tokens.py",
+          "old": "f\"<|{decoding.language}|>\"",
+          "new": "{code: f\"<|{code}|>\" for code in LANGUAGES}[decoding.language]"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_decoding_roundtrip",
+      "name": "the grid checked on whole hundredths, which snaps 1.081 to 1.08",
+      "edits": [
+        {
+          "file": "tokens.py",
+          "old": "    tick = round(seconds / TIME_PRECISION)\n    if not 0 <= tick <= _MAX_TICK or abs(seconds - tick * TIME_PRECISION) > 1e-9:\n",
+          "new": "    hundredths = round(seconds * 100)\n    tick = hundredths // 2\n    if not 0 <= tick <= _MAX_TICK or hundredths % 2:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_decoding_roundtrip",
+      "name": "no upper bound, so 30.02 s gets a token",
+      "edits": [
+        {
+          "file": "tokens.py",
+          "old": "    if not 0 <= tick <= _MAX_TICK or",
+          "new": "    if not 0 <= tick or"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_decoding_roundtrip",
+      "name": "an empty decoding written with <|notimestamps|>",
+      "edits": [
+        {
+          "file": "tokens.py",
+          "old": "    if decoding.text is not None:\n        parts += [NO_TIMESTAMPS, _plain(decoding.text)]\n",
+          "new": "    if not decoding.segments:\n        parts += [NO_TIMESTAMPS, _plain(decoding.text or \"\")]\n"
+        }
+      ],
+      "expect": "a decoding must round-trip exactly"
+    },
+    {
+      "test": "test_decoding_roundtrip",
+      "name": "segments read back as a tuple",
+      "edits": [
+        {
+          "file": "tokens.py",
+          "old": "        decoding = Decoding(language, task, segments, previous=previous)\n",
+          "new": "        decoding = Decoding(language, task, tuple(segments), previous=previous)\n"
+        }
+      ],
+      "expect": "a decoding must round-trip exactly"
+    },
+    {
+      "test": "test_stitch_windows",
+      "name": "words placed by their start, not their midpoint",
+      "edits": [
+        {
+          "file": "stitch.py",
+          "old": "            midpoint = 2 * window.start + start + end\n",
+          "new": "            midpoint = 2 * (window.start + start)\n"
+        }
+      ],
+      "expect": "each word once, from the window on whose side of the split its midpoint falls"
+    },
+    {
+      "test": "test_stitch_windows",
+      "name": "a midpoint on the split goes to the earlier window",
+      "edits": [
+        {
+          "file": "stitch.py",
+          "old": "(low is not None and midpoint < low) or (high is not None and midpoint >= high)",
+          "new": "(low is not None and midpoint <= low) or (high is not None and midpoint > high)"
+        }
+      ],
+      "expect": "each word once, from the window on whose side of the split its midpoint falls"
+    },
+    {
+      "test": "test_stitch_windows",
+      "name": "both windows keep a midpoint on the split",
+      "edits": [
+        {
+          "file": "stitch.py",
+          "old": "(high is not None and midpoint >= high)",
+          "new": "(high is not None and midpoint > high)"
+        }
+      ],
+      "expect": "each word once, from the window on whose side of the split its midpoint falls"
+    },
+    {
+      "test": "test_stitch_windows",
+      "name": "2.5 s trimmed from both ends of every window, as in the lesson's exercise",
+      "edits": [
+        {
+          "file": "stitch.py",
+          "old": "        low = windows[k - 1].end + window.start if k > 0 else None\n        high = window.end + windows[k + 1].start if k + 1 < len(windows) else None\n",
+          "new": "        low = 2 * window.start + 5 * SAMPLE_RATE\n        high = 2 * window.end - 5 * SAMPLE_RATE\n"
+        }
+      ],
+      "expect": "nothing is trimmed at the start or the end of the recording"
+    },
+    {
+      "test": "test_stitch_windows",
+      "name": "the split fixed 2.5 s after the next window starts",
+      "edits": [
+        {
+          "file": "stitch.py",
+          "old": "        low = windows[k - 1].end + window.start if k > 0 else None\n        high = window.end + windows[k + 1].start if k + 1 < len(windows) else None\n",
+          "new": "        low = 2 * window.start + 5 * SAMPLE_RATE if k > 0 else None\n        high = 2 * windows[k + 1].start + 5 * SAMPLE_RATE if k + 1 < len(windows) else None\n"
+        }
+      ],
+      "expect": "the split is the middle of the actual overlap"
+    },
+    {
+      "test": "test_stitch_windows",
+      "name": "words decoded from the padding kept",
+      "edits": [
+        {
+          "file": "stitch.py",
+          "old": "            if start >= audio_end:\n                continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "words decoded from the padding are dropped"
+    },
+    {
+      "test": "test_stitch_windows",
+      "name": "times added as floats and not rounded",
+      "edits": [
+        {
+          "file": "stitch.py",
+          "old": "                round((window.start + start) / SAMPLE_RATE, 2),\n                round((window.start + end) / SAMPLE_RATE, 2),\n",
+          "new": "                window.start / SAMPLE_RATE + segment.start,\n                window.start / SAMPLE_RATE + segment.end,\n"
+        }
+      ],
+      "expect": "rounded to 0.01 s"
+    },
+    {
+      "test": "test_stitch_windows",
+      "name": "padding judged by where a word ends",
+      "edits": [
+        {
+          "file": "stitch.py",
+          "old": "            if start >= audio_end:\n",
+          "new": "            if end > audio_end:\n"
+        }
+      ],
+      "expect": "nothing is trimmed at the start or the end of the recording"
+    },
+    {
+      "test": "test_stitch_windows",
+      "name": "padding judged by a word's midpoint",
+      "edits": [
+        {
+          "file": "stitch.py",
+          "old": "            if start >= audio_end:\n",
+          "new": "            if start + end >= 2 * audio_end:\n"
+        }
+      ],
+      "expect": "nothing is trimmed at the start or the end of the recording"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "one newline after each event",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            }) + \"\\n\\n\"\n",
+          "new": "            }) + \"\\n\"\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "    yield \"data: [DONE]\\n\\n\"\n",
+          "new": "    yield \"data: [DONE]\\n\"\n"
+        }
+      ],
+      "expect": "server-sent events"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "no [DONE] at the end",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    yield \"data: [DONE]\\n\\n\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "the stream ends with data: [DONE]"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "leftover samples dropped at the end of the stream",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    if buffer:\n        for event in events(buffer):\n            yield event\n",
+          "new": ""
+        }
+      ],
+      "expect": "then whatever is left"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "an empty last window decoded too",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    if buffer:\n",
+          "new": "    if True:\n"
+        }
+      ],
+      "expect": "leaves nothing more to decode"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "windows restart at every chunk",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        buffer.extend(chunk)\n",
+          "new": "        buffer = list(chunk)\n"
+        }
+      ],
+      "expect": "then whatever is left"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "a looping window still feeds the context",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if is_loop(text):\n            previous = None\n",
+          "new": "        if is_loop(text):\n            previous = (previous or \"\") + text\n"
+        }
+      ],
+      "expect": "never fed back as context"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "loops compared with case and punctuation",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    words = _WORD.findall(text.lower())\n",
+          "new": "    words = text.split()\n"
+        }
+      ],
+      "expect": "never fed back as context"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "loops counted one segment at a time",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if is_loop(text):\n",
+          "new": "        if any(is_loop(segment.text) for segment in segments):\n"
+        }
+      ],
+      "expect": "never fed back as context"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "reads the whole stream before decoding",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for chunk in chunks:\n        buffer.extend(chunk)\n",
+          "new": "    everything = [s async for chunk in chunks for s in chunk]\n    for chunk in [everything]:\n        buffer.extend(chunk)\n"
+        }
+      ],
+      "expect": "as soon as the window is full"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "event times not rounded",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                \"start\": round(seconds + segment.start, 2),\n                \"end\": round(seconds + segment.end, 2),\n",
+          "new": "                \"start\": seconds + segment.start,\n                \"end\": seconds + segment.end,\n"
+        }
+      ],
+      "expect": "same transcript whatever the chunking"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "3-word runs counted in fixed blocks of three",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    for i in range(len(words) - ngram + 1):\n",
+          "new": "    for i in range(0, len(words) - ngram + 1, ngram):\n"
+        }
+      ],
+      "expect": "never fed back as context"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "a looping window's segments still sent",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if is_loop(text):\n            previous = None\n            return []\n        previous = (previous or \"\") + text or None\n",
+          "new": "        if is_loop(text):\n            previous = None\n        else:\n            previous = (previous or \"\") + text or None\n"
+        }
+      ],
+      "expect": "same transcript whatever the chunking"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "loops looked for in the context and the window together",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if is_loop(text):\n",
+          "new": "        if is_loop((previous or \"\") + text):\n"
+        }
+      ],
+      "expect": "checked for a loop on its own text"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "a loop needs more than three repeats",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if counts[key] >= repeats:\n",
+          "new": "        if counts[key] > repeats:\n"
+        }
+      ],
+      "expect": "never fed back as context"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "previous joined with spaces",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        previous = (previous or \"\") + text or None\n",
+          "new": "        previous = \" \".join(filter(None, [previous, text])) or None\n"
+        }
+      ],
+      "expect": "never fed back as context"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "previous reset to an empty string",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            previous = None\n            return []\n",
+          "new": "            previous = \"\"\n            return []\n"
+        }
+      ],
+      "expect": "never fed back as context"
+    },
+    {
+      "test": "test_stream_transcript",
+      "name": "previous holds only the last window",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        previous = (previous or \"\") + text or None\n",
+          "new": "        previous = text or None\n"
+        }
+      ],
+      "expect": "never fed back as context"
+    },
+    {
+      "test": "test_lora_budget",
+      "name": "numbered submodules (layer lists) not walked",
+      "edits": [
+        {
+          "file": "lora.py",
+          "old": "        elif isinstance(node, list):\n",
+          "new": "        elif False:\n"
+        }
+      ],
+      "expect": "neither a dict nor a list"
+    },
+    {
+      "test": "test_lora_budget",
+      "name": "targets compared with the last name only",
+      "edits": [
+        {
+          "file": "lora.py",
+          "old": "_matches(path.split(\".\"), names)",
+          "new": "fnmatchcase(path.split(\".\")[-1], pattern)"
+        }
+      ],
+      "expect": "matches no module"
+    },
+    {
+      "test": "test_lora_budget",
+      "name": "biases trained too",
+      "edits": [
+        {
+          "file": "lora.py",
+          "old": "        trainable += rank * (in_features + out_features)\n",
+          "new": "        trainable += rank * (in_features + out_features) + math.prod(shapes.get(f\"{path}.bias\", [0]))\n"
+        }
+      ],
+      "expect": "about 3M trainable parameters"
+    },
+    {
+      "test": "test_lora_budget",
+      "name": "a tied weight counted twice",
+      "edits": [
+        {
+          "file": "lora.py",
+          "old": "    total = sum(math.prod(shape) for shape in shapes.values()) + trainable\n",
+          "new": "    total = sum(math.prod(shape) for shape in shapes.values()) + trainable\n    total += sum(math.prod(shapes[target]) for target in ties.values())\n"
+        }
+      ],
+      "expect": "a tied weight counted once"
+    },
+    {
+      "test": "test_lora_budget",
+      "name": "adapters left out of the total",
+      "edits": [
+        {
+          "file": "lora.py",
+          "old": "    total = sum(math.prod(shape) for shape in shapes.values()) + trainable\n",
+          "new": "    total = sum(math.prod(shape) for shape in shapes.values())\n"
+        }
+      ],
+      "expect": "plus the adapters"
+    },
+    {
+      "test": "test_lora_budget",
+      "name": "the lesson's 2 * d * rank for every adapter",
+      "edits": [
+        {
+          "file": "lora.py",
+          "old": "        trainable += rank * (in_features + out_features)\n",
+          "new": "        trainable += 2 * in_features * rank\n"
+        }
+      ],
+      "expect": "rank * (in + out)"
+    },
+    {
+      "test": "test_lora_budget",
+      "name": "a target that matches nothing ignored",
+      "edits": [
+        {
+          "file": "lora.py",
+          "old": "        if not hits:\n            raise ValueError(f\"target {pattern!r} matches no module\")\n",
+          "new": "        if not hits:\n            continue\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_lora_budget",
+      "name": "any layer a target matches gets an adapter",
+      "edits": [
+        {
+          "file": "lora.py",
+          "old": "            if not (isinstance(node, dict) and node.get(\"type\") == \"Linear\"):\n                raise ValueError(f\"target {pattern!r} matches {path!r}, not a Linear layer\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_lora_budget",
+      "name": "targets matched against the end of the path string",
+      "edits": [
+        {
+          "file": "lora.py",
+          "old": "_matches(path.split(\".\"), names)",
+          "new": "fnmatchcase(path, \"*\" + pattern)"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_lora_budget",
+      "name": "a layer that two targets match adapted twice",
+      "edits": [
+        {
+          "file": "lora.py",
+          "old": "    adapted: set[str] = set()\n",
+          "new": "    adapted: list[str] = []\n"
+        },
+        {
+          "file": "lora.py",
+          "old": "            adapted.add(path)\n",
+          "new": "            adapted.append(path)\n"
+        },
+        {
+          "file": "lora.py",
+          "old": "    ordered = [path for path, _ in modules if path in adapted]\n",
+          "new": "    order = {path: i for i, (path, _) in enumerate(modules)}\n    ordered = sorted(adapted, key=order.__getitem__)\n"
+        }
+      ],
+      "expect": "a layer that two targets match gets one adapter"
+    },
+    {
+      "test": "test_lora_budget",
+      "name": "non-Linear matches skipped instead of rejected",
+      "edits": [
+        {
+          "file": "lora.py",
+          "old": "            if not (isinstance(node, dict) and node.get(\"type\") == \"Linear\"):\n                raise ValueError(f\"target {pattern!r} matches {path!r}, not a Linear layer\")\n            adapted.add(path)\n",
+          "new": "            if isinstance(node, dict) and node.get(\"type\") == \"Linear\":\n                adapted.add(path)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_lora_budget",
+      "name": "the frozen encoder positions left out of the total",
+      "edits": [
+        {
+          "file": "lora.py",
+          "old": "    total = sum(math.prod(shape) for shape in shapes.values()) + trainable\n",
+          "new": "    total = sum(math.prod(shape) for key, shape in shapes.items() if \"encoder.embed_positions\" not in key) + trainable\n"
+        }
+      ],
+      "expect": "a tied weight counted once, plus the adapters"
+    },
+    {
+      "test": "test_lora_budget",
+      "name": "adapted layers sorted by name",
+      "edits": [
+        {
+          "file": "lora.py",
+          "old": "    ordered = [path for path, _ in modules if path in adapted]\n",
+          "new": "    ordered = sorted(adapted)\n"
+        }
+      ],
+      "expect": "adapted layers are listed in tree order"
+    }
+  ]
+}
