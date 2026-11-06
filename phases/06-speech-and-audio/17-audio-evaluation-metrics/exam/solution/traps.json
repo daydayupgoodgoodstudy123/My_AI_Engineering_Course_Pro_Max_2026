@@ -1,0 +1,353 @@
+{
+  "package": "evalsuite",
+  "tests": [
+    "test_normalized_scoring",
+    "test_leaderboard",
+    "test_paired_bootstrap",
+    "test_stream_report",
+    "test_suite_scores"
+  ],
+  "layers": [
+    {
+      "test": "test_normalized_scoring",
+      "steps": [
+        {"name": "as shipped", "edits": [],
+         "expect": "full-width forms and punctuation are formatting, not errors"},
+        {"name": "normalize the character path too", "edits": [
+          {"file": "scoring.py", "old": "        return [ch for ch in text if not ch.isspace()]", "new": "        return [ch for ch in normalize(text, language) if not ch.isspace()]"}
+        ],
+         "expect": "nothing to score in reference"},
+        {"name": "- the ASCII-only character class", "edits": [
+          {"file": "scoring.py", "old": "    text = re.sub(r\"[^a-z0-9\\s]\", \"\", text)\n", "new": ""}
+        ],
+         "expect": "a contraction and its expansion are the same words"},
+        {"name": "+ contractions before punctuation", "edits": [
+          {"file": "scoring.py", "old": "    text = text.translate(_punctuation_table())\n    if language == \"en\":\n        text = CONTRACTION.sub(lambda m: CONTRACTIONS[m.group()], text)\n", "new": "    if language == \"en\":\n        text = CONTRACTION.sub(lambda m: CONTRACTIONS[m.group()], text)\n    text = text.translate(_punctuation_table())\n    if language == \"en\":\n"}
+        ],
+         "expect": "scoring should keep up with a full test set"},
+        {"name": "+ punctuation table built once", "edits": [
+          {"file": "scoring.py", "old": "import re\n", "new": "import functools\nimport re\n"},
+          {"file": "scoring.py", "old": "def _punctuation_table()", "new": "@functools.cache\ndef _punctuation_table()"}
+        ],
+         "expect": "PASSED"}
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {"test": "test_normalized_scoring", "name": "the lesson's ASCII regex in place of the slow Unicode table",
+     "edits": [
+       {"file": "scoring.py", "old": "    text = text.translate(_punctuation_table())\n", "new": "    text = re.sub(r\"[^a-z0-9\\s]\", \" \", text)\n"}
+     ],
+     "expect": "nothing to score in reference"},
+    {"test": "test_normalized_scoring", "name": "accents folded away (NFKD, combining marks dropped)",
+     "edits": [
+       {"file": "scoring.py", "old": "    text = unicodedata.normalize(\"NFKC\", text)", "new": "    text = \"\".join(c for c in unicodedata.normalize(\"NFKD\", text) if not unicodedata.combining(c))\n    text = unicodedata.normalize(\"NFKC\", text)"}
+     ],
+     "expect": "an accent is part of the word"},
+    {"test": "test_normalized_scoring", "name": "letters only: digits dropped with the punctuation",
+     "edits": [
+       {"file": "scoring.py", "old": "    text = text.translate(_punctuation_table())\n", "new": "    text = \"\".join(c if c.isalpha() or c.isspace() else \" \" for c in text)\n"}
+     ],
+     "expect": "a wrong digit is a real error"},
+    {"test": "test_normalized_scoring", "name": "apostrophes kept so contractions survive the punctuation pass",
+     "edits": [
+       {"file": "scoring.py", "old": "    if language == \"en\":\n        text = CONTRACTION.sub(lambda m: CONTRACTIONS[m.group()], text)\n    text = text.translate(_punctuation_table())\n", "new": "    text = text.translate(_punctuation_table())\n    if language == \"en\":\n        text = CONTRACTION.sub(lambda m: CONTRACTIONS[m.group()], text)\n"},
+       {"file": "scoring.py", "old": "if unicodedata.category(chr(code))[0] in \"PS\"", "new": "if unicodedata.category(chr(code))[0] in \"PS\" and chr(code) != \"'\""}
+     ],
+     "expect": "quotation marks are punctuation"},
+    {"test": "test_normalized_scoring", "name": "the regex [^\\w\\s] in place of the slow table (marks are not \\w)",
+     "edits": [
+       {"file": "scoring.py", "old": "    text = text.translate(_punctuation_table())\n", "new": "    text = re.sub(r\"[^\\w\\s]\", \" \", text)\n"}
+     ],
+     "expect": "a vowel sign is part of the word"},
+    {"test": "test_normalized_scoring", "name": "ASCII string.punctuation in place of the Unicode table",
+     "edits": [
+       {"file": "scoring.py", "old": "    text = text.translate(_punctuation_table())\n", "new": "    text = text.translate(str.maketrans({c: \" \" for c in __import__(\"string\").punctuation}))\n"}
+     ],
+     "expect": "full-width forms and punctuation are formatting, not errors"},
+    {"test": "test_normalized_scoring", "name": "NFC instead of NFKC",
+     "edits": [
+       {"file": "scoring.py", "old": "unicodedata.normalize(\"NFKC\", text)", "new": "unicodedata.normalize(\"NFC\", text)"}
+     ],
+     "expect": "full-width forms and punctuation are formatting, not errors"},
+    {"test": "test_leaderboard", "name": "no commit after insert",
+     "edits": [
+       {"file": "board.py", "old": "        with self._db:\n            self._db.execute(\n                f\"INSERT", "new": "        if True:\n            self._db.execute(\n                f\"INSERT"}
+     ],
+     "expect": "KeyError"},
+    {"test": "test_leaderboard", "name": "CREATE TABLE without IF NOT EXISTS",
+     "edits": [
+       {"file": "board.py", "old": "CREATE TABLE IF NOT EXISTS", "new": "CREATE TABLE"}
+     ],
+     "expect": "table results already exists"},
+    {"test": "test_leaderboard", "name": "INSERT OR REPLACE as the upsert",
+     "edits": [
+       {"file": "board.py", "old": "                f\"INSERT INTO results ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)\"\n                \" ON CONFLICT (model, benchmark, metric) DO UPDATE SET\"\n                \" value = excluded.value, n = excluded.n, ci_low = excluded.ci_low,\"\n                \" ci_high = excluded.ci_high, protocol = excluded.protocol\",\n", "new": "                f\"INSERT OR REPLACE INTO results ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)\",\n"}
+     ],
+     "expect": "a tie keeps the order the models first appeared"},
+    {"test": "test_leaderboard", "name": "append-only rows, no unique key",
+     "edits": [
+       {"file": "board.py", "old": ",\n    UNIQUE (model, benchmark, metric)\n", "new": "\n"},
+       {"file": "board.py", "old": "                f\"INSERT INTO results ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)\"\n                \" ON CONFLICT (model, benchmark, metric) DO UPDATE SET\"\n                \" value = excluded.value, n = excluded.n, ci_low = excluded.ci_low,\"\n                \" ci_high = excluded.ci_high, protocol = excluded.protocol\",\n", "new": "                f\"INSERT INTO results ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)\",\n"}
+     ],
+     "expect": "a re-run replaces the result"},
+    {"test": "test_leaderboard", "name": "every metric ranked ascending",
+     "edits": [
+       {"file": "board.py", "old": "order = \"ASC\" if spec.lower_is_better else \"DESC\"", "new": "order = \"ASC\""}
+     ],
+     "expect": "a higher UTMOS ranks first"},
+    {"test": "test_leaderboard", "name": "protocols not checked",
+     "edits": [
+       {"file": "board.py", "old": "        if len(protocols) > 1:\n", "new": "        if False:\n"}
+     ],
+     "expect": "DID NOT RAISE"},
+    {"test": "test_leaderboard", "name": "interval read back as a JSON list",
+     "edits": [
+       {"file": "board.py", "old": "n, (low, high), protocol)", "new": "n, [low, high], protocol)"}
+     ],
+     "expect": "a result comes back exactly as submitted"},
+    {"test": "test_leaderboard", "name": "values stored rounded to four decimals",
+     "edits": [
+       {"file": "board.py", "old": "(model, benchmark, metric, value, n, low, high, protocol),", "new": "(model, benchmark, metric, round(value, 4), n, low, high, protocol),"}
+     ],
+     "expect": "a result comes back exactly as submitted"},
+    {"test": "test_leaderboard", "name": "error rates capped at 1",
+     "edits": [
+       {"file": "board.py", "old": "        if not spec.minimum <= value <= spec.maximum:\n", "new": "        if not spec.minimum <= value <= (1.0 if spec.lower_is_better else spec.maximum):\n"}
+     ],
+     "expect": "got 1.25"},
+    {"test": "test_leaderboard", "name": "ties broken by model name",
+     "edits": [
+       {"file": "board.py", "old": "f\" ORDER BY value {order}, seq\",", "new": "f\" ORDER BY value {order}, model\","}
+     ],
+     "expect": "a tie keeps the order the models first appeared"},
+    {"test": "test_leaderboard", "name": "INSERT OR REPLACE with ties broken by model name",
+     "edits": [
+       {"file": "board.py", "old": "f\" ORDER BY value {order}, seq\",", "new": "f\" ORDER BY value {order}, model\","},
+       {"file": "board.py", "old": "                f\"INSERT INTO results ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)\"\n                \" ON CONFLICT (model, benchmark, metric) DO UPDATE SET\"\n                \" value = excluded.value, n = excluded.n, ci_low = excluded.ci_low,\"\n                \" ci_high = excluded.ci_high, protocol = excluded.protocol\",\n", "new": "                f\"INSERT OR REPLACE INTO results ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)\",\n"}
+     ],
+     "expect": "a tie keeps the order the models first appeared"},
+    {"test": "test_leaderboard", "name": "a worse re-run keeps the better result",
+     "edits": [
+       {"file": "board.py", "old": "        with self._db:\n            self._db.execute(\n                f\"INSERT", "new": "        old = self._db.execute(\"SELECT value FROM results WHERE model = ? AND benchmark = ? AND metric = ?\", (model, benchmark, metric)).fetchone()\n        if old is not None and (old[0] < value if spec.lower_is_better else old[0] > value):\n            return\n        with self._db:\n            self._db.execute(\n                f\"INSERT"}
+     ],
+     "expect": "a reopened board has every result, as last submitted"},
+    {"test": "test_leaderboard", "name": "the upsert leaves the protocol unchanged",
+     "edits": [
+       {"file": "board.py", "old": "\" ci_high = excluded.ci_high, protocol = excluded.protocol\",", "new": "\" ci_high = excluded.ci_high\","}
+     ],
+     "expect": "a reopened board has every result, as last submitted"},
+    {"test": "test_leaderboard", "name": "mixed protocols rejected at submit",
+     "edits": [
+       {"file": "board.py", "old": "        with self._db:\n            self._db.execute(\n                f\"INSERT", "new": "        if self._db.execute(\"SELECT 1 FROM results WHERE benchmark = ? AND metric = ? AND protocol != ?\", (benchmark, metric, protocol)).fetchone():\n            raise ValueError(\"protocol differs from the board's\")\n        with self._db:\n            self._db.execute(\n                f\"INSERT"}
+     ],
+     "expect": "protocol differs from the board's"},
+    {"test": "test_leaderboard", "name": "ranking quietly keeps one protocol",
+     "edits": [
+       {"file": "board.py", "old": "        protocols = sorted({entry.protocol for entry in entries})\n        if len(protocols) > 1:\n            raise ValueError(f\"{benchmark} {metric} mixes protocols {protocols}\")\n        return entries\n", "new": "        return [e for e in entries if e.protocol == entries[0].protocol]\n"}
+     ],
+     "expect": "DID NOT RAISE"},
+    {"test": "test_leaderboard", "name": "interval not checked against the value",
+     "edits": [
+       {"file": "board.py", "old": "        if not low <= value <= high:\n            raise ValueError(f\"interval {ci} does not contain {value}\")\n", "new": ""}
+     ],
+     "expect": "DID NOT RAISE"},
+    {"test": "test_paired_bootstrap", "name": "replicates not sorted",
+     "edits": [
+       {"file": "bootstrap.py", "old": "    ordered = sorted(values)\n", "new": "    ordered = list(values)\n"}
+     ],
+     "expect": "replicates come in any order"},
+    {"test": "test_paired_bootstrap", "name": "k truncated with int()",
+     "edits": [
+       {"file": "bootstrap.py", "old": "    k = round(len(ordered) * (1 - confidence) / 2)\n", "new": "    k = int(len(ordered) * (1 - confidence) / 2)\n"}
+     ],
+     "expect": "a 90% interval drops 50 at each end"},
+    {"test": "test_paired_bootstrap", "name": "upper end one past the kept replicates",
+     "edits": [
+       {"file": "bootstrap.py", "old": "ordered[len(ordered) - 1 - k]", "new": "ordered[len(ordered) - k]"}
+     ],
+     "expect": "drop the same number of replicates at each end"},
+    {"test": "test_paired_bootstrap", "name": "each system resampled on its own (unpaired)",
+     "edits": [
+       {"file": "bootstrap.py", "old": "    deltas = [delta([rng.randrange(n) for _ in range(n)]) for _ in range(replicates)]\n", "new": "    def unpaired() -> float:\n        a = [rng.randrange(n) for _ in range(n)]\n        b = [rng.randrange(n) for _ in range(n)]\n        return (sum(cand[i] for i in b) / sum(units[i] for i in b)\n                - sum(base[i] for i in a) / sum(units[i] for i in a))\n\n    deltas = [unpaired() for _ in range(replicates)]\n"}
+     ],
+     "expect": "one error fewer on most of them is a clear win"},
+    {"test": "test_paired_bootstrap", "name": "runs paired by position, not by utterance id",
+     "edits": [
+       {"file": "bootstrap.py", "old": "    units = [baseline[u][1] for u in ids]\n    base = [baseline[u][0] for u in ids]\n    cand = [candidate[u][0] for u in ids]\n", "new": "    units = [n for _, n in baseline.values()]\n    base = [e for e, _ in baseline.values()]\n    cand = [e for e, _ in candidate.values()]\n"}
+     ],
+     "expect": "one error fewer on most of them is a clear win"},
+    {"test": "test_paired_bootstrap", "name": "ties counted as wins",
+     "edits": [
+       {"file": "bootstrap.py", "old": "sum(d < 0 for d in deltas)", "new": "sum(d <= 0 for d in deltas)"}
+     ],
+     "expect": "a replicate that leaves that utterance out is a tie, not a win"},
+    {"test": "test_paired_bootstrap", "name": "the global random module, seeded",
+     "edits": [
+       {"file": "bootstrap.py", "old": "    rng = random.Random(seed)\n", "new": "    random.seed(seed)\n    rng = random\n"}
+     ],
+     "expect": "the bootstrap leaves the global random state alone"},
+    {"test": "test_paired_bootstrap", "name": "ids drawn in the order the run lists them",
+     "edits": [
+       {"file": "bootstrap.py", "old": "    ids = sorted(baseline)\n", "new": "    ids = list(baseline)\n"}
+     ],
+     "expect": "whatever order the runs list utterances in"},
+    {"test": "test_paired_bootstrap", "name": "delta as baseline minus candidate",
+     "edits": [
+       {"file": "bootstrap.py", "old": "return sum(cand[i] for i in draw) / total - sum(base[i] for i in draw) / total", "new": "return sum(base[i] for i in draw) / total - sum(cand[i] for i in draw) / total"}
+     ],
+     "expect": "delta is the candidate's corpus error rate minus the baseline's"},
+    {"test": "test_paired_bootstrap", "name": "a fresh Random(seed) for every replicate",
+     "edits": [
+       {"file": "bootstrap.py", "old": "    deltas = [delta([rng.randrange(n) for _ in range(n)]) for _ in range(replicates)]\n", "new": "    deltas = [delta([r.randrange(n) for _ in range(n)]) for r in (random.Random(seed) for _ in range(replicates))]\n"}
+     ],
+     "expect": "one fixed utterance is not a significant win"},
+    {"test": "test_paired_bootstrap", "name": "utterances drawn without replacement",
+     "edits": [
+       {"file": "bootstrap.py", "old": "    deltas = [delta([rng.randrange(n) for _ in range(n)]) for _ in range(replicates)]\n", "new": "    deltas = [delta(rng.sample(range(n), n)) for _ in range(replicates)]\n"}
+     ],
+     "expect": "the seed decides the draws"},
+    {"test": "test_paired_bootstrap", "name": "delta reported as the mean of the replicates",
+     "edits": [
+       {"file": "bootstrap.py", "old": "        delta(list(range(n))),\n", "new": "        sum(deltas) / replicates,\n"}
+     ],
+     "expect": "delta is the candidate's corpus error rate minus the baseline's"},
+    {"test": "test_paired_bootstrap", "name": "delta as the mean of per-utterance rate differences",
+     "edits": [
+       {"file": "bootstrap.py", "old": "        delta(list(range(n))),\n", "new": "        sum(cand[i] / units[i] - base[i] / units[i] for i in range(n)) / n,\n"}
+     ],
+     "expect": "delta is the candidate's corpus error rate minus the baseline's"},
+    {"test": "test_paired_bootstrap", "name": "every replicate averages per-utterance differences",
+     "edits": [
+       {"file": "bootstrap.py", "old": "    def delta(draw: list[int]) -> float:\n        total = sum(units[i] for i in draw)\n        return sum(cand[i] for i in draw) / total - sum(base[i] for i in draw) / total\n", "new": "    def delta(draw: list[int]) -> float:\n        return sum(cand[i] / units[i] - base[i] / units[i] for i in draw) / len(draw)\n"}
+     ],
+     "expect": "delta is the candidate's corpus error rate minus the baseline's"},
+    {"test": "test_paired_bootstrap", "name": "coverage checked by count only",
+     "edits": [
+       {"file": "bootstrap.py", "old": "    if baseline.keys() != candidate.keys():\n", "new": "    if len(baseline) != len(candidate):\n"}
+     ],
+     "expect": "KeyError: 'utt39'"},
+    {"test": "test_paired_bootstrap", "name": "only the baseline's ids checked",
+     "edits": [
+       {"file": "bootstrap.py", "old": "    if baseline.keys() != candidate.keys():\n        raise ValueError(\"the two runs cover different utterances\")\n", "new": "    for utterance in baseline:\n        if utterance not in candidate:\n            raise ValueError(\"the two runs cover different utterances\")\n"}
+     ],
+     "expect": "DID NOT RAISE"},
+    {"test": "test_stream_report", "name": "mean of per-utterance rates, as in the lesson's ttr_wer",
+     "edits": [
+       {"file": "stream.py", "old": "            tally[1] += result.errors\n            tally[2] += result.units\n", "new": "            tally[1] += result.errors / result.units\n            tally[2] += 1\n"}
+     ],
+     "expect": "a rate pools its domain's errors over its units"},
+    {"test": "test_stream_report", "name": "pooled row as the mean of the domain rates",
+     "edits": [
+       {"file": "stream.py", "old": "writer.writerow((seen, POOLED, pooled[0], str(pooled[1] / pooled[2])))", "new": "writer.writerow((seen, POOLED, pooled[0], str(sum(t[1] / t[2] for t in totals.values()) / len(totals))))"}
+     ],
+     "expect": "* pools every utterance"},
+    {"test": "test_stream_report", "name": "rows joined by hand instead of the csv module",
+     "edits": [
+       {"file": "stream.py", "old": "    writer = csv.writer(out)\n", "new": "    writer = type(\"Rows\", (), {\"writerow\": lambda self, row: out.write(\",\".join(map(str, row)) + \"\\n\")})()\n"}
+     ],
+     "expect": "invalid literal for int()"},
+    {"test": "test_stream_report", "name": "every counted within each batch",
+     "edits": [
+       {"file": "stream.py", "old": "        for result in batch:\n", "new": "        for count, result in enumerate(batch, 1):\n"},
+       {"file": "stream.py", "old": "            if seen % every == 0:\n", "new": "            if count % every == 0:\n"}
+     ],
+     "expect": "the same report whatever the batching"},
+    {"test": "test_stream_report", "name": "a final report written even when nothing is new",
+     "edits": [
+       {"file": "stream.py", "old": "    if seen != reported:\n", "new": "    if True:\n"}
+     ],
+     "expect": "a report that already covers every utterance is not repeated"},
+    {"test": "test_stream_report", "name": "reads the whole stream before reporting",
+     "edits": [
+       {"file": "stream.py", "old": "    async for batch in batches:\n", "new": "    everything = [batch async for batch in batches]\n    for batch in everything:\n"}
+     ],
+     "expect": "write each report as soon as it is due"},
+    {"test": "test_stream_report", "name": "header repeated before every report",
+     "edits": [
+       {"file": "stream.py", "old": "        pooled = [0, 0, 0]\n", "new": "        writer.writerow(HEADER)\n        pooled = [0, 0, 0]\n"}
+     ],
+     "expect": "invalid literal for int() with base 10: 'seen'"},
+    {"test": "test_stream_report", "name": "header written with the first report",
+     "edits": [
+       {"file": "stream.py", "old": "    writer.writerow(HEADER)\n    yield drain()\n", "new": "    pending = [HEADER]\n"},
+       {"file": "stream.py", "old": "        pooled = [0, 0, 0]\n", "new": "        writer.writerows(pending)\n        pending.clear()\n        pooled = [0, 0, 0]\n"}
+     ],
+     "expect": "an empty run still writes the header"},
+    {"test": "test_stream_report", "name": "domains in arrival order",
+     "edits": [
+       {"file": "stream.py", "old": "        for domain in sorted(totals):\n", "new": "        for domain in totals:\n"}
+     ],
+     "expect": "a rate pools its domain's errors over its units"},
+    {"test": "test_stream_report", "name": "reports only at batch boundaries",
+     "edits": [
+       {"file": "stream.py", "old": "            seen += 1\n            if seen % every == 0:\n                report()\n                reported = seen\n                yield drain()\n", "new": "            seen += 1\n        if seen - reported >= every:\n            report()\n            reported = seen\n            yield drain()\n"}
+     ],
+     "expect": "a rate pools its domain's errors over its units"},
+    {"test": "test_stream_report", "name": "rate written with four decimals",
+     "edits": [
+       {"file": "stream.py", "old": "str(tally[1] / tally[2])", "new": "f\"{tally[1] / tally[2]:.4f}\""}
+     ],
+     "expect": "a rate pools its domain's errors over its units"},
+    {"test": "test_stream_report", "name": "csv.QUOTE_NONNUMERIC",
+     "edits": [
+       {"file": "stream.py", "old": "    writer = csv.writer(out)\n", "new": "    writer = csv.writer(out, quoting=csv.QUOTE_NONNUMERIC)\n"}
+     ],
+     "expect": "the first report comes after 20 utterances"},
+    {"test": "test_suite_scores", "name": "raw metric values used as scores",
+     "edits": [
+       {"file": "suite.py", "old": "score = min(1.0, max(0.0, (value - spec.worst) / (spec.best - spec.worst)))", "new": "score = min(1.0, max(0.0, value))"}
+     ],
+     "expect": "a lower error rate scores higher"},
+    {"test": "test_suite_scores", "name": "scores not clamped",
+     "edits": [
+       {"file": "suite.py", "old": "score = min(1.0, max(0.0, (value - spec.worst) / (spec.best - spec.worst)))", "new": "score = (value - spec.worst) / (spec.best - spec.worst)"}
+     ],
+     "expect": "scores stay between 0 and 1"},
+    {"test": "test_suite_scores", "name": "weights not divided out",
+     "edits": [
+       {"file": "suite.py", "old": "score = sum(weight * below for weight, below in counted) / total", "new": "score = sum(weight * below for weight, below in counted)"}
+     ],
+     "expect": "a subset weighs its metrics"},
+    {"test": "test_suite_scores", "name": "missing results averaged away over the children present",
+     "edits": [
+       {"file": "suite.py", "old": "            score = None\n            if all(below is not None for _, below in counted):\n                score = sum(weight * below for weight, below in counted) / total\n", "new": "            present = [(weight, below) for weight, below in counted if below is not None]\n            score = None\n            if present:\n                score = sum(w * b for w, b in present) / sum(w for w, _ in present)\n"}
+     ],
+     "expect": "a missing result is never averaged away"},
+    {"test": "test_suite_scores", "name": "a missing weight-0 child blocks its parent",
+     "edits": [
+       {"file": "suite.py", "old": "                if weight:\n                    counted.append((weight, below))\n", "new": "                counted.append((weight, below))\n"}
+     ],
+     "expect": "a missing weight-0 result blocks nothing"},
+    {"test": "test_suite_scores", "name": "1 - value for lower-is-better, the raw value otherwise",
+     "edits": [
+       {"file": "suite.py", "old": "score = min(1.0, max(0.0, (value - spec.worst) / (spec.best - spec.worst)))", "new": "score = min(1.0, max(0.0, 1 - value if spec.lower_is_better else value))"}
+     ],
+     "expect": "a subset weighs its metrics"},
+    {"test": "test_suite_scores", "name": "weights read only on metric leaves",
+     "edits": [
+       {"file": "suite.py", "old": "                weight = child.get(\"weight\", 1)\n", "new": "                weight = child.get(\"weight\", 1) if \"metric\" in child else 1\n"}
+     ],
+     "expect": "a weight-0 subset does not count"},
+    {"test": "test_suite_scores", "name": "weight-0 children left out of the result",
+     "edits": [
+       {"file": "suite.py", "old": "                below = visit(child, f\"{path}/{_name(child)}\", node[\"name\"])\n                if weight:\n                    counted.append((weight, below))\n", "new": "                if not weight:\n                    continue\n                below = visit(child, f\"{path}/{_name(child)}\", node[\"name\"])\n                counted.append((weight, below))\n"}
+     ],
+     "expect": "KeyError: 'audio-2026/understanding/mmau-pro-multi-audio/accuracy'"},
+    {"test": "test_suite_scores", "name": "a missing result scored as the metric's worst value",
+     "edits": [
+       {"file": "suite.py", "old": "            value = results.get((parent, node[\"metric\"]))\n", "new": "            value = results.get((parent, node[\"metric\"]), spec.worst)\n"}
+     ],
+     "expect": "a missing result has no score"},
+    {"test": "test_suite_scores", "name": "unknown metric rejected only when it has a result",
+     "edits": [
+       {"file": "suite.py", "old": "            spec = METRICS.get(node[\"metric\"])\n            if spec is None:\n                raise ValueError(f\"{path}: unknown metric {node['metric']!r}\")\n            value = results.get((parent, node[\"metric\"]))\n            score = None\n            if value is not None:\n", "new": "            value = results.get((parent, node[\"metric\"]))\n            score = None\n            if value is not None:\n                spec = METRICS.get(node[\"metric\"])\n                if spec is None:\n                    raise ValueError(f\"{path}: unknown metric {node['metric']!r}\")\n"}
+     ],
+     "expect": "DID NOT RAISE"},
+    {"test": "test_suite_scores", "name": "nodes keyed by name, not path",
+     "edits": [
+       {"file": "suite.py", "old": "        if path in scores:\n            raise ValueError(f\"two nodes at {path}\")\n        scores[path] = score\n", "new": "        scores[path.rsplit(\"/\", 1)[-1]] = score\n"}
+     ],
+     "expect": "KeyError: 'audio-2026/asr/librispeech-other/wer'"}
+  ]
+}

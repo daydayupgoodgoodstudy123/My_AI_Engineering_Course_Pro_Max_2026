@@ -1,0 +1,132 @@
+{
+  "lesson": "phases/06-speech-and-audio/17-audio-evaluation-metrics",
+  "title": "Audio Evaluation — WER, MOS, UTMOS, MMAU, FAD, and the Open Leaderboards",
+  "format": "staged-brownfield",
+  "service": "EvalSuite: normalized WER/CER scoring, a SQLite leaderboard with intervals and protocols, paired bootstrap comparisons, a streaming per-domain error-rate report and weighted suite scores",
+  "sources": {
+    "docs/en.md": "1384d50a713138f0b4459e40bf3c413b11a4e25171a2085daee16fd02be1ed5b",
+    "code/main.py": "3d88905d3dcc32757a61ec1143f604ccd452af75b9d1880d825f5b9f4d74deb6"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_normalized_scoring",
+      "kind": "debug",
+      "lesson_anchor": "ASR metrics: WER and CER; Use It rule 1 (normalize before scoring); code/main.py normalize and cer; quiz Q9 (contractions and numbers, expand before stripping punctuation) and Q10 (CER without normalization)",
+      "planted_bugs": [
+        "the character path (CER) splits the raw text and skips normalize, as the lesson's cer() does, so a full-width digit and the ideographic full stop count as errors",
+        "normalize keeps the lesson's re.sub(r'[^a-z0-9\\s]', '', text) after the Unicode punctuation table and deletes Han, kana, Cyrillic and accented letters; the failure surfaces two calls away, as a ValueError in error_counts about an empty reference",
+        "contractions are expanded after the punctuation table has turned the apostrophe into a space, so what's never matches",
+        "_punctuation_table rescans all 1,114,112 code points on every normalize call"
+      ],
+      "timing_assert": "24 scored pairs under 0.1 s (rebuilding the table costs about 46 ms per normalize call, 2.2 s for the 48 calls on an idle machine and up to 4.3 s under load; built once, about 0.2 ms)",
+      "overfix_guard": "the lesson's ASCII regex brought back for speed empties the Chinese reference; a [^\\w\\s] regex or an isalnum() filter turns Devanagari vowel signs into spaces, so किताबें and किताब become the same letters (must stay 1/4); ASCII string.punctuation or NFC instead of NFKC keeps the Japanese full stop or the full-width digit; NFKD accent stripping makes 'un café noir' match 'un cafe noir' (must stay 1/3); a letters-only filter drops digits (3号楼 against 5号楼 must stay 1/3); exempting the apostrophe from the punctuation pass leaves the quotes on 'yes'"
+    },
+    {
+      "part": 2,
+      "test": "test_leaderboard",
+      "kind": "model and persistence",
+      "lesson_anchor": "The 2026 leaderboards; Use It rules 1 and 3 (report the normalization rule, run one canonical public benchmark); Pitfall: FAD depends on reference set; quiz Q2 (WER can pass 100%)",
+      "exactness": "values and interval bounds round-trip exactly across close and reopen; two WERs one error apart on the 52,343 words of LibriSpeech test-other, both 6.05 %, still rank by exact value; the interval comes back as a tuple",
+      "traps": [
+        "missing commit",
+        "CREATE TABLE without IF NOT EXISTS",
+        "INSERT OR REPLACE moves a re-run model behind its ties",
+        "ties broken by model name (the first tied model sorts last by name)",
+        "append-only rows without a unique key",
+        "a worse re-run kept out (aed-1.5b scores 5.75 % under whisper-en, 6.05 % under the board's normalizer)",
+        "every metric ranked ascending",
+        "mixed protocols ranked together, quietly filtered, or rejected at submit",
+        "the upsert leaves the protocol column unchanged",
+        "interval back as a JSON list",
+        "values rounded to four decimals",
+        "error rates capped at 1"
+      ],
+      "clarifying_questions": [
+        "keep the best of several runs",
+        "tie order",
+        "what a protocol is"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_paired_bootstrap",
+      "kind": "core algorithm",
+      "lesson_anchor": "Use It rule 2 (report distributions, not averages); comparing models on the 2026 leaderboards; quiz Q11(c) (report a confidence interval)",
+      "traps": [
+        "replicates not sorted",
+        "k truncated with int(): 1 - 0.9 is 0.09999999999999998",
+        "upper end one past the kept replicates",
+        "each system resampled on its own",
+        "runs paired by position instead of utterance id",
+        "utterance coverage checked by count, or only from the baseline's side",
+        "delta as the mean of the replicates or of per-utterance differences",
+        "ties counted as wins in p_better",
+        "the global random state, or a fresh Random(seed) for every replicate",
+        "draws without replacement",
+        "ids drawn in the order a run lists them",
+        "delta sign"
+      ],
+      "integration": "two runs of six voice commands scored with Part 1 (formatting is free, a failed decode counts as every word deleted), compared with the bootstrap, and published to the Part 2 board with a bootstrap interval",
+      "clarifying_questions": [
+        "resample utterances or words",
+        "ties in p_better",
+        "which random API"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_stream_report",
+      "kind": "streaming",
+      "lesson_anchor": "Pitfall: aggregate WER hides slices (report by demographic slice); quiz Q10(b) (corpus-level WER sums edits over words); Build It Step 2 ttr_wer averages per-utterance WER",
+      "wire_format": "CSV with one header row, written with the csv module, decided by the test's csv.DictReader; one domain name contains a comma",
+      "traps": [
+        "mean of per-utterance rates",
+        "pooled row as the mean of the domain rates",
+        "rows joined by hand, or quoted with QUOTE_NONNUMERIC",
+        "every counted within each batch, or checked only when a batch ends",
+        "final report repeated",
+        "reading the whole stream first",
+        "no header on an empty run, or a header before every report",
+        "domains in arrival order",
+        "rates rounded to fixed decimals"
+      ],
+      "clarifying_questions": [
+        "empty run",
+        "duplicate utterances",
+        "line ending",
+        "a report per batch"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_suite_scores",
+      "kind": "recursive structure",
+      "lesson_anchor": "The task-to-metric table; MMAU-Pro categories (multi-audio ~22%) and Use It rule 2 (per-category reporting); TTS round-trip WER next to UTMOS",
+      "traps": [
+        "raw metric values used as scores",
+        "1 - value instead of the METRICS scale (UTMOS runs 1 to 5)",
+        "scores not clamped (a CER of 1.25)",
+        "weights not divided out",
+        "weights read only on metric leaves",
+        "missing results averaged away, or scored as 0",
+        "a missing weight-0 child blocks its parent, or is left out of the result",
+        "unknown metric accepted when it has no result",
+        "results keyed by name instead of path"
+      ],
+      "clarifying_questions": [
+        "missing result",
+        "weight 0"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: Chinese and Japanese are already routed to CER; the planted CER defect is the lesson code's own, cer() scoring the raw text (quiz Q10). Case, width and punctuation come with that bug, Unicode letters with the lesson's ASCII-only class, contractions with their order (quiz Q9). Numbers are spelled out by working code and asserted, which keeps Part 1 at four layers.",
+    "Part 1: the timing defect is a Unicode punctuation table rebuilt on every call. Edit distance stays correct because 06/04 already plants its exponential recursion.",
+    "Part 2: every entry also carries a protocol (the text normalizer behind a WER, the reference set behind a FAD), because the lesson asks to report the normalization rule and to compare FAD against one reference set; ranking mixed protocols raises. The upsert must keep a model's first-appearance place among ties, which rules out INSERT OR REPLACE; the model that appears first sorts last by name, so a tie-break by name fails as well. A worse re-run still replaces the result. The INSERT OR REPLACE trap is shared with 06/10's result store; what is new here is exact ranking of near-equal floats, metric direction and range, and protocol comparability.",
+    "Part 3: percentile_interval is a separately tested helper with a fixed rule, so the index and the 1 - 0.9 rounding traps are exact. The bootstrap itself is checked through properties that hold for any way of drawing from random.Random(seed) (checked over 300 seeds and four draw methods), not through hard-coded draws.",
+    "Part 4: the wire format is CSV (06/03 uses NDJSON, 06/04 and 06/09 SSE, 06/06 RTTM). A report is due every N utterances rather than per batch, so the output does not depend on batching, and a pooled '*' row sits next to the per-domain rows.",
+    "Part 5: a metric leaf reads the result of its parent subset and is mapped onto 0..1 with the metric's worst and best values in METRICS, the same table Part 2 ranks with. A weight-0 child is reported but not counted."
+  ]
+}
