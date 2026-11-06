@@ -1,0 +1,694 @@
+{
+  "package": "clonegate",
+  "tests": [
+    "test_watermark_roundtrip",
+    "test_consent_registry",
+    "test_convert_with_consent",
+    "test_watch_stream",
+    "test_policy_decisions"
+  ],
+  "layers": [
+    {
+      "test": "test_watermark_roundtrip",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a separate verifier with the same key reads every stamped clip"
+        },
+        {
+          "name": "fresh chip sequence per call",
+          "edits": [
+            {
+              "file": "watermark.py",
+              "old": "        while True:\n            yield 1 if self._rng.random() < 0.5 else -1\n",
+              "new": "        rng = random.Random(self.key)\n        while True:\n            yield 1 if rng.random() < 0.5 else -1\n"
+            }
+          ],
+          "expect": "scores do not change with playback volume"
+        },
+        {
+          "name": "+ scores divided by root energy",
+          "edits": [
+            {
+              "file": "watermark.py",
+              "old": "        return list(self._corr)\n",
+              "new": "        return [c / e ** 0.5 if e > 0.0 else 0.0 for c, e in zip(self._corr, self._energy)]\n"
+            }
+          ],
+          "expect": "a bit without evidence counts as wrong"
+        },
+        {
+          "name": "+ divide by the payload length",
+          "edits": [
+            {
+              "file": "watermark.py",
+              "old": "    return sum(e == o for e, o in decided) / len(decided)\n",
+              "new": "    return sum(e == o for e, o in decided) / len(expected)\n"
+            }
+          ],
+          "expect": "evidence should be quick to update as a stream arrives"
+        },
+        {
+          "name": "+ incremental evidence",
+          "edits": [
+            {
+              "file": "watermark.py",
+              "old": "        self._audio: list[float] = []\n",
+              "new": "        self._audio: list[float] = []\n        self._chips = watermarker.chips()\n"
+            },
+            {
+              "file": "watermark.py",
+              "old": "        self._audio.extend(samples)\n        corr = [0.0] * self.n_bits\n        energy = [0.0] * self.n_bits\n        for i, (x, chip) in enumerate(zip(self._audio, self._watermarker.chips())):\n            corr[i % self.n_bits] += x * chip\n            energy[i % self.n_bits] += x * x\n        self._corr, self._energy = corr, energy\n",
+              "new": "        for x in samples:\n            b = len(self._audio) % self.n_bits\n            self._corr[b] += x * next(self._chips)\n            self._energy[b] += x * x\n            self._audio.append(x)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_watermark_roundtrip",
+      "name": "non-blind: detect subtracts the host kept by embed",
+      "edits": [
+        {
+          "file": "watermark.py",
+          "old": "        chips = self.chips()\n        n = self.n_bits\n",
+          "new": "        self._host = list(audio)\n        chips = self.chips()\n        n = self.n_bits\n"
+        },
+        {
+          "file": "watermark.py",
+          "old": "        evidence.add(audio)\n",
+          "new": "        evidence.add([a - h for a, h in zip(audio, self._host)])\n"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_watermark_roundtrip",
+      "name": "chip sequence restarted at every add",
+      "edits": [
+        {
+          "file": "watermark.py",
+          "old": "        self._chips = watermarker.chips()\n",
+          "new": "        self._chips = watermarker.chips()\n        self._watermarker = watermarker\n"
+        },
+        {
+          "file": "watermark.py",
+          "old": "        corr, energy, chips = self._corr, self._energy, self._chips\n",
+          "new": "        corr, energy, chips = self._corr, self._energy, self._watermarker.chips()\n"
+        }
+      ],
+      "expect": "evidence fed in chunks matches evidence fed at once"
+    },
+    {
+      "test": "test_watermark_roundtrip",
+      "name": "bit index restarted at every add",
+      "edits": [
+        {
+          "file": "watermark.py",
+          "old": "        b = self.samples % self.n_bits\n",
+          "new": "        b = 0\n"
+        }
+      ],
+      "expect": "evidence fed in chunks matches evidence fed at once"
+    },
+    {
+      "test": "test_watermark_roundtrip",
+      "name": "scores divided by energy, not root energy",
+      "edits": [
+        {
+          "file": "watermark.py",
+          "old": "c / math.sqrt(e) if e > 0.0",
+          "new": "c / e if e > 0.0"
+        }
+      ],
+      "expect": "scores do not change with playback volume"
+    },
+    {
+      "test": "test_watermark_roundtrip",
+      "name": "one shared RNG reseeded at every call",
+      "edits": [
+        {
+          "file": "watermark.py",
+          "old": "        self.threshold = threshold\n",
+          "new": "        self.threshold = threshold\n        self._rng = random.Random(key)\n"
+        },
+        {
+          "file": "watermark.py",
+          "old": "        rng = random.Random(self.key)\n        while True:\n            yield 1 if rng.random() < 0.5 else -1\n",
+          "new": "        self._rng.seed(self.key)\n        while True:\n            yield 1 if self._rng.random() < 0.5 else -1\n"
+        }
+      ],
+      "expect": "two streams can be checked at the same time"
+    },
+    {
+      "test": "test_watermark_roundtrip",
+      "name": "chips regenerated from the key and skipped ahead on every add",
+      "edits": [
+        {
+          "file": "watermark.py",
+          "old": "import math\n",
+          "new": "import itertools\nimport math\n"
+        },
+        {
+          "file": "watermark.py",
+          "old": "        self._chips = watermarker.chips()\n",
+          "new": "        self._watermarker = watermarker\n"
+        },
+        {
+          "file": "watermark.py",
+          "old": "        corr, energy, chips = self._corr, self._energy, self._chips\n",
+          "new": "        corr, energy = self._corr, self._energy\n        chips = itertools.islice(self._watermarker.chips(), self.samples, None)\n"
+        }
+      ],
+      "expect": "evidence should be quick to update as a stream arrives"
+    },
+    {
+      "test": "test_consent_registry",
+      "name": "times stored in UTC",
+      "edits": [
+        {
+          "file": "consent.py",
+          "old": "(speaker, json.dumps(sorted(purposes)), granted_at.isoformat(), expires_at.isoformat())",
+          "new": "(speaker, json.dumps(sorted(purposes)), granted_at.astimezone(__import__('datetime').timezone.utc).isoformat(), expires_at.astimezone(__import__('datetime').timezone.utc).isoformat())"
+        }
+      ],
+      "expect": "times come back exactly as signed, offset included"
+    },
+    {
+      "test": "test_consent_registry",
+      "name": "no commit after insert",
+      "edits": [
+        {
+          "file": "consent.py",
+          "old": "        with self._db:\n            cursor = self._db.execute(",
+          "new": "        if True:\n            cursor = self._db.execute("
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_consent_registry",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [
+        {
+          "file": "consent.py",
+          "old": "CREATE TABLE IF NOT EXISTS",
+          "new": "CREATE TABLE"
+        }
+      ],
+      "expect": "table consents already exists"
+    },
+    {
+      "test": "test_consent_registry",
+      "name": "active() compares ISO strings in SQL",
+      "edits": [
+        {
+          "file": "consent.py",
+          "old": "            f\"SELECT {COLUMNS} FROM consents WHERE speaker = ? ORDER BY consent_id\", (speaker,)\n        )\n        return [consent for consent in map(_to_consent, rows) if consent.allows(purpose, at)]\n",
+          "new": "            f\"SELECT {COLUMNS} FROM consents WHERE speaker = ? AND granted_at <= ? AND ? < expires_at\"\n            \" AND (revoked_at IS NULL OR ? < revoked_at) ORDER BY consent_id\",\n            (speaker, at.isoformat(), at.isoformat(), at.isoformat()),\n        )\n        return [consent for consent in map(_to_consent, rows) if purpose in consent.purposes]\n"
+        }
+      ],
+      "expect": "a consent expires at a moment in time, whatever the offset"
+    },
+    {
+      "test": "test_consent_registry",
+      "name": "a second revoke overwrites the first",
+      "edits": [
+        {
+          "file": "consent.py",
+          "old": "        if self.get(consent_id).revoked_at is None:\n",
+          "new": "        if True:\n"
+        }
+      ],
+      "expect": "revocation is permanent and keeps its first time"
+    },
+    {
+      "test": "test_consent_registry",
+      "name": "revocation not in force at its own moment",
+      "edits": [
+        {
+          "file": "consent.py",
+          "old": "return self.revoked_at is None or at < self.revoked_at",
+          "new": "return self.revoked_at is None or at <= self.revoked_at"
+        }
+      ],
+      "expect": "revoked from that moment on"
+    },
+    {
+      "test": "test_consent_registry",
+      "name": "purposes read back as a list",
+      "edits": [
+        {
+          "file": "consent.py",
+          "old": "        frozenset(json.loads(purposes)),\n",
+          "new": "        json.loads(purposes),\n"
+        }
+      ],
+      "expect": "a consent round-trips"
+    },
+    {
+      "test": "test_consent_registry",
+      "name": "naive times accepted",
+      "edits": [
+        {
+          "file": "consent.py",
+          "old": "    if moment.tzinfo is None or moment.utcoffset() is None:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_consent_registry",
+      "name": "validity without a lower bound",
+      "edits": [
+        {
+          "file": "consent.py",
+          "old": "or not self.granted_at <= at < self.expires_at:",
+          "new": "or not at < self.expires_at:"
+        }
+      ],
+      "expect": "not valid before it is granted"
+    },
+    {
+      "test": "test_consent_registry",
+      "name": "datetimes handed to sqlite3 as they are",
+      "edits": [
+        {
+          "file": "consent.py",
+          "old": "granted_at.isoformat(), expires_at.isoformat())",
+          "new": "granted_at, expires_at)"
+        },
+        {
+          "file": "consent.py",
+          "old": "(at.isoformat(), consent_id)",
+          "new": "(at, consent_id)"
+        },
+        {
+          "file": "consent.py",
+          "old": "        datetime.fromisoformat(granted_at),\n        datetime.fromisoformat(expires_at),\n        None if revoked_at is None else datetime.fromisoformat(revoked_at),\n",
+          "new": "        granted_at,\n        expires_at,\n        revoked_at,\n"
+        }
+      ],
+      "expect": "a consent round-trips"
+    },
+    {
+      "test": "test_consent_registry",
+      "name": "still valid at the expiry moment",
+      "edits": [
+        {
+          "file": "consent.py",
+          "old": "not self.granted_at <= at < self.expires_at:",
+          "new": "not self.granted_at <= at <= self.expires_at:"
+        }
+      ],
+      "expect": "a consent expires at a moment in time, whatever the offset"
+    },
+    {
+      "test": "test_consent_registry",
+      "name": "a second revoke raises",
+      "edits": [
+        {
+          "file": "consent.py",
+          "old": "        if self.get(consent_id).revoked_at is None:\n",
+          "new": "        if self.get(consent_id).revoked_at is not None:\n            raise ValueError(f\"consent {consent_id} is already revoked\")\n        if True:\n"
+        }
+      ],
+      "expect": "is already revoked"
+    },
+    {
+      "test": "test_convert_with_consent",
+      "name": "Euclidean distance",
+      "edits": [
+        {
+          "file": "knnvc.py",
+          "old": "key=lambda j: -cosine(frame, matching[j])",
+          "new": "key=lambda j: sum((a - b) ** 2 for a, b in zip(frame, matching[j]))"
+        }
+      ],
+      "expect": "nearest by cosine distance, so loudness does not matter"
+    },
+    {
+      "test": "test_convert_with_consent",
+      "name": "only the single nearest frame",
+      "edits": [
+        {
+          "file": "knnvc.py",
+          "old": "        nearest = [matching[j] for j in ranked[:k]]\n        out.append([sum(column) / k for column in zip(*nearest)])\n",
+          "new": "        out.append(list(matching[ranked[0]]))\n"
+        }
+      ],
+      "expect": "each frame becomes the mean of its k nearest matching frames"
+    },
+    {
+      "test": "test_convert_with_consent",
+      "name": "ties broken by comparing frames",
+      "edits": [
+        {
+          "file": "knnvc.py",
+          "old": "        ranked = sorted(range(len(matching)), key=lambda j: -cosine(frame, matching[j]))\n",
+          "new": "        ranked = [j for _, _, j in sorted((-cosine(frame, m), m, j) for j, m in enumerate(matching))]\n"
+        }
+      ],
+      "expect": "ties go to the frame that comes first in the matching set"
+    },
+    {
+      "test": "test_convert_with_consent",
+      "name": "matching set is every enrolled frame",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "matching = [frame for owner, _, frame in self._frames if owner == consent_id]",
+          "new": "matching = [frame for _, _, frame in self._frames]"
+        }
+      ],
+      "expect": "the matching set is the audio enrolled under this consent, nothing else"
+    },
+    {
+      "test": "test_convert_with_consent",
+      "name": "matching set is everything the speaker enrolled",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "matching = [frame for owner, _, frame in self._frames if owner == consent_id]",
+          "new": "matching = [frame for _, speaker, frame in self._frames if speaker == consent.speaker]"
+        }
+      ],
+      "expect": "the matching set is the audio enrolled under this consent, nothing else"
+    },
+    {
+      "test": "test_convert_with_consent",
+      "name": "consent not checked",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if not consent.allows(purpose, at):\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_convert_with_consent",
+      "name": "matching set from every active consent of the speaker",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        matching = [frame for owner, _, frame in self._frames if owner == consent_id]\n",
+          "new": "        ids = {c.consent_id for c in self.registry.active(consent.speaker, purpose, at)}\n        matching = [frame for owner, _, frame in self._frames if owner in ids]\n"
+        }
+      ],
+      "expect": "the matching set is the audio enrolled under this consent, nothing else"
+    },
+    {
+      "test": "test_convert_with_consent",
+      "name": "permission from any active consent of the speaker",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "        if not consent.allows(purpose, at):\n",
+          "new": "        if not self.registry.active(consent.speaker, purpose, at):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE PermissionError"
+    },
+    {
+      "test": "test_convert_with_consent",
+      "name": "ascending sort reversed, so ties go to the last frame",
+      "edits": [
+        {
+          "file": "knnvc.py",
+          "old": "        ranked = sorted(range(len(matching)), key=lambda j: -cosine(frame, matching[j]))\n",
+          "new": "        ranked = sorted(range(len(matching)), key=lambda j: cosine(frame, matching[j]))[::-1]\n"
+        }
+      ],
+      "expect": "ties go to the frame that comes first in the matching set"
+    },
+    {
+      "test": "test_convert_with_consent",
+      "name": "k checked only against the matching set size",
+      "edits": [
+        {
+          "file": "knnvc.py",
+          "old": "    if not 1 <= k <= len(matching):\n",
+          "new": "    if k > len(matching):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE ValueError"
+    },
+    {
+      "test": "test_watch_stream",
+      "name": "scored only at chunk ends",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "        pos = 0\n        while pos < len(chunk):\n            take = step - evidence.samples % step\n            evidence.add(chunk[pos : pos + take])\n            pos += take\n            if evidence.samples % step == 0:\n",
+          "new": "        before = evidence.samples\n        evidence.add(chunk)\n        if True:\n            if evidence.samples // step > before // step:\n"
+        }
+      ],
+      "expect": "same verdict whatever the chunking"
+    },
+    {
+      "test": "test_watch_stream",
+      "name": "fresh evidence for every chunk",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "    async for chunk in chunks:\n",
+          "new": "    async for chunk in chunks:\n        evidence = watermarker.evidence()\n"
+        }
+      ],
+      "expect": "same verdict whatever the chunking"
+    },
+    {
+      "test": "test_watch_stream",
+      "name": "keeps reporting after the verdict",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "                    yield _watermark(verdict, evidence.samples / sample_rate)\n                    return\n",
+          "new": "                    yield _watermark(verdict, evidence.samples / sample_rate)\n"
+        }
+      ],
+      "expect": "exactly one verdict per stream"
+    },
+    {
+      "test": "test_watch_stream",
+      "name": "reads the whole stream before scoring",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "    async for chunk in chunks:\n",
+          "new": "    for chunk in [chunk async for chunk in chunks]:\n"
+        }
+      ],
+      "expect": "the verdict comes as soon as the evidence is in"
+    },
+    {
+      "test": "test_watch_stream",
+      "name": "no blank line after an event",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "return f\"event: {name}\\ndata: {json.dumps(data)}\\n\\n\"",
+          "new": "return f\"event: {name}\\ndata: {json.dumps(data)}\\n\""
+        }
+      ],
+      "expect": "every event ends with a blank line"
+    },
+    {
+      "test": "test_watch_stream",
+      "name": "end of the stream not scored",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "    verdict = watermarker.verdict(evidence)\n    if verdict.found:\n",
+          "new": "    verdict = watermarker.verdict(evidence)\n    if False:\n"
+        }
+      ],
+      "expect": "the end of the stream is scored too"
+    },
+    {
+      "test": "test_watch_stream",
+      "name": "reads the rest of the stream after the verdict",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "    evidence = watermarker.evidence()\n    async for chunk in chunks:\n        pos = 0\n",
+          "new": "    evidence = watermarker.evidence()\n    done = False\n    async for chunk in chunks:\n        if done:\n            continue\n        pos = 0\n"
+        },
+        {
+          "file": "monitor.py",
+          "old": "                    yield _watermark(verdict, evidence.samples / sample_rate)\n                    return\n",
+          "new": "                    yield _watermark(verdict, evidence.samples / sample_rate)\n                    done = True\n                    break\n"
+        },
+        {
+          "file": "monitor.py",
+          "old": "    verdict = watermarker.verdict(evidence)\n    if verdict.found:\n",
+          "new": "    if done:\n        return\n    verdict = watermarker.verdict(evidence)\n    if verdict.found:\n"
+        }
+      ],
+      "expect": "no more audio is read after the verdict"
+    },
+    {
+      "test": "test_watch_stream",
+      "name": "check times accumulated in float seconds",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "    evidence = watermarker.evidence()\n    async for chunk in chunks:\n        pos = 0\n        while pos < len(chunk):\n            take = step - evidence.samples % step\n            evidence.add(chunk[pos : pos + take])\n            pos += take\n            if evidence.samples % step == 0:\n",
+          "new": "    evidence = watermarker.evidence()\n    next_t = check_s\n    async for chunk in chunks:\n        pos = 0\n        while pos < len(chunk):\n            boundary = int(next_t * sample_rate)\n            take = boundary - evidence.samples\n            evidence.add(chunk[pos : pos + take])\n            pos += take\n            if evidence.samples == boundary:\n                next_t += check_s\n"
+        }
+      ],
+      "expect": "same verdict whatever the chunking"
+    },
+    {
+      "test": "test_watch_stream",
+      "name": "also scored at the end of every chunk",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "                    return\n    verdict = watermarker.verdict(evidence)\n",
+          "new": "                    return\n        if watermarker.verdict(evidence).found:\n            yield _watermark(watermarker.verdict(evidence), evidence.samples / sample_rate)\n            return\n    verdict = watermarker.verdict(evidence)\n"
+        }
+      ],
+      "expect": "same verdict whatever the chunking"
+    },
+    {
+      "test": "test_policy_decisions",
+      "name": "a failing not blames its inner rule",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "return (not inner), (pointer if inner else None)",
+          "new": "return (not inner), (f\"{pointer}/not\" if inner else None)"
+        }
+      ],
+      "expect": "a not whose rule allows is the rule that denies"
+    },
+    {
+      "test": "test_policy_decisions",
+      "name": "a failing any blames its last rule",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    if kind == \"any\":\n        for i, child in enumerate(arg):\n            if _decide(child, request, f\"{pointer}/any/{i}\")[0]:\n                return True, None\n        return False, pointer\n",
+          "new": "    if kind == \"any\":\n        culprit = pointer\n        for i, child in enumerate(arg):\n            allowed, culprit = _decide(child, request, f\"{pointer}/any/{i}\")\n            if allowed:\n                return True, None\n        return False, culprit\n"
+        }
+      ],
+      "expect": "an any none of whose rules allows is the rule that denies"
+    },
+    {
+      "test": "test_policy_decisions",
+      "name": "times compared as ISO strings",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        allowed = request.at < _moment(arg, pointer)\n",
+          "new": "        allowed = request.at.isoformat() < arg\n"
+        }
+      ],
+      "expect": "times compare as moments, whatever the offset"
+    },
+    {
+      "test": "test_policy_decisions",
+      "name": "rules checked only where evaluation reaches",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    _check(policy, \"\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_policy_decisions",
+      "name": "an empty any allows",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    if kind == \"any\":\n",
+          "new": "    if kind == \"any\":\n        if not arg:\n            return True, None\n"
+        }
+      ],
+      "expect": "an empty any allows nothing"
+    },
+    {
+      "test": "test_policy_decisions",
+      "name": "root pointer written as /",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    return Decision(allowed, None if allowed else culprit)\n",
+          "new": "    return Decision(allowed, None if allowed else (culprit or \"/\"))\n"
+        }
+      ],
+      "expect": "the root rule's pointer is the empty string"
+    },
+    {
+      "test": "test_policy_decisions",
+      "name": "from excludes its own moment",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        allowed = request.at >= _moment(arg, pointer)\n",
+          "new": "        allowed = request.at > _moment(arg, pointer)\n"
+        }
+      ],
+      "expect": "from allows from its own moment on, whatever the offset"
+    },
+    {
+      "test": "test_policy_decisions",
+      "name": "from compared as ISO strings",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        allowed = request.at >= _moment(arg, pointer)\n",
+          "new": "        allowed = request.at.isoformat() >= arg\n"
+        }
+      ],
+      "expect": "from allows from its own moment on, whatever the offset"
+    },
+    {
+      "test": "test_policy_decisions",
+      "name": "purpose and region arguments not checked",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        if not isinstance(arg, list) or not all(isinstance(item, str) for item in arg):\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE ValueError"
+    },
+    {
+      "test": "test_policy_decisions",
+      "name": "a denying all blames itself",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            if not allowed:\n                return False, culprit\n",
+          "new": "            if not allowed:\n                return False, pointer\n"
+        }
+      ],
+      "expect": "the first rule of an all that denies is the rule that denies"
+    },
+    {
+      "test": "test_policy_decisions",
+      "name": "request time without an offset not rejected",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    if request.at.utcoffset() is None:\n        raise ValueError(\"the request time has no offset\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "can't compare offset-naive and offset-aware datetimes"
+    }
+  ]
+}

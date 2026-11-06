@@ -1,0 +1,67 @@
+{
+  "lesson": "phases/06-speech-and-audio/08-voice-cloning-conversion",
+  "title": "Voice Cloning & Voice Conversion",
+  "format": "staged-brownfield",
+  "service": "CloneGate: consent-gated kNN-VC voice conversion with a blind spread-spectrum watermark carrying the consent id",
+  "sources": {
+    "docs/en.md": "dc41114b9bfa5d8fdc151f0efebe947230683806c1d2f888031a457c9bb8a480",
+    "code/main.py": "1c74e73a93b5a162b2635095426b2db812ad1e6ca29d91c3fcc37b0e1cc2ed9e"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_watermark_roundtrip",
+      "kind": "debug",
+      "lesson_anchor": "The ethics bit, not a bolt-on (watermarking); Step 4 embed a watermark; code/main.py watermark, detect_watermark, bit_accuracy",
+      "planted_bugs": [
+        "Watermarker.chips() draws from one random.Random built in __init__, so the chip sequence is not reset per call; the failure surfaces in a separate verifier reading the second clip the stamper marked",
+        "Evidence.scores() returns raw correlations instead of dividing by the root energy of each bit's samples, so scores scale with playback volume",
+        "bit_accuracy divides by the number of decided bits, dropping bits without evidence from the denominator (and dividing by zero when none is decided)",
+        "Evidence.add re-correlates the whole received audio on every call, O(N^2/chunk) for a chunked feed"
+      ],
+      "timing_assert": "2 s clip fed in 480 uneven chunks under 0.05 s (re-correlating version takes about 0.75 s, incremental about 3 ms)",
+      "overfix_guard": "detection is blind: a separate verifier with only the clip and the key must decode it (the lesson's non-blind subtract-the-original detector fails); a chunked feed must match a single feed (resetting the chips at every add fails); two evidences fed in turn must each decode their own clip (reseeding one shared RNG at every call fails)"
+    },
+    {
+      "part": 2,
+      "test": "test_consent_registry",
+      "kind": "model and persistence",
+      "lesson_anchor": "Step 5 consent gate; The ethics bit, not a bolt-on (consent record: who, when, which purpose; tamper-evident log)",
+      "exactness": "timezone-aware times round-trip exactly, offset and microseconds included (isoformat compared), across close and reopen",
+      "traps": ["times normalized to UTC", "datetimes handed to sqlite3 as they are (the default adapter reads back text)", "missing commit", "CREATE TABLE without IF NOT EXISTS", "expiry compared as ISO strings in SQL", "validity without a lower bound", "still valid at the expiry moment", "second revocation overwrites the first", "second revocation raises", "revocation not in force at its own moment", "purposes read back as a list", "naive datetimes accepted", "UUID instead of small integer ids"],
+      "clarifying_questions": ["store in UTC", "revoking twice", "validity at the expiry moment"]
+    },
+    {
+      "part": 3,
+      "test": "test_convert_with_consent",
+      "kind": "core algorithm",
+      "lesson_anchor": "Step 3 voice conversion with KNN-VC; Key Terms KNN-VC; Step 5 consent gate",
+      "traps": ["Euclidean instead of cosine distance", "single nearest frame instead of the mean of k", "ties broken by comparing frames", "ascending sort reversed, so ties go to the last frame", "k = 0 accepted", "matching set includes other speakers", "matching set includes the speaker's other consents", "matching set pooled from every active consent of the speaker", "consent not checked before converting", "permission from any active consent of the speaker"],
+      "integration": "toy WavLM frames: content preserved and voice switched (cosine probes, as in code/main.py), then stamp with the consent id and trace it back through Parts 1-2",
+      "clarifying_questions": ["audio under another consent of the same speaker", "k larger than the matching set"]
+    },
+    {
+      "part": 4,
+      "test": "test_watch_stream",
+      "kind": "streaming",
+      "lesson_anchor": "watermark survives streaming; Exercise 3 detect the payload and report bit accuracy",
+      "wire_format": "Server-Sent Events, exactly one event per stream, decided by the test's parse_sse (event and data lines, blank line after each event)",
+      "traps": ["scoring only at chunk ends", "an extra score at the end of every chunk", "check times accumulated in float seconds", "fresh evidence for every chunk", "reporting again after the verdict", "reading the whole stream first", "reading the rest of the stream after the verdict", "missing blank line", "end of the stream not scored", "plain coroutine instead of an async generator"],
+      "clarifying_questions": ["tail shorter than one check interval", "reading on after the verdict"]
+    },
+    {
+      "part": 5,
+      "test": "test_policy_decisions",
+      "kind": "recursive structure",
+      "lesson_anchor": "consent record 'authorize this voice for X purpose'; outputs/skill-voice-cloner.md consent scope",
+      "traps": ["a failing not blames its inner rule", "a failing any blames its last rule", "a denying all blames itself", "times compared as ISO strings", "from exclusive of its own moment", "rules validated only where evaluation reaches", "purpose or region given as a string", "request time without an offset", "an empty any allows", "root pointer written as /"],
+      "clarifying_questions": ["empty all and empty any", "unknown rule types"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the timing defect is the streaming accumulator re-correlating all received audio on every add (O(N^2/chunk)); the blind-detection guard is a separate verifier instance that never saw the original, plus a chunked feed that rules out restarting the chips at every add, and two streams checked at once, which rule out reseeding one shared RNG",
+    "Part 3: the matching set is narrower than 'the target speaker': only frames enrolled under the consent that authorizes the conversion, so the consent decides which data is used (The ethics bit, not a bolt-on); alice's second consent also covers dubbing, so pooling every active consent of hers fails; the conversion averages k nearest frames as in the kNN-VC paper, while the lesson text says the single nearest",
+    "Part 4: evidence is accumulated as soft correlation and energy per bit (Part 1's z-scores) rather than hard per-chunk bit votes, because summed evidence is the optimal statistic and does not depend on chunk size; the wire format is Server-Sent Events, scored every 0.1 s of stream time and once at the end"
+  ]
+}
