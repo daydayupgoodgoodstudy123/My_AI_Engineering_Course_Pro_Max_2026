@@ -1,0 +1,1534 @@
+{
+  "package": "stategraph",
+  "tests": [
+    "test_pause_and_resume",
+    "test_sqlite_checkpoints",
+    "test_record_and_replay",
+    "test_stream_updates",
+    "test_nested_subgraphs"
+  ],
+  "layers": [
+    {
+      "test": "test_pause_and_resume",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "PausedAtNode"
+        },
+        {
+          "name": "pause marker taken out of the update before the checkpoint",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "            state = self._commit(ns, graph, step, node, state, update or {}, calls)\n            if state.get(PAUSE):\n                reason = state.pop(PAUSE)\n                raise PausedAtNode(node, step, reason, ns)\n",
+              "new": "            update = dict(update or {})\n            reason = update.pop(PAUSE, None)\n            state = self._commit(ns, graph, step, node, state, update, calls)\n            if reason:\n                raise PausedAtNode(node, step, reason, ns)\n"
+            }
+          ],
+          "expect": "resume picks up at the node after the latest checkpoint"
+        },
+        {
+          "name": "+ resume runs the node after the latest checkpoint",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "        return state, step, here, None\n",
+              "new": "        return state, step, graph.next_node(here, state), None\n"
+            }
+          ],
+          "expect": "the router runs once per step"
+        },
+        {
+          "name": "+ the router is called once",
+          "edits": [
+            {
+              "file": "graph.py",
+              "old": "        for edge in self.edges.get(node, []):\n            if edge.router is None or edge.router(state) == edge.label:\n                return edge.dst\n        return None\n",
+              "new": "        edges = self.edges.get(node, [])\n        label = edges[0].router(state) if edges and edges[0].router else None\n        for edge in edges:\n            if edge.router is None or edge.label == label:\n                return edge.dst\n        return None\n"
+            }
+          ],
+          "expect": "DID NOT RAISE"
+        },
+        {
+          "name": "+ no matching edge raises GraphError",
+          "edits": [
+            {
+              "file": "graph.py",
+              "old": "        return None\n",
+              "new": "        raise GraphError(f\"no edge out of {node!r} matches\")\n"
+            }
+          ],
+          "expect": "checkpoints of a long session must stay cheap"
+        },
+        {
+          "name": "+ a checkpoint holds its step's writes and the state is folded from them",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "        state = graph.merge(state, update)\n        self.checkpointer.put(ns, Record(step, node, state, tuple(calls)))\n        return state\n",
+              "new": "        self.checkpointer.put(ns, Record(step, node, dict(update), tuple(calls)))\n        return graph.merge(state, update)\n"
+            },
+            {
+              "file": "runner.py",
+              "old": "        return copy.deepcopy(records[-1].writes)\n",
+              "new": "        state: State = {}\n        for record in records:\n            state = graph.merge(state, record.writes)\n        return copy.deepcopy(state)\n"
+            },
+            {
+              "file": "runner.py",
+              "old": "        return [Checkpoint(r.step, r.node, copy.deepcopy(r.writes)) for r in self.checkpointer.records(session)]\n",
+              "new": "        state: State = {}\n        history = []\n        for record in self.checkpointer.records(session):\n            state = self.graph.merge(state, copy.deepcopy(record.writes))\n            history.append(Checkpoint(record.step, record.node, state))\n        return history\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_pause_and_resume",
+      "name": "put keeps the record it was given, not a copy",
+      "edits": [
+        {
+          "file": "checkpoint.py",
+          "old": "        log.append(copy.deepcopy(record))\n",
+          "new": "        log.append(record)\n"
+        }
+      ],
+      "expect": "a checkpoint keeps each value as it was when its step ran"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "put keeps a shallow copy of the writes",
+      "edits": [
+        {
+          "file": "checkpoint.py",
+          "old": "        log.append(copy.deepcopy(record))\n",
+          "new": "        log.append(Record(record.step, record.node, dict(record.writes), record.calls))\n"
+        }
+      ],
+      "expect": "a checkpoint keeps each value as it was when its step ran"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "load_state hands out the folded state itself",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        state: State = {}\n        for record in records:\n            state = graph.merge(state, record.writes)\n        return copy.deepcopy(state)\n",
+          "new": "        state: State = {}\n        for record in records:\n            state = graph.merge(state, record.writes)\n        return state\n"
+        }
+      ],
+      "expect": "changing a loaded state leaves the checkpoints alone"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "checkpoints too small: the latest step's writes taken for the whole state",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        state: State = {}\n        for record in records:\n            state = graph.merge(state, record.writes)\n        return copy.deepcopy(state)\n",
+          "new": "        return copy.deepcopy(records[-1].writes)\n"
+        }
+      ],
+      "expect": "KeyError: 'ticket'"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "the fold skips the inputs at step 0",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        for record in records:\n            state = graph.merge(state, record.writes)\n",
+          "new": "        for record in records[1:]:\n            state = graph.merge(state, record.writes)\n"
+        }
+      ],
+      "expect": "resume goes on with the checkpointed state"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "the fold ignores the reducers",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            state = graph.merge(state, record.writes)\n",
+          "new": "            state = {**state, **record.writes}\n"
+        }
+      ],
+      "expect": "a checkpoint restores the whole state"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "history folds without the reducers",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            state = self.graph.merge(state, copy.deepcopy(record.writes))\n            history.append",
+          "new": "            state = {**state, **copy.deepcopy(record.writes)}\n            history.append"
+        }
+      ],
+      "expect": "history gives the whole state as of every step"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "pause marker kept in the checkpoint and dropped when loading",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            reason = update.pop(PAUSE, None)\n",
+          "new": "            reason = update.get(PAUSE)\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "        state: State = {}\n        for record in records:\n            state = graph.merge(state, record.writes)\n        return copy.deepcopy(state)\n",
+          "new": "        state: State = {}\n        for record in records:\n            state = graph.merge(state, record.writes)\n        state.pop(PAUSE, None)\n        return copy.deepcopy(state)\n"
+        }
+      ],
+      "expect": "history gives the whole state as of every step"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "pause raised before its step is checkpointed",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            state = self._commit(ns, graph, step, node, state, update, calls)\n            if reason:\n                raise PausedAtNode(node, step, reason, ns)\n",
+          "new": "            if reason:\n                raise PausedAtNode(node, step, reason, ns)\n            state = self._commit(ns, graph, step, node, state, update, calls)\n"
+        }
+      ],
+      "expect": "resume picks up at the node after the latest checkpoint"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "next node chosen before the human edit is applied",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        if patch is not None:\n            step += 1\n            state = self._commit(ns, graph, step, HUMAN, state, patch)\n        return state, step, graph.next_node(here, state), None\n",
+          "new": "        node = graph.next_node(here, state)\n        if patch is not None:\n            step += 1\n            state = self._commit(ns, graph, step, HUMAN, state, patch)\n        return state, step, node, None\n"
+        }
+      ],
+      "expect": "resume picks up at the node after the latest checkpoint"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "human edit merged in memory, not checkpointed",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        if patch is not None:\n            step += 1\n            state = self._commit(ns, graph, step, HUMAN, state, patch)\n",
+          "new": "        if patch is not None:\n            state = graph.merge(state, patch)\n"
+        }
+      ],
+      "expect": "resume picks up at the node after the latest checkpoint"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "resume goes on from the latest record, human edits included",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        here = next(r.node for r in reversed(records) if r.node != HUMAN)\n",
+          "new": "        here = records[-1].node\n"
+        }
+      ],
+      "expect": "no edge out of '__human__'"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "resume follows the node's first edge, as code/main.py hard-codes send",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        return state, step, graph.next_node(here, state), None\n",
+          "new": "        return state, step, graph.edges[here][0].dst, None\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "the router's label remembered per node",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        self.reducers: dict[str, Reducer] = dict(reducers or {})\n",
+          "new": "        self.reducers: dict[str, Reducer] = dict(reducers or {})\n        self._labels: dict[str, str] = {}\n"
+        },
+        {
+          "file": "graph.py",
+          "old": "        label = edges[0].router(state)\n",
+          "new": "        if node not in self._labels:\n            self._labels[node] = edges[0].router(state)\n        label = self._labels[node]\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "a label without an edge ends the run",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        raise GraphError(f\"the router of {node!r} returned {label!r}, which has no edge\")\n",
+          "new": "        return END\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "a label without an edge raises KeyError",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        for edge in edges:\n            if edge.label == label:\n                return edge.dst\n",
+          "new": "        return {edge.label: edge.dst for edge in edges}[label]\n"
+        }
+      ],
+      "expect": "KeyError: 'spam'"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "a node without edges ends the run",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        if not edges:\n            raise GraphError(f\"no edge out of {node!r}\")\n",
+          "new": "        if not edges:\n            return END\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "whole-state snapshots, copied shallowly so they are cheap",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        \"\"\"Checkpoint one step and return the state after it.\"\"\"\n        self.checkpointer.put(ns, Record(step, node, dict(update), tuple(calls)))\n        return graph.merge(state, update)\n",
+          "new": "        \"\"\"Checkpoint one step and return the state after it.\"\"\"\n        state = graph.merge(state, update)\n        self.checkpointer.put(ns, Record(step, node, state, tuple(calls)))\n        return state\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "        state: State = {}\n        for record in records:\n            state = graph.merge(state, record.writes)\n        return copy.deepcopy(state)\n",
+          "new": "        return copy.deepcopy(records[-1].writes)\n"
+        },
+        {
+          "file": "checkpoint.py",
+          "old": "        log.append(copy.deepcopy(record))\n",
+          "new": "        log.append(Record(record.step, record.node, dict(record.writes), record.calls))\n"
+        }
+      ],
+      "expect": "a checkpoint holds what its step wrote"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "whole-state snapshots through pickle instead of deepcopy",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        \"\"\"Checkpoint one step and return the state after it.\"\"\"\n        self.checkpointer.put(ns, Record(step, node, dict(update), tuple(calls)))\n        return graph.merge(state, update)\n",
+          "new": "        \"\"\"Checkpoint one step and return the state after it.\"\"\"\n        state = graph.merge(state, update)\n        self.checkpointer.put(ns, Record(step, node, state, tuple(calls)))\n        return state\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "        state: State = {}\n        for record in records:\n            state = graph.merge(state, record.writes)\n        return copy.deepcopy(state)\n",
+          "new": "        return copy.deepcopy(records[-1].writes)\n"
+        },
+        {
+          "file": "checkpoint.py",
+          "old": "        log.append(copy.deepcopy(record))\n",
+          "new": "        log.append(__import__('pickle').loads(__import__('pickle').dumps(record)))\n"
+        }
+      ],
+      "expect": "checkpoints of a long session must stay cheap"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "pause marker kept in the checkpoint and dropped from every folded state",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            reason = update.pop(PAUSE, None)\n",
+          "new": "            reason = update.get(PAUSE)\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "        for record in records:\n            state = graph.merge(state, record.writes)\n        return copy.deepcopy(state)\n",
+          "new": "        for record in records:\n            state = graph.merge(state, record.writes)\n        state.pop(PAUSE, None)\n        return copy.deepcopy(state)\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "            state = self.graph.merge(state, copy.deepcopy(record.writes))\n            history.append(Checkpoint(record.step, record.node, state))\n",
+          "new": "            state = self.graph.merge(state, copy.deepcopy(record.writes))\n            state.pop(PAUSE, None)\n            history.append(Checkpoint(record.step, record.node, state))\n"
+        }
+      ],
+      "expect": "without the pause marker"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "a label without an edge falls back to the first edge",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        raise GraphError(f\"the router of {node!r} returned {label!r}, which has no edge\")\n",
+          "new": "        return edges[0].dst\n"
+        }
+      ],
+      "expect": "PausedAtNode: human_gate"
+    },
+    {
+      "test": "test_pause_and_resume",
+      "name": "history folds every step into one shared dict",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            state = self.graph.merge(state, copy.deepcopy(record.writes))\n            history.append(Checkpoint(record.step, record.node, state))\n",
+          "new": "            state.update(self.graph.merge(state, copy.deepcopy(record.writes)))\n            history.append(Checkpoint(record.step, record.node, state))\n"
+        }
+      ],
+      "expect": "history gives the whole state as of every step"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "plain JSON, no type tags",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    return json.dumps(_tag(value))\n",
+          "new": "    return json.dumps(value)\n"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "    return _untag(json.loads(text))\n",
+          "new": "    return json.loads(text)\n"
+        }
+      ],
+      "expect": "dumps and loads keep pair exactly"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "tuples written as lists",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    if kind is list:\n",
+          "new": "    if kind in (list, tuple):\n"
+        }
+      ],
+      "expect": "dumps and loads keep pair exactly"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "set items sorted for a stable encoding",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "        return {kind.__name__: [_tag(item) for item in value]}\n",
+          "new": "        return {kind.__name__: [_tag(item) for item in (value if kind is tuple else sorted(value))]}\n"
+        }
+      ],
+      "expect": "not supported between instances"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "a frozenset read back as a set",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "\"frozenset\": frozenset}[kind](items)",
+          "new": "\"frozenset\": set}[kind](items)"
+        }
+      ],
+      "expect": "dumps and loads keep seen exactly"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "dicts as JSON objects with str() keys",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "        return {\"dict\": [[_tag(key), _tag(item)] for key, item in value.items()]}\n",
+          "new": "        return {str(key): _tag(item) for key, item in value.items()}\n"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "    ((kind, body),) = data.items()\n",
+          "new": "    if len(data) != 1 or next(iter(data)) not in ('tuple', 'set', 'frozenset', 'bytes'):\n        return {key: _untag(item) for key, item in data.items()}\n    ((kind, body),) = data.items()\n"
+        }
+      ],
+      "expect": "dumps and loads keep by_id exactly"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "plain dicts kept as objects, tags told apart by their shape",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    if kind is dict:\n",
+          "new": "    if kind is dict and all(type(key) is str for key in value):\n        return {key: _tag(item) for key, item in value.items()}\n    if kind is dict:\n"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "    ((kind, body),) = data.items()\n",
+          "new": "    if len(data) != 1 or next(iter(data)) not in ('dict', 'tuple', 'set', 'frozenset', 'bytes'):\n        return {key: _untag(item) for key, item in data.items()}\n    ((kind, body),) = data.items()\n"
+        }
+      ],
+      "expect": "dumps and loads keep lookalikes exactly"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "booleans stored as 0 and 1",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    if value is None or kind in (bool, int, float, str):\n        return value\n",
+          "new": "    if kind is bool:\n        return int(value)\n    if value is None or kind in (int, float, str):\n        return value\n"
+        }
+      ],
+      "expect": "dumps and loads keep vip exactly"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "ints past 2**53 written as strings for JSON readers",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    if value is None or kind in (bool, int, float, str):\n        return value\n",
+          "new": "    if kind is int and abs(value) >= 2**53:\n        return str(value)\n    if value is None or kind in (bool, int, float, str):\n        return value\n"
+        }
+      ],
+      "expect": "dumps and loads keep order_id exactly"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "bytes stored as latin-1 text",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "        return {\"bytes\": base64.b64encode(value).decode(\"ascii\")}\n",
+          "new": "        return value.decode(\"latin-1\")\n"
+        }
+      ],
+      "expect": "dumps and loads keep attachment exactly"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "pickle in base64 instead of JSON",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    return json.dumps(_tag(value))\n",
+          "new": "    return base64.b64encode(__import__('pickle').dumps(value)).decode('ascii')\n"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "    return _untag(json.loads(text))\n",
+          "new": "    return __import__('pickle').loads(base64.b64decode(text))\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "anything else written as its str(), the default=str of code/main.py",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    raise TypeError(f\"cannot checkpoint a value of type {kind.__name__}\")\n",
+          "new": "    return str(value)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "a value it cannot encode raises ValueError",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    raise TypeError(f\"cannot checkpoint a value of type {kind.__name__}\")\n",
+          "new": "    raise ValueError(f\"cannot checkpoint a value of type {kind.__name__}\")\n"
+        }
+      ],
+      "expect": "ValueError: cannot checkpoint"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "a write of None left out",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "for channel, value in record.writes.items()]\n",
+          "new": "for channel, value in record.writes.items() if value is not None]\n"
+        }
+      ],
+      "expect": "a reopened file gives back every record exactly"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "records rebuilt from the writes table only, so a step without writes is lost",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "                \"SELECT step, node, calls FROM steps WHERE session = ? ORDER BY step\", (session,)\n            )\n        ]\n",
+          "new": "                \"SELECT step, node, calls FROM steps WHERE session = ? ORDER BY step\", (session,)\n            )\n            if step in writes\n        ]\n"
+        }
+      ],
+      "expect": "a reopened file gives back every record exactly"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "each row committed on its own",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "            self._db.execute(\"INSERT INTO steps VALUES (?, ?, ?, ?)\", (session, record.step, record.node, calls))\n            self._db.executemany(\"INSERT INTO writes VALUES (?, ?, ?, ?)\", rows)\n",
+          "new": "            self._db.execute(\"INSERT INTO steps VALUES (?, ?, ?, ?)\", (session, record.step, record.node, calls))\n        for channel, value in record.writes.items():\n            with self._db:\n                self._db.execute(\"INSERT INTO writes VALUES (?, ?, ?, ?)\", (session, record.step, channel, dumps(value)))\n"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "        rows = [(session, record.step, channel, dumps(value)) for channel, value in record.writes.items()]\n",
+          "new": ""
+        }
+      ],
+      "expect": "a put that fails leaves no trace of its step"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "no check for a step already written (the primary key answers)",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "            if latest is not None and record.step <= latest:\n                raise ValueError(f\"{session}: step {record.step} is already written\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "IntegrityError"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "only the latest step refused again",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "record.step <= latest",
+          "new": "record.step == latest"
+        }
+      ],
+      "expect": "IntegrityError"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "recorded calls not stored",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "        calls = dumps(tuple(record.calls))\n",
+          "new": "        calls = dumps(())\n"
+        }
+      ],
+      "expect": "a step's recorded calls are kept too"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "__type__/items tags, str-keyed dicts kept as plain objects",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "def _tag(value: Any) -> Any:\n    # Every container becomes a one-key object naming its type, a dict included, so a dict\n    # that happens to look like a tag still reads back as a dict.\n    kind = type(value)\n    if value is None or kind in (bool, int, float, str):\n        return value\n    if kind is list:\n        return [_tag(item) for item in value]\n    if kind in (tuple, set, frozenset):\n        return {kind.__name__: [_tag(item) for item in value]}\n    if kind is bytes:\n        return {\"bytes\": base64.b64encode(value).decode(\"ascii\")}\n    if kind is dict:\n        return {\"dict\": [[_tag(key), _tag(item)] for key, item in value.items()]}\n    raise TypeError(f\"cannot checkpoint a value of type {kind.__name__}\")\n\n\ndef _untag(data: Any) -> Any:\n    if isinstance(data, list):\n        return [_untag(item) for item in data]\n    if not isinstance(data, dict):\n        return data\n    ((kind, body),) = data.items()\n    if kind == \"dict\":\n        return {_untag(key): _untag(item) for key, item in body}\n    if kind == \"bytes\":\n        return base64.b64decode(body)\n    items = [_untag(item) for item in body]\n    return {\"tuple\": tuple, \"set\": set, \"frozenset\": frozenset}[kind](items)\n\n\n",
+          "new": "def _tag(value: Any) -> Any:\n    kind = type(value)\n    if value is None or kind in (bool, int, float, str):\n        return value\n    if kind is list:\n        return [_tag(item) for item in value]\n    if kind in (tuple, set, frozenset):\n        return {\"__type__\": kind.__name__, \"items\": [_tag(item) for item in value]}\n    if kind is bytes:\n        return {\"__type__\": \"bytes\", \"items\": base64.b64encode(value).decode(\"ascii\")}\n    if kind is dict:\n        if all(type(key) is str for key in value):\n            return {key: _tag(item) for key, item in value.items()}\n        return {\"__type__\": \"dict\", \"items\": [[_tag(key), _tag(item)] for key, item in value.items()]}\n    raise TypeError(f\"cannot checkpoint a value of type {kind.__name__}\")\n\n\ndef _untag(data: Any) -> Any:\n    if isinstance(data, list):\n        return [_untag(item) for item in data]\n    if not isinstance(data, dict):\n        return data\n    if \"__type__\" not in data:\n        return {key: _untag(item) for key, item in data.items()}\n    kind, body = data[\"__type__\"], data[\"items\"]\n    if kind == \"dict\":\n        return {_untag(key): _untag(item) for key, item in body}\n    if kind == \"bytes\":\n        return base64.b64decode(body)\n    items = [_untag(item) for item in body]\n    return {\"tuple\": tuple, \"set\": set, \"frozenset\": frozenset}[kind](items)\n\n\n"
+        }
+      ],
+      "expect": "a dict shaped like the encoding of pair reads back as a dict"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "py/tuple-style tags, str-keyed dicts kept as plain objects",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "def _tag(value: Any) -> Any:\n    # Every container becomes a one-key object naming its type, a dict included, so a dict\n    # that happens to look like a tag still reads back as a dict.\n    kind = type(value)\n    if value is None or kind in (bool, int, float, str):\n        return value\n    if kind is list:\n        return [_tag(item) for item in value]\n    if kind in (tuple, set, frozenset):\n        return {kind.__name__: [_tag(item) for item in value]}\n    if kind is bytes:\n        return {\"bytes\": base64.b64encode(value).decode(\"ascii\")}\n    if kind is dict:\n        return {\"dict\": [[_tag(key), _tag(item)] for key, item in value.items()]}\n    raise TypeError(f\"cannot checkpoint a value of type {kind.__name__}\")\n\n\ndef _untag(data: Any) -> Any:\n    if isinstance(data, list):\n        return [_untag(item) for item in data]\n    if not isinstance(data, dict):\n        return data\n    ((kind, body),) = data.items()\n    if kind == \"dict\":\n        return {_untag(key): _untag(item) for key, item in body}\n    if kind == \"bytes\":\n        return base64.b64decode(body)\n    items = [_untag(item) for item in body]\n    return {\"tuple\": tuple, \"set\": set, \"frozenset\": frozenset}[kind](items)\n\n\n",
+          "new": "def _tag(value: Any) -> Any:\n    kind = type(value)\n    if value is None or kind in (bool, int, float, str):\n        return value\n    if kind is list:\n        return [_tag(item) for item in value]\n    if kind in (tuple, set, frozenset):\n        return {\"py/\" + kind.__name__: [_tag(item) for item in value]}\n    if kind is bytes:\n        return {\"py/bytes\": base64.b64encode(value).decode(\"ascii\")}\n    if kind is dict:\n        if all(type(key) is str for key in value):\n            return {key: _tag(item) for key, item in value.items()}\n        return {\"py/dict\": [[_tag(key), _tag(item)] for key, item in value.items()]}\n    raise TypeError(f\"cannot checkpoint a value of type {kind.__name__}\")\n\n\ndef _untag(data: Any) -> Any:\n    if isinstance(data, list):\n        return [_untag(item) for item in data]\n    if not isinstance(data, dict):\n        return data\n    if len(data) != 1 or not next(iter(data)).startswith(\"py/\"):\n        return {key: _untag(item) for key, item in data.items()}\n    ((kind, body),) = data.items()\n    kind = kind[3:]\n    if kind == \"dict\":\n        return {_untag(key): _untag(item) for key, item in body}\n    if kind == \"bytes\":\n        return base64.b64decode(body)\n    items = [_untag(item) for item in body]\n    return {\"tuple\": tuple, \"set\": set, \"frozenset\": frozenset}[kind](items)\n\n\n"
+        }
+      ],
+      "expect": "a dict shaped like the encoding of pair reads back as a dict"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "dict keys read back as their encoded text",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "        return {_untag(key): _untag(item) for key, item in body}\n",
+          "new": "        return {json.dumps(key): _untag(item) for key, item in body}\n"
+        }
+      ],
+      "expect": "dumps and loads keep by_id exactly"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "a set built before its items are decoded",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    items = [_untag(item) for item in body]\n    return {\"tuple\": tuple, \"set\": set, \"frozenset\": frozenset}[kind](items)\n",
+          "new": "    built = {\"tuple\": tuple, \"set\": set, \"frozenset\": frozenset}[kind](body)\n    return type(built)(_untag(item) for item in built)\n"
+        }
+      ],
+      "expect": "unhashable type"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "rows inserted but never committed",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "        with self._db:\n            (latest,)",
+          "new": "        if True:\n            (latest,)"
+        }
+      ],
+      "expect": "a reopened file gives back every record exactly"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "schema created without IF NOT EXISTS",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "CREATE TABLE IF NOT EXISTS steps",
+          "new": "CREATE TABLE steps"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "CREATE TABLE IF NOT EXISTS writes",
+          "new": "CREATE TABLE writes"
+        }
+      ],
+      "expect": "already exists"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "recorded calls read back as a list",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "            Record(step, node, writes.get(step, {}), loads(calls))\n",
+          "new": "            Record(step, node, writes.get(step, {}), list(loads(calls)))\n"
+        }
+      ],
+      "expect": "a reopened file gives back every record exactly"
+    },
+    {
+      "test": "test_sqlite_checkpoints",
+      "name": "a repeated step written over with INSERT OR REPLACE",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "            if latest is not None and record.step <= latest:\n                raise ValueError(f\"{session}: step {record.step} is already written\")\n",
+          "new": ""
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "\"INSERT INTO steps VALUES",
+          "new": "\"INSERT OR REPLACE INTO steps VALUES"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "\"INSERT INTO writes VALUES",
+          "new": "\"INSERT OR REPLACE INTO writes VALUES"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "replay runs the nodes against the world",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                ctx = NodeContext(recorded=record.calls)\n",
+          "new": "                ctx = NodeContext(self.world)\n"
+        }
+      ],
+      "expect": "ReplayMismatch"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "replay checks the op of each call but not its args",
+      "edits": [
+        {
+          "file": "effects.py",
+          "old": "        if (entry[0], entry[1]) != (op, args):\n",
+          "new": "        if entry[0] != op:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "replay serves calls by position without checking them",
+      "edits": [
+        {
+          "file": "effects.py",
+          "old": "        if (entry[0], entry[1]) != (op, args):\n            raise ReplayMismatch(f\"call {i} is {op}{args!r}, the recording has {entry[0]}{entry[1]!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "past the end of the recording, the call goes to the world",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                ctx = NodeContext(recorded=record.calls)\n",
+          "new": "                ctx = NodeContext(self.world, recorded=record.calls)\n"
+        },
+        {
+          "file": "effects.py",
+          "old": "            raise ReplayMismatch(f\"call {i}, {op}{args!r}, is past the end of the recording\")\n",
+          "new": "            result = live()\n            self.calls.append((op, args, copy.deepcopy(result)))\n            return result\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "recorded calls left over are not checked",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                    ctx.finish()\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "the recording keeps the object the API returned",
+      "edits": [
+        {
+          "file": "effects.py",
+          "old": "            self.calls.append((op, args, copy.deepcopy(result)))\n",
+          "new": "            self.calls.append((op, args, result))\n"
+        }
+      ],
+      "expect": "a step records its calls in order, each with what it returned"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "the recording keeps a shallow copy of the result",
+      "edits": [
+        {
+          "file": "effects.py",
+          "old": "            self.calls.append((op, args, copy.deepcopy(result)))\n",
+          "new": "            self.calls.append((op, args, copy.copy(result)))\n"
+        }
+      ],
+      "expect": "a step records its calls in order, each with what it returned"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "a replayed call hands out a shallow copy",
+      "edits": [
+        {
+          "file": "effects.py",
+          "old": "        return copy.deepcopy(entry[2])\n",
+          "new": "        return copy.copy(entry[2])\n"
+        }
+      ],
+      "expect": "ReplayMismatch"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "a replayed call hands out the recorded object itself",
+      "edits": [
+        {
+          "file": "effects.py",
+          "old": "        return copy.deepcopy(entry[2])\n",
+          "new": "        return entry[2]\n"
+        }
+      ],
+      "expect": "ReplayMismatch"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "replay skips human edits",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            state = self.graph.merge(state, copy.deepcopy(record.writes))\n        return state\n",
+          "new": "            if record.node != HUMAN:\n                state = self.graph.merge(state, copy.deepcopy(record.writes))\n        return state\n"
+        }
+      ],
+      "expect": "ReplayMismatch"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "replay compares the update with the pause marker still in it",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                update.pop(PAUSE, None)\n                if update != record.writes:\n",
+          "new": "                if update != record.writes:\n"
+        }
+      ],
+      "expect": "ReplayMismatch"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "replay compares the calls but not the update",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                if update != record.writes:\n                    raise ReplayMismatch(\n                        f\"step {record.step} ({record.node}) wrote {update!r}, its checkpoint has {record.writes!r}\"\n                    )\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "replay returns the checkpointed state without running the nodes",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        records = self.checkpointer.records(session)\n        if not records:\n            raise KeyError(session)\n        state: State = {}\n",
+          "new": "        return self.load_state(session).state\n        records = self.checkpointer.records(session)\n        state: State = {}\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "the mismatch is raised without the step",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                    raise ReplayMismatch(f\"step {record.step} ({record.node}): {err}\") from None\n",
+          "new": "                    raise\n"
+        }
+      ],
+      "expect": "Regex pattern did not match"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "call args recorded as a list",
+      "edits": [
+        {
+          "file": "effects.py",
+          "old": "        return self._effect(\"call\", (api, *args), lambda: self.world.apis[api](*args))\n",
+          "new": "        return self._effect(\"call\", [api, *args], lambda: self.world.apis[api](*args))\n"
+        }
+      ],
+      "expect": "a step records its calls in order, each with what it returned"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "a step's calls stored as the context's list",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        self.checkpointer.put(ns, Record(step, node, dict(update), tuple(calls)))\n",
+          "new": "        self.checkpointer.put(ns, Record(step, node, dict(update), calls))\n"
+        }
+      ],
+      "expect": "a step records its calls in order, each with what it returned"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "replay runs each node on the state after its own step",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        for record in records:\n            if record.node not in (START, HUMAN):\n",
+          "new": "        for record in records:\n            state = self.graph.merge(state, copy.deepcopy(record.writes))\n            if record.node not in (START, HUMAN):\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "                    )\n            state = self.graph.merge(state, copy.deepcopy(record.writes))\n        return state\n",
+          "new": "                    )\n        return state\n"
+        }
+      ],
+      "expect": "ReplayMismatch: step 2"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "replayed calls looked up by op and args, not by position",
+      "edits": [
+        {
+          "file": "effects.py",
+          "old": "        i = len(self.calls)\n        if i >= len(self.recorded):\n            raise ReplayMismatch(f\"call {i}, {op}{args!r}, is past the end of the recording\")\n        entry = self.recorded[i]\n        if (entry[0], entry[1]) != (op, args):\n            raise ReplayMismatch(f\"call {i} is {op}{args!r}, the recording has {entry[0]}{entry[1]!r}\")\n",
+          "new": "        i = len(self.calls)\n        left = [e for e in self.recorded if e not in self.calls]\n        found = [e for e in left if (e[0], e[1]) == (op, args)]\n        if not found:\n            raise ReplayMismatch(f\"call {i}, {op}{args!r}, is not in the recording\")\n        entry = found[0]\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "finish() called outside the step that names the mismatch",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                    update = dict(self.graph.nodes[record.node](state, ctx) or {})\n                    ctx.finish()\n                except ReplayMismatch as err:\n                    raise ReplayMismatch(f\"step {record.step} ({record.node}): {err}\") from None\n",
+          "new": "                    update = dict(self.graph.nodes[record.node](state, ctx) or {})\n                except ReplayMismatch as err:\n                    raise ReplayMismatch(f\"step {record.step} ({record.node}): {err}\") from None\n                ctx.finish()\n"
+        }
+      ],
+      "expect": "Regex pattern did not match"
+    },
+    {
+      "test": "test_record_and_replay",
+      "name": "only the channels the replayed node wrote are compared",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                if update != record.writes:\n",
+          "new": "                if any(record.writes.get(k) != v for k, v in update.items()):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "updates events carry the whole state",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        yield _event(\"updates\", {\"node\": node, \"update\": update}, step)\n",
+          "new": "        yield _event(\"updates\", {\"node\": node, \"update\": state}, step)\n"
+        }
+      ],
+      "expect": "an updates event carries what its step wrote"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "the pause marker left in the update that is sent",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        reason = update.pop(PAUSE, None)\n        state = runner._commit(session, graph, step, node, state, update, calls)\n",
+          "new": "        reason = update.get(PAUSE)\n        state = runner._commit(session, graph, step, node, state, {k: v for k, v in update.items() if k != PAUSE}, calls)\n"
+        }
+      ],
+      "expect": "an updates event carries what its step wrote"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "event ids counted per stream",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    inner = None\n    if inputs is not None:\n",
+          "new": "    inner, ids = None, iter(range(10**9))\n    if inputs is not None:\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "        yield _event(\"updates\", {\"node\": START, \"update\": inputs}, step)\n",
+          "new": "        yield _event(\"updates\", {\"node\": START, \"update\": inputs}, next(ids))\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "            yield _event(\"updates\", {\"node\": HUMAN, \"update\": patch}, step)\n",
+          "new": "            yield _event(\"updates\", {\"node\": HUMAN, \"update\": patch}, next(ids))\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "        yield _event(\"updates\", {\"node\": node, \"update\": update}, step)\n",
+          "new": "        yield _event(\"updates\", {\"node\": node, \"update\": update}, next(ids))\n"
+        }
+      ],
+      "expect": "a resumed stream goes on with the session's next step"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "the human edit is not sent",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if latest and step > latest[0].step:\n            yield _event(\"updates\", {\"node\": HUMAN, \"update\": patch}, step)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a resumed stream goes on with the session's next step"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "the human edit sent as the whole state",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "{\"node\": HUMAN, \"update\": patch}",
+          "new": "{\"node\": HUMAN, \"update\": state}"
+        }
+      ],
+      "expect": "a resumed stream goes on with the session's next step"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "the inputs are not sent",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        yield _event(\"updates\", {\"node\": START, \"update\": inputs}, step)\n",
+          "new": ""
+        }
+      ],
+      "expect": "an updates event carries what its step wrote"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "after a pause the loop breaks and end is sent too",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            yield _event(\"interrupt\", {\"node\": node, \"step\": step, \"reason\": reason})\n            return\n",
+          "new": "            yield _event(\"interrupt\", {\"node\": node, \"step\": step, \"reason\": reason})\n            break\n"
+        }
+      ],
+      "expect": "an updates event carries what its step wrote"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "no end event",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    yield _event(\"end\", {\"step\": step})\n",
+          "new": ""
+        }
+      ],
+      "expect": "reaching END sends end"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "a coroutine node is not awaited",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if inspect.isawaitable(update):\n                update = await update\n",
+          "new": ""
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "every node awaited",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if inspect.isawaitable(update):\n                update = await update\n",
+          "new": "            update = await update\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "events held back until the run stops",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    inner = None\n    if inputs is not None:\n",
+          "new": "    inner, held = None, []\n    if inputs is not None:\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "        yield _event(\"updates\", {\"node\": node, \"update\": update}, step)\n        if reason:\n            yield _event(\"interrupt\", {\"node\": node, \"step\": step, \"reason\": reason})\n            return\n        node = graph.next_node(node, state)\n    yield _event(\"end\", {\"step\": step})\n",
+          "new": "        held.append(_event(\"updates\", {\"node\": node, \"update\": update}, step))\n        if reason:\n            held.append(_event(\"interrupt\", {\"node\": node, \"step\": step, \"reason\": reason}))\n            break\n        node = graph.next_node(node, state)\n    else:\n        held.append(_event(\"end\", {\"step\": step}))\n    for frame in held:\n        yield frame\n"
+        }
+      ],
+      "expect": "each event goes out as soon as its step is checkpointed"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "an event sent before its step is checkpointed",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        state = runner._commit(session, graph, step, node, state, update, calls)\n        yield _event(\"updates\", {\"node\": node, \"update\": update}, step)\n",
+          "new": "        yield _event(\"updates\", {\"node\": node, \"update\": update}, step)\n        state = runner._commit(session, graph, step, node, state, update, calls)\n"
+        }
+      ],
+      "expect": "an event goes out only once its step is checkpointed"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "the stream merges updates without checkpointing them",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        state = runner._commit(session, graph, step, node, state, update, calls)\n",
+          "new": "        state = graph.merge(state, update)\n"
+        }
+      ],
+      "expect": "an event goes out only once its step is checkpointed"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "pretty-printed JSON behind one data: prefix",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    return f\"{head}event: {kind}\\ndata: {json.dumps(data)}\\n\\n\"\n",
+          "new": "    return f\"{head}event: {kind}\\ndata: {json.dumps(data, indent=2)}\\n\\n\"\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "no blank line after an event",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    return f\"{head}event: {kind}\\ndata: {json.dumps(data)}\\n\\n\"\n",
+          "new": "    return f\"{head}event: {kind}\\ndata: {json.dumps(data)}\\n\"\n"
+        }
+      ],
+      "expect": "each item is one event, closed by a blank line"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "the inputs sent before START is checkpointed",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        state, step, node = runner._begin(session, graph, inputs)\n        yield _event(\"updates\", {\"node\": START, \"update\": inputs}, step)\n",
+          "new": "        yield _event(\"updates\", {\"node\": START, \"update\": inputs}, 0)\n        state, step, node = runner._begin(session, graph, inputs)\n"
+        }
+      ],
+      "expect": "an event goes out only once its step is checkpointed"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "the human edit sent before it is checkpointed",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        latest = runner.checkpointer.records(session)[-1:]\n        state, step, node, inner = runner._position(session, graph, patch)\n        if latest and step > latest[0].step:\n            yield _event(\"updates\", {\"node\": HUMAN, \"update\": patch}, step)\n",
+          "new": "        latest = runner.checkpointer.records(session)[-1:]\n        if patch is not None:\n            yield _event(\"updates\", {\"node\": HUMAN, \"update\": patch}, latest[0].step + 1)\n        state, step, node, inner = runner._position(session, graph, patch)\n"
+        }
+      ],
+      "expect": "an event goes out only once its step is checkpointed"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "a node's error turned into an error event",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            update = target(state, ctx)\n            if inspect.isawaitable(update):\n                update = await update\n",
+          "new": "            try:\n                update = target(state, ctx)\n                if inspect.isawaitable(update):\n                    update = await update\n            except Exception as err:\n                yield _event(\"error\", {\"node\": node, \"error\": str(err)})\n                return\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "end reports the number of steps instead of the latest step",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    yield _event(\"end\", {\"step\": step})\n",
+          "new": "    yield _event(\"end\", {\"step\": step + 1})\n"
+        }
+      ],
+      "expect": "reaching END sends end"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "CRLF line ends",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    return f\"{head}event: {kind}\\ndata: {json.dumps(data)}\\n\\n\"\n",
+          "new": "    return f\"{head}event: {kind}\\r\\ndata: {json.dumps(data)}\\r\\n\\r\\n\".replace(\"id: \", \"id: \")\n"
+        }
+      ],
+      "expect": "each item is one event, closed by a blank line"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "interrupt sent before the pausing step's updates event",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        yield _event(\"updates\", {\"node\": node, \"update\": update}, step)\n        if reason:\n            yield _event(\"interrupt\", {\"node\": node, \"step\": step, \"reason\": reason})\n            return\n",
+          "new": "        if reason:\n            yield _event(\"interrupt\", {\"node\": node, \"step\": step, \"reason\": reason})\n            return\n        yield _event(\"updates\", {\"node\": node, \"update\": update}, step)\n"
+        }
+      ],
+      "expect": "an updates event carries what its step wrote"
+    },
+    {
+      "test": "test_stream_updates",
+      "name": "the human edit's id taken from the step before it",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            yield _event(\"updates\", {\"node\": HUMAN, \"update\": patch}, step)\n",
+          "new": "            yield _event(\"updates\", {\"node\": HUMAN, \"update\": patch}, latest[0].step)\n"
+        }
+      ],
+      "expect": "a resumed stream goes on with the session's next step"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "a subgraph's namespace built from the session id",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        child = f\"{ns}|{node}:{step}\"\n",
+          "new": "        child = f\"{ns.split('|')[0]}|{node}:{step}\"\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "self.checkpointer.records(f\"{ns}|{name}:{step}\")",
+          "new": "self.checkpointer.records(f\"{ns.split('|')[0]}|{name}:{step}\")"
+        }
+      ],
+      "expect": "a pause names the namespace it happened in"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "a subgraph's namespace without the parent step",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        child = f\"{ns}|{node}:{step}\"\n",
+          "new": "        child = f\"{ns}|{node}\"\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "self.checkpointer.records(f\"{ns}|{name}:{step}\")",
+          "new": "self.checkpointer.records(f\"{ns}|{name}\")"
+        }
+      ],
+      "expect": "a pause names the namespace it happened in"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "a pause re-raised by each parent as its own",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                update, calls = self._subgraph(ns, node, step, target, state, patch), ()\n",
+          "new": "                try:\n                    update, calls = self._subgraph(ns, node, step, target, state, patch), ()\n                except PausedAtNode as paused:\n                    raise PausedAtNode(node, step, paused.reason, ns) from None\n"
+        }
+      ],
+      "expect": "a pause names the namespace it happened in"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "the parent checkpoints a subgraph node that paused",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                update, calls = self._subgraph(ns, node, step, target, state, patch), ()\n",
+          "new": "                try:\n                    update, calls = self._subgraph(ns, node, step, target, state, patch), ()\n                except PausedAtNode:\n                    self._commit(ns, graph, step, node, state, {}, ())\n                    raise\n"
+        }
+      ],
+      "expect": "a subgraph node is checkpointed once it finishes"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "the parent gets the subgraph's whole final state",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        update: Update = {}\n        for record in self.checkpointer.records(child):\n            if record.node != START:\n                update = graph.merge(update, copy.deepcopy(record.writes))\n        return update\n",
+          "new": "        return self._state_at(graph, self.checkpointer.records(child))\n"
+        }
+      ],
+      "expect": "a subgraph hands its parent what its steps wrote"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "the subgraph's START writes go to the parent too",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            if record.node != START:\n                update = graph.merge(update, copy.deepcopy(record.writes))\n",
+          "new": "            update = graph.merge(update, copy.deepcopy(record.writes))\n"
+        }
+      ],
+      "expect": "a subgraph hands its parent what its steps wrote"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "human edits inside a subgraph do not reach the parent",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            if record.node != START:\n                update = graph.merge(update, copy.deepcopy(record.writes))\n",
+          "new": "            if record.node not in (START, HUMAN):\n                update = graph.merge(update, copy.deepcopy(record.writes))\n"
+        }
+      ],
+      "expect": "a subgraph hands its parent what its steps wrote"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "the subgraph's writes folded without its reducers",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                update = graph.merge(update, copy.deepcopy(record.writes))\n",
+          "new": "                update = {**update, **copy.deepcopy(record.writes)}\n"
+        }
+      ],
+      "expect": "a subgraph hands its parent what its steps wrote"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "the human edit applied to the parent first",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        if _has_subgraphs(graph):\n            inside = self._stopped_in(ns, graph, step + 1)\n            if inside is not None:\n                return state, step, inside, patch\n        if patch is not None:\n            step += 1\n            state = self._commit(ns, graph, step, HUMAN, state, patch)\n",
+          "new": "        if patch is not None:\n            step += 1\n            state = self._commit(ns, graph, step, HUMAN, state, patch)\n        if _has_subgraphs(graph):\n            inside = self._stopped_in(ns, graph, step + 1)\n            if inside is not None:\n                return state, step, inside, patch\n"
+        }
+      ],
+      "expect": "the edit goes to the subgraph that paused"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "the human edit dropped when the session stopped inside a subgraph",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                return state, step, inside, patch\n",
+          "new": "                return state, step, inside, None\n"
+        }
+      ],
+      "expect": "PausedAtNode"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "the subgraph looked for at the latest step instead of the next",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            inside = self._stopped_in(ns, graph, step + 1)\n",
+          "new": "            inside = self._stopped_in(ns, graph, step)\n"
+        }
+      ],
+      "expect": "the edit goes to the subgraph that paused"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "a subgraph always starts over from its entry",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        if self.checkpointer.records(child):\n            sub_state",
+          "new": "        if False:\n            sub_state"
+        }
+      ],
+      "expect": "is already written"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "a resumed subgraph goes on with the parent's state",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            sub_state, sub_step, sub_node, inner = self._position(child, graph, patch)\n",
+          "new": "            sub_state, sub_step, sub_node, inner = self._position(child, graph, patch)\n            sub_state = graph.merge(state, patch or {})\n"
+        }
+      ],
+      "expect": "KeyError: 'draft'"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "nodes looked up in the root graph first",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            target = graph.nodes[node]\n",
+          "new": "            target = self.graph.nodes.get(node, graph.nodes.get(node))\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "any subgraph node taken for the one that stopped",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "if isinstance(target, StateGraph) and self.checkpointer.records(f\"{ns}|{name}:{step}\"):",
+          "new": "if isinstance(target, StateGraph):"
+        }
+      ],
+      "expect": "resume goes on inside the subgraph"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "a subgraph's namespace numbered by the node's runs, not the parent step",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        child = f\"{ns}|{node}:{step}\"\n",
+          "new": "        runs = getattr(self, '_runs', {}); self._runs = runs\n        runs[(ns, node)] = runs.get((ns, node), 0) + 1\n        child = f\"{ns}|{node}:{runs[(ns, node)]}\"\n"
+        }
+      ],
+      "expect": "a pause names the namespace it happened in"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "namespace levels joined with '/'",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        child = f\"{ns}|{node}:{step}\"\n",
+          "new": "        child = f\"{ns}/{node}:{step}\"\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "self.checkpointer.records(f\"{ns}|{name}:{step}\")",
+          "new": "self.checkpointer.records(f\"{ns}/{name}:{step}\")"
+        }
+      ],
+      "expect": "a pause names the namespace it happened in"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "a stopped subgraph node resumed one step too late",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                return state, step, inside, patch\n",
+          "new": "                return state, step + 1, inside, patch\n"
+        }
+      ],
+      "expect": "PausedAtNode"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "_stopped_in looks at the root graph's nodes",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        for name, target in graph.nodes.items():\n            if isinstance(target, StateGraph) and",
+          "new": "        for name, target in self.graph.nodes.items():\n            if isinstance(target, StateGraph) and"
+        }
+      ],
+      "expect": "the edit goes to the subgraph that paused"
+    },
+    {
+      "test": "test_nested_subgraphs",
+      "name": "a subgraph started from the parent's last update only",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            (sub_state, sub_step, sub_node), inner = self._begin(child, graph, state), None\n",
+          "new": "            last = self.checkpointer.records(ns)[-1].writes\n            (sub_state, sub_step, sub_node), inner = self._begin(child, graph, dict(last)), None\n"
+        }
+      ],
+      "expect": "KeyError: 'customer'"
+    }
+  ]
+}

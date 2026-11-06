@@ -1,0 +1,139 @@
+{
+  "lesson": "phases/14-agent-engineering/13-langgraph-stateful-graphs",
+  "title": "Stateful Graph Orchestration — Durable Execution and Checkpoints",
+  "format": "staged-brownfield",
+  "service": "StateGraph: a LangGraph-shaped stateful graph runtime with a checkpoint after every step, pause for a human and resume after a crash, a SQLite checkpointer with typed JSON values, recorded random draws, clock reads and API calls that replay a session, a per-step SSE stream for the UI, and nested subgraphs with their own checkpoint namespaces",
+  "sources": {
+    "docs/en.md": "eff89296945c389b50c9491488940eebee8dc61756ea274a2b1a094709fb4951",
+    "code/main.py": "317ea714757bdcbc361248efe45a8c4b9210113c4c4c4c195014bb7e82885b48"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_pause_and_resume",
+      "kind": "debug",
+      "lesson_anchor": "Durable execution (resume at step N+1 with exact state); Human-in-the-loop (pause, accept modifications, resume); Where this pattern goes wrong: Checkpoints too small; Key Terms: Reducer, Conditional edge; code/main.py Runner.run, StateGraph._next, _make_router, InMemoryCheckpointer; quiz Q7, Q8, Q9, Q10",
+      "planted_bugs": [
+        "_loop writes the checkpoint before it pops _pause_reason, as code/main.py does, so the paused step's checkpoint keeps the marker; it surfaces one call later, when resume with the human's approval pauses again at human_gate",
+        "_position resumes at the latest checkpointed node itself instead of the node after it, so a finished step runs twice (an extra human_gate step; after a crash, a second ticket)",
+        "next_node expands conditional edges into one edge per label and calls the router once per edge (code/main.py _make_router), so a scripted LLM router is asked three times and routes to sales; once that is fixed, a label without an edge or a node without edges returns None and _loop ends the run quietly instead of raising GraphError",
+        "every step hands the whole state to the checkpointer as its record and put deep-copies it, although Record holds only what the step wrote, so a long session is quadratic"
+      ],
+      "timing_assert": "800 steps of a session holding 1500 documents of tool state and a growing message list, under 0.15 s. Measured on this machine at load average 4 to 13. The venv's Python 3.12: the whole-state copy takes 2.0 to 3.1 s (at least 13x the limit), records of the step's writes folded on read take 5.5 to 9.9 ms (at least 15x under it). Python 3.10: 2.7 to 3.0 s and 7.8 to 11.4 ms; Python 3.13: 1.8 to 2.1 s and 5.5 to 11.8 ms; Python 3.14: 1.4 to 1.9 s (at least 9x) and 4.6 to 13.2 ms (at least 11x under)",
+      "overfix_guard": "records that hold only the update must still give back the whole state (taking the latest writes as the state fails with KeyError: 'ticket'; folding without reducers or without step 0 fails); put must keep its own deep copy (a node that hands back the list it keeps growing catches no copy and dict()); load_state hands out a copy; whole-state snapshots copied shallowly pass the timing but not 'a checkpoint holds what its step wrote', and pickle snapshots fail the timing; the marker kept in the checkpoint and dropped on load (dropped from history too, it is still caught by the pausing step's own record), the edit merged in memory only, the next node chosen before the edit, a HUMAN record taken as the resume position, following the first edge as code/main.py hard-codes send, and router labels cached per node are each caught"
+    },
+    {
+      "part": 2,
+      "test": "test_sqlite_checkpoints",
+      "kind": "model and persistence",
+      "lesson_anchor": "Durable execution (the runtime serializes the state and writes it to a checkpointer: SQLite, Postgres, Redis, custom); Build It: SQLiteCheckpointer (in-memory fake); Exercise 2 (a real SQLite checkpointer); quiz Q10 (deepcopy is not serialization; set and datetime break JSON; default=str changes types)",
+      "exactness": "a session's records read back from a reopened file equal, type for type, the records of the same graph run on InMemoryCheckpointer (exact() tells tuple from list, set from frozenset, bytes from str, True from 1 and 1.0, -0.0 from 0.0): a 2**64 + 1 id, True, -0.0, a tuple, a set mixing str, int and tuple, a frozenset, bytes, a dict keyed by 7, '7', (2, 3), None and True, dicts shaped like common type tags, 0.1 + 0.2, 2**80, inf, non-ASCII text with U+2028, nested containers and empty ones, a write of None, a step that wrote nothing, and recorded calls made of tuples; each value's own encoding, read as plain JSON data and encoded again, reads back unchanged; a new Runner resumes the session from the reopened file",
+      "traps": [
+        "plain JSON: tuples come back as lists, sets and bytes raise",
+        "dicts written as JSON objects with str() keys (7 and '7' collide)",
+        "tags told apart from data by their shape, so {'tuple': [1]} reads back as a tuple; encoding each value's own encoding again, taken as plain data, catches shapes the test does not list, such as __type__/items or py/tuple",
+        "set items sorted for a stable encoding (mixed types raise)",
+        "a frozenset read back as a set; bytes as latin-1 text; booleans as 0 and 1; large ints as strings",
+        "default=str or pickle instead of a TypeError for unsupported values",
+        "a write of None skipped",
+        "one row per channel only, so a step without writes disappears",
+        "rows committed one by one, so a failed put leaves part of its step",
+        "a repeated step accepted, or refused only by a primary key (IntegrityError)",
+        "recorded calls not stored"
+      ],
+      "clarifying_questions": [
+        "pickle",
+        "datetime and Decimal",
+        "set order",
+        "one table or two",
+        "two workers writing one step"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_record_and_replay",
+      "kind": "core algorithm",
+      "lesson_anchor": "Where this pattern goes wrong: Non-deterministic nodes (resume assumes node inputs produce the same state update; random seeds, wall-clock, external APIs must be captured); outputs/skill-state-graph.md hard reject: non-deterministic nodes without explicit random-seed or wall-clock capture",
+      "traps": [
+        "results recorded by reference or as a shallow copy (the quote node changes the API's answer and a nested list in it)",
+        "replayed results handed out without a copy, so the second replay sees what the first one changed",
+        "calls not checked, or checked by op only (an amount changed from 45 to 50 goes unnoticed)",
+        "a call past the end of the recording sent to the real API",
+        "recorded calls left over not checked",
+        "calls compared but not the whole update (a node stamping time.time(), a code change with the same calls, one that drops paid_at)",
+        "the pause marker left in the update when comparing",
+        "human edits skipped during replay",
+        "a node replayed on the state after its own step (review keeps the asked_at it already has and skips the clock)",
+        "replay that calls the world, writes checkpoints, or just returns the checkpointed state",
+        "a crashed attempt's calls kept in the recording",
+        "the mismatch raised without 'step <n>'"
+      ],
+      "integration": "a refund session pauses for approval, takes a human edit, crashes in the refund call and resumes: the recording holds only the attempt that finished, two replays give the final state without touching the RNG, the clock or the API, and replays against seven changed node versions fail at the right step",
+      "clarifying_questions": [
+        "replaying a crashed attempt",
+        "more calls than recorded",
+        "whether replay needs the World",
+        "what replay returns",
+        "how updates are compared"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_stream_updates",
+      "kind": "streaming",
+      "lesson_anchor": "Streaming (the graph streams per-node-delta events to the caller so UIs update as the graph runs); Exercise 5; Human-in-the-loop (the pause becomes an interrupt event)",
+      "wire_format": "server-sent events, one event per yielded string: updates events with id: <step>, event: updates and data: {\"node\", \"update\"}; interrupt and end events without an id; LF line ends, a blank line after each event, data as JSON on one line; decided by the test's parse_sse (field: value lines, one space after the colon dropped, json.loads on data)",
+      "traps": [
+        "the whole state, or the pause marker, in the data",
+        "START or HUMAN checkpoints not sent, or a HUMAN event carrying the whole state",
+        "ids counted per stream instead of the step",
+        "break after interrupt, so end follows it; no end event",
+        "an event sent before its checkpoint is written, START and HUMAN included (each event's step is looked up in the checkpointer as it arrives; aclose after the second event leaves step 1 unwritten)",
+        "events held back until the run stops (the log of node runs and received events is checked)",
+        "coroutine nodes not awaited, or every node awaited",
+        "updates merged without checkpointing",
+        "pretty-printed JSON behind one data: prefix, or no blank line"
+      ],
+      "clarifying_questions": [
+        "START events",
+        "ids on interrupt and end",
+        "a node that raises",
+        "LF or CRLF",
+        "whole state or delta"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_nested_subgraphs",
+      "kind": "recursive structure",
+      "lesson_anchor": "Three topologies: Hierarchical (supervisors managing sub-supervisors, implemented as nested subgraphs); Key Terms: Subgraph (a graph used as a node inside another graph); outputs/skill-state-graph.md: more than ~30 nodes requires nested subgraphs",
+      "traps": [
+        "namespaces built from the session id or without the parent step",
+        "a pause re-raised by each parent as its own",
+        "the parent checkpointing a subgraph node that paused",
+        "the human edit applied to the parent, dropped, or looked for at the wrong step",
+        "a resumed subgraph started over from its entry, or run on the parent's state",
+        "the parent given the subgraph's final state, START included, human edits left out, or writes folded without reducers",
+        "nodes looked up in the root graph, so the subgraph's send runs the root's send",
+        "any subgraph node taken for the one that stopped",
+        "one namespace for every run of a subgraph node in a loop"
+      ],
+      "clarifying_questions": [
+        "what the subgraph sees",
+        "what the parent gets back",
+        "where a patch goes",
+        "a subgraph node in a loop",
+        "what a nested pause reports"
+      ]
+    }
+  ],
+  "deviations": [
+    "Nodes take (state, ctx) instead of (state): the context is the only way to random numbers, the clock and external APIs (Part 3); the nodes of Parts 1 and 2 ignore it. The lesson's in-state step counter, which every node increments, is dropped: checkpoints carry the runtime's step numbers, so a node that runs twice shows up as an extra step in the history.",
+    "Part 1: the suggested bugs, with the duplicate ticket shown by a crash after a sales ticket. The timing workload is 800 steps over 1500 documents of tool state plus a growing message list instead of 2000 bare steps, so the whole-state copy dominates while the slow version stays near 2 to 3 s. Per-channel incremental saving takes the form of records that hold the step's writes and a fold through the reducers on read; besides the suggested Checkpoints-too-small guard, a node that hands back a list it keeps growing guards against dropping the copy, and a structural check rules out cheap whole-state snapshots.",
+    "Part 2: the reference uses two tables, steps(session, step, node, calls) and writes(session, step, channel, value), rather than one (session, step, node, channel, value) table, because a step that writes nothing (a pausing gate) is still a checkpoint and the recorded calls need a home. The tests only go through put and records, so other layouts pass too. Instead of an ordering trap (lesson 07 already uses string order), the extra traps are a write of None, an all-or-nothing put and a step written once.",
+    "Part 3: in this runtime resume never re-runs a checkpointed step (it picks up at N+1), so replay against the recording is its own operation, Runner.replay, which re-runs a recorded session to check the lesson's assumption that node inputs produce the same update; a changed node version is replayed the same way. As suggested, a crashed attempt is not recorded (recordings are committed with their checkpoint) and the rerun records fresh, and human edits, which are checkpoints of their own since Part 1, are applied during replay.",
+    "Part 4: as suggested, plus START and HUMAN checkpoints are streamed too, so a client that applies every updates event holds the session's state; interrupt and end carry no id, and an event goes out only after its checkpoint is written, checked as each event arrives and probed with aclose().",
+    "Part 5: as suggested; each namespace level is written <node>:<step> so that a subgraph node in a loop gets one namespace per run, the patch goes to the innermost paused namespace, and the merge rule is in the docstring of Runner._subgraph. The root graph and the review subgraph both have a node named send."
+  ]
+}
