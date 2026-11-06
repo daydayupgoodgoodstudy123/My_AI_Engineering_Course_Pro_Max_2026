@@ -1,0 +1,131 @@
+{
+  "lesson": "phases/14-agent-engineering/23-otel-genai-conventions",
+  "title": "OpenTelemetry GenAI Semantic Conventions",
+  "format": "staged-brownfield",
+  "service": "SemConv: GenAI spans (create_agent, invoke_agent, chat, tool_call) for an in-process ReAct agent with a scripted model, opt-in content capture by reference, a SQLite content store, tool-error attribution by model, a live NDJSON span feed and nested-agent token rollup",
+  "sources": {
+    "docs/en.md": "079cbb2f56f7ec32724047275efa9fbd66a2af5f3953edba52f675527e336aa8",
+    "code/main.py": "bdc519e5b6e6026d172d2d74e895fc3e195517361b5c9f3375e1ac20fd2908a8",
+    "quiz/quiz.md": "1902e91a3ece393145c2b1ce0aef8758c8cc06040f98846f0b1cb0ddb34fe0e3"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network and no LLM: the model is a scripted async function and the tools are async functions the tests supply",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_agent_spans",
+      "kind": "debug",
+      "lesson_anchor": "Span categories (agent spans: create_agent when the agent is constructed, invoke_agent when it runs; code/main.py records create_agent once and ends it at once, a root of its own, before invoke_agent; quiz key point 2, Q1 and Q12 item 6); Agent span naming (invoke_agent {gen_ai.agent.name}, fallback invoke_agent; INTERNAL for in-process agents); Tool spans connected to the agent span by parent-child relation; Content capture (store externally, record references on spans); code/main.py Tracer.start_span/end_span, add_content and ExternalContentStore; code/main.讲解.md on the single stack under asyncio and contextvars; quiz Q15 (contextvars for the current span in async tasks)",
+      "planted_bugs": [
+        "agent_attributes always sets gen_ai.agent.name and agent_span_name returns 'invoke_agent None' (both agent spans use them); the TypeError surfaces in Span.set_attribute, three calls below run_agent, which passes those attributes",
+        "the current span is a shared list used as a stack and end_span pops the top instead of the span it is given; under asyncio.gather the second tool span becomes a child of the first and the first tool to return ends the other one",
+        "create_agent() records nothing and run_agent records a create_agent span at the start of every run, as a child of its invoke_agent span, although the docstrings and the lesson's span categories record create_agent once, when the agent is constructed, and invoke_agent on every run; the test counts spans by gen_ai.operation.name (exactly one create_agent right after construction, none added by a run on the same tracer or on a second one) and checks the parent only in passing",
+        "the default clock is time.perf_counter_ns instead of Unix-epoch time.time_ns"
+      ],
+      "timing_assert": "18,000 put() calls on ExternalContentStore under 0.15 s. The starter dedupes by scanning every stored text, O(n^2). Measured on this machine (Python 3.12, load average 5-9 from other agents): starter 1.63-3.6 s; a reverse dict from JSON text to reference 7-15 ms",
+      "overfix_guard": "identical content gets one reference across two tracers sharing a store and inside one store (rules out dropping dedupe for speed); sequential chat spans and later tool spans stay children of invoke_agent (rules out contextvars without restoring the parent in end_span); timestamps are int (rules out time.time() * 1e9); Tracer(capture_content=True) without a store still works and a store given is the one used (rules out assigning content_store as given, and the lesson code's content_store or ExternalContentStore(), which swaps out an empty store because it has __len__); dropping None in set_attribute still leaves the span named wrongly; spans carry no captured text; create_agent is counted right after construction, not only after the run (rules out recording it before invoke_agent on every run, the lesson script's order, recording it on the first run only, and starting it without ending it); a run on a second tracer adds no create_agent (rules out one per tracer); the create_agent span of an unnamed agent is named create_agent and carries gen_ai.provider.name"
+    },
+    {
+      "part": 2,
+      "test": "test_content_store_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Content capture: store content externally, record references on spans (pointer IDs, not prose); Exercise 2: prompts to SQLite, span attributes carry only row IDs",
+      "exactness": "gen_ai.input.messages-shaped content (nested dicts and lists with 1.0, 2, True, None, non-ASCII text, an emoji, U+2028, NUL, CRLF, a tool result that is JSON text) comes back with the same types and key order, across a close and reopen; a str that looks like JSON stays a str; [1], [1.0] and [True] are three different contents",
+      "traps": [
+        "the reference returned as an int instead of the row id as a decimal string",
+        "strings stored as they are and everything else as JSON",
+        "dedupe by comparing decoded values with ==",
+        "dedupe in an in-memory dict that a reopen forgets",
+        "no AUTOINCREMENT, so a deleted row id is handed out again",
+        "int(ref) raising ValueError for a reference that is not a row id",
+        "delete ignoring unknown references",
+        "a delete that is never committed, so the erased content is back after a reopen (the test gets it once more after the last reopen)",
+        "a soft delete that keeps the row behind a flag, so the same content put again gets the dead reference"
+      ],
+      "integration": "the Part 1 tracer with this store: a tool span carries only gen_ai.tool.result.reference_id and captured_content resolves it",
+      "clarifying_questions": [
+        "reference format",
+        "re-putting deleted content",
+        "1 vs 1.0",
+        "several writers"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_tool_errors_by_model",
+      "kind": "core algorithm",
+      "lesson_anchor": "Exercise 5: which tool errors correlate with which models, from GenAI attributes alone; Key attributes (gen_ai.provider.name, gen_ai.request.model, gen_ai.response.model may differ due to routing); Where this pattern goes wrong: No gen_ai.provider.name, Spans without parent links; quiz Q16 (tool rows joined along the parent chain to the chat spans of the same agent run, response.model x tool.name; token usage on chat spans)",
+      "traps": [
+        "the latest chat span anywhere in the trace instead of under the same invoke_agent (two agents interleaved in time)",
+        "keyed by gen_ai.request.model instead of gen_ai.response.model",
+        "a chat span without gen_ai.provider.name not taking its agent's provider",
+        "a tool span whose parent is a chat span treated as orphaned",
+        "< instead of <= for a chat span that starts at the tool's start time; ties not going to the smaller span_id",
+        "orphans (no parent, missing parent, tool parent, no earlier chat) dropped without a count",
+        "rows not sorted by (provider, model, tool)",
+        "ties broken by input order, first or last seen (the report must not change when the spans are reversed)",
+        "the agent's provider taken before the chat span's own (an openai agent whose call went to aws.bedrock)"
+      ],
+      "integration": "a traced run whose first reply was routed to another model and whose second reply has no response model, with a failing tool called twice",
+      "clarifying_questions": [
+        "missing response model",
+        "tool span under a tool span",
+        "ties on start time"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_span_feed",
+      "kind": "streaming",
+      "lesson_anchor": "Spans without parent links: always propagate context; Build It: Tracer with nested contexts; code/main.讲解.md (real OTel spans carry trace_id, span_id and parent_span_id and are exported one by one, the backend rebuilds the tree); quiz Q11 (error.type)",
+      "wire_format": "NDJSON, one object per ended span in end order: {trace_id 32 hex, span_id 16 hex, parent_span_id 16 hex or null, name, kind, start_ns, end_ns, attributes}, decided by the test's ''.join(lines).splitlines() and json.loads",
+      "traps": [
+        "a plain async def instead of an async generator",
+        "waiting for the run before yielding (the probe tool waits for an Event set by the first line)",
+        "stopping as soon as the run task is done, losing the last spans",
+        "ids without zero padding (seed 0 gives a 15-digit span id, the failing run's seed 34 a 31-digit trace id); a root's parent written as sixteen zeros; timestamps written as float seconds",
+        "the run's exception swallowed",
+        "closing the feed early without cancelling and awaiting the run: aclose() returns only after every span of the run has ended (cancel then sleep(0) is not enough)",
+        "the feed left attached to tracer.processors, also after a failed run",
+        "concurrent agents' tool spans under the wrong agent (depends on Part 1)",
+        "asyncio.create_task(run) on the future that asyncio.gather returns (TypeError)",
+        "looping on task.done() around queue.get(), which hangs after the last span"
+      ],
+      "clarifying_questions": [
+        "slow consumer",
+        "spans that end after the feed stops",
+        "a failed run's error"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_agent_usage_rollup",
+      "kind": "tree",
+      "lesson_anchor": "Span categories (agent spans and model spans, connected by parent-child); the span tree figure; code/main.讲解.md suggestion to add token usage to chat spans; quiz Q16 (cost from token usage by provider and model)",
+      "traps": [
+        "runs keyed by gen_ai.agent.name (two researcher runs)",
+        "a run whose parent span never arrived dropped instead of becoming a root",
+        "chat tokens credited to every agent above instead of the nearest",
+        "child runs found by direct parent id only (sub-agents sit under tool_call spans)",
+        "depth counting every span instead of agent runs",
+        "a chat span whose parent is missing dropped instead of unattributed",
+        "runs in input order instead of pre-order by start time",
+        "missing token attributes raising instead of counting as 0",
+        "a chat span under a tool_call span left unattributed (chat 13 sits under tool 9)"
+      ],
+      "integration": "a lead agent that calls a researcher through agent_tool, traced and rolled up",
+      "clarifying_questions": [
+        "missing token counts",
+        "same-name runs",
+        "a sub-agent whose parent is missing"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1 does not use the suggested 'each Tracer mints its own content ids' bug. Its third bug is the lesson's agent span lifecycle (Span categories: create_agent when the agent is constructed, invoke_agent when it runs): the starter records create_agent at the start of every run, under invoke_agent. The test asserts how many create_agent spans there are and when they appear, counted by gen_ai.operation.name, and checks the parent only in passing, to stay apart from the gather parenting bug in the same part and from 13/23's tasks/get spans under agent.invoke_agent; the fix moves span recording out of the run, the reverse of 14/18's agent shared across requests. The tracer's default store is an is None check in the starter already, and the test still checks that content lands in the store the tracer was given. The suggested perf_counter_ns bug is kept; the clock was already injectable in the lesson-shaped API.",
+    "Part 1 has no inline capture mode. Capture is opt-in (capture_content=False records nothing) and by reference only, the production pattern the lesson recommends, so the suggested 'no truncated content in reference mode' guard becomes the check that no captured text appears in any span attribute.",
+    "Part 2 does not build its main traps on surrogate text, sort_keys or a missing commit, which other lessons in this chapter already use; the exactness traps are the JSON-looking string and 1 / 1.0 / True dedupe, and the domain trap is that a deleted reference is never reused. Key order and a delete that is never committed are still checked in passing.",
+    "Part 3 charges a tool span to a chat span that is its parent as well (some frameworks nest tool spans under the model call), and counts a tool span under another tool span as orphaned.",
+    "Part 4 is an async generator over a run task (stream_spans) rather than a file writer, to stay apart from 14/16's NDJSON trace processor: the traps are about yielding while the run is going, draining at the end, re-raising the run's error and cancelling on close.",
+    "The lesson does not name the token usage attributes. Parts 4 and 5 use OpenTelemetry's gen_ai.usage.input_tokens and gen_ai.usage.output_tokens, and error.type comes from the quiz (Q11). Operation names are the lesson's: chat, invoke_agent, tool_call."
+  ]
+}

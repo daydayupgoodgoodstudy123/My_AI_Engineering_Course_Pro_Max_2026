@@ -1,0 +1,1029 @@
+{
+  "package": "semconv",
+  "tests": [
+    "test_agent_spans",
+    "test_content_store_roundtrip",
+    "test_tool_errors_by_model",
+    "test_span_feed",
+    "test_agent_usage_rollup"
+  ],
+  "layers": [
+    {
+      "test": "test_agent_spans",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "must be str, bool, int or float"
+        },
+        {
+          "name": "unnamed agent: no None attribute, span named invoke_agent",
+          "edits": [
+            {
+              "file": "agent.py",
+              "old": "    return f\"{operation} {agent_name}\"\n",
+              "new": "    return f\"{operation} {agent_name}\" if agent_name else operation\n"
+            },
+            {
+              "file": "agent.py",
+              "old": "    return {\n        \"gen_ai.operation.name\": operation,\n        \"gen_ai.provider.name\": agent.provider,\n        \"gen_ai.request.model\": agent.model,\n        \"gen_ai.agent.name\": agent.name,\n    }\n",
+              "new": "    attributes: dict[str, Any] = {\n        \"gen_ai.operation.name\": operation,\n        \"gen_ai.provider.name\": agent.provider,\n        \"gen_ai.request.model\": agent.model,\n    }\n    if agent.name:\n        attributes[\"gen_ai.agent.name\"] = agent.name\n    return attributes\n"
+            }
+          ],
+          "expect": "concurrent tool calls are children of the invoke_agent span"
+        },
+        {
+          "name": "+ current span in a context variable, end_span ends the span it is given",
+          "edits": [
+            {
+              "file": "tracer.py",
+              "old": "import contextlib\nimport json\n",
+              "new": "import contextlib\nimport contextvars\nimport json\n"
+            },
+            {
+              "file": "tracer.py",
+              "old": "        self._stack: list[Span] = []\n\n    def current_span(self) -> Span | None:\n        return self._stack[-1] if self._stack else None\n",
+              "new": "        self._current = contextvars.ContextVar(f\"current_{id(self)}\", default=None)\n        self._parents: dict[int, Span | None] = {}\n\n    def current_span(self) -> Span | None:\n        return self._current.get()\n"
+            },
+            {
+              "file": "tracer.py",
+              "old": "        self._stack.append(span)\n        return span\n",
+              "new": "        self._parents[span.span_id] = parent\n        self._current.set(span)\n        return span\n"
+            },
+            {
+              "file": "tracer.py",
+              "old": "        span = self._stack.pop()\n        span.end_ns = self.clock()\n",
+              "new": "        span.end_ns = self.clock()\n        parent = self._parents.pop(span.span_id, None)\n        if self._current.get() is span:\n            self._current.set(parent)\n"
+            }
+          ],
+          "expect": "constructing an agent records one create_agent span"
+        },
+        {
+          "name": "+ create_agent recorded once, when the agent is built",
+          "edits": [
+            {
+              "file": "agent.py",
+              "old": "        created = tracer.start_span(\n            agent_span_name(\"create_agent\", agent.name),\n            attributes=agent_attributes(\"create_agent\", agent),\n        )\n        tracer.end_span(created)\n",
+              "new": ""
+            },
+            {
+              "file": "agent.py",
+              "old": "    return Agent(\n        name,\n        provider,\n        model,\n        tools={} if tools is None else dict(tools),\n        data_sources={} if data_sources is None else dict(data_sources),\n    )\n",
+              "new": "    agent = Agent(\n        name,\n        provider,\n        model,\n        tools={} if tools is None else dict(tools),\n        data_sources={} if data_sources is None else dict(data_sources),\n    )\n    created = tracer.start_span(\n        agent_span_name(\"create_agent\", agent.name),\n        attributes=agent_attributes(\"create_agent\", agent),\n    )\n    tracer.end_span(created)\n    return agent\n"
+            }
+          ],
+          "expect": "timestamps are Unix-epoch nanoseconds"
+        },
+        {
+          "name": "+ epoch clock by default",
+          "edits": [
+            {
+              "file": "tracer.py",
+              "old": "clock: Callable[[], int] = time.perf_counter_ns,",
+              "new": "clock: Callable[[], int] = time.time_ns,"
+            }
+          ],
+          "expect": "put stays fast as the store grows"
+        },
+        {
+          "name": "+ index content by its JSON text",
+          "edits": [
+            {
+              "file": "tracer.py",
+              "old": "        self._by_ref: dict[str, str] = {}\n\n",
+              "new": "        self._by_ref: dict[str, str] = {}\n        self._by_text: dict[str, str] = {}\n\n"
+            },
+            {
+              "file": "tracer.py",
+              "old": "        for ref, stored in self._by_ref.items():\n            if stored == text:\n                return ref\n        ref = f\"content_{len(self._by_ref) + 1:03d}\"\n        self._by_ref[ref] = text\n",
+              "new": "        if text in self._by_text:\n            return self._by_text[text]\n        ref = f\"content_{len(self._by_ref) + 1:03d}\"\n        self._by_ref[ref] = text\n        self._by_text[text] = ref\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_agent_spans",
+      "name": "dedupe dropped to make put fast",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        ref = self._by_text.get(text)\n        if ref is None:\n",
+          "new": "        ref = None\n        if ref is None:\n"
+        }
+      ],
+      "expect": "identical content shares one reference"
+    },
+    {
+      "test": "test_agent_spans",
+      "name": "end_span leaves the ended span current",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        if self._current.get() is span:\n            self._current.set(parent)\n",
+          "new": ""
+        }
+      ],
+      "expect": "children of the invoke_agent span"
+    },
+    {
+      "test": "test_agent_spans",
+      "name": "epoch time as float seconds times 1e9",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "clock: Callable[[], int] = time.time_ns,",
+          "new": "clock: Callable[[], int] = lambda: time.time() * 1e9,"
+        }
+      ],
+      "expect": "timestamps are integer nanoseconds"
+    },
+    {
+      "test": "test_agent_spans",
+      "name": "content_store required instead of defaulting",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "ExternalContentStore() if content_store is None else content_store",
+          "new": "content_store"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_agent_spans",
+      "name": "None attribute values silently dropped instead of fixing the agent",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        if not isinstance(value, (str, bool, int, float)):\n",
+          "new": "        if value is None:\n            return\n        if not isinstance(value, (str, bool, int, float)):\n"
+        },
+        {
+          "file": "agent.py",
+          "old": "    if agent.name:\n        attributes[\"gen_ai.agent.name\"] = agent.name\n",
+          "new": "    attributes[\"gen_ai.agent.name\"] = agent.name\n"
+        },
+        {
+          "file": "agent.py",
+          "old": "    return f\"{operation} {agent_name}\" if agent_name else operation\n",
+          "new": "    return f\"{operation} {agent_name}\"\n"
+        }
+      ],
+      "expect": "an unnamed agent's span is named invoke_agent"
+    },
+    {
+      "test": "test_agent_spans",
+      "name": "shared stack kept, end_span removes the span it is given",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "        self._parents: dict[int, Span | None] = {}\n",
+          "new": "        self._parents: dict[int, Span | None] = {}\n        self._stack: list[Span] = []\n"
+        },
+        {
+          "file": "tracer.py",
+          "old": "    def current_span(self) -> Span | None:\n        return self._current.get()\n",
+          "new": "    def current_span(self) -> Span | None:\n        return self._stack[-1] if self._stack else None\n"
+        },
+        {
+          "file": "tracer.py",
+          "old": "        parent = self._current.get()\n        span = Span(",
+          "new": "        parent = self.current_span()\n        span = Span("
+        },
+        {
+          "file": "tracer.py",
+          "old": "        self._parents[span.span_id] = parent\n        self._current.set(span)\n",
+          "new": "        self._stack.append(span)\n"
+        },
+        {
+          "file": "tracer.py",
+          "old": "        parent = self._parents.pop(span.span_id, None)\n        if self._current.get() is span:\n            self._current.set(parent)\n",
+          "new": "        self._stack.remove(span)\n"
+        }
+      ],
+      "expect": "concurrent tool calls are children of the invoke_agent span"
+    },
+    {
+      "test": "test_agent_spans",
+      "name": "create_agent moved before invoke_agent, still recorded on every run (the lesson script's order)",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "    created = tracer.start_span(\n        agent_span_name(\"create_agent\", agent.name),\n        attributes=agent_attributes(\"create_agent\", agent),\n    )\n    tracer.end_span(created)\n    return agent\n",
+          "new": "    return agent\n"
+        },
+        {
+          "file": "agent.py",
+          "old": "    span_name = agent_span_name(\"invoke_agent\", agent.name)\n",
+          "new": "    created = tracer.start_span(\n        agent_span_name(\"create_agent\", agent.name),\n        attributes=agent_attributes(\"create_agent\", agent),\n    )\n    tracer.end_span(created)\n    span_name = agent_span_name(\"invoke_agent\", agent.name)\n"
+        }
+      ],
+      "expect": "constructing an agent records one create_agent span"
+    },
+    {
+      "test": "test_agent_spans",
+      "name": "create_agent recorded when the agent is built and again in every run",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "    with tracer.span(span_name, attributes=agent_attributes(\"invoke_agent\", agent)):\n",
+          "new": "    with tracer.span(span_name, attributes=agent_attributes(\"invoke_agent\", agent)):\n        created = tracer.start_span(\n            agent_span_name(\"create_agent\", agent.name),\n            attributes=agent_attributes(\"create_agent\", agent),\n        )\n        tracer.end_span(created)\n"
+        }
+      ],
+      "expect": "a run records invoke_agent, never create_agent"
+    },
+    {
+      "test": "test_agent_spans",
+      "name": "create_agent recorded lazily, on the agent's first run",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "    created = tracer.start_span(\n        agent_span_name(\"create_agent\", agent.name),\n        attributes=agent_attributes(\"create_agent\", agent),\n    )\n    tracer.end_span(created)\n    return agent\n",
+          "new": "    return agent\n"
+        },
+        {
+          "file": "agent.py",
+          "old": "    with tracer.span(span_name, attributes=agent_attributes(\"invoke_agent\", agent)):\n",
+          "new": "    with tracer.span(span_name, attributes=agent_attributes(\"invoke_agent\", agent)):\n        if not getattr(agent, \"_created\", False):\n            agent._created = True\n            created = tracer.start_span(\n                agent_span_name(\"create_agent\", agent.name),\n                attributes=agent_attributes(\"create_agent\", agent),\n            )\n            tracer.end_span(created)\n"
+        }
+      ],
+      "expect": "constructing an agent records one create_agent span"
+    },
+    {
+      "test": "test_agent_spans",
+      "name": "create_agent started when the agent is built but never ended",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "    tracer.end_span(created)\n    return agent\n",
+          "new": "    return agent\n"
+        }
+      ],
+      "expect": "constructing an agent records one create_agent span"
+    },
+    {
+      "test": "test_agent_spans",
+      "name": "create_agent recorded again on each tracer the agent runs on",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "    tracer.end_span(created)\n    return agent\n",
+          "new": "    tracer.end_span(created)\n    agent._tracers = {id(tracer)}\n    return agent\n"
+        },
+        {
+          "file": "agent.py",
+          "old": "    span_name = agent_span_name(\"invoke_agent\", agent.name)\n",
+          "new": "    if id(tracer) not in getattr(agent, \"_tracers\", set()):\n        agent._tracers = getattr(agent, \"_tracers\", set()) | {id(tracer)}\n        created = tracer.start_span(\n            agent_span_name(\"create_agent\", agent.name),\n            attributes=agent_attributes(\"create_agent\", agent),\n        )\n        tracer.end_span(created)\n    span_name = agent_span_name(\"invoke_agent\", agent.name)\n"
+        }
+      ],
+      "expect": "a run on another tracer records no create_agent either"
+    },
+    {
+      "test": "test_agent_spans",
+      "name": "create_agent span named with an f-string",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "    created = tracer.start_span(\n        agent_span_name(\"create_agent\", agent.name),\n",
+          "new": "    created = tracer.start_span(\n        f\"create_agent {agent.name}\",\n"
+        }
+      ],
+      "expect": "an unnamed agent's create_agent span is named create_agent"
+    },
+    {
+      "test": "test_agent_spans",
+      "name": "create_agent span carrying only its operation name",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "        attributes=agent_attributes(\"create_agent\", agent),\n    )\n    tracer.end_span(created)\n",
+          "new": "        attributes={\"gen_ai.operation.name\": \"create_agent\"},\n    )\n    tracer.end_span(created)\n"
+        }
+      ],
+      "expect": "an agent built outside any run gets a root create_agent span with its provider"
+    },
+    {
+      "test": "test_agent_spans",
+      "name": "store defaulted with or, as in the lesson code: an empty store is falsy",
+      "edits": [
+        {
+          "file": "tracer.py",
+          "old": "ExternalContentStore() if content_store is None else content_store",
+          "new": "content_store or ExternalContentStore()"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_content_store_roundtrip",
+      "name": "strings stored as they are, everything else as JSON",
+      "edits": [
+        {
+          "file": "content_db.py",
+          "old": "        body = json.dumps(content)\n",
+          "new": "        body = content if isinstance(content, str) else json.dumps(content)\n"
+        }
+      ],
+      "expect": "a string comes back as the same string"
+    },
+    {
+      "test": "test_content_store_roundtrip",
+      "name": "reference returned as an int",
+      "edits": [
+        {
+          "file": "content_db.py",
+          "old": "        return str(row_id)\n",
+          "new": "        return row_id\n"
+        }
+      ],
+      "expect": "a reference is the content row's id, as a decimal string"
+    },
+    {
+      "test": "test_content_store_roundtrip",
+      "name": "dedupe by comparing decoded values",
+      "edits": [
+        {
+          "file": "content_db.py",
+          "old": "        with self._db:\n            self._db.execute(\"INSERT OR IGNORE",
+          "new": "        for row_id, stored in self._db.execute(\"SELECT id, body FROM content ORDER BY id\").fetchall():\n            if json.loads(stored) == content:\n                return str(row_id)\n        with self._db:\n            self._db.execute(\"INSERT OR IGNORE"
+        }
+      ],
+      "expect": "1, 1.0 and True are different content"
+    },
+    {
+      "test": "test_content_store_roundtrip",
+      "name": "dedupe kept in a dict that a reopen forgets",
+      "edits": [
+        {
+          "file": "content_db.py",
+          "old": "    body TEXT NOT NULL UNIQUE\n",
+          "new": "    body TEXT NOT NULL\n"
+        },
+        {
+          "file": "content_db.py",
+          "old": "            self._db.execute(SCHEMA)\n",
+          "new": "            self._db.execute(SCHEMA)\n        self._seen: dict[str, str] = {}\n"
+        },
+        {
+          "file": "content_db.py",
+          "old": "        with self._db:\n            self._db.execute(\"INSERT OR IGNORE INTO content (body) VALUES (?)\", (body,))\n            (row_id,) = self._db.execute(\"SELECT id FROM content WHERE body = ?\", (body,)).fetchone()\n        return str(row_id)\n",
+          "new": "        if body not in self._seen:\n            with self._db:\n                cur = self._db.execute(\"INSERT INTO content (body) VALUES (?)\", (body,))\n            self._seen[body] = str(cur.lastrowid)\n        return self._seen[body]\n"
+        }
+      ],
+      "expect": "identical content reuses its row after a reopen"
+    },
+    {
+      "test": "test_content_store_roundtrip",
+      "name": "no AUTOINCREMENT, so a deleted row id comes back",
+      "edits": [
+        {
+          "file": "content_db.py",
+          "old": "id INTEGER PRIMARY KEY AUTOINCREMENT,",
+          "new": "id INTEGER PRIMARY KEY,"
+        }
+      ],
+      "expect": "a deleted reference is never handed out again"
+    },
+    {
+      "test": "test_content_store_roundtrip",
+      "name": "int(ref) on any reference",
+      "edits": [
+        {
+          "file": "content_db.py",
+          "old": "    if not (isinstance(ref, str) and ref.isascii() and ref.isdigit()):\n        raise KeyError(ref)\n",
+          "new": ""
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_content_store_roundtrip",
+      "name": "delete ignores unknown references",
+      "edits": [
+        {
+          "file": "content_db.py",
+          "old": "        if cur.rowcount == 0:\n            raise KeyError(ref)\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_content_store_roundtrip",
+      "name": "delete never committed, so the erased content is back after a reopen",
+      "edits": [
+        {
+          "file": "content_db.py",
+          "old": "        with self._db:\n            cur = self._db.execute(\"DELETE FROM content WHERE id = ?\", (_row_id(ref),))\n",
+          "new": "        cur = self._db.execute(\"DELETE FROM content WHERE id = ?\", (_row_id(ref),))\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_content_store_roundtrip",
+      "name": "soft delete: the row kept behind a deleted flag",
+      "edits": [
+        {
+          "file": "content_db.py",
+          "old": "    body TEXT NOT NULL UNIQUE\n",
+          "new": "    body TEXT NOT NULL UNIQUE,\n    deleted INTEGER NOT NULL DEFAULT 0\n"
+        },
+        {
+          "file": "content_db.py",
+          "old": "\"SELECT body FROM content WHERE id = ?\"",
+          "new": "\"SELECT body FROM content WHERE id = ? AND deleted = 0\""
+        },
+        {
+          "file": "content_db.py",
+          "old": "\"DELETE FROM content WHERE id = ?\"",
+          "new": "\"UPDATE content SET deleted = 1 WHERE id = ? AND deleted = 0\""
+        }
+      ],
+      "expect": "a deleted reference is never handed out again"
+    },
+    {
+      "test": "test_content_store_roundtrip",
+      "name": "INSERT OR REPLACE gives repeated content a new row",
+      "edits": [
+        {
+          "file": "content_db.py",
+          "old": "INSERT OR IGNORE INTO",
+          "new": "INSERT OR REPLACE INTO"
+        }
+      ],
+      "expect": "identical content reuses its row"
+    },
+    {
+      "test": "test_content_store_roundtrip",
+      "name": "lastrowid read after INSERT OR IGNORE",
+      "edits": [
+        {
+          "file": "content_db.py",
+          "old": "            self._db.execute(\"INSERT OR IGNORE INTO content (body) VALUES (?)\", (body,))\n            (row_id,) = self._db.execute(\"SELECT id FROM content WHERE body = ?\", (body,)).fetchone()\n",
+          "new": "            row_id = self._db.execute(\"INSERT OR IGNORE INTO content (body) VALUES (?)\", (body,)).lastrowid\n"
+        }
+      ],
+      "expect": "identical content reuses its row"
+    },
+    {
+      "test": "test_content_store_roundtrip",
+      "name": "JSON written with sort_keys",
+      "edits": [
+        {
+          "file": "content_db.py",
+          "old": "        body = json.dumps(content)\n",
+          "new": "        body = json.dumps(content, sort_keys=True)\n"
+        }
+      ],
+      "expect": "content comes back exactly as it went in"
+    },
+    {
+      "test": "test_tool_errors_by_model",
+      "name": "latest chat span anywhere in the trace",
+      "edits": [
+        {
+          "file": "attribution.py",
+          "old": "    earlier = [c for c in chats_under.get(parent.span_id, []) if c.start_ns <= tool.start_ns]\n",
+          "new": "    earlier = [c for cs in chats_under.values() for c in cs if c.start_ns <= tool.start_ns]\n"
+        }
+      ],
+      "expect": "a tool span is matched to a chat span of its own agent run"
+    },
+    {
+      "test": "test_tool_errors_by_model",
+      "name": "keyed by gen_ai.request.model",
+      "edits": [
+        {
+          "file": "attribution.py",
+          "old": "        model = chat.attributes.get(\"gen_ai.response.model\") or chat.attributes.get(\"gen_ai.request.model\")\n",
+          "new": "        model = chat.attributes.get(\"gen_ai.request.model\")\n"
+        }
+      ],
+      "expect": "tool calls are charged to the model that answered"
+    },
+    {
+      "test": "test_tool_errors_by_model",
+      "name": "provider read from the chat span only",
+      "edits": [
+        {
+          "file": "attribution.py",
+          "old": "    agent = _nearest_agent(chat, by_id)\n",
+          "new": "    agent = None\n"
+        }
+      ],
+      "expect": "a chat span without gen_ai.provider.name takes its agent's provider"
+    },
+    {
+      "test": "test_tool_errors_by_model",
+      "name": "a tool span under a chat span treated as orphaned",
+      "edits": [
+        {
+          "file": "attribution.py",
+          "old": "    if op == \"chat\":\n        return parent\n",
+          "new": "    if op == \"chat\":\n        return None\n"
+        }
+      ],
+      "expect": "a tool span under a chat span belongs to it"
+    },
+    {
+      "test": "test_tool_errors_by_model",
+      "name": "chat spans that start at the tool's start time skipped",
+      "edits": [
+        {
+          "file": "attribution.py",
+          "old": "if c.start_ns <= tool.start_ns]",
+          "new": "if c.start_ns < tool.start_ns]"
+        }
+      ],
+      "expect": "ties go to the smaller span_id"
+    },
+    {
+      "test": "test_tool_errors_by_model",
+      "name": "ties go to the larger span_id",
+      "edits": [
+        {
+          "file": "attribution.py",
+          "old": "key=lambda c: (-c.start_ns, c.span_id)",
+          "new": "key=lambda c: (-c.start_ns, -c.span_id)"
+        }
+      ],
+      "expect": "ties go to the smaller span_id"
+    },
+    {
+      "test": "test_tool_errors_by_model",
+      "name": "orphans dropped without a count",
+      "edits": [
+        {
+          "file": "attribution.py",
+          "old": "            orphaned += 1\n",
+          "new": "            pass\n"
+        }
+      ],
+      "expect": "orphaned tool spans are counted apart"
+    },
+    {
+      "test": "test_tool_errors_by_model",
+      "name": "rows in first-seen order",
+      "edits": [
+        {
+          "file": "attribution.py",
+          "old": "for (p, m, t), (c, e) in sorted(counts.items())]",
+          "new": "for (p, m, t), (c, e) in counts.items()]"
+        }
+      ],
+      "expect": "rows sorted by (provider, model, tool)"
+    },
+    {
+      "test": "test_tool_errors_by_model",
+      "name": "ties go to the last chat span in input order",
+      "edits": [
+        {
+          "file": "attribution.py",
+          "old": "    return min(earlier, key=lambda c: (-c.start_ns, c.span_id))\n",
+          "new": "    return sorted(earlier, key=lambda c: c.start_ns)[-1]\n"
+        }
+      ],
+      "expect": "the report does not depend on the order spans arrive in"
+    },
+    {
+      "test": "test_tool_errors_by_model",
+      "name": "ties go to the first chat span in input order",
+      "edits": [
+        {
+          "file": "attribution.py",
+          "old": "    return min(earlier, key=lambda c: (-c.start_ns, c.span_id))\n",
+          "new": "    return max(earlier, key=lambda c: c.start_ns)\n"
+        }
+      ],
+      "expect": "ties go to the smaller span_id"
+    },
+    {
+      "test": "test_tool_errors_by_model",
+      "name": "the agent's provider taken before the chat span's own",
+      "edits": [
+        {
+          "file": "attribution.py",
+          "old": "    if chat.attributes.get(\"gen_ai.provider.name\"):\n        return chat.attributes[\"gen_ai.provider.name\"]\n    agent = _nearest_agent(chat, by_id)\n    if agent is not None and agent.attributes.get(\"gen_ai.provider.name\"):\n        return agent.attributes[\"gen_ai.provider.name\"]\n",
+          "new": "    agent = _nearest_agent(chat, by_id)\n    if agent is not None and agent.attributes.get(\"gen_ai.provider.name\"):\n        return agent.attributes[\"gen_ai.provider.name\"]\n    if chat.attributes.get(\"gen_ai.provider.name\"):\n        return chat.attributes[\"gen_ai.provider.name\"]\n"
+        }
+      ],
+      "expect": "a chat span's own gen_ai.provider.name comes before its agent's"
+    },
+    {
+      "test": "test_tool_errors_by_model",
+      "name": "a tool span under a tool span walks up to the agent",
+      "edits": [
+        {
+          "file": "attribution.py",
+          "old": "    if op != \"invoke_agent\":\n        return None\n",
+          "new": "    while op == \"tool_call\" and parent.parent_span_id in by_id:\n        parent = by_id[parent.parent_span_id]\n        op = parent.attributes.get(OP)\n    if op != \"invoke_agent\":\n        return None\n"
+        }
+      ],
+      "expect": "a tool span is matched to a chat span of its own agent run"
+    },
+    {
+      "test": "test_tool_errors_by_model",
+      "name": "the chat span must end before the tool span starts",
+      "edits": [
+        {
+          "file": "attribution.py",
+          "old": "if c.start_ns <= tool.start_ns]",
+          "new": "if c.end_ns <= tool.start_ns]"
+        }
+      ],
+      "expect": "the latest chat span at or before the tool call"
+    },
+    {
+      "test": "test_tool_errors_by_model",
+      "name": "model read from gen_ai.response.model only",
+      "edits": [
+        {
+          "file": "attribution.py",
+          "old": "        model = chat.attributes.get(\"gen_ai.response.model\") or chat.attributes.get(\"gen_ai.request.model\")\n",
+          "new": "        model = chat.attributes.get(\"gen_ai.response.model\")\n"
+        }
+      ],
+      "expect": "the latest chat span at or before the tool call"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "waits for the run before yielding",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "    try:\n        while True:\n",
+          "new": "    try:\n        await asyncio.wait([task])\n        while True:\n"
+        }
+      ],
+      "expect": "each line is yielded as soon as its span ends"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "stops as soon as the run is done",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "            if item is _DONE:\n",
+          "new": "            if item is _DONE or task.done():\n"
+        }
+      ],
+      "expect": "a failed run streams all of its spans"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "ids without zero padding",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "\"span_id\": f\"{span.span_id:016x}\"",
+          "new": "\"span_id\": f\"{span.span_id:x}\""
+        }
+      ],
+      "expect": "ids are zero-padded lowercase hex"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "a root's parent written as sixteen zeros",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "None if span.parent_span_id is None else f\"{span.parent_span_id:016x}\"",
+          "new": "f\"{span.parent_span_id or 0:016x}\""
+        }
+      ],
+      "expect": "a root's parent_span_id is null"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "timestamps written as float seconds",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "        \"start_ns\": span.start_ns,\n",
+          "new": "        \"start_ns\": span.start_ns / 1e9,\n"
+        }
+      ],
+      "expect": "timestamps are the integer epoch nanoseconds"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "feed left attached to the tracer",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "        tracer.processors.remove(processor)\n",
+          "new": ""
+        }
+      ],
+      "expect": "the feed detaches from the tracer when it stops"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "the run's exception swallowed",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "            yield json.dumps(span_record(item)) + \"\\n\"\n        task.result()\n",
+          "new": "            yield json.dumps(span_record(item)) + \"\\n\"\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "close cancels the run without waiting for it",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "            task.cancel()\n            with contextlib.suppress(asyncio.CancelledError):\n                await task\n",
+          "new": "            task.cancel()\n"
+        }
+      ],
+      "expect": "closing the feed cancels the run and waits for it"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "asyncio.create_task on the gather future",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "    task = asyncio.ensure_future(run)\n",
+          "new": "    task = asyncio.create_task(run)\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "loop on task.done() around queue.get(), no done marker",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "    task.add_done_callback(lambda _: queue.put_nowait(_DONE))\n",
+          "new": ""
+        },
+        {
+          "file": "feed.py",
+          "old": "        while True:\n            item = await queue.get()\n            if item is _DONE:\n                break\n            yield json.dumps(span_record(item)) + \"\\n\"\n        task.result()\n",
+          "new": "        while not task.done():\n            item = await queue.get()\n            yield json.dumps(span_record(item)) + \"\\n\"\n        while not queue.empty():\n            yield json.dumps(span_record(queue.get_nowait())) + \"\\n\"\n        task.result()\n"
+        }
+      ],
+      "expect": "each line is yielded as soon as its span ends"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "feed left attached after a failed run",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "    try:\n        while True:\n            item = await queue.get()\n            if item is _DONE:\n                break\n            yield json.dumps(span_record(item)) + \"\\n\"\n        task.result()\n    finally:\n        if not task.done():\n            task.cancel()\n            with contextlib.suppress(asyncio.CancelledError):\n                await task\n        tracer.processors.remove(processor)\n",
+          "new": "    try:\n        while True:\n            item = await queue.get()\n            if item is _DONE:\n                break\n            yield json.dumps(span_record(item)) + \"\\n\"\n    except GeneratorExit:\n        task.cancel()\n        with contextlib.suppress(asyncio.CancelledError):\n            await task\n        tracer.processors.remove(processor)\n        raise\n    task.result()\n    tracer.processors.remove(processor)\n"
+        }
+      ],
+      "expect": "the feed detaches from the tracer when it stops"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "the cancelled run awaited without suppressing CancelledError",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "            with contextlib.suppress(asyncio.CancelledError):\n                await task\n",
+          "new": "            await task\n"
+        }
+      ],
+      "expect": "CancelledError"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "cancel, then one sleep(0) instead of awaiting the run",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "            with contextlib.suppress(asyncio.CancelledError):\n                await task\n",
+          "new": "            await asyncio.sleep(0)\n"
+        }
+      ],
+      "expect": "closing the feed cancels the run and waits for it"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "trace_id without zero padding",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "f\"{span.trace_id:032x}\"",
+          "new": "f\"{span.trace_id:x}\""
+        }
+      ],
+      "expect": "ids are zero-padded lowercase hex"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "trace_id padded to 16 digits like a span_id",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "f\"{span.trace_id:032x}\"",
+          "new": "f\"{span.trace_id:016x}\""
+        }
+      ],
+      "expect": "ids are zero-padded lowercase hex"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "parent_span_id alone without zero padding",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "f\"{span.parent_span_id:016x}\"",
+          "new": "f\"{span.parent_span_id:x}\""
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "upper-case hex span ids",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "\"span_id\": f\"{span.span_id:016x}\"",
+          "new": "\"span_id\": f\"{span.span_id:016X}\""
+        }
+      ],
+      "expect": "ids are zero-padded lowercase hex"
+    },
+    {
+      "test": "test_span_feed",
+      "name": "records pretty-printed over several lines",
+      "edits": [
+        {
+          "file": "feed.py",
+          "old": "            yield json.dumps(span_record(item)) + \"\\n\"\n",
+          "new": "            yield json.dumps(span_record(item), indent=1) + \"\\n\"\n"
+        }
+      ],
+      "expect": "one JSON object per line"
+    },
+    {
+      "test": "test_agent_usage_rollup",
+      "name": "runs keyed by agent name",
+      "edits": [
+        {
+          "file": "usage.py",
+          "old": "    agents = [s for s in spans if s.attributes.get(OP) == \"invoke_agent\"]\n",
+          "new": "    agents = list({s.attributes.get(\"gen_ai.agent.name\"): s for s in spans if s.attributes.get(OP) == \"invoke_agent\"}.values())\n"
+        },
+        {
+          "file": "usage.py",
+          "old": "    own = {a.span_id: Usage() for a in agents}\n",
+          "new": "    own = {s.span_id: Usage() for s in spans}\n"
+        }
+      ],
+      "expect": "two runs with the same name are two runs"
+    },
+    {
+      "test": "test_agent_usage_rollup",
+      "name": "a run whose parent is missing dropped",
+      "edits": [
+        {
+          "file": "usage.py",
+          "old": "    agents = [s for s in spans if s.attributes.get(OP) == \"invoke_agent\"]\n",
+          "new": "    agents = [s for s in spans if s.attributes.get(OP) == \"invoke_agent\" and (s.parent_span_id is None or s.parent_span_id in by_id)]\n"
+        },
+        {
+          "file": "usage.py",
+          "old": "    own = {a.span_id: Usage() for a in agents}\n",
+          "new": "    own = {s.span_id: Usage() for s in spans}\n"
+        }
+      ],
+      "expect": "a run whose parent never arrived is a root of its own"
+    },
+    {
+      "test": "test_agent_usage_rollup",
+      "name": "chat tokens credited to every agent above",
+      "edits": [
+        {
+          "file": "usage.py",
+          "old": "        else:\n            own[agent.span_id] += tokens\n",
+          "new": "        while agent is not None:\n            own[agent.span_id] += tokens\n            agent = _nearest_agent(agent, by_id)\n"
+        }
+      ],
+      "expect": "own usage counts the run's own chat spans only"
+    },
+    {
+      "test": "test_agent_usage_rollup",
+      "name": "child runs found by direct parent id only",
+      "edits": [
+        {
+          "file": "usage.py",
+          "old": "            (totals[c.span_id] for c in children.get(agent.span_id, [])), own[agent.span_id]\n",
+          "new": "            (totals[c.span_id] for c in agents if c.parent_span_id == agent.span_id), own[agent.span_id]\n"
+        }
+      ],
+      "expect": "total adds every agent run nested below, through tool calls"
+    },
+    {
+      "test": "test_agent_usage_rollup",
+      "name": "depth counts every span above",
+      "edits": [
+        {
+          "file": "usage.py",
+          "old": "        stack.extend((c, depth + 1) for c in reversed(ordered(agent.span_id)))\n",
+          "new": "        stack.extend((c, depth + 2) for c in reversed(ordered(agent.span_id)))\n"
+        }
+      ],
+      "expect": "depth counts the agent runs above"
+    },
+    {
+      "test": "test_agent_usage_rollup",
+      "name": "a chat whose parent is missing dropped",
+      "edits": [
+        {
+          "file": "usage.py",
+          "old": "        if agent is None:\n            unattributed += tokens\n",
+          "new": "        if agent is None:\n            if s.parent_span_id is None:\n                unattributed += tokens\n"
+        }
+      ],
+      "expect": "chat spans outside any agent run are unattributed"
+    },
+    {
+      "test": "test_agent_usage_rollup",
+      "name": "runs in input order",
+      "edits": [
+        {
+          "file": "usage.py",
+          "old": "        return sorted(children.get(key, []), key=lambda s: (s.start_ns, s.span_id))\n",
+          "new": "        return children.get(key, [])\n"
+        }
+      ],
+      "expect": "runs in pre-order, siblings by start time"
+    },
+    {
+      "test": "test_agent_usage_rollup",
+      "name": "missing token counts raise",
+      "edits": [
+        {
+          "file": "usage.py",
+          "old": "            int(s.attributes.get(\"gen_ai.usage.input_tokens\", 0)),\n",
+          "new": "            int(s.attributes[\"gen_ai.usage.input_tokens\"]),\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_agent_usage_rollup",
+      "name": "a chat span counted only under a direct invoke_agent parent",
+      "edits": [
+        {
+          "file": "usage.py",
+          "old": "        agent = _nearest_agent(s, by_id)\n        if agent is None:\n            unattributed += tokens\n",
+          "new": "        agent = by_id.get(s.parent_span_id) if s.parent_span_id is not None else None\n        if agent is not None and agent.attributes.get(OP) != \"invoke_agent\":\n            agent = None\n        if agent is None:\n            unattributed += tokens\n"
+        }
+      ],
+      "expect": "own usage counts the run's own chat spans only"
+    },
+    {
+      "test": "test_agent_usage_rollup",
+      "name": "roots sorted, children left in input order",
+      "edits": [
+        {
+          "file": "usage.py",
+          "old": "    def ordered(key: int | None) -> list[Span]:\n        return sorted(children.get(key, []), key=lambda s: (s.start_ns, s.span_id))\n",
+          "new": "    def ordered(key: int | None) -> list[Span]:\n        kids = children.get(key, [])\n        return sorted(kids, key=lambda s: (s.start_ns, s.span_id)) if key is None else kids\n"
+        }
+      ],
+      "expect": "runs in pre-order, siblings by start time"
+    },
+    {
+      "test": "test_agent_usage_rollup",
+      "name": "total adds the children's own usage, one level down",
+      "edits": [
+        {
+          "file": "usage.py",
+          "old": "            (totals[c.span_id] for c in children.get(agent.span_id, [])), own[agent.span_id]\n",
+          "new": "            (own[c.span_id] for c in children.get(agent.span_id, [])), own[agent.span_id]\n"
+        }
+      ],
+      "expect": "total adds every agent run nested below"
+    },
+    {
+      "test": "test_agent_usage_rollup",
+      "name": "runs in breadth-first order",
+      "edits": [
+        {
+          "file": "usage.py",
+          "old": "    stack = [(a, 0) for a in reversed(ordered(None))]\n    while stack:\n        agent, depth = stack.pop()\n        order.append((agent, depth))\n        stack.extend((c, depth + 1) for c in reversed(ordered(agent.span_id)))\n",
+          "new": "    stack = [(a, 0) for a in ordered(None)]\n    while stack:\n        agent, depth = stack.pop(0)\n        order.append((agent, depth))\n        stack.extend((c, depth + 1) for c in ordered(agent.span_id))\n"
+        }
+      ],
+      "expect": "runs in pre-order, siblings by start time"
+    }
+  ]
+}
