@@ -1,0 +1,125 @@
+{
+  "lesson": "phases/14-agent-engineering/20-benchmarks-webarena-osworld",
+  "title": "Benchmarks: WebArena and OSWorld",
+  "format": "staged-brownfield",
+  "service": "WebGym: a WebArena-style harness over a pinned toy shopping app, with execution-based judging, steps over gold, a content-addressed snapshot store, isolated parallel episodes streamed as CSV, and nested success predicates with an explanation",
+  "sources": {
+    "docs/en.md": "5f2b258833ea48979405b3f939f5765a667a5a28ae0786b4c208710ac6d8c717",
+    "code/main.py": "d311e8c0d3a8b1c7fef81718585dfe04edad5d8fbed340d9f7d49794de2d3425",
+    "quiz/quiz.md": "6e969b8e7f879c56367c527b87c2706f151cee6f2ed45ff0a08c936ae624475c"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network and no LLM: every agent is a scripted function the tests supply",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_suite_judging",
+      "kind": "debug",
+      "lesson_anchor": "Learning Objectives: why execution-based evaluation matters; WebArena: execution-based evaluation (was the order placed); the self-hosted apps are pinned and reproducible; OSWorld-Human steps over gold; Build It: ShoppingApp, scripted agents, state check; quiz Q14 (a state check instead of comparing the agent's trajectory: one task has many legal paths); quiz Q6 (len(trace) counts the revised_choice line)",
+      "planted_bugs": [
+        "episode_result never calls judge: it marks an episode successful when the agent's actions equal gold, although its docstring (and judge's) says success comes from the final state alone and gold only gives gold_steps; a detour (a wrong item added, removed, the right one added), a direct path that skips list_items and the bundle added in the other order all end in the wanted order and are judged failures. The failure shows in run_suite's results, the root cause is episode_result",
+        "judge uses any() over every order with a subset check, as the lesson's success lambdas do: a pinned order, a wrong order before the right one and an order with an extra item all pass, while the docstring asks for exactly one new order holding exactly want; it shows only once episode_result calls judge",
+        "count_steps is len(trace), so Notes (the lesson's revised_choice line) count as steps",
+        "add_to_cart accepts qty 0, negative quantities and 1.5 although the docstring asks for a positive integer and an error string",
+        "add_to_cart checks the sku by copying the whole catalog through list_items() on every call"
+      ],
+      "timing_assert": "one episode of 2500 adds on a 5000-item catalog under 0.08 s. Measured on this machine (Python 3.12, other agents running, load average 5 to 80): the list_items scan 0.73-2.5 s, at least 9x the limit; a direct dict lookup 2.8-9.2 ms over about 235 fresh runs, median about 3 ms, at least 8.7x under it. Dropping the copy but still building a sku set on every add takes 0.33-0.5 s and fails",
+      "overfix_guard": "relaxing the gold comparison to a subsequence, to every gold action taken (with or without judge), or to the actions left after an add undone by a remove passes the detour but not the direct path; judge plus gold's cart actions in gold's order fails the bundle added in the other order; keeping 'equal to gold' as a shortcut in front of judge fails a gold replay onto a pinned cart that already holds a keyboard, which orders the keyboard too; reading success from the last step's answer (an order id) passes a wrong order; an action answered with an error still counts as a step (rules out counting only successful actions); list_items rows are copies (rules out returning the app's own rows to save time); a bad qty answers with an error string instead of raising; reset is correct as shipped (it copies every row) and three assertions guard it: the next episode's total after a set_price, the caller's snapshot, and set_price then reset against the pinned state; sharing the snapshot's rows breaks the first two, copying the snapshot once in __init__ and sharing that copy's rows in reset breaks the first, and a deep copy per episode in run_suite over a reset that shares rows breaks only the third; resetting before every action breaks every episode"
+    },
+    {
+      "part": 2,
+      "test": "test_snapshot_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "the target apps are pinned and reproducible; Where benchmarking goes wrong: stale self-hosted apps (update without re-curation breaks comparability)",
+      "storage": "content-addressed files: <root>/<sha256 of canonical JSON>.json holding exactly the canonical bytes",
+      "exactness": "a snapshot round-trips equal with catalog order kept and prices as int; the digest of a fixed snapshot with non-ASCII, comma and quote text is pinned; the same state built in another key order has the same digest, a reordered catalog a different one",
+      "traps": [
+        "default json.dumps separators",
+        "ensure_ascii left on",
+        "keys not sorted",
+        "catalog sorted to make it canonical",
+        "59.0 and True accepted as integer cents, or coerced with int()",
+        "only catalog prices validated: the cart, an order total and an order quantity carry bad values too",
+        "a rejected snapshot written before the check, left in the store",
+        "no hash check on get",
+        "hash check on re-canonicalized JSON that accepts a reformatted file",
+        "FileNotFoundError instead of KeyError"
+      ],
+      "clarifying_questions": [
+        "reformatted file with the same content",
+        "59.0 as a price",
+        "sorting the catalog",
+        "totals and quantities inside orders"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_trajectory_efficiency",
+      "kind": "core algorithm",
+      "lesson_anchor": "OSWorld-Human: gold trajectories, top agents use 1.4-2.7x more steps than necessary; Trajectory efficiency = agent steps over human minimum; Ignoring trajectory length; Exercise 2; OSWorld-G separates grounding from planning (Exercise 4)",
+      "algorithm": "edit-distance alignment of normalized actions with same-name substitution, a suffix DP and a forward tie-break walk; micro and macro steps over gold on successful tasks only",
+      "traps": [
+        "sku case and qty default not normalized",
+        "different action names substituted (plain Levenshtein)",
+        "prefix DP backtracked from the end marks the earlier of two repeated actions as extra",
+        "missing preferred over extra on a tie",
+        "failed tasks included, as the lesson's aggregate does",
+        "micro and macro mixed up",
+        "division by zero with no successful task"
+      ],
+      "clarifying_questions": [
+        "qty default",
+        "wrong item on the right action",
+        "failed tasks in efficiency"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_parallel_episodes",
+      "kind": "streaming",
+      "lesson_anchor": "Use It: WebArena Verified on a cluster for continuous evaluation, OSWorld in a VM fleet; every episode on its own pinned app instance",
+      "wire_format": "CSV: header task_id,success,steps,gold_steps, then one record per episode in finish order, each yielded string one csv.writer record with its line ending; decided by the test's per-line and joined csv.reader parse; the test also finds the crash record and checks the closing test's record through csv.reader, so any quoting or line ending csv.writer produces passes",
+      "traps": [
+        "one app shared by concurrent episodes",
+        "gather before the first record, or fixed batches of limit (the test's gate makes both stall)",
+        "an agent's exception escapes and its record never comes",
+        "a crashed episode judged on its final state: the crashing agent places exactly the wanted order before it raises",
+        "fields joined by hand (comma and quotes in a task id)",
+        "success as True/False",
+        "no header",
+        "no line ending",
+        "limit ignored",
+        "episodes left running when the reader closes the stream"
+      ],
+      "clarifying_questions": [
+        "a crashing agent",
+        "line endings and quoting",
+        "record order"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_goal_predicates",
+      "kind": "recursive structure",
+      "lesson_anchor": "execution-based evaluation: was the order placed, was the issue closed; the lesson's revised_order check (has sku-001 and sku-003, and not sku-002) generalized to nested all/any/not",
+      "traps": [
+        "ordered without qty taken as qty 1",
+        "not blamed without flipping polarity (double negation)",
+        "a failed any blamed on its first child",
+        "a failed all blamed on its last failing child",
+        "a forbidden all blamed on its first child instead of itself",
+        "a forbidden any blamed on its last alternative that held",
+        "empty any taken as true",
+        "validation only where short-circuit evaluation reaches",
+        "required leaf arguments not checked",
+        "count or qty compared with >= instead of exactly",
+        "an unknown leaf argument (quantity) ignored, which silently widens the check"
+      ],
+      "clarifying_questions": [
+        "ordered without qty",
+        "unknown predicate in an unreached branch",
+        "an unknown leaf argument",
+        "count at least or exactly"
+      ]
+    }
+  ]
+}

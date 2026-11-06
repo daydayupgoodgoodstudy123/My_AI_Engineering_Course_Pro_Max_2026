@@ -1,0 +1,1165 @@
+{
+  "package": "webgym",
+  "tests": [
+    "test_suite_judging",
+    "test_snapshot_store",
+    "test_trajectory_efficiency",
+    "test_parallel_episodes",
+    "test_goal_predicates"
+  ],
+  "layers": [
+    {
+      "test": "test_suite_judging",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "whatever path it took"
+        },
+        {
+          "name": "success from judge, not from the gold trajectory",
+          "edits": [
+            {
+              "file": "harness.py",
+              "old": "    taken = [entry.action for entry in env.trace if isinstance(entry, Step)]\n    return Result(\n        task.tid,\n        taken == task.gold,\n",
+              "new": "    return Result(\n        task.tid,\n        judge(app, task.want),\n"
+            }
+          ],
+          "expect": "success is judged on the final state"
+        },
+        {
+          "name": "+ judge new orders exactly",
+          "edits": [
+            {
+              "file": "harness.py",
+              "old": "    return any(\n        all(order[\"items\"].get(sku) == qty for sku, qty in want.items())\n        for order in app.orders\n    )\n",
+              "new": "    placed = app.orders[app.pinned_orders :]\n    return len(placed) == 1 and placed[0][\"items\"] == want\n"
+            }
+          ],
+          "expect": "every action is a step"
+        },
+        {
+          "name": "+ count actions only",
+          "edits": [
+            {
+              "file": "harness.py",
+              "old": "    return len(trace)\n",
+              "new": "    return sum(isinstance(entry, Step) for entry in trace)\n"
+            }
+          ],
+          "expect": "quantities must be positive"
+        },
+        {
+          "name": "+ reject non-positive qty",
+          "edits": [
+            {
+              "file": "app.py",
+              "old": "            return \"error: unknown sku\"\n        self.cart[sku]",
+              "new": "            return \"error: unknown sku\"\n        if not _whole(qty, 1):\n            return \"error: qty must be a positive integer\"\n        self.cart[sku]"
+            }
+          ],
+          "expect": "adding to the cart should stay fast on a large catalog"
+        },
+        {
+          "name": "+ look the sku up directly",
+          "edits": [
+            {
+              "file": "app.py",
+              "old": "        if sku not in {row[\"sku\"] for row in self.list_items()}:\n",
+              "new": "        if sku not in self.items:\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_suite_judging",
+      "name": "orders from the pinned snapshot counted",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    placed = app.orders[app.pinned_orders :]\n",
+          "new": "    placed = app.orders\n"
+        }
+      ],
+      "expect": "whatever path it took"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "actions that returned an error not counted",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    return sum(isinstance(entry, Step) for entry in trace)\n",
+          "new": "    return sum(isinstance(entry, Step) and not str(entry.result).startswith(\"error\") for entry in trace)\n"
+        }
+      ],
+      "expect": "every action is a step"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "list_items returns the app's own rows",
+      "edits": [
+        {
+          "file": "app.py",
+          "old": "        \"\"\"Every catalog row, in catalog order. The rows are copies.\"\"\"\n        return [dict(row) for row in self.items.values()]",
+          "new": "        \"\"\"Every catalog row, in catalog order. The rows are copies.\"\"\"\n        return list(self.items.values())"
+        }
+      ],
+      "expect": "list_items hands out copies of the catalog rows"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "a bad qty raises instead of answering with an error",
+      "edits": [
+        {
+          "file": "app.py",
+          "old": "            return \"error: qty must be a positive integer\"\n",
+          "new": "            raise ValueError(\"qty must be a positive integer\")\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "reset shares the pinned snapshot's rows",
+      "edits": [
+        {
+          "file": "app.py",
+          "old": "        self.items = {row[\"sku\"]: dict(row) for row in pinned[\"catalog\"]}\n",
+          "new": "        self.items = {row[\"sku\"]: row for row in pinned[\"catalog\"]}\n"
+        }
+      ],
+      "expect": "every episode starts from the pinned snapshot"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "snapshot copied once in __init__, reset shares its rows",
+      "edits": [
+        {
+          "file": "app.py",
+          "old": "        self._pinned = snapshot\n",
+          "new": "        self._pinned = __import__(\"copy\").deepcopy(snapshot)\n"
+        },
+        {
+          "file": "app.py",
+          "old": "        self.items = {row[\"sku\"]: dict(row) for row in pinned[\"catalog\"]}\n",
+          "new": "        self.items = {row[\"sku\"]: row for row in pinned[\"catalog\"]}\n"
+        }
+      ],
+      "expect": "every episode starts from the pinned snapshot"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "reset left sharing rows, each episode on a deep copy instead",
+      "edits": [
+        {
+          "file": "app.py",
+          "old": "        self.items = {row[\"sku\"]: dict(row) for row in pinned[\"catalog\"]}\n",
+          "new": "        self.items = {row[\"sku\"]: row for row in pinned[\"catalog\"]}\n"
+        },
+        {
+          "file": "harness.py",
+          "old": "    app = ShoppingApp(snapshot)\n    results = []\n    for task in tasks:\n        app.reset()\n",
+          "new": "    results = []\n    for task in tasks:\n        app = ShoppingApp(__import__(\"copy\").deepcopy(snapshot))\n"
+        }
+      ],
+      "expect": "reset puts the app back to exactly the pinned state"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "qty checked for positivity only",
+      "edits": [
+        {
+          "file": "app.py",
+          "old": "        if not _whole(qty, 1):\n            return \"error: qty must be a positive integer\"\n",
+          "new": "        if qty < 1:\n            return \"error: qty must be a positive integer\"\n"
+        }
+      ],
+      "expect": "quantities must be positive integers"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "qty coerced with int()",
+      "edits": [
+        {
+          "file": "app.py",
+          "old": "        if not _whole(qty, 1):\n            return \"error: qty must be a positive integer\"\n",
+          "new": "        qty = int(qty)\n        if qty < 1:\n            return \"error: qty must be a positive integer\"\n"
+        }
+      ],
+      "expect": "quantities must be positive integers"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "judged on the last new order",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    return len(placed) == 1 and placed[0][\"items\"] == want\n",
+          "new": "    return bool(placed) and placed[-1][\"items\"] == want\n"
+        }
+      ],
+      "expect": "success is judged on the final state"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "judged on any new order that matches exactly",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    return len(placed) == 1 and placed[0][\"items\"] == want\n",
+          "new": "    return any(order[\"items\"] == want for order in placed)\n"
+        }
+      ],
+      "expect": "success is judged on the final state"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "one new order, but only the wanted skus checked",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    return len(placed) == 1 and placed[0][\"items\"] == want\n",
+          "new": "    return len(placed) == 1 and all(placed[0][\"items\"].get(sku) == qty for sku, qty in want.items())\n"
+        }
+      ],
+      "expect": "success is judged on the final state"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "copy dropped, but a sku set still built on every add",
+      "edits": [
+        {
+          "file": "app.py",
+          "old": "        if sku not in self.items:\n            return \"error: unknown sku\"\n        if not _whole",
+          "new": "        if sku not in {row[\"sku\"] for row in self.items.values()}:\n            return \"error: unknown sku\"\n        if not _whole"
+        }
+      ],
+      "expect": "adding to the cart should stay fast on a large catalog"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "reset before every action",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        if name in ACTIONS:\n            result = getattr(self.app, name)(**args)\n",
+          "new": "        if name in ACTIONS:\n            self.app.reset()\n            result = getattr(self.app, name)(**args)\n"
+        }
+      ],
+      "expect": "whatever path it took"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "gold required as a subsequence of the agent's actions",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    app = env.app\n    return Result(\n        task.tid,\n        judge(app, task.want),\n",
+          "new": "    app = env.app\n    taken = iter([entry.action for entry in env.trace if isinstance(entry, Step)])\n    return Result(\n        task.tid,\n        all(any(action == step for action in taken) for step in task.gold),\n"
+        }
+      ],
+      "expect": "whatever path it took"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "an add undone by a remove dropped, the rest compared with gold",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    app = env.app\n    return Result(\n        task.tid,\n        judge(app, task.want),\n",
+          "new": "    app = env.app\n    taken = []\n    for entry in env.trace:\n        if isinstance(entry, Step) and entry.action.name == \"remove_from_cart\":\n            sku = entry.action.args.get(\"sku\")\n            taken = [a for a in taken if not (a.name == \"add_to_cart\" and a.args.get(\"sku\") == sku)]\n        elif isinstance(entry, Step):\n            taken.append(entry.action)\n    return Result(\n        task.tid,\n        taken == task.gold,\n"
+        }
+      ],
+      "expect": "whatever path it took"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "every gold action taken, in any order",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        judge(app, task.want),\n",
+          "new": "        all(step in [e.action for e in env.trace if isinstance(e, Step)] for step in task.gold),\n"
+        }
+      ],
+      "expect": "whatever path it took"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "judge, and every gold action taken as well",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        judge(app, task.want),\n",
+          "new": "        judge(app, task.want)\n        and all(step in [e.action for e in env.trace if isinstance(e, Step)] for step in task.gold),\n"
+        }
+      ],
+      "expect": "whatever path it took"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "judge, and gold's cart actions taken in gold's order",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    app = env.app\n    return Result(\n        task.tid,\n        judge(app, task.want),\n",
+          "new": "    app = env.app\n    taken = iter([entry.action for entry in env.trace if isinstance(entry, Step)])\n    return Result(\n        task.tid,\n        judge(app, task.want)\n        and all(any(action == step for action in taken) for step in task.gold if step.name != \"list_items\"),\n"
+        }
+      ],
+      "expect": "whatever path it took"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "a trajectory equal to gold succeeds without judge",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        judge(app, task.want),\n",
+          "new": "        [e.action for e in env.trace if isinstance(e, Step)] == task.gold or judge(app, task.want),\n"
+        }
+      ],
+      "expect": "even when the agent replays gold step for step"
+    },
+    {
+      "test": "test_suite_judging",
+      "name": "success read from the last step's answer (an order id)",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        judge(app, task.want),\n",
+          "new": "        bool(env.trace) and str(getattr(env.trace[-1], \"result\", \"\")).startswith(\"ord-\"),\n"
+        }
+      ],
+      "expect": "success is judged on the final state"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "json.dumps default separators",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "sort_keys=True, separators=(\",\", \":\"), ensure_ascii=False",
+          "new": "sort_keys=True, ensure_ascii=False"
+        }
+      ],
+      "expect": "the digest is the SHA-256 of the canonical JSON"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "ensure_ascii left on",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "ensure_ascii=False).encode",
+          "new": "ensure_ascii=True).encode"
+        }
+      ],
+      "expect": "the digest is the SHA-256 of the canonical JSON"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "keys not sorted",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "json.dumps(state, sort_keys=True,",
+          "new": "json.dumps(state, sort_keys=False,"
+        }
+      ],
+      "expect": "the digest is the SHA-256 of the canonical JSON"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "catalog sorted by sku before hashing",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "json.dumps(state, sort_keys=True,",
+          "new": "json.dumps({**state, \"catalog\": sorted(state[\"catalog\"], key=lambda row: row[\"sku\"])}, sort_keys=True,"
+        }
+      ],
+      "expect": "the digest is the SHA-256 of the canonical JSON"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "bool accepted as an integer",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum\n",
+          "new": "    return isinstance(value, int) and value >= minimum\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "float prices coerced with int()",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "    for row in state[\"catalog\"]:\n        if not",
+          "new": "    for row in state[\"catalog\"]:\n        row[\"price\"] = int(row[\"price\"])\n        if not"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "no hash check on get",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "        if hashlib.sha256(data).hexdigest() != digest:\n            raise SnapshotError(f\"snapshot {digest} does not match its digest\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "hash check on the re-canonicalized JSON instead of the bytes",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "        if hashlib.sha256(data).hexdigest() != digest:\n",
+          "new": "        if hashlib.sha256(canonical_bytes(json.loads(data))).hexdigest() != digest:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "missing snapshot leaks FileNotFoundError",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "        try:\n            data = path.read_bytes()\n        except FileNotFoundError:\n            raise KeyError(digest) from None\n",
+          "new": "        data = path.read_bytes()\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "cart quantities not validated",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "    for sku, qty in state[\"cart\"].items():\n        if not _whole(qty, 1):\n            raise ValueError(f\"cart qty of {sku} must be a positive integer, got {qty!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "order totals not validated",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "        if not _whole(order[\"total\"], 0):\n            raise ValueError(f\"total of {order['oid']} must be integer cents, got {order['total']!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "order quantities not validated",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "        for sku, qty in order[\"items\"].items():\n            if not _whole(qty, 1):\n                raise ValueError(f\"qty of {sku} in {order['oid']} must be a positive integer\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "get answers from an in-memory cache filled by put",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "        self.root.mkdir(parents=True, exist_ok=True)\n",
+          "new": "        self.root.mkdir(parents=True, exist_ok=True)\n        self._cache = {}\n"
+        },
+        {
+          "file": "snapshots.py",
+          "old": "        if not path.exists():\n            path.write_bytes(data)\n",
+          "new": "        if not path.exists():\n            path.write_bytes(data)\n        self._cache[digest] = json.loads(data)\n"
+        },
+        {
+          "file": "snapshots.py",
+          "old": "        path = self.root / f\"{digest}.json\"\n        try:\n",
+          "new": "        if digest in self._cache:\n            return self._cache[digest]\n        path = self.root / f\"{digest}.json\"\n        try:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "SnapshotError does not name the digest",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "raise SnapshotError(f\"snapshot {digest} does not match its digest\")",
+          "new": "raise SnapshotError(\"snapshot does not match its digest\")"
+        }
+      ],
+      "expect": "snapshot does not match its digest"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "file holds indented JSON while the digest covers the canonical bytes",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "            path.write_bytes(data)\n",
+          "new": "            path.write_bytes(json.dumps(state, sort_keys=True, ensure_ascii=False, indent=1).encode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "SnapshotError"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "whole-number floats accepted as cents",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum\n",
+          "new": "    return not isinstance(value, bool) and isinstance(value, (int, float)) and value == int(value) and value >= minimum\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "get checks the file name instead of hashing the bytes",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "        if hashlib.sha256(data).hexdigest() != digest:\n",
+          "new": "        if path.stem != digest:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "file written before the snapshot is checked",
+      "edits": [
+        {
+          "file": "snapshots.py",
+          "old": "        check_state(state)\n        data = canonical_bytes(state)\n        digest = hashlib.sha256(data).hexdigest()\n        path = self.root / f\"{digest}.json\"\n        if not path.exists():\n            path.write_bytes(data)\n        return digest",
+          "new": "        data = canonical_bytes(state)\n        digest = hashlib.sha256(data).hexdigest()\n        path = self.root / f\"{digest}.json\"\n        if not path.exists():\n            path.write_bytes(data)\n        check_state(state)\n        return digest"
+        }
+      ],
+      "expect": "a rejected snapshot is not stored"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "sku compared case-sensitively",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "        args[\"sku\"] = args[\"sku\"].lower()\n",
+          "new": "        args[\"sku\"] = args[\"sku\"]\n"
+        }
+      ],
+      "expect": "compare normalized actions"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "qty default not filled in",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "        args.setdefault(\"qty\", 1)\n",
+          "new": "        pass\n"
+        }
+      ],
+      "expect": "compare normalized actions"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "actions with different names substituted",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "        if a[i][0] == g[j][0]:\n            return 1\n        return None",
+          "new": "        return 1"
+        }
+      ],
+      "expect": "different actions are never paired"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "textbook backtrack from the end",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "    # rest[i][j]: cheapest alignment of a[i:] with g[j:]\n    rest = [[0] * (m + 1) for _ in range(n + 1)]\n    for i in range(n, -1, -1):\n        for j in range(m, -1, -1):\n            if i == n or j == m:\n                rest[i][j] = (n - i) + (m - j)\n                continue\n            best = 1 + min(rest[i + 1][j], rest[i][j + 1])\n            cost = pair_cost(i, j)\n            if cost is not None:\n                best = min(best, cost + rest[i + 1][j + 1])\n            rest[i][j] = best\n\n    ops: list[Op] = []\n    i = j = 0\n    while i < n or j < m:\n        cost = pair_cost(i, j) if i < n and j < m else None\n        if cost is not None and cost + rest[i + 1][j + 1] == rest[i][j]:\n            ops.append((\"match\" if cost == 0 else \"substitute\", i, j))\n            i, j = i + 1, j + 1\n        elif i < n and 1 + rest[i + 1][j] == rest[i][j]:\n            ops.append((\"extra\", i, None))\n            i += 1\n        else:\n            ops.append((\"missing\", None, j))\n            j += 1\n    return Alignment(ops)\n",
+          "new": "    d = [[i + j if i == 0 or j == 0 else 0 for j in range(m + 1)] for i in range(n + 1)]\n    for i in range(1, n + 1):\n        for j in range(1, m + 1):\n            best = 1 + min(d[i - 1][j], d[i][j - 1])\n            cost = pair_cost(i - 1, j - 1)\n            if cost is not None:\n                best = min(best, cost + d[i - 1][j - 1])\n            d[i][j] = best\n    ops: list[Op] = []\n    i, j = n, m\n    while i or j:\n        cost = pair_cost(i - 1, j - 1) if i and j else None\n        if cost is not None and cost + d[i - 1][j - 1] == d[i][j]:\n            ops.append((\"match\" if cost == 0 else \"substitute\", i - 1, j - 1))\n            i, j = i - 1, j - 1\n        elif i and 1 + d[i - 1][j] == d[i][j]:\n            ops.append((\"extra\", i - 1, None))\n            i -= 1\n        else:\n            ops.append((\"missing\", None, j - 1))\n            j -= 1\n    ops.reverse()\n    return Alignment(ops)\n"
+        }
+      ],
+      "expect": "the repeat is the extra one"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "skip an agent action before pairing",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "        if cost is not None and cost + rest[i + 1][j + 1] == rest[i][j]:\n            ops.append((\"match\" if cost == 0 else \"substitute\", i, j))\n            i, j = i + 1, j + 1\n        elif i < n and 1 + rest[i + 1][j] == rest[i][j]:\n            ops.append((\"extra\", i, None))\n            i += 1\n",
+          "new": "        if i < n and 1 + rest[i + 1][j] == rest[i][j]:\n            ops.append((\"extra\", i, None))\n            i += 1\n        elif cost is not None and cost + rest[i + 1][j + 1] == rest[i][j]:\n            ops.append((\"match\" if cost == 0 else \"substitute\", i, j))\n            i, j = i + 1, j + 1\n"
+        }
+      ],
+      "expect": "the repeat is the extra one"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "skip a gold action before an agent action",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "        elif i < n and 1 + rest[i + 1][j] == rest[i][j]:\n            ops.append((\"extra\", i, None))\n            i += 1\n        else:\n            ops.append((\"missing\", None, j))\n            j += 1\n",
+          "new": "        elif j < m and 1 + rest[i][j + 1] == rest[i][j]:\n            ops.append((\"missing\", None, j))\n            j += 1\n        else:\n            ops.append((\"extra\", i, None))\n            i += 1\n"
+        }
+      ],
+      "expect": "on a tie, skip the agent's action first"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "efficiency over every task, as the lesson's aggregate does",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "        report[\"micro\"] = sum(r.steps for r in solved) / sum(r.gold_steps for r in solved)\n",
+          "new": "        report[\"micro\"] = sum(r.steps for r in results) / sum(r.gold_steps for r in results)\n"
+        }
+      ],
+      "expect": "micro: total steps over total gold, successful tasks only"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "micro computed as a mean of ratios",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "        report[\"micro\"] = sum(r.steps for r in solved) / sum(r.gold_steps for r in solved)\n",
+          "new": "        report[\"micro\"] = sum(r.steps / r.gold_steps for r in solved) / len(solved)\n"
+        }
+      ],
+      "expect": "micro: total steps over total gold, successful tasks only"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "macro computed as total over total",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "        report[\"macro\"] = sum(r.steps / r.gold_steps for r in solved) / len(solved)\n",
+          "new": "        report[\"macro\"] = sum(r.steps for r in solved) / sum(r.gold_steps for r in solved)\n"
+        }
+      ],
+      "expect": "macro: mean of per-task ratios"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "no guard when nothing succeeded",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "    if solved:\n",
+          "new": "    if True:\n"
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "normalized arguments kept in call order",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "    return action.name, tuple(sorted(args.items()))\n",
+          "new": "    return action.name, tuple(args.items())\n"
+        }
+      ],
+      "expect": "compare normalized actions"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "greedy left-to-right alignment",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "    # rest[i][j]: cheapest alignment of a[i:] with g[j:]\n",
+          "new": "    ops: list[Op] = []\n    i = j = 0\n    while i < n or j < m:\n        cost = pair_cost(i, j) if i < n and j < m else None\n        if cost is not None:\n            ops.append((\"match\" if cost == 0 else \"substitute\", i, j))\n            i, j = i + 1, j + 1\n        elif i < n:\n            ops.append((\"extra\", i, None))\n            i += 1\n        else:\n            ops.append((\"missing\", None, j))\n            j += 1\n    return Alignment(ops)\n    # rest[i][j]: cheapest alignment of a[i:] with g[j:]\n"
+        }
+      ],
+      "expect": "compare normalized actions"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "no substitution: the wrong item is an extra plus a missing",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "        if a[i][0] == g[j][0]:\n            return 1\n        return None",
+          "new": "        return None"
+        }
+      ],
+      "expect": "the right action on the wrong item is one substitution"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "different names paired at cost 2",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "        if a[i][0] == g[j][0]:\n            return 1\n        return None",
+          "new": "        if a[i][0] == g[j][0]:\n            return 1\n        return 2"
+        }
+      ],
+      "expect": "different actions are never paired"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "walk pairs whenever the names match",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "        if cost is not None and cost + rest[i + 1][j + 1] == rest[i][j]:\n",
+          "new": "        if cost is not None:\n"
+        }
+      ],
+      "expect": "compare normalized actions"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "macro over every task",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "        report[\"macro\"] = sum(r.steps / r.gold_steps for r in solved) / len(solved)\n",
+          "new": "        report[\"macro\"] = sum(r.steps / r.gold_steps for r in results) / len(results)\n"
+        }
+      ],
+      "expect": "macro: mean of per-task ratios"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "macro rounded to two places",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "        report[\"macro\"] = sum(r.steps / r.gold_steps for r in solved) / len(solved)\n",
+          "new": "        report[\"macro\"] = round(sum(r.steps / r.gold_steps for r in solved) / len(solved), 2)\n"
+        }
+      ],
+      "expect": "macro: mean of per-task ratios"
+    },
+    {
+      "test": "test_trajectory_efficiency",
+      "name": "nothing solved reported as 0.0",
+      "edits": [
+        {
+          "file": "trajectory.py",
+          "old": "        \"micro\": None,\n        \"macro\": None,\n",
+          "new": "        \"micro\": 0.0,\n        \"macro\": 0.0,\n"
+        }
+      ],
+      "expect": "no successful task, no efficiency"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "every episode awaited before any record",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "        yield _record(HEADER)\n        for _ in tasks:",
+          "new": "        yield _record(HEADER)\n        await asyncio.gather(*running)\n        for _ in tasks:"
+        }
+      ],
+      "expect": "the stream stalled"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "episodes run in fixed batches of limit",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "    running = [asyncio.create_task(episode(task)) for task in tasks]\n    try:\n        yield _record(HEADER)\n        for _ in tasks:\n            yield await finished.get()\n",
+          "new": "    running = []\n    try:\n        yield _record(HEADER)\n        for start in range(0, len(tasks), limit):\n            batch = [asyncio.create_task(episode(task)) for task in tasks[start : start + limit]]\n            running += batch\n            for _ in batch:\n                yield await finished.get()\n"
+        }
+      ],
+      "expect": "the stream stalled"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "one app shared by every episode",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "    snapshot = store.get(digest)\n",
+          "new": "    snapshot = store.get(digest)\n    shared = ShoppingApp(snapshot)\n"
+        },
+        {
+          "file": "parallel.py",
+          "old": "            env = Env(ShoppingApp(snapshot))\n",
+          "new": "            env = Env(shared)\n"
+        }
+      ],
+      "expect": "every episode has its own app"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "an agent's exception escapes its episode",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "            try:\n                await task.agent(env)\n            except Exception:\n                ok = False\n            else:\n                ok = judge(env.app, task.want)\n",
+          "new": "            await task.agent(env)\n            ok = judge(env.app, task.want)\n"
+        }
+      ],
+      "expect": "the stream stalled"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "limit ignored",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "    slots = asyncio.Semaphore(limit)\n",
+          "new": "    slots = asyncio.Semaphore(len(tasks) or 1)\n"
+        }
+      ],
+      "expect": "at most limit episodes run at once"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "fields joined by hand",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "    out = io.StringIO()\n    csv.writer(out).writerow(fields)\n    return out.getvalue()",
+          "new": "    return \",\".join(str(f) for f in fields) + \"\\n\""
+        }
+      ],
+      "expect": "records in finish order"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "success written as True/False",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "int(ok)",
+          "new": "ok"
+        }
+      ],
+      "expect": "records in finish order"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "no header",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "        yield _record(HEADER)\n",
+          "new": ""
+        }
+      ],
+      "expect": "records in finish order"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "records without a line ending",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "    return out.getvalue()",
+          "new": "    return out.getvalue().rstrip(\"\\r\\n\")"
+        }
+      ],
+      "expect": "every yielded string is one CSV record with its line ending"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "closing the stream leaves episodes running",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "        for job in running:\n            job.cancel()\n        await asyncio.gather(*running, return_exceptions=True)",
+          "new": "        pass"
+        }
+      ],
+      "expect": "closing the stream cancels the episodes still running"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "a crashed episode judged on its final state",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "            except Exception:\n                ok = False\n            else:\n                ok = judge(env.app, task.want)\n",
+          "new": "            except Exception:\n                pass\n            ok = judge(env.app, task.want)\n"
+        }
+      ],
+      "expect": "records in finish order"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "a crash reports no steps",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "            except Exception:\n                ok = False\n",
+          "new": "            except Exception:\n                ok = False\n                env.trace.clear()\n"
+        }
+      ],
+      "expect": "records in finish order"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "records yielded in start order",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "            await finished.put(_record((task.tid, int(ok), count_steps(env.trace), len(task.gold))))\n",
+          "new": "            return _record((task.tid, int(ok), count_steps(env.trace), len(task.gold)))\n"
+        },
+        {
+          "file": "parallel.py",
+          "old": "        for _ in tasks:\n            yield await finished.get()\n",
+          "new": "        for job in running:\n            yield await job\n"
+        }
+      ],
+      "expect": "the stream stalled"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "header and records yielded as one string at the end",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "        yield _record(HEADER)\n        for _ in tasks:\n            yield await finished.get()\n",
+          "new": "        rows = [_record(HEADER)]\n        for _ in tasks:\n            rows.append(await finished.get())\n        yield \"\".join(rows)\n"
+        }
+      ],
+      "expect": "the stream stalled"
+    },
+    {
+      "test": "test_parallel_episodes",
+      "name": "slot released before the episode runs",
+      "edits": [
+        {
+          "file": "parallel.py",
+          "old": "        async with slots:\n            env = Env(ShoppingApp(snapshot))\n",
+          "new": "        async with slots:\n            pass\n        if True:\n            env = Env(ShoppingApp(snapshot))\n"
+        }
+      ],
+      "expect": "at most limit episodes run at once"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "ordered without qty taken as qty 1",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "arg[\"sku\"] in o[\"items\"] and (\"qty\" not in arg or o[\"items\"][arg[\"sku\"]] == arg[\"qty\"])",
+          "new": "o[\"items\"].get(arg[\"sku\"]) == arg.get(\"qty\", 1)"
+        }
+      ],
+      "expect": "ordered without qty means any quantity"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "a failed not blamed on its child without flipping",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "        return _blame(arg, state, not wanted, path + (\"not\",))",
+          "new": "        return path + (\"not\",)"
+        }
+      ],
+      "expect": "two negations cancel"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "goal validated only where evaluation reaches",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "    _validate(goal, ())\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "an empty any holds",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "        return any(_holds(child, state) for child in arg)\n",
+          "new": "        return not arg or any(_holds(child, state) for child in arg)\n"
+        }
+      ],
+      "expect": "an empty any does not"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "a failed any blamed on its first alternative",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "    if op == \"any\" and not wanted:",
+          "new": "    if op == \"any\" and wanted and arg:\n        return _blame(arg[0], state, True, path + (\"any\", 0))\n    if op == \"any\" and not wanted:"
+        }
+      ],
+      "expect": "an any with no alternative holding is explained by itself"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "a failed all blamed on its last failing child",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "        i = next(i for i, child in enumerate(arg) if not _holds(child, state))\n",
+          "new": "        i = max(i for i, child in enumerate(arg) if not _holds(child, state))\n"
+        }
+      ],
+      "expect": "an all by its first failing child"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "a forbidden any blamed on its last alternative that held",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "        i = next(i for i, child in enumerate(arg) if _holds(child, state))\n",
+          "new": "        i = max(i for i, child in enumerate(arg) if _holds(child, state))\n"
+        }
+      ],
+      "expect": "a forbidden any is explained by its first alternative that held"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "required leaf arguments not checked",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "not required <= set(arg) <= required | optional",
+          "new": "not set(arg) <= required | optional"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "a forbidden all blamed on its first child",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "    if op == \"any\" and not wanted:",
+          "new": "    if op == \"all\" and not wanted and arg:\n        return _blame(arg[0], state, False, path + (\"all\", 0))\n    if op == \"any\" and not wanted:"
+        }
+      ],
+      "expect": "an all that held when it should not have is explained by itself"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "not given a list skips validation",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "    elif op == \"not\":\n        _validate(arg, path + (op,))",
+          "new": "    elif op == \"not\":\n        if not isinstance(arg, list):\n            _validate(arg, path + (op,))"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "a node with several keys read by its first key",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "    if not isinstance(node, dict) or len(node) != 1:\n        raise ValueError(f\"predicate at {path} must be a dict with one key, got {node!r}\")\n    ((op, arg),) = node.items()\n    return op, arg",
+          "new": "    if not isinstance(node, dict) or not node:\n        raise ValueError(f\"predicate at {path} must be a dict with one key, got {node!r}\")\n    return next(iter(node.items()))"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "orders count read as at least n",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "        return len(state[\"orders\"]) == arg[\"count\"]\n",
+          "new": "        return len(state[\"orders\"]) >= arg[\"count\"]\n"
+        }
+      ],
+      "expect": "a count and a qty are matched exactly"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "ordered qty read as at least q",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "o[\"items\"][arg[\"sku\"]] == arg[\"qty\"]",
+          "new": "o[\"items\"][arg[\"sku\"]] >= arg[\"qty\"]"
+        }
+      ],
+      "expect": "a count and a qty are matched exactly"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "unknown leaf arguments accepted",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "not required <= set(arg) <= required | optional",
+          "new": "not required <= set(arg)"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "an empty all fails",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "        return all(_holds(child, state) for child in arg)\n",
+          "new": "        return bool(arg) and all(_holds(child, state) for child in arg)\n"
+        }
+      ],
+      "expect": "StopIteration"
+    },
+    {
+      "test": "test_goal_predicates",
+      "name": "list steps in the blame path without the index",
+      "edits": [
+        {
+          "file": "predicates.py",
+          "old": "        return _blame(arg[i], state, True, path + (\"all\", i))\n",
+          "new": "        return _blame(arg[i], state, True, path + (\"all\",))\n"
+        }
+      ],
+      "expect": "a failed not is explained by what it forbids"
+    }
+  ]
+}
