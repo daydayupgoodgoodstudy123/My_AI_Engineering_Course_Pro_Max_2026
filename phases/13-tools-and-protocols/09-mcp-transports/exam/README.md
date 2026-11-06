@@ -10,7 +10,7 @@ You need Python 3.10+ and pytest (`python -m pip install pytest`). Run `python -
 
 ## Pt 1 `test_read_post`
 
-Comment out `@pytest.mark.skip("Part 1")`, run pytest, and work out why the request reader fails.
+Comment out `@pytest.mark.skip("Part 1")`, run pytest, and work out why the request reader fails. Each routing header supplies one exact value for the body.
 
 ## Pt 2 `test_shared_drafts`
 

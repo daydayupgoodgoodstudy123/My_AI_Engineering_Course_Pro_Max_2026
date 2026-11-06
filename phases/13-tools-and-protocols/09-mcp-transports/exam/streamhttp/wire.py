@@ -130,8 +130,8 @@ def _expect(
     decode: Callable[[str], str] | None = None,
 ) -> None:
     values = headers.get_all(name)
-    if len(values) != 1:
+    if not values:
         raise HeaderMismatch(f"{name} must be sent exactly once")
     value = values[0] if decode is None else decode(values[0])
-    if expected is None or value.lower() != expected.lower():
+    if expected is None or value != expected:
         raise HeaderMismatch(f"Header mismatch: {name}")

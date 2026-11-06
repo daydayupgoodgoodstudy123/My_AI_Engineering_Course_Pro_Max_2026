@@ -14,6 +14,7 @@
 
 | 关 | 可能的问题 | 回答 |
 |---|---|---|
+| 1 | 两个 Mcp-Method 或 Mcp-Name 的值一样，也要拒绝吗？ | "Yes. Each routing header must arrive exactly once; never select a value from duplicates." |
 | 1 | 两个 Content-Length 的值一样，也要拒绝吗？ | "Yes. We never choose between two framing headers, even when they agree." |
 | 1 | Content-Length: 0 可以吗？ | "No. A JSON-RPC message is never empty: 1 through the limit." |
 | 1 | 能不能一次 read 读完？ | "No. A connection can hand you fewer bytes than you ask for." |
@@ -42,7 +43,7 @@
 一个测试里叠了 4 个缺陷和 1 组护栏：
 
 1. `Headers.get_all` 按原样比较头名（`key == name`）。测试模拟 HTTP/2 那一跳，所有头名都是小写。错误不在 `Headers` 里报出来，而是在上一层：`read_body` 报 `FramingError: Content-Length is required`，可请求里明明带着 `content-length`。
-2. `_expect` 比较镜像头和 body 时两边都 `.lower()`，和 docstring 写的 compared exactly 不一致，`Mcp-Method: Tools/Call` 被当成 `tools/call` 放行。讲义原话是 “Header values are case-sensitive even though header names are case-insensitive.”
+2. `_expect` 只拒绝没有值，随后取 `values[0]` 比较。第一个路由头与 body 相同，第二个却不同也会放行；两个值相同也不能接受。头名大小写不同仍然是同一个路由字段。要先确认正好一个值，再使用它，不能 first-wins、last-wins 或只拒绝冲突值。解码后原样比较已经正确给定，大小写和尾空格断言保护这个合同。
 3. `body_name` 一律取 `params.name`，`resources/read` 应该取 `params.uri`。测试用的正是讲义练习 3：非 ASCII 的 URI 用 Base64 哨兵发过来，解码后和 `params.uri` 比较。
 4. `read_body` 用 `body += chunk` 累加 bytes。bytes 没有原地追加，每次都把已读的部分复制一遍，是 O(n²)：12 MiB 的 body 按 4 KiB 一块读要 1 秒多，改成 bytearray 或 list 加 join 只要 2 到 3 毫秒。
 5. 护栏：换成快写法时，Content-Length 的严格规则一条都不能丢。缺失、两个冲突的值、和 Transfer-Encoding 同时出现（测试里的 TE 头名是小写）、非 ASCII 数字（`"١٠".isdigit()` 为真，`int()` 也能转）、带符号、0、超过上限，都要在读 body 之前拒绝；body 不够长要报错；只读 Content-Length 个字节，后面的字节留在流里。顺手把值也转小写、给值 strip、只转一边的小写，也都会被抓住。

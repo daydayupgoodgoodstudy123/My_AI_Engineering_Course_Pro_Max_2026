@@ -11,7 +11,7 @@
 **依次修四处**：
 
 1. `get_all` 两边都转小写再比：`key.lower() == name.lower()`。只在存入时转小写、查询时不转，或者反过来，都不够。
-2. `_expect` 去掉 `.lower()`，原样比较。头值区分大小写，`Tools/Call` 不是 `tools/call`。只去掉一边也不行：只把 body 一侧转小写，`searchNotes` 这种驼峰工具名会被误拒；只把头一侧转小写，`Tools/Call` 照样放行；给两边 strip 会放过多一个空格的名字。
+2. `_expect` 先确认 `len(values) == 1`，再读取这一个值。路由头不能 first-wins 或 last-wins，两个值相同也必须拒绝；混合大小写的头名仍是同一个字段。`code/main.py` 的 `reject_duplicate_routing_headers` 也在分发之前检查这一点。解码后原样比较已经给定：`Tools/Call` 不是 `tools/call`，`searchNotes` 的大小写和名字末尾空格都不能改写。
 3. `body_name` 对 `resources/read` 取 `params.uri`，其余取 `params.name`。Base64 哨兵的解码本来就在 `_expect` 里，修好以后讲义练习 3 的场景就能通过：非 ASCII 的 URI 以 `=?base64?...?=` 发来，解码后和 `params.uri` 原样比较。
 4. `read_body` 改用 `bytearray` 累加，最后返回 `bytes(body)`；list 加 `b"".join` 也可以。bytes 不可变，`+=` 每次都新建一个对象，把已读的全部内容复制一遍。12 MiB 按 4 KiB 读，一共要复制约 18 GiB，1 秒多；bytearray 的追加摊还是 O(1)，2 到 3 毫秒。
 
@@ -124,4 +124,4 @@ LF 是单字节 0x0A，而 UTF-8 多字节序列里的每个字节都不小于 0
 
 ## 这套题证明了什么，没证明什么
 
-通过了说明你能在这个规模的协议代码里顺着错误找到上一层的根因，知道 HTTP 头名和头值的大小写规则，也知道 Content-Length 为什么要这么严；能把跨副本的应用状态放进共享库并按调用者授权；能把讲义里 Streamable HTTP 的状态码规则按正确的先后写出来；能写出逐事件输出、关流即取消的 SSE 生成器，以及在任意字节边界上都正确的分层解码器。它不涉及真正的套接字和 HTTP 服务器（测试直接调用函数，`code/main.py` 的 `http.server` 版本要另外跑），也不涉及 stdio 传输、`subscriptions/listen` 的长连接订阅（第 10 课）、真实的认证（第 16、18 课）、背压和看门狗（第 29 课）、并发下的 compare-and-set 竞态，以及 legacy HTTP+SSE 的兼容桥。
+通过了说明你能在这个规模的协议代码里顺着错误找到上一层的根因，知道一个路由头只能有一个值，保留 HTTP 头名和头值的大小写规则，也知道 Content-Length 为什么要这么严；能把跨副本的应用状态放进共享库并按调用者授权；能把讲义里 Streamable HTTP 的状态码规则按正确的先后写出来；能写出逐事件输出、关流即取消的 SSE 生成器，以及在任意字节边界上都正确的分层解码器。它不涉及真正的套接字和 HTTP 服务器（测试直接调用函数，`code/main.py` 的 `http.server` 版本要另外跑），也不涉及 stdio 传输、`subscriptions/listen` 的长连接订阅（第 10 课）、真实的认证（第 16、18 课）、背压和看门狗（第 29 课）、并发下的 compare-and-set 竞态，以及 legacy HTTP+SSE 的兼容桥。

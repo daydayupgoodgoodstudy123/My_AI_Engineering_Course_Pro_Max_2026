@@ -128,10 +128,35 @@ def test_read_post() -> None:
         "decoded values are compared exactly: a trailing space counts"
     )
 
+    for name, matching, different in (
+        ("MCP-Protocol-Version", "2026-07-28", "2027-01-01"),
+        ("Mcp-Method", "tools/call", "tools/list"),
+        ("Mcp-Name", "searchNotes", "otherTool"),
+    ):
+        for extra in (matching, different):
+            for first, second in ((name, name), (name.swapcase(), name.lower())):
+                pairs = [(key, value) for key, value in post_headers(search, body) if key.lower() != name.lower()]
+                pairs.extend(((first, matching), (second, extra)))
+                repeated = rejection(Headers(pairs), search)
+                assert repeated is not None and repeated.code == -32020, (
+                    f"each routing header arrives exactly once, even if repeated values agree: {name}"
+                )
+                pairs[-2:] = ((first, extra), (second, matching))
+                assert rejection(Headers(pairs), search) is not None, (
+                    "choosing the last routing header is no safer than choosing the first"
+                )
+        single = [(key.swapcase(), value) for key, value in post_headers(search, body)]
+        assert rejection(Headers(single), search) is None, "one routing value passes with any header-name casing"
+        absent = [(key, value) for key, value in post_headers(search, body) if key.lower() != name.lower()]
+        assert rejection(Headers(absent), search) is not None, "each routing header is required"
+
     read = rpc(8, "resources/read", {"uri": "notes://笔记-1"})
     assert rejection(Headers(post_headers(read, encode(read))), read) is None, (
         "Mcp-Name mirrors params.uri for resources/read, compared after Base64 decoding"
     )
+    name_pairs = post_headers(read, encode(read))
+    name_pairs.append(("mCp-NaMe", mirror("notes://笔记-1")))
+    assert rejection(Headers(name_pairs), read) is not None, "a decoded matching Mcp-Name still cannot arrive twice"
     other_note = Headers(post_headers(read, encode(read), replace={"Mcp-Name": mirror("notes://笔记-2")}))
     elsewhere = rejection(other_note, read)
     assert elsewhere is not None and elsewhere.code == -32020, "a Mcp-Name naming another resource is -32020"
