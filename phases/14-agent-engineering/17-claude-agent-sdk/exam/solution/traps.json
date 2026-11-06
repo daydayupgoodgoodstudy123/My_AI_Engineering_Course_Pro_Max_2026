@@ -1,0 +1,895 @@
+{
+  "package": "harness",
+  "tests": [
+    "test_harness_dispatch",
+    "test_session_mirror",
+    "test_batch_plan",
+    "test_parallel_subagents",
+    "test_subagent_tree"
+  ],
+  "layers": [
+    {
+      "test": "test_harness_dispatch",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a denied call must not run the tool"
+        },
+        {
+          "name": "honor Deny and stop the PreToolUse chain",
+          "edits": [
+            {
+              "file": "core.py",
+              "old": "        for hook in self.hooks.pre_tool_use:\n            hook(session_id, tool_name, args)\n        tool = self.tools.get(tool_name)\n        if tool is None:\n",
+              "new": "        denied: Optional[Deny] = None\n        for hook in self.hooks.pre_tool_use:\n            decision = hook(session_id, tool_name, args)\n            if isinstance(decision, Deny):\n                denied = decision\n                break\n        tool = self.tools.get(tool_name)\n        if denied is not None:\n            result = f\"denied: {denied.reason}\"\n        elif tool is None:\n"
+            }
+          ],
+          "expect": "post_tool_use sees every result, tool errors included"
+        },
+        {
+          "name": "+ tool errors reach the PostToolUse hooks",
+          "edits": [
+            {
+              "file": "core.py",
+              "old": "                return f\"error: {type(exc).__name__}: {exc}\"\n",
+              "new": "                result = f\"error: {type(exc).__name__}: {exc}\"\n"
+            }
+          ],
+          "expect": "'list' object has no attribute 'split'"
+        },
+        {
+          "name": "+ only the subagent's output returns",
+          "edits": [
+            {
+              "file": "core.py",
+              "old": "self._record(parent, \"subagent\", self.store.load(sub_session))",
+              "new": "self._record(parent, \"subagent\", run.output)"
+            }
+          ],
+          "expect": "run_agent should stay fast on long sessions"
+        },
+        {
+          "name": "+ context counted once, then incrementally",
+          "edits": [
+            {
+              "file": "core.py",
+              "old": "        run.context_tokens = self._context_tokens(run.session_id)\n",
+              "new": "        run.context_tokens += count_tokens(content)\n"
+            },
+            {
+              "file": "core.py",
+              "old": "        run = AgentRun(session_id=session_id)\n",
+              "new": "        run = AgentRun(session_id=session_id, context_tokens=self._context_tokens(session_id))\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_harness_dispatch",
+      "name": "Deny returns early and skips the PostToolUse hooks",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "            if isinstance(decision, Deny):\n                denied = decision\n                break\n",
+          "new": "            if isinstance(decision, Deny):\n                return f\"denied: {decision.reason}\"\n"
+        }
+      ],
+      "expect": "post_tool_use audits denied calls too"
+    },
+    {
+      "test": "test_harness_dispatch",
+      "name": "later PreToolUse hooks still run after a Deny",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "                denied = decision\n                break\n",
+          "new": "                denied = denied or decision\n"
+        }
+      ],
+      "expect": "PreToolUse hooks after a Deny do not run"
+    },
+    {
+      "test": "test_harness_dispatch",
+      "name": "subagent transcript joined into one turn",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "self._record(parent, \"subagent\", run.output)",
+          "new": "self._record(parent, \"subagent\", \"\\n\".join(t.content for t in self.store.load(sub_session)))"
+        }
+      ],
+      "expect": "only subagent results return to the orchestrator"
+    },
+    {
+      "test": "test_harness_dispatch",
+      "name": "incremental count that starts at 0 for a resumed session",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "        run = AgentRun(session_id=session_id, context_tokens=self._context_tokens(session_id))\n",
+          "new": "        run = AgentRun(session_id=session_id)\n"
+        }
+      ],
+      "expect": "a resumed session keeps its earlier context"
+    },
+    {
+      "test": "test_harness_dispatch",
+      "name": "a resumed session seeded with its number of turns",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "context_tokens=self._context_tokens(session_id))",
+          "new": "context_tokens=len(self.store.load(session_id)))"
+        }
+      ],
+      "expect": "a resumed session keeps its earlier context"
+    },
+    {
+      "test": "test_harness_dispatch",
+      "name": "the subagent's whole context added to the orchestrator's",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "            self._record(parent, \"subagent\", run.output)\n",
+          "new": "            self._record(parent, \"subagent\", run.output)\n            parent.context_tokens += run.context_tokens\n"
+        }
+      ],
+      "expect": "only subagent results return to the orchestrator"
+    },
+    {
+      "test": "test_session_mirror",
+      "name": "non-ASCII written as \\u escapes",
+      "edits": [
+        {
+          "file": "mirror.py",
+          "old": "json.dumps(record, ensure_ascii=False)",
+          "new": "json.dumps(record)"
+        }
+      ],
+      "expect": "non-ASCII text is written as it is"
+    },
+    {
+      "test": "test_session_mirror",
+      "name": "lines read back with str.splitlines",
+      "edits": [
+        {
+          "file": "mirror.py",
+          "old": "text.split(\"\\n\")[:-1]",
+          "new": "text.splitlines()"
+        }
+      ],
+      "expect": "Unterminated string"
+    },
+    {
+      "test": "test_session_mirror",
+      "name": "\"/\" replaced by \"_\" in file names",
+      "edits": [
+        {
+          "file": "mirror.py",
+          "old": "self.root / (session_id.encode(\"utf-8\").hex() + SUFFIX)",
+          "new": "self.root / (session_id.replace(\"/\", \"_\") + SUFFIX)"
+        }
+      ],
+      "expect": "every session gets its own mirror file inside root"
+    },
+    {
+      "test": "test_session_mirror",
+      "name": "file names percent-encoded (case collides)",
+      "edits": [
+        {
+          "file": "mirror.py",
+          "old": "self.root / (session_id.encode(\"utf-8\").hex() + SUFFIX)",
+          "new": "self.root / (__import__(\"urllib.parse\").parse.quote(session_id, safe=\"\") + SUFFIX)"
+        }
+      ],
+      "expect": "every session gets its own mirror file inside root"
+    },
+    {
+      "test": "test_session_mirror",
+      "name": "a kept-open file handle that is never flushed",
+      "edits": [
+        {
+          "file": "mirror.py",
+          "old": "        with open(self.mirror_path(session_id), \"a\", encoding=\"utf-8\") as f:\n            f.write(line)\n",
+          "new": "        self.__dict__.setdefault(\"_handles\", {}).setdefault(\n            session_id, open(self.mirror_path(session_id), \"a\", encoding=\"utf-8\")).write(line)\n"
+        }
+      ],
+      "expect": "each turn is on disk, one line each, as soon as it is appended"
+    },
+    {
+      "test": "test_session_mirror",
+      "name": "delete cascades one level only, as in the lesson code",
+      "edits": [
+        {
+          "file": "mirror.py",
+          "old": "            stack.extend(self._subkeys.pop(sid, []))\n",
+          "new": "            stack.extend(self._subkeys.pop(sid, []) if sid == session_id else [])\n"
+        }
+      ],
+      "expect": "delete cascades to every subagent session below"
+    },
+    {
+      "test": "test_session_mirror",
+      "name": "deletion not recorded in the parent's mirror",
+      "edits": [
+        {
+          "file": "mirror.py",
+          "old": "                    self._write(parent, {\"removed\": sub})\n",
+          "new": "                    pass\n"
+        }
+      ],
+      "expect": "a deleted subagent stays out of its parent's subkeys after a reopen"
+    },
+    {
+      "test": "test_session_mirror",
+      "name": "delete rewrites the parent's mirror without the link line",
+      "edits": [
+        {
+          "file": "mirror.py",
+          "old": "        for parent, subs in self._subkeys.items():\n            for sub in subs:\n                if sub in gone:\n                    self._write(parent, {\"removed\": sub})\n",
+          "new": "        for parent, subs in self._subkeys.items():\n            if any(s in gone for s in subs):\n                path = self.mirror_path(parent)\n                kept = [ln for ln in path.read_text(encoding=\"utf-8\").split(\"\\n\")[:-1] if json.loads(ln).get(\"subagent\") not in gone]\n                path.write_text(\"\".join(ln + \"\\n\" for ln in kept), encoding=\"utf-8\")\n"
+        }
+      ],
+      "expect": "mirror files are only ever appended to"
+    },
+    {
+      "test": "test_session_mirror",
+      "name": "link_sub does not create the subagent's session",
+      "edits": [
+        {
+          "file": "mirror.py",
+          "old": "        self._touch(parent)\n        self._touch(sub)\n",
+          "new": "        self._touch(parent)\n"
+        }
+      ],
+      "expect": "a session exists once it has a turn or takes part in a link"
+    },
+    {
+      "test": "test_session_mirror",
+      "name": "removal records also written into deleted parents, recreating their files",
+      "edits": [
+        {
+          "file": "mirror.py",
+          "old": "        gone: set[str] = set()\n        stack = [session_id]\n        while stack:\n            sid = stack.pop()\n            if sid in gone or sid not in self._sessions:\n                continue\n            gone.add(sid)\n            stack.extend(self._subkeys.pop(sid, []))\n            del self._sessions[sid]\n            self.mirror_path(sid).unlink()\n        for parent, subs in self._subkeys.items():\n            for sub in subs:\n                if sub in gone:\n                    self._write(parent, {\"removed\": sub})\n            self._subkeys[parent] = [s for s in subs if s not in gone]",
+          "new": "        gone: set[str] = set()\n        stack = [session_id]\n        parent_of = {}\n        while stack:\n            sid = stack.pop()\n            if sid in gone or sid not in self._sessions:\n                continue\n            gone.add(sid)\n            subs = self._subkeys.pop(sid, [])\n            for s in subs:\n                parent_of[s] = sid\n            stack.extend(subs)\n            del self._sessions[sid]\n            self.mirror_path(sid).unlink()\n        for parent, subs in self._subkeys.items():\n            if session_id in subs:\n                parent_of[session_id] = parent\n        for sid, parent in parent_of.items():\n            self._write(parent, {\"removed\": sid})\n        for parent, subs in self._subkeys.items():\n            self._subkeys[parent] = [s for s in subs if s not in gone]"
+        }
+      ],
+      "expect": "a deleted session's mirror file is removed"
+    },
+    {
+      "test": "test_session_mirror",
+      "name": "timestamps rounded to microseconds",
+      "edits": [
+        {
+          "file": "mirror.py",
+          "old": "\"ts\": turn.ts})",
+          "new": "\"ts\": round(turn.ts, 6)})"
+        }
+      ],
+      "expect": "a turn line holds role, content and ts"
+    },
+    {
+      "test": "test_session_mirror",
+      "name": "file names in standard base64 (can contain \"/\")",
+      "edits": [
+        {
+          "file": "mirror.py",
+          "old": "self.root / (session_id.encode(\"utf-8\").hex() + SUFFIX)",
+          "new": "self.root / (__import__(\"base64\").b64encode(session_id.encode(\"utf-8\")).decode() + SUFFIX)"
+        },
+        {
+          "file": "mirror.py",
+          "old": "bytes.fromhex(path.name[: -len(SUFFIX)]).decode(\"utf-8\")",
+          "new": "__import__(\"base64\").b64decode(path.name[: -len(SUFFIX)]).decode(\"utf-8\")"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_session_mirror",
+      "name": "root not created when it is missing",
+      "edits": [
+        {
+          "file": "mirror.py",
+          "old": "        self.root.mkdir(parents=True, exist_ok=True)\n",
+          "new": ""
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_session_mirror",
+      "name": "session ids used as file names as they are",
+      "edits": [
+        {
+          "file": "mirror.py",
+          "old": "self.root / (session_id.encode(\"utf-8\").hex() + SUFFIX)",
+          "new": "self.root / (session_id + SUFFIX)"
+        },
+        {
+          "file": "mirror.py",
+          "old": "bytes.fromhex(path.name[: -len(SUFFIX)]).decode(\"utf-8\")",
+          "new": "path.name[: -len(SUFFIX)]"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "the subagents' reads counted in the orchestrator's context",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "        orchestrator = costs.prompt + sum(summaries)\n",
+          "new": "        orchestrator = costs.prompt + sum(read for _, read in tasks) + sum(summaries)\n"
+        }
+      ],
+      "expect": "only the summaries return to the orchestrator"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "the plan without subagents holds the prompt alone",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "    alone = costs.prompt + sum(read for _, read in tasks)\n",
+          "new": "    alone = costs.prompt\n"
+        }
+      ],
+      "expect": "without subagents the orchestrator reads every task itself"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "no plan without subagents",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "    plans = [Plan(0, (), alone, (), alone)]\n",
+          "new": "    plans = []\n"
+        }
+      ],
+      "expect": "one plan without subagents, then one per batch size"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "the last, partial batch dropped (n // k batches)",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "        batches = [tasks[i:i + k] for i in range(0, len(tasks), k)]\n",
+          "new": "        batches = [tasks[i * k:(i + 1) * k] for i in range(len(tasks) // k)]\n"
+        }
+      ],
+      "expect": "the last batch taking what is left"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "n // k + 1 batches, an empty one when k divides n",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "        batches = [tasks[i:i + k] for i in range(0, len(tasks), k)]\n",
+          "new": "        batches = [tasks[i * k:(i + 1) * k] for i in range(len(tasks) // k + 1)]\n"
+        }
+      ],
+      "expect": "the last batch taking what is left"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "k batches dealt round-robin instead of batches of k",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "        batches = [tasks[i:i + k] for i in range(0, len(tasks), k)]\n",
+          "new": "        batches = [tasks[i::k] for i in range(k)]\n"
+        }
+      ],
+      "expect": "the last batch taking what is left"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "one summary per task instead of one per batch",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "        summaries = [costs.summary_base + costs.summary_per_task * len(batch) for batch in batches]\n",
+          "new": "        summaries = [(costs.summary_base + costs.summary_per_task) * len(batch) for batch in batches]\n"
+        }
+      ],
+      "expect": "a subagent hands back one summary for its whole batch"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "summary_per_task counted once per batch",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "        summaries = [costs.summary_base + costs.summary_per_task * len(batch) for batch in batches]\n",
+          "new": "        summaries = [costs.summary_base + costs.summary_per_task for batch in batches]\n"
+        }
+      ],
+      "expect": "a subagent hands back one summary for its whole batch"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "each subagent's fixed overhead left out",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "            costs.overhead + costs.brief + sum(read for _, read in batch) + summary\n",
+          "new": "            costs.brief + sum(read for _, read in batch) + summary\n"
+        }
+      ],
+      "expect": "the total adds every subagent's context"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "the summary left out of the subagent's own context",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "            costs.overhead + costs.brief + sum(read for _, read in batch) + summary\n",
+          "new": "            costs.overhead + costs.brief + sum(read for _, read in batch)\n"
+        }
+      ],
+      "expect": "the total adds every subagent's context"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "the orchestrator's prompt used as each subagent's brief",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "            costs.overhead + costs.brief + sum(read for _, read in batch) + summary\n",
+          "new": "            costs.overhead + costs.prompt + sum(read for _, read in batch) + summary\n"
+        }
+      ],
+      "expect": "every plan, for tasks that read different amounts"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "a plan exactly at the cap left out",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "plan.orchestrator_tokens <= cap",
+          "new": "plan.orchestrator_tokens < cap"
+        }
+      ],
+      "expect": "no subagents is cheapest when the orchestrator can hold every read"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "the plan with the smallest orchestrator context chosen",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "key=lambda plan: (plan.total_tokens, plan.subagents, plan.batch_size)",
+          "new": "key=lambda plan: (plan.orchestrator_tokens, plan.subagents, plan.batch_size)"
+        }
+      ],
+      "expect": "no subagents is cheapest when the orchestrator can hold every read"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "the subagent window ignored",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": " and all(tokens <= window for tokens in plan.subagent_tokens)",
+          "new": ""
+        }
+      ],
+      "expect": "the cheapest plan in which every subagent fits its own window"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "the window checked against the batch's reads alone",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "all(tokens <= window for tokens in plan.subagent_tokens)",
+          "new": "all(sum(dict(tasks)[name] for name in batch) <= window for batch in plan.batches)"
+        }
+      ],
+      "expect": "the cheapest plan in which every subagent fits its own window"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "ties go to the larger batch",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "(plan.total_tokens, plan.subagents, plan.batch_size)",
+          "new": "(plan.total_tokens, plan.subagents, -plan.batch_size)"
+        }
+      ],
+      "expect": "equal plans go to the smaller batch"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "ties not broken by the number of subagents",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "(plan.total_tokens, plan.subagents, plan.batch_size)",
+          "new": "(plan.total_tokens, plan.batch_size)"
+        }
+      ],
+      "expect": "equal totals go to fewer subagents"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "the cap checked for the plan without subagents only",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "if plan.orchestrator_tokens <= cap and ",
+          "new": "if (plan.batch_size > 0 or plan.orchestrator_tokens <= cap) and "
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "the search stops at the first batch size that does not fit",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "    fits = [\n        plan for plan in compare_plans(tasks, costs)\n        if plan.orchestrator_tokens <= cap and all(tokens <= window for tokens in plan.subagent_tokens)\n    ]\n",
+          "new": "    fits = []\n    for plan in compare_plans(tasks, costs):\n        if plan.orchestrator_tokens <= cap and all(tokens <= window for tokens in plan.subagent_tokens):\n            fits.append(plan)\n        elif plan.batch_size > 0:\n            break\n"
+        }
+      ],
+      "expect": "a batch size that does not fit says nothing about larger ones"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "None instead of ValueError when nothing fits",
+      "edits": [
+        {
+          "file": "batching.py",
+          "old": "        raise ValueError(f\"no plan fits an orchestrator cap of {cap} and a subagent window of {window}\")\n",
+          "new": "        return None\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_batch_plan",
+      "name": "the planned batches run on a harness that joins each subagent's transcript into its summary",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "self._record(parent, \"subagent\", run.output)",
+          "new": "self._record(parent, \"subagent\", \"\\n\".join(t.content for t in self.store.load(sub_session)))"
+        }
+      ],
+      "expect": "the orchestrator's context grows by the summaries alone, as planned"
+    },
+    {
+      "test": "test_parallel_subagents",
+      "name": "outcomes held back until every subagent is done",
+      "edits": [
+        {
+          "file": "fanout.py",
+          "old": "    ok = failed = 0\n",
+          "new": "    ok = failed = 0\n    held = []\n"
+        },
+        {
+          "file": "fanout.py",
+          "old": "                yield _event(\"subagent_result\", {\"session_id\": session_id, \"result\": result})\n",
+          "new": "                held.append(_event(\"subagent_result\", {\"session_id\": session_id, \"result\": result}))\n"
+        },
+        {
+          "file": "fanout.py",
+          "old": "                yield _event(\"error\", {\"session_id\": session_id, \"error\": error})\n",
+          "new": "                held.append(_event(\"error\", {\"session_id\": session_id, \"error\": error}))\n"
+        },
+        {
+          "file": "fanout.py",
+          "old": "        tokens = sum(",
+          "new": "        for frame in held:\n            yield frame\n        tokens = sum("
+        }
+      ],
+      "expect": "send each outcome as soon as its subagent finishes"
+    },
+    {
+      "test": "test_parallel_subagents",
+      "name": "groups of five that wait for the slowest",
+      "edits": [
+        {
+          "file": "fanout.py",
+          "old": "            if queue:\n                start_next()\n",
+          "new": "            if queue and not running:\n                while queue and len(running) < max_parallel:\n                    start_next()\n"
+        }
+      ],
+      "expect": "a finished subagent frees its slot right away"
+    },
+    {
+      "test": "test_parallel_subagents",
+      "name": "no limit on running subagents",
+      "edits": [
+        {
+          "file": "fanout.py",
+          "old": "        while queue and len(running) < max_parallel:\n",
+          "new": "        while queue:\n"
+        }
+      ],
+      "expect": "at most five subagents run at once"
+    },
+    {
+      "test": "test_parallel_subagents",
+      "name": "orchestrator tokens counted over every session",
+      "edits": [
+        {
+          "file": "fanout.py",
+          "old": "sum(count_tokens(turn.content) for turn in store.load(parent))",
+          "new": "sum(count_tokens(turn.content) for sid in store.list_sessions() for turn in store.load(sid))"
+        }
+      ],
+      "expect": "done reports the counts and the orchestrator's context"
+    },
+    {
+      "test": "test_parallel_subagents",
+      "name": "events separated by a single newline",
+      "edits": [
+        {
+          "file": "fanout.py",
+          "old": "{json.dumps(data)}\\n\\n\"",
+          "new": "{json.dumps(data)}\\n\""
+        }
+      ],
+      "expect": "every event ends with a blank line"
+    },
+    {
+      "test": "test_parallel_subagents",
+      "name": "pretty-printed data",
+      "edits": [
+        {
+          "file": "fanout.py",
+          "old": "json.dumps(data)",
+          "new": "json.dumps(data, indent=2)"
+        }
+      ],
+      "expect": "an event is one event: line and one data: line"
+    },
+    {
+      "test": "test_parallel_subagents",
+      "name": "running subagents cancelled but not awaited",
+      "edits": [
+        {
+          "file": "fanout.py",
+          "old": "        await asyncio.gather(*running.values(), return_exceptions=True)\n",
+          "new": ""
+        }
+      ],
+      "expect": "closing the stream cancels the subagents still running"
+    },
+    {
+      "test": "test_parallel_subagents",
+      "name": "groups of five gathered and reported in task order",
+      "edits": [
+        {
+          "file": "fanout.py",
+          "old": "    finished: asyncio.Queue = asyncio.Queue()\n    running: dict[str, asyncio.Task] = {}\n    queue = list(enumerate(tasks))[::-1]\n\n    async def one(session_id: str, prompt: str) -> None:\n        try:\n            result = await run(session_id, prompt)\n        except asyncio.CancelledError:\n            raise\n        except Exception as exc:\n            await finished.put((session_id, None, f\"{type(exc).__name__}: {exc}\"))\n        else:\n            await finished.put((session_id, result, None))\n\n    def start_next() -> None:\n        index, prompt = queue.pop()\n        session_id = f\"{parent}.sub{index + 1:02d}\"\n        store.link_sub(parent, session_id)\n        running[session_id] = asyncio.ensure_future(one(session_id, prompt))\n\n    ok = failed = 0\n    try:\n        while queue and len(running) < max_parallel:\n            start_next()\n        while running:\n            session_id, result, error = await finished.get()\n            del running[session_id]\n            if queue:\n                start_next()\n            if error is None:\n                ok += 1\n                store.append(parent, Turn(\"subagent\", result))\n                yield _event(\"subagent_result\", {\"session_id\": session_id, \"result\": result})\n            else:\n                failed += 1\n                store.append(parent, Turn(\"subagent\", f\"error: {error}\"))\n                yield _event(\"error\", {\"session_id\": session_id, \"error\": error})\n        tokens = sum(count_tokens(turn.content) for turn in store.load(parent))\n        yield _event(\"done\", {\"results\": ok, \"errors\": failed, \"orchestrator_tokens\": tokens})\n    finally:\n        for task in running.values():\n            task.cancel()\n        await asyncio.gather(*running.values(), return_exceptions=True)\n",
+          "new": "    ok = failed = 0\n    pending: list = []\n    try:\n        for start in range(0, len(tasks), max_parallel):\n            group = []\n            for index in range(start, min(start + max_parallel, len(tasks))):\n                session_id = f\"{parent}.sub{index + 1:02d}\"\n                store.link_sub(parent, session_id)\n                group.append((session_id, asyncio.ensure_future(run(session_id, tasks[index]))))\n            pending = [task for _, task in group]\n            outcomes = await asyncio.gather(*pending, return_exceptions=True)\n            pending = []\n            for (session_id, _), outcome in zip(group, outcomes):\n                if isinstance(outcome, Exception):\n                    failed += 1\n                    error = f\"{type(outcome).__name__}: {outcome}\"\n                    store.append(parent, Turn(\"subagent\", f\"error: {error}\"))\n                    yield _event(\"error\", {\"session_id\": session_id, \"error\": error})\n                else:\n                    ok += 1\n                    store.append(parent, Turn(\"subagent\", outcome))\n                    yield _event(\"subagent_result\", {\"session_id\": session_id, \"result\": outcome})\n        tokens = sum(count_tokens(turn.content) for turn in store.load(parent))\n        yield _event(\"done\", {\"results\": ok, \"errors\": failed, \"orchestrator_tokens\": tokens})\n    finally:\n        for task in pending:\n            task.cancel()\n        await asyncio.gather(*pending, return_exceptions=True)\n"
+        }
+      ],
+      "expect": "outcomes arrive in the order subagents finish"
+    },
+    {
+      "test": "test_parallel_subagents",
+      "name": "error text returned to the orchestrator without the error: prefix",
+      "edits": [
+        {
+          "file": "fanout.py",
+          "old": "Turn(\"subagent\", f\"error: {error}\")",
+          "new": "Turn(\"subagent\", error)"
+        }
+      ],
+      "expect": "done reports the counts"
+    },
+    {
+      "test": "test_parallel_subagents",
+      "name": "nothing cleaned up when the consumer stops early",
+      "edits": [
+        {
+          "file": "fanout.py",
+          "old": "    finally:\n        for task in running.values():\n            task.cancel()\n        await asyncio.gather(*running.values(), return_exceptions=True)\n",
+          "new": "    finally:\n        pass\n"
+        }
+      ],
+      "expect": "closing the stream cancels the subagents still running"
+    },
+    {
+      "test": "test_parallel_subagents",
+      "name": "a failing subagent's exception raised into the stream",
+      "edits": [
+        {
+          "file": "fanout.py",
+          "old": "    finished: asyncio.Queue = asyncio.Queue()\n    running: dict[str, asyncio.Task] = {}\n    queue = list(enumerate(tasks))[::-1]\n\n    async def one(session_id: str, prompt: str) -> None:\n        try:\n            result = await run(session_id, prompt)\n        except asyncio.CancelledError:\n            raise\n        except Exception as exc:\n            await finished.put((session_id, None, f\"{type(exc).__name__}: {exc}\"))\n        else:\n            await finished.put((session_id, result, None))\n\n    def start_next() -> None:\n        index, prompt = queue.pop()\n        session_id = f\"{parent}.sub{index + 1:02d}\"\n        store.link_sub(parent, session_id)\n        running[session_id] = asyncio.ensure_future(one(session_id, prompt))\n\n    ok = failed = 0\n    try:\n        while queue and len(running) < max_parallel:\n            start_next()\n        while running:\n            session_id, result, error = await finished.get()\n            del running[session_id]\n            if queue:\n                start_next()\n            if error is None:\n                ok += 1\n                store.append(parent, Turn(\"subagent\", result))\n                yield _event(\"subagent_result\", {\"session_id\": session_id, \"result\": result})\n            else:\n                failed += 1\n                store.append(parent, Turn(\"subagent\", f\"error: {error}\"))\n                yield _event(\"error\", {\"session_id\": session_id, \"error\": error})\n        tokens = sum(count_tokens(turn.content) for turn in store.load(parent))\n        yield _event(\"done\", {\"results\": ok, \"errors\": failed, \"orchestrator_tokens\": tokens})\n    finally:\n        for task in running.values():\n            task.cancel()\n        await asyncio.gather(*running.values(), return_exceptions=True)\n",
+          "new": "    pending: dict = {}\n    queue = list(enumerate(tasks))[::-1]\n    ok = failed = 0\n    try:\n        while queue or pending:\n            while queue and len(pending) < max_parallel:\n                index, prompt = queue.pop()\n                session_id = f\"{parent}.sub{index + 1:02d}\"\n                store.link_sub(parent, session_id)\n                pending[asyncio.ensure_future(run(session_id, prompt))] = session_id\n            done, _ = await asyncio.wait(list(pending), return_when=asyncio.FIRST_COMPLETED)\n            for task in done:\n                session_id = pending.pop(task)\n                result = task.result()\n                ok += 1\n                store.append(parent, Turn(\"subagent\", result))\n                yield _event(\"subagent_result\", {\"session_id\": session_id, \"result\": result})\n        tokens = sum(count_tokens(turn.content) for turn in store.load(parent))\n        yield _event(\"done\", {\"results\": ok, \"errors\": failed, \"orchestrator_tokens\": tokens})\n    finally:\n        for task in pending:\n            task.cancel()\n        await asyncio.gather(*pending, return_exceptions=True)\n"
+        }
+      ],
+      "expect": "ValueError: no tests for module 07"
+    },
+    {
+      "test": "test_subagent_tree",
+      "name": "children sorted by name",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "reversed(store.list_subkeys(sid))",
+          "new": "reversed(sorted(store.list_subkeys(sid)))"
+        }
+      ],
+      "expect": "children in the order they were linked"
+    },
+    {
+      "test": "test_subagent_tree",
+      "name": "a session expires on its own activity alone",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "            live[sid] = own or any(live[sub] for sub in store.list_subkeys(sid))\n",
+          "new": "            live[sid] = own\n"
+        }
+      ],
+      "expect": "a session expires only when it and every session below it are idle"
+    },
+    {
+      "test": "test_subagent_tree",
+      "name": "only direct subagents checked",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "any(live[sub] for sub in store.list_subkeys(sid))",
+          "new": "any(bool(store.load(sub)) and now - max(t.ts for t in store.load(sub)) <= ttl_s for sub in store.list_subkeys(sid))"
+        }
+      ],
+      "expect": "a session expires only when it and every session below it are idle"
+    },
+    {
+      "test": "test_subagent_tree",
+      "name": "recursive walk",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    out: list[tuple[str, int]] = []\n    stack = [(root, 0)]\n    while stack:\n        sid, depth = stack.pop()\n        out.append((sid, depth))\n        stack.extend((sub, depth + 1) for sub in reversed(store.list_subkeys(sid)))\n    return out\n",
+          "new": "    out = [(root, 0)]\n    for sub in store.list_subkeys(root):\n        out.extend((sid, depth + 1) for sid, depth in _preorder(store, sub))\n    return out\n"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_subagent_tree",
+      "name": "render_tree skips the link check",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    _parents(store)\n    order = ",
+          "new": "    order = "
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_subagent_tree",
+      "name": "idle already when the newest turn is exactly ttl_s old",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "now - max(turn.ts for turn in turns) <= ttl_s",
+          "new": "now - max(turn.ts for turn in turns) < ttl_s"
+        }
+      ],
+      "expect": "a session expires only when it and every session below it are idle"
+    },
+    {
+      "test": "test_subagent_tree",
+      "name": "idleness judged from the first turn, not the newest",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "now - max(turn.ts for turn in turns) <= ttl_s",
+          "new": "now - turns[0].ts <= ttl_s"
+        }
+      ],
+      "expect": "a session expires only when it and every session below it are idle"
+    },
+    {
+      "test": "test_subagent_tree",
+      "name": "a session without turns counts as live",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "own = bool(turns) and now - max(turn.ts for turn in turns) <= ttl_s",
+          "new": "own = now - max((turn.ts for turn in turns), default=now) <= ttl_s"
+        }
+      ],
+      "expect": "a session expires only when it and every session below it are idle"
+    },
+    {
+      "test": "test_subagent_tree",
+      "name": "max() over a session without turns",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "own = bool(turns) and now - max(turn.ts for turn in turns) <= ttl_s",
+          "new": "own = now - max(turn.ts for turn in turns) <= ttl_s"
+        }
+      ],
+      "expect": "max()"
+    },
+    {
+      "test": "test_subagent_tree",
+      "name": "subtree totals without the session's own turns",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "total[sid] = len(store.load(sid)) + sum(",
+          "new": "total[sid] = sum("
+        }
+      ],
+      "expect": "one indented line per session"
+    },
+    {
+      "test": "test_subagent_tree",
+      "name": "only whole idle trees removed, idle subagents under a live parent kept",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "            if not live[sid]:\n                expired.append(sid)\n",
+          "new": ""
+        },
+        {
+          "file": "tree.py",
+          "old": "    gone = set(expired)\n",
+          "new": "        if not live[root]:\n            expired.extend(sid for sid, _ in order)\n    gone = set(expired)\n"
+        }
+      ],
+      "expect": "a session expires only when it and every session below it are idle"
+    },
+    {
+      "test": "test_subagent_tree",
+      "name": "prune_expired skips the link check",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    parent_of = _parents(store)\n    sessions",
+          "new": "    parent_of = {sub: sid for sid in store.list_sessions() for sub in store.list_subkeys(sid)}\n    sessions"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_subagent_tree",
+      "name": "link loops not detected",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    reached = sum(len(_preorder(store, sid)) for sid in store.list_sessions() if sid not in parent_of)\n    if reached != len(store.list_sessions()):\n        raise ValueError(\"subagent links loop\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_subagent_tree",
+      "name": "render_tree of a session that does not exist",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    if root not in store.list_sessions():\n        raise ValueError(f\"no session {root!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    }
+  ]
+}

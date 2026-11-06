@@ -1,0 +1,108 @@
+{
+  "lesson": "phases/14-agent-engineering/17-claude-agent-sdk",
+  "title": "The Harness as a Library — Subagents and Session Store",
+  "format": "staged-brownfield",
+  "service": "Harness: a Claude Agent SDK-shaped harness with PreToolUse/PostToolUse hooks, subagents with isolated context, an in-memory session store, a JSONL session mirror, a planner that batches tasks into subagents, parallel subagents streamed as SSE and the subagent tree with expiry",
+  "sources": {
+    "docs/en.md": "f1fb3653f42b54dd9267aa3bd20bb56714567f56c71a8b92972d725f0948b9bd",
+    "code/main.py": "a2b37f2064cafca626aab5c675964f570d1365031195cfda8cbee50ea1642fd7",
+    "quiz/quiz.md": "0d6b46bb70e2b5fe8e34bcf9e7077d21cb195d226d630af928610957d48fd4b7"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network and no LLM: tool calls are scripted by the tests and Part 4's subagents are async functions the tests supply",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_harness_dispatch",
+      "kind": "debug",
+      "lesson_anchor": "Hooks (PreToolUse, PostToolUse: gate or audit tool calls); Subagents (context isolation: only results return to the orchestrator); code/main.py Harness._dispatch, run_agent, spawn_subagents; quiz note that the lesson's hook signature lacks the session id",
+      "planted_bugs": [
+        "_dispatch calls the PreToolUse hooks but ignores what they return, so a Deny never blocks the tool",
+        "the branch for a tool that raises returns early and skips the PostToolUse hooks, so the audit misses tool errors",
+        "spawn_subagents hands the subagent's whole transcript (a list of Turns) back to the parent session; the AttributeError surfaces two calls later in count_tokens",
+        "_record reloads the whole session and recounts its tokens after every turn, O(n^2) in the session length"
+      ],
+      "timing_assert": "run_agent with 5000 scripted tool calls under 0.12 s. Measured on this machine (Python 3.12, load average 6 to 10 from other agents): the recounting version 1.40-2.23 s inside the test; counted once and then incrementally 6.5-8.2 ms inside the test, 2.7-9.0 ms over 240 standalone runs",
+      "overfix_guard": "a denied call still reaches every PostToolUse hook (rules out returning early on Deny); PreToolUse hooks after a Deny do not run (rules out collecting the Deny and carrying on); the parent's context grows by the outputs alone (rules out joining the transcript into one string); a resumed session's context_tokens includes its earlier turns (rules out an incremental count that starts at 0 or at the session's number of turns)"
+    },
+    {
+      "part": 2,
+      "test": "test_session_mirror",
+      "kind": "model and persistence",
+      "lesson_anchor": "Session store (append, load, list_sessions, delete with cascade to subagent sessions, list_subkeys); --session-mirror mirrors the transcript to an external file as it streams",
+      "storage": "append-only JSONL, one mirror file per session; link and removal records live in the parent's file",
+      "exactness": "turns come back as equal Turn objects after a reopen: timestamps like 1767225600 + 1/3 and 0.1 + 0.2, content with newlines, U+2028, U+0085, quotes, a backslash, an emoji, an empty string and a trailing newline; load, list_sessions and list_subkeys match the in-memory SessionStore for every session, including a subagent that is linked but has no turns; after a delete the parent's mirror still starts with everything it held before",
+      "traps": [
+        "delete that cascades one level only, as in the lesson code",
+        "delete that rewrites the parent's mirror without the link line instead of appending a removal record",
+        "a deleted subagent that comes back in its parent's subkeys after a reopen",
+        "a subagent that is linked but has no turns yet: missing from list_sessions, or without a mirror file",
+        "a kept-open handle that is not flushed, so a tail sees nothing",
+        "timestamps rounded or written with a fixed number of decimals",
+        "incidental: str.splitlines on a mirror written with ensure_ascii=False (splits at U+2028 and U+0085), or non-ASCII written as \\u escapes although the mirror is for people",
+        "incidental: file names from replace('/', '_'), percent-encoding or standard base64 (lead/sub01 vs lead_sub01, Lead vs lead, a '/' in the encoding of 'naïve / id?'), or an id like ../escape leaving root"
+      ],
+      "clarifying_questions": ["slashes in session ids", "rewriting the parent's file on delete", "a linked subagent without turns", "several writer processes", "ids longer than the file name limit"]
+    },
+    {
+      "part": 3,
+      "test": "test_batch_plan",
+      "kind": "core algorithm",
+      "lesson_anchor": "Subagents: context isolation (subagents use their own context window; only results return to the orchestrator; the orchestrator's budget is preserved); Where this pattern goes wrong: subagent over-spawn (overhead dominates, batch instead); Exercise 1 (batch 20 tasks into groups of 5 and measure the orchestrator's context against one subagent per task); quiz Q12 (orchestrator context and total tokens without subagents, with one subagent per task and with batches of five, and a batch must still fit the subagent's own window)",
+      "algorithm": "one plan without subagents (the orchestrator holds its prompt and every read) and one per batch size k = 1..n (consecutive batches, the last one partial): the orchestrator holds its prompt plus one merged summary per subagent, a subagent holds its overhead, brief, reads and the summary it writes, and the total adds every context; the chosen plan has the lowest total among the plans within the orchestrator's cap and the subagent window, ties going to fewer subagents and then to the smaller batch",
+      "traps": [
+        "the subagents' reads counted in the orchestrator's context, so nothing is isolated (42,050 instead of 2,050 for one subagent per task)",
+        "the plan without subagents left with the prompt alone, without the orchestrator's own reads, or left out",
+        "the last, partial batch dropped (n // k), an empty batch added when k divides n (n // k + 1), or k batches dealt round-robin",
+        "one summary per task instead of one merged summary per batch (2,050 instead of 1,250 for batches of five), or summary_per_task counted once per batch",
+        "the subagent's own window ignored, so one subagent reading all 20 modules always wins",
+        "fitting taken as monotone in k: the search stops at the first batch size that does not fit (k = 2 does not, k = 3 does)",
+        "ties: the larger batch (k = 6 instead of 5), or more subagents when every subagent plan costs the same",
+        "the cap checked for the plan without subagents only, or no ValueError when nothing fits",
+        "incidental: each subagent's fixed overhead, or the summary it writes, left out of the total; a plan exactly at the cap; the window checked against the reads alone; the orchestrator's prompt used as the brief"
+      ],
+      "integration": "the chosen plan's batches (3, 3 and 1 modules) run through Part 1's spawn_subagents: the orchestrator's context grows by the three 4-word summaries alone, and every context matches the plan",
+      "clarifying_questions": ["a partial last batch", "the summary in both contexts", "reordering tasks into better batches", "the window without subagents"]
+    },
+    {
+      "part": 4,
+      "test": "test_parallel_subagents",
+      "kind": "streaming",
+      "lesson_anchor": "Subagents: parallelization ('find the test file for each of these 20 modules') and context isolation; Exercise 1 (20 tasks, 5 parallel subagents); Where this pattern goes wrong: subagent over-spawn",
+      "wire_format": "SSE: event: subagent_result / error, then event: done, one data: line of JSON each and a blank line after every event, decided by the test's parse_sse",
+      "traps": [
+        "a single newline between events, or pretty-printed data",
+        "outcomes held back until every subagent is done",
+        "groups of five instead of a sliding pool: gathered and reported in task order, or streamed but refilled only when the whole group is done",
+        "no limit on running subagents",
+        "a failing subagent taking the stream down",
+        "orchestrator tokens counted over every session instead of the parent's",
+        "running subagents cancelled but not awaited when the consumer closes the stream"
+      ],
+      "clarifying_questions": ["groups of five or a pool", "event order", "the error line in the orchestrator's session", "client disconnect"]
+    },
+    {
+      "part": 5,
+      "test": "test_subagent_tree",
+      "kind": "recursive structure",
+      "lesson_anchor": "Exercise 3: wire list_subkeys to render a subagent tree, what does deep nesting look like; Where this pattern goes wrong: session bloat (list_sessions + expiry policy); delete with cascade; quiz: a TTL on the last activity, cascading on cleanup",
+      "traps": [
+        "expiry judged on the session's own activity, or on its direct subagents only, which deletes a parent of a live grandchild",
+        "idleness judged from the first turn instead of the newest, or already at exactly ttl_s",
+        "a session without turns treated as live, or max() over its empty turns",
+        "an idle subagent under a live parent left in place",
+        "children sorted by name instead of link order",
+        "subtree totals without the session's own turns",
+        "a session under two parents, or a link loop, not rejected, or rejected after deleting",
+        "incidental: a recursive walk on a 1200-level chain (RecursionError)"
+      ],
+      "clarifying_questions": ["sessions without turns", "a session exactly ttl_s old", "a session under two parents", "order of the returned ids", "how deep trees get"]
+    }
+  ],
+  "deviations": [
+    "Part 1: three of the four suggested defects are kept (PreToolUse result ignored, the whole subagent transcript returned to the orchestrator, PostToolUse skipped on the tool-error path) together with the suggested O(n^2) recount. The recursive delete cascade moved to Part 2, where the mirror store implements delete; the in-memory SessionStore ships correct so that Parts 4 and 5 do not depend on Part 1. The transcript defect returns a list of Turns so that the error surfaces two calls away in count_tokens. Hooks take the session id as their first argument (the quiz points out that the lesson's signature lacks it). Besides the suggested guard (a denied call is still audited), the test checks that hooks after a Deny do not run, the exact orchestrator context and a resumed session's context.",
+    "Part 2: links are records in the parent's mirror ({\"subagent\": id}, and {\"removed\": id} on delete) instead of a parent field in the child's file, so list_subkeys keeps link order and delete stays append-only. The test centres on the session-store semantics this lesson names: a cascade at every depth, a removal record instead of a rewrite, and a linked subagent without turns still being a session. The JSONL traps (U+2028 and U+0085 with str.splitlines, reversible and case-safe file names) are covered on the side, because other chapter 14 packs already centre on them.",
+    "Part 3: Exercise 1 with quiz Q12's numbers instead of Exercise 2's rate limiter, because chapter 13 lesson 17 Part 1 already pins the same sliding-window semantics. The hook pipeline (Modify passing changed arguments on, PostToolUse rewriting results) is not used either: the lesson does not describe modify or rewrite semantics, and Part 1 already tests hook order and the first Deny. Besides the orchestrator's cap, a plan must fit each subagent's own window (Q12's last point), because without it the total and the orchestrator's context both fall as batches grow and one subagent for every task would always win. Each subagent's fixed overhead and a plan exactly at the cap are only checked in passing, since lesson 28's Part 3 centres on a fixed overhead and a prompt exactly at the budget; a subagent exactly at the window is not tested.",
+    "Part 4: a sliding pool of five instead of the exercise's literal groups of five (a clarifying question), and closing the stream early must cancel and await the running subagents. Completion order is checked against the order the fake subagents finish, which keeps the test independent of how the pool is written (a queue, asyncio.wait or a semaphore all pass).",
+    "Part 5: as suggested (indented tree, subtree totals, expiry where a parent goes only when its whole subtree is idle, a session under two parents rejected), plus a 1200-level chain and link loops. Idleness follows the docstring and the quiz (a TTL on the last activity): the newest turn, strictly more than ttl_s, and a session without turns is idle. Loops are only tested through prune_expired, because a render that does not check for them would never finish."
+  ]
+}
