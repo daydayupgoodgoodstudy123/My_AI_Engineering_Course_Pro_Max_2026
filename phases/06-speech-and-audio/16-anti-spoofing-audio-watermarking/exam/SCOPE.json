@@ -1,0 +1,70 @@
+{
+  "lesson": "phases/06-speech-and-audio/16-anti-spoofing-audio-watermarking",
+  "title": "Voice Anti-Spoofing & Audio Watermarking — ASVspoof 5, AudioSeal, WaveVerify",
+  "format": "staged-brownfield",
+  "service": "Provenance: a toy spectral spoof detector, a SQLite audit log of detection decisions, AudioSeal-style watermark localization, live spoof alarms and C2PA-style manifest chains",
+  "sources": {
+    "docs/en.md": "312eab13609b920ae76f6c7e413cfc8abfdbf761b87328fcd7af4edd9a7b944a",
+    "code/main.py": "9c7022470455456930061af9dc4c55e65689e1a52d6568bb6c165eca519de5b4"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_spoof_detector",
+      "kind": "debug",
+      "lesson_anchor": "Build It, Step 1: a simple spectral-feature detector (toy); code/main.py magnitude_spectrum and toy_detector_score; quiz Q11 (framing off-by-one, slow DFT)",
+      "planted_bugs": [
+        "frame_starts is the lesson's range(0, len - n_fft, n_fft), which never starts the last full frame; a one-frame clip gets no frames and the ZeroDivisionError surfaces one call up, in average_spectrum",
+        "power_spectrum returns the magnitude (the lesson's sqrt) although its docstring promises power, so the energy share becomes a magnitude share: -4.77 dB instead of -6.99 dB",
+        "high_band takes the FFT size to be len(spec), the number of one-sided bins (129), so the 4 kHz cutoff lands near 2 kHz and a 3 kHz tone counts as high band",
+        "toy_detector_score adds 1e-12 to both energies to keep away from log(0), so silence scores 1e-12 / 1e-12 = 0 dB, the most suspicious score, instead of FLOOR_DB",
+        "average_spectrum loops over bins outside frames, recomputing every frame's DFT for each of the 129 bins"
+      ],
+      "timing_assert": "an 8-frame clip scored under 0.1 s (the per-bin recomputation takes 1.05-1.2 s, one DFT per frame 7.8-9.5 ms)",
+      "overfix_guard": "a copy 80 dB quieter scores the same (special-casing silence and keeping the constant on both energies shifts it); the score is clipped at the floor (a constant added to the share gives -99.49 dB); a trailing partial frame is dropped (range(0, n, n_fft)); a 4 kHz tone at the cutoff counts (n_fft = 2 * len(spec) puts bin 64 at 3969 Hz)"
+    },
+    {
+      "part": 2,
+      "test": "test_audit_log",
+      "kind": "model and persistence",
+      "lesson_anchor": "Build It, Step 4: every generation ships a retention-policy-compliant audit log; Pitfalls: detection without calibration (calibrate on your domain); outputs/skill-spoof-defender.md audit log retention",
+      "exactness": "a threshold from a calibration sweep (0.1 + 0.2) and a score of 0.3 just below it round-trip exactly across close and reopen, so every verdict can be re-derived; times come back in UTC with their microseconds",
+      "traps": ["missing commit", "CREATE TABLE without IF NOT EXISTS", "NaN left to NOT NULL (SQLite stores NaN as NULL, so IntegrityError)", "scores rounded or stored as float32 flip the boundary verdict", "a score equal to the threshold judged bona fide", "times kept in the caller's offset", "flips across every model", "flips compared strictly"],
+      "clarifying_questions": ["score direction of AASIST-style bona fide scores", "UTC or the caller's offset", "the same clip logged twice", "infinite scores"]
+    },
+    {
+      "part": 3,
+      "test": "test_watermark_localization",
+      "kind": "core algorithm",
+      "lesson_anchor": "AudioSeal: localized, per-sample detection at 16 kHz resolution; quiz Q5 (a spliced clip that is only partly generated)",
+      "traps": ["a probability equal to the threshold counted", "a run reaching the end never closed", "short runs dropped before bridging", "a gap of exactly max_gap_s not bridged", "a segment of exactly min_s dropped", "IoU union taken as the span", "IoU pairing segments by position, or taking each segment's best overlap", "IoU of two empty lists divides by zero", "durations converted at a fixed 1000 samples per second"],
+      "integration": "a spliced clip (the lesson's real and fake recipes, half a second each) through Parts 1-3: the generated third is located at samples 8000-16000, the clip scores -16.1 dB and is logged as spoof, the recorded speech alone scores -20.6 dB and passes",
+      "clarifying_questions": ["probability equal to the threshold", "bridge first or drop first"]
+    },
+    {
+      "part": 4,
+      "test": "test_spoof_alarm",
+      "kind": "streaming",
+      "lesson_anchor": "Use It: call-center fraud detection (AASIST on incoming calls); outputs/skill-spoof-defender.md alerting on abuse signals",
+      "wire_format": "Server-Sent Events, an alarm event when an alarm starts and a clear event when it ends, decided by the test's parse_sse (event and data lines, a blank line after each event)",
+      "traps": ["average started at 0", "a fixed smoothing factor that ignores gaps in stream time", "one threshold instead of hysteresis", "s exactly at raise_at or exactly at clear_below", "the raw score or a frozen peak reported", "cooldown counted from the alarm's start", "scores ignored during the cooldown", "cooldown blocking its last moment", "an open alarm never cleared at the end, or a cleared one cleared again", "smoothing restarted per batch", "an empty batch taken for the end of the call", "single newline after an event", "reading the whole call first", "repeated or decreasing times accepted"],
+      "clarifying_questions": ["smoothing during the cooldown", "an alarm still open at the end", "repeated or decreasing times"]
+    },
+    {
+      "part": 5,
+      "test": "test_manifest_chain",
+      "kind": "recursive structure",
+      "lesson_anchor": "C2PA / Content Authenticity Initiative; Build It, Step 4 c2pa_sign; Pitfalls: metadata strip-and-rehost",
+      "traps": ["componentOf ingredients not followed", "the active manifest's own actions ignored, or the whole store scanned for AI", "an ingredient without credentials looked up (KeyError) or reported missing", "every manifest's data hash checked against the asset", "a diamond taken for a loop", "ingredient hashes never checked", "a broken link still followed", "a missing manifest looked up (KeyError)", "the first of two parents followed", "the loop check placed after the hash check", "problems left in the order found (mix before edit)", "a manifest reached twice reported twice"],
+      "clarifying_questions": ["an ingredient without credentials", "following a link whose hash fails", "the same manifest referenced twice"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the three suggested defects (bin to Hz, the high-band energy normalization, log(0)) are joined by the lesson's own framing off-by-one (quiz Q11a), which gives the failure one call away from its cause; it drops the last full frame, the opposite of 06/03's partial frame. The normalization defect is the lesson's own too: its toy_detector_score sums magnitudes |X| and calls the result an energy share. The score is in dB with a floor. log(0) is planted as the usual guard against it, a constant added to both energies, which scores silence at 0 dB and makes quiet clips score differently; a bare log10(0) crash on silence would repeat 06/11's dBFS meter. The timing defect is a per-bin comprehension that recomputes every frame's DFT, because requiring an FFT would not fit ten minutes.",
+    "Part 2: times come back in UTC, the audit-log convention, instead of keeping the caller's offset as 06/08's consent registry does. The domain's precision trap is a calibrated threshold (0.1 + 0.2) with a score just below it, plus NaN, which SQLite stores as NULL. flips() adds the recalibration question from the lesson's calibration pitfall; the verdict is derived by the log, never passed in.",
+    "Part 3: per-sample probabilities stand in for the AudioSeal detector, so the part is the post-processing (strict threshold, bridge short gaps, then drop short segments, the order pyannote's Binarize uses) plus IoU against the ground truth. No payload is decoded, because 06/08 covers bit voting.",
+    "Part 4: the input is a stream of (t, score) batches from an upstream countermeasure model rather than audio, so 06/03's windowing of audio across chunks is not repeated. Smoothing is an exponential average in stream time with a half-life, so gaps in the score stream decay old evidence. The wire format is Server-Sent Events.",
+    "Part 5: the manifests carry no signatures; hashed ingredient references bind them. A loop raises ValueError before any hash check, because a hash-first walk can never follow a loop and would only report a mismatch. The origin is reported as the parentOf history, and AI involvement is looked for along both relationships."
+  ]
+}

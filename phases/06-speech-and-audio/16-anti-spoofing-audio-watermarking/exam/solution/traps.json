@@ -1,0 +1,653 @@
+{
+  "package": "provenance",
+  "tests": [
+    "test_spoof_detector",
+    "test_audit_log",
+    "test_watermark_localization",
+    "test_spoof_alarm",
+    "test_manifest_chain"
+  ],
+  "layers": [
+    {
+      "test": "test_spoof_detector",
+      "steps": [
+        {"name": "as shipped", "edits": [], "expect": "ZeroDivisionError"},
+        {
+          "name": "fix frame_starts",
+          "edits": [{"file": "detector.py",
+                     "old": "    return range(0, n_samples - n_fft, n_fft)\n",
+                     "new": "    return range(0, n_samples - n_fft + 1, n_fft)\n"}],
+          "expect": "a 6 kHz tone at half the amplitude of a 1 kHz tone carries a fifth of the energy"
+        },
+        {
+          "name": "+ power, not magnitude",
+          "edits": [{"file": "detector.py",
+                     "old": "        out.append(math.sqrt(re * re + im * im))\n",
+                     "new": "        out.append(re * re + im * im)\n"}],
+          "expect": "a 3 kHz tone has nothing at or above 4 kHz"
+        },
+        {
+          "name": "+ FFT size from the number of one-sided bins",
+          "edits": [{"file": "detector.py",
+                     "old": "    n_fft = len(spec)\n",
+                     "new": "    n_fft = 2 * (len(spec) - 1)\n"}],
+          "expect": "silence scores the floor"
+        },
+        {
+          "name": "+ share of the raw energies, silence at the floor",
+          "edits": [{"file": "detector.py",
+                     "old": "    share = (sum(high_band(spec, sr, cutoff_hz)) + 1e-12) / (sum(spec) + 1e-12)\n    return max(FLOOR_DB, 10.0 * math.log10(share))\n",
+                     "new": "    share = sum(high_band(spec, sr, cutoff_hz)) / (sum(spec) or 1e-9)\n    if share == 0.0:\n        return FLOOR_DB\n    return max(FLOOR_DB, 10.0 * math.log10(share))\n"}],
+          "expect": "the detector should be fast"
+        },
+        {
+          "name": "+ each frame's spectrum computed once",
+          "edits": [{"file": "detector.py",
+                     "old": "    starts = frame_starts(len(audio), n_fft)\n    return [\n        sum(power_spectrum(audio[s : s + n_fft])[k] for s in starts) / len(starts)\n        for k in range(n_fft // 2 + 1)\n    ]\n",
+                     "new": "    spectra = [power_spectrum(audio[s : s + n_fft]) for s in frame_starts(len(audio), n_fft)]\n    return [sum(column) / len(spectra) for column in zip(*spectra)]\n"}],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_spoof_detector",
+      "name": "frames run to the end of the clip, so a trailing partial frame is scored",
+      "edits": [{"file": "detector.py",
+                 "old": "    return range(0, n_samples - n_fft + 1, n_fft)\n",
+                 "new": "    return range(0, n_samples, n_fft)\n"}],
+      "expect": "a trailing partial frame is dropped"
+    },
+    {
+      "test": "test_spoof_detector",
+      "name": "FFT size taken as twice the number of bins",
+      "edits": [{"file": "detector.py",
+                 "old": "    n_fft = 2 * (len(spec) - 1)\n",
+                 "new": "    n_fft = 2 * len(spec)\n"}],
+      "expect": "a 4 kHz tone sits at the cutoff, so it counts"
+    },
+    {
+      "test": "test_spoof_detector",
+      "name": "silence special-cased, the constant on both energies kept",
+      "edits": [{"file": "detector.py",
+                 "old": "    share = sum(high_band(spec, sr, cutoff_hz)) / (sum(spec) or 1e-9)\n    if share == 0.0:\n        return FLOOR_DB\n",
+                 "new": "    if sum(spec) == 0.0:\n        return FLOOR_DB\n    share = (sum(high_band(spec, sr, cutoff_hz)) + 1e-12) / (sum(spec) + 1e-12)\n"}],
+      "expect": "the score does not change with playback volume"
+    },
+    {
+      "test": "test_spoof_detector",
+      "name": "a constant added to the share instead of clipping at the floor",
+      "edits": [{"file": "detector.py",
+                 "old": "    if share == 0.0:\n        return FLOOR_DB\n    return max(FLOOR_DB, 10.0 * math.log10(share))\n",
+                 "new": "    return 10.0 * math.log10(share + 1e-10)\n"}],
+      "expect": "the score is clipped at the floor"
+    },
+    {
+      "test": "test_spoof_detector",
+      "name": "faster by scoring the first frame only",
+      "edits": [{"file": "detector.py",
+                 "old": "    spectra = [power_spectrum(audio[s : s + n_fft]) for s in frame_starts(len(audio), n_fft)]\n",
+                 "new": "    spectra = [power_spectrum(audio[:n_fft])]\n"}],
+      "expect": "a 6 kHz tone at half the amplitude of a 1 kHz tone carries a fifth of the energy"
+    },
+    {
+      "test": "test_spoof_detector",
+      "name": "the share of each frame averaged, instead of the share of the averaged spectrum",
+      "edits": [{"file": "detector.py",
+                 "old": "    spec = average_spectrum(audio, n_fft)\n    share = sum(high_band(spec, sr, cutoff_hz)) / (sum(spec) or 1e-9)\n",
+                 "new": "    spectra = [power_spectrum(audio[s : s + n_fft]) for s in frame_starts(len(audio), n_fft)]\n    share = sum(sum(high_band(sp, sr, cutoff_hz)) / (sum(sp) or 1e-9) for sp in spectra) / len(spectra)\n"}],
+      "expect": "a 6 kHz tone at half the amplitude of a 1 kHz tone carries a fifth of the energy"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "no commit after insert",
+      "edits": [{"file": "audit.py",
+                 "old": "        with self._db:\n            cursor = self._db.execute(\n",
+                 "new": "        if True:\n            cursor = self._db.execute(\n"}],
+      "expect": "decisions survive a reopen exactly, in the order they were recorded"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [{"file": "audit.py",
+                 "old": "CREATE TABLE IF NOT EXISTS",
+                 "new": "CREATE TABLE"}],
+      "expect": "table decisions already exists"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "NaN left to the NOT NULL constraint (SQLite stores NaN as NULL)",
+      "edits": [{"file": "audit.py",
+                 "old": "        if math.isnan(score) or math.isnan(threshold):\n            raise ValueError(\"score and threshold must be numbers, not NaN\")\n",
+                 "new": ""}],
+      "expect": "IntegrityError"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "scores and thresholds rounded to six decimals for storage",
+      "edits": [{"file": "audit.py",
+                 "old": "                (clip, model, threshold, score, decide(score, threshold), when),\n",
+                 "new": "                (clip, model, round(threshold, 6), round(score, 6), decide(score, threshold), when),\n"}],
+      "expect": "a decision is logged exactly as made"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "a score equal to the threshold passes as bona fide",
+      "edits": [{"file": "audit.py",
+                 "old": "    return \"spoof\" if score >= threshold else \"bonafide\"\n",
+                 "new": "    return \"spoof\" if score > threshold else \"bonafide\"\n"}],
+      "expect": "a score at or above the threshold is a spoof"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "times stored with the offset they were given",
+      "edits": [{"file": "audit.py",
+                 "old": "        when = at.astimezone(timezone.utc).isoformat()\n",
+                 "new": "        when = at.isoformat()\n"}],
+      "expect": "times come back in UTC"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "flips re-derives every model's decisions",
+      "edits": [{"file": "audit.py",
+                 "old": "        return [e for e in self.entries(model) if decide(e.score, threshold) != e.verdict]\n",
+                 "new": "        return [e for e in self.entries() if decide(e.score, threshold) != e.verdict]\n"}],
+      "expect": "only that model's decisions are re-derived"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "flips compares strictly against the new threshold",
+      "edits": [{"file": "audit.py",
+                 "old": "        return [e for e in self.entries(model) if decide(e.score, threshold) != e.verdict]\n",
+                 "new": "        return [e for e in self.entries(model) if (\"spoof\" if e.score > threshold else \"bonafide\") != e.verdict]\n"}],
+      "expect": "a recalibrated threshold flips the decisions it moves across"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "microseconds dropped when the time is stored",
+      "edits": [{"file": "audit.py",
+                 "old": "        when = at.astimezone(timezone.utc).isoformat()\n",
+                 "new": "        when = at.astimezone(timezone.utc).isoformat(timespec=\"seconds\")\n"}],
+      "expect": "times come back in UTC"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "only the score checked for NaN",
+      "edits": [{"file": "audit.py",
+                 "old": "        if math.isnan(score) or math.isnan(threshold):\n",
+                 "new": "        if math.isnan(score):\n"}],
+      "expect": "decisions.threshold"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "a naive time taken to be UTC",
+      "edits": [{"file": "audit.py",
+                 "old": "        if at.tzinfo is None or at.utcoffset() is None:\n            raise ValueError(f\"{at.isoformat()} has no time zone\")\n",
+                 "new": "        if at.tzinfo is None or at.utcoffset() is None:\n            at = at.replace(tzinfo=timezone.utc)\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "scores and thresholds stored as float32",
+      "edits": [
+        {"file": "audit.py",
+         "old": "                (clip, model, threshold, score, decide(score, threshold), when),\n",
+         "new": "                (clip, model, struct.unpack(\"f\", struct.pack(\"f\", threshold))[0],\n                 struct.unpack(\"f\", struct.pack(\"f\", score))[0], decide(score, threshold), when),\n"},
+        {"file": "audit.py",
+         "old": "import sqlite3\n",
+         "new": "import sqlite3\nimport struct\n"}
+      ],
+      "expect": "a decision is logged exactly as made"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "the verdict decided from the rounded numbers that are stored",
+      "edits": [{"file": "audit.py",
+                 "old": "                (clip, model, threshold, score, decide(score, threshold), when),\n",
+                 "new": "                (clip, model, round(threshold, 6), round(score, 6), decide(round(score, 6), round(threshold, 6)), when),\n"}],
+      "expect": "a score at or above the threshold is a spoof"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "flips compares against the logged threshold",
+      "edits": [{"file": "audit.py",
+                 "old": "if decide(e.score, threshold) != e.verdict]",
+                 "new": "if decide(e.score, e.threshold) != e.verdict]"}],
+      "expect": "a recalibrated threshold flips the decisions it moves across"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "record returns its arguments instead of the stored row",
+      "edits": [{"file": "audit.py",
+                 "old": "        return self.get(cursor.lastrowid)\n",
+                 "new": "        return Entry(cursor.lastrowid, clip, model, threshold, score, decide(score, threshold), at)\n"}],
+      "expect": "times come back in UTC"
+    },
+    {
+      "test": "test_watermark_localization",
+      "name": "a probability equal to the threshold counts as watermarked",
+      "edits": [{"file": "localize.py",
+                 "old": "        if p > threshold:\n",
+                 "new": "        if p >= threshold:\n"}],
+      "expect": "samples above the threshold, short gaps bridged, then short segments dropped"
+    },
+    {
+      "test": "test_watermark_localization",
+      "name": "a run reaching the end of the clip is never closed",
+      "edits": [{"file": "localize.py",
+                 "old": "    if start is not None:\n        runs.append([start, len(probs)])\n",
+                 "new": ""}],
+      "expect": "samples above the threshold, short gaps bridged, then short segments dropped"
+    },
+    {
+      "test": "test_watermark_localization",
+      "name": "short runs dropped before the gaps are bridged",
+      "edits": [{"file": "localize.py",
+                 "old": "    for run in runs:\n        if joined",
+                 "new": "    for run in [r for r in runs if r[1] - r[0] >= min_len]:\n        if joined"}],
+      "expect": "samples above the threshold, short gaps bridged, then short segments dropped"
+    },
+    {
+      "test": "test_watermark_localization",
+      "name": "only gaps shorter than max_gap_s are bridged",
+      "edits": [{"file": "localize.py",
+                 "old": "run[0] - joined[-1][1] <= max_gap",
+                 "new": "run[0] - joined[-1][1] < max_gap"}],
+      "expect": "a gap of exactly max_gap_s is bridged, and a segment of exactly min_s is kept"
+    },
+    {
+      "test": "test_watermark_localization",
+      "name": "a segment must be longer than min_s",
+      "edits": [{"file": "localize.py",
+                 "old": "if e - s >= min_len]",
+                 "new": "if e - s > min_len]"}],
+      "expect": "a gap of exactly max_gap_s is bridged, and a segment of exactly min_s is kept"
+    },
+    {
+      "test": "test_watermark_localization",
+      "name": "union taken as the span from the first start to the last end",
+      "edits": [{"file": "localize.py",
+                 "old": "    union = sum(s.length for s in predicted) + sum(s.length for s in truth) - inter\n",
+                 "new": "    both = predicted + truth\n    union = max(s.end for s in both) - min(s.start for s in both) if both else 0\n"}],
+      "expect": "IoU counts the samples the two lists share"
+    },
+    {
+      "test": "test_watermark_localization",
+      "name": "two empty lists divide by zero",
+      "edits": [{"file": "localize.py",
+                 "old": "    return inter / union if union else 1.0\n",
+                 "new": "    return inter / union\n"}],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_watermark_localization",
+      "name": "IoU pairs segments by position",
+      "edits": [{"file": "localize.py",
+                 "old": "for p in predicted for t in truth\n",
+                 "new": "for p, t in zip(predicted, truth)\n"}],
+      "expect": "one segment can overlap several in the other list"
+    },
+    {
+      "test": "test_watermark_localization",
+      "name": "IoU takes each predicted segment's best overlap",
+      "edits": [{"file": "localize.py",
+                 "old": "    inter = sum(\n        max(0, min(p.end, t.end) - max(p.start, t.start)) for p in predicted for t in truth\n    )\n",
+                 "new": "    inter = sum(\n        max((max(0, min(p.end, t.end) - max(p.start, t.start)) for t in truth), default=0)\n        for p in predicted\n    )\n"}],
+      "expect": "one segment can overlap several in the other list"
+    },
+    {
+      "test": "test_watermark_localization",
+      "name": "durations converted at 1000 samples per second",
+      "edits": [{"file": "localize.py",
+                 "old": "    min_len = round(min_s * sample_rate)\n    max_gap = round(max_gap_s * sample_rate)\n",
+                 "new": "    min_len = round(min_s * 1000)\n    max_gap = round(max_gap_s * 1000)\n"}],
+      "expect": "the generated half second is located, end to end"
+    },
+    {
+      "test": "test_watermark_localization",
+      "name": "a gap counted one sample short",
+      "edits": [{"file": "localize.py",
+                 "old": "run[0] - joined[-1][1] <= max_gap",
+                 "new": "run[0] - joined[-1][1] - 1 <= max_gap"}],
+      "expect": "a gap of exactly max_gap_s is bridged"
+    },
+    {
+      "test": "test_watermark_localization",
+      "name": "a segment ends at its last watermarked sample",
+      "edits": [{"file": "localize.py",
+                 "old": "            runs.append([start, i])\n",
+                 "new": "            runs.append([start, i - 1])\n"}],
+      "expect": "samples above the threshold, short gaps bridged, then short segments dropped"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "the average starts from 0 instead of the first score",
+      "edits": [{"file": "alarm.py",
+                 "old": "            s = score if s is None else s + (1.0 - 0.5 ** ((t - last) / half_life_s)) * (score - s)\n",
+                 "new": "            if s is None:\n                s, last = 0.0, t - half_life_s\n            s = s + (1.0 - 0.5 ** ((t - last) / half_life_s)) * (score - s)\n"}],
+      "expect": "the first score starts the average"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "a fixed smoothing factor per score, whatever the time between scores",
+      "edits": [{"file": "alarm.py",
+                 "old": "s + (1.0 - 0.5 ** ((t - last) / half_life_s)) * (score - s)",
+                 "new": "s + 0.5 * (score - s)"}],
+      "expect": "same alarms whatever the batching"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "one threshold: the alarm clears as soon as s drops below raise_at",
+      "edits": [{"file": "alarm.py",
+                 "old": "            elif s < clear_below:\n",
+                 "new": "            elif s < raise_at:\n"}],
+      "expect": "same alarms whatever the batching"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "cooldown counted from the start of the previous alarm",
+      "edits": [
+        {"file": "alarm.py",
+         "old": "                    peak = s\n                    yield sse(\"alarm\", {\"t\": t, \"score\": s})\n",
+         "new": "                    peak = s\n                    earliest = t + cooldown_s\n                    yield sse(\"alarm\", {\"t\": t, \"score\": s})\n"},
+        {"file": "alarm.py",
+         "old": "                peak = None\n                earliest = t + cooldown_s\n",
+         "new": "                peak = None\n"}
+      ],
+      "expect": "same alarms whatever the batching"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "scores ignored during the cooldown",
+      "edits": [{"file": "alarm.py",
+                 "old": "            if last is not None and t <= last:\n                raise ValueError(f\"score times must increase: {t} came after {last}\")\n",
+                 "new": "            if last is not None and t <= last:\n                raise ValueError(f\"score times must increase: {t} came after {last}\")\n            if peak is None and t < earliest:\n                continue\n"}],
+      "expect": "same alarms whatever the batching"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "the cooldown also blocks its last moment",
+      "edits": [{"file": "alarm.py",
+                 "old": "and t >= earliest:",
+                 "new": "and t > earliest:"}],
+      "expect": "same alarms whatever the batching"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "an alarm open at the end of the call is never cleared",
+      "edits": [{"file": "alarm.py",
+                 "old": "    if peak is not None:\n        yield sse(\"clear\", {\"t\": last, \"peak\": peak})\n",
+                 "new": ""}],
+      "expect": "same alarms whatever the batching"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "the smoothing restarts with every batch",
+      "edits": [{"file": "alarm.py",
+                 "old": "    async for batch in batches:\n",
+                 "new": "    async for batch in batches:\n        s = last = None\n"}],
+      "expect": "same alarms whatever the batching, e.g. [1]"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "a single newline after each event",
+      "edits": [{"file": "alarm.py",
+                 "old": "    return f\"event: {event}\\ndata: {json.dumps(data)}\\n\\n\"\n",
+                 "new": "    return f\"event: {event}\\ndata: {json.dumps(data)}\\n\"\n"}],
+      "expect": "every event ends with a blank line"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "reads the whole call before scoring",
+      "edits": [{"file": "alarm.py",
+                 "old": "    async for batch in batches:\n",
+                 "new": "    everything = [record async for batch in batches for record in batch]\n    for batch in [everything]:\n"}],
+      "expect": "the alarm goes out as soon as the score that raises it arrives"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "times that do not increase are accepted",
+      "edits": [{"file": "alarm.py",
+                 "old": "            if last is not None and t <= last:\n",
+                 "new": "            if last is not None and t < last:\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "the alarm reports the raw score",
+      "edits": [{"file": "alarm.py",
+                 "old": "                    yield sse(\"alarm\", {\"t\": t, \"score\": s})\n",
+                 "new": "                    yield sse(\"alarm\", {\"t\": t, \"score\": score})\n"}],
+      "expect": "same alarms whatever the batching"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "an alarm needs s above raise_at",
+      "edits": [{"file": "alarm.py",
+                 "old": "if s >= raise_at and t >= earliest:",
+                 "new": "if s > raise_at and t >= earliest:"}],
+      "expect": "same alarms whatever the batching"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "the alarm clears when s is at or below clear_below",
+      "edits": [{"file": "alarm.py",
+                 "old": "            elif s < clear_below:\n",
+                 "new": "            elif s <= clear_below:\n"}],
+      "expect": "s exactly at clear_below keeps the alarm"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "a clear sent at the end even when no alarm is open",
+      "edits": [{"file": "alarm.py",
+                 "old": "    if peak is not None:\n        yield sse(\"clear\", {\"t\": last, \"peak\": peak})\n",
+                 "new": "    if last is not None:\n        yield sse(\"clear\", {\"t\": last, \"peak\": peak})\n"}],
+      "expect": "a cleared alarm is not cleared again"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "an empty batch ends the call",
+      "edits": [{"file": "alarm.py",
+                 "old": "    async for batch in batches:\n",
+                 "new": "    async for batch in batches:\n        if not batch:\n            break\n"}],
+      "expect": "same alarms whatever the batching, e.g. [2, 0, 3]"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "only a repeated time is rejected",
+      "edits": [{"file": "alarm.py",
+                 "old": "            if last is not None and t <= last:\n",
+                 "new": "            if last is not None and t == last:\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "the peak frozen at the alarm's first value",
+      "edits": [{"file": "alarm.py",
+                 "old": "                peak = max(peak, s)\n",
+                 "new": "                peak = peak\n"}],
+      "expect": "same alarms whatever the batching"
+    },
+    {
+      "test": "test_spoof_alarm",
+      "name": "the half-life used as a time constant",
+      "edits": [
+        {"file": "alarm.py",
+         "old": "0.5 ** ((t - last) / half_life_s)",
+         "new": "math.exp(-(t - last) / half_life_s)"},
+        {"file": "alarm.py",
+         "old": "import json\n",
+         "new": "import json\nimport math\n"}
+      ],
+      "expect": "same alarms whatever the batching"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "only parentOf ingredients are followed",
+      "edits": [{"file": "manifest.py",
+                 "old": "            holds = ref is not None and follow(label, ref, path)\n",
+                 "new": "            holds = ref is not None and ingredient[\"relationship\"] == \"parentOf\" and follow(label, ref, path)\n"}],
+      "expect": "the history follows parentOf back to the recording, and the TTS line used twice counts"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "every manifest's data hash checked against the asset",
+      "edits": [{"file": "manifest.py",
+                 "old": "        manifest = store[label]\n",
+                 "new": "        manifest = store[label]\n        if assertions(manifest, \"c2pa.hash.data\")[0][\"hash\"] != hashlib.sha256(asset).hexdigest():\n            problems.add(f\"{label}: assertion.dataHash.mismatch\")\n"}],
+      "expect": "the history follows parentOf back to the recording, and the TTS line used twice counts"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "a manifest seen before is taken for a loop",
+      "edits": [{"file": "manifest.py",
+                 "old": "        if url in path:\n",
+                 "new": "        if url in path or url in done:\n"}],
+      "expect": "ingredient loop"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "ingredient hashes never checked",
+      "edits": [{"file": "manifest.py",
+                 "old": "        if manifest_hash(store[url]) != ref[\"hash\"]:\n",
+                 "new": "        if False:\n"}],
+      "expect": "a changed ingredient manifest breaks the link to it, and the history stops there"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "a broken link still followed",
+      "edits": [{"file": "manifest.py",
+                 "old": "            problems.add(f\"{label}: ingredient.hashedURI.mismatch\")\n            return False\n",
+                 "new": "            problems.add(f\"{label}: ingredient.hashedURI.mismatch\")\n"}],
+      "expect": "a changed ingredient manifest breaks the link to it, and the history stops there"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "a missing ingredient manifest looked up anyway",
+      "edits": [{"file": "manifest.py",
+                 "old": "        if url not in store:\n            problems.add(f\"{label}: ingredient.manifest.missing\")\n            return False\n",
+                 "new": ""}],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "the first of two parents is followed",
+      "edits": [{"file": "manifest.py",
+                 "old": "        if len(parents) > 1:\n            problems.add(f\"{label}: manifest.multipleParents\")\n            parent[label] = None\n        else:\n            parent[label] = parents[0] if parents else None\n",
+                 "new": "        parent[label] = parents[0] if parents else None\n"}],
+      "expect": "a manifest with two parents has no single history"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "the loop check comes after the hash check",
+      "edits": [
+        {"file": "manifest.py",
+         "old": "        if url in path:\n            raise ValueError(f\"ingredient loop: {' -> '.join(path + (url,))}\")\n",
+         "new": ""},
+        {"file": "manifest.py",
+         "old": "        if url not in done:\n            visit(url, path + (url,))\n",
+         "new": "        if url in path:\n            raise ValueError(f\"ingredient loop: {' -> '.join(path + (url,))}\")\n        if url not in done:\n            visit(url, path + (url,))\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "AI involvement looked up across the whole store",
+      "edits": [{"file": "manifest.py",
+                 "old": "    visit(active, (active,))\n",
+                 "new": "    visit(active, (active,))\n    ai = any(\n        action.get(\"digitalSourceType\") == TRAINED\n        for manifest in store.values()\n        for data in assertions(manifest, \"c2pa.actions\")\n        for action in data[\"actions\"]\n    )\n"}],
+      "expect": "manifests the asset was not made from say nothing about it"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "the active manifest's own actions not read",
+      "edits": [{"file": "manifest.py",
+                 "old": "        for data in assertions(manifest, \"c2pa.actions\"):\n",
+                 "new": "        for data in assertions(manifest, \"c2pa.actions\") if label != active else []:\n"}],
+      "expect": "the asset's own manifest counts too"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "problems kept in the order they were found",
+      "edits": [
+        {"file": "manifest.py",
+         "old": "    problems: set[str] = set()\n",
+         "new": "    problems: list[str] = []\n"},
+        {"file": "manifest.py",
+         "old": "problems.add(",
+         "new": "problems.append("},
+        {"file": "manifest.py",
+         "old": "problems.add(",
+         "new": "problems.append("},
+        {"file": "manifest.py",
+         "old": "problems.add(",
+         "new": "problems.append("},
+        {"file": "manifest.py",
+         "old": "problems.add(",
+         "new": "problems.append("},
+        {"file": "manifest.py",
+         "old": "Trace(history, ai, sorted(problems))",
+         "new": "Trace(history, ai, problems)"}
+      ],
+      "expect": "with the TTS manifest stripped, nothing left proves AI involvement"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "a manifest reached twice is checked twice, problems kept in a sorted list",
+      "edits": [
+        {"file": "manifest.py",
+         "old": "    problems: set[str] = set()\n",
+         "new": "    problems: list[str] = []\n"},
+        {"file": "manifest.py",
+         "old": "problems.add(",
+         "new": "problems.append("},
+        {"file": "manifest.py",
+         "old": "problems.add(",
+         "new": "problems.append("},
+        {"file": "manifest.py",
+         "old": "problems.add(",
+         "new": "problems.append("},
+        {"file": "manifest.py",
+         "old": "problems.add(",
+         "new": "problems.append("},
+        {"file": "manifest.py",
+         "old": "        if url not in done:\n            visit(url, path + (url,))\n",
+         "new": "        visit(url, path + (url,))\n"}
+      ],
+      "expect": "a manifest reached twice is checked once"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "an ingredient without credentials looked up anyway",
+      "edits": [{"file": "manifest.py",
+                 "old": "            ref = ingredient.get(\"manifest\")\n",
+                 "new": "            ref = ingredient[\"manifest\"]\n"}],
+      "expect": "KeyError: 'manifest'"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "an ingredient without credentials reported missing",
+      "edits": [{"file": "manifest.py",
+                 "old": "            ref = ingredient.get(\"manifest\")\n",
+                 "new": "            ref = ingredient.get(\"manifest\")\n            if ref is None:\n                problems.add(f\"{label}: ingredient.manifest.missing\")\n"}],
+      "expect": "the history follows parentOf back to the recording"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "a missing manifest reported as a hash mismatch",
+      "edits": [{"file": "manifest.py",
+                 "old": "            problems.add(f\"{label}: ingredient.manifest.missing\")\n",
+                 "new": "            problems.add(f\"{label}: ingredient.hashedURI.mismatch\")\n"}],
+      "expect": "with the TTS manifest stripped, nothing left proves AI involvement"
+    },
+    {
+      "test": "test_manifest_chain",
+      "name": "every ingredient counted as a parent",
+      "edits": [{"file": "manifest.py",
+                 "old": "            if ingredient[\"relationship\"] == \"parentOf\":\n",
+                 "new": "            if True:\n"}],
+      "expect": "the history follows parentOf back to the recording"
+    }
+  ]
+}
