@@ -1,0 +1,178 @@
+{
+  "lesson": "phases/11-llm-engineering/04-embeddings",
+  "title": "Embeddings & Vector Representations",
+  "format": "staged-brownfield",
+  "service": "BitVecBank: local projection/metric inspection, binary64 bank, packed binary shortlist/fullprecision rescore, streaming records and supplied multilayer graph",
+  "sources": {
+    "docs/en.md": "9c3115093f152ce871351f278f9e08a2322849bfaa9af54bb5339b5874f2b401",
+    "code/embeddings.py": "3fb74d10613a3d8c068ba101b26af41835a8e575747d3633f50ec860cdd29ff0",
+    "code/main.ts": "c6a90058aad6ca7c6ec377ba8ebd2ced71247ab872898b5fc6dd8350e74c417d",
+    "code/embeddings.讲解.md": "022cc995e8a3b14d5edd7ff4108748c726d9eb8546883cfd957e1fccf0bedfe1"
+  },
+  "runtime": "Python3.10+, standard library, pytest; local deterministic supplied vectors; no numpy/FAISS/model/API/network",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_vector_inspection_pipeline",
+      "kind": "debug",
+      "lesson_anchor": "embeddings.py73-95 metrics/sign;109-136 metric rank;186-191 prefix renormalization",
+      "planted_bugs": [
+        "normalize the complete vector before slicing its prefix, mathematically the same wrong full-vector divisor; incorrect projection reaches VectorService.inspect_projection then correct projection_card unit-norm assertion,1-2calls beyond producer",
+        ">=0 sign mapping incorrectly sets positive and negative zeros",
+        "all raw scores sorted descending rather than supplied metric-specific order",
+        "stored norm_b recomputed inside coordinate dot loop, O(D^2) per cosine pair"
+      ],
+      "timing_assert": {
+        "slow": [
+          1.3306879161391407,
+          1.3320690419059247,
+          1.3854504581540823
+        ],
+        "fast": [
+          0.0066534169018268585,
+          0.006104208994656801,
+          0.007183125009760261
+        ],
+        "workload": {
+          "dimensions": 32768,
+          "vectors": 1,
+          "queries": 1,
+          "pairs": 1,
+          "limit_seconds": 0.1,
+          "untimed_functional_vectors": 24,
+          "untimed_functional_queries": 2,
+          "untimed_functional_dimensions": 1024,
+          "untimed_functional_pairs": 48
+        },
+        "slow_min_over_limit": 13.306879161391407,
+        "limit_over_fast_max": 13.92151742648532,
+        "evidence": "/tmp/exam-11-16-work/draft11-04/postacceptance-numeric-fix/timing-final-full-coverage/summary.json; executable /tmp/exam-11-16-work/draft11-04/postacceptance-numeric-fix/run_final_timing.py runs actual P1 in six complete isolated copies, replacing only the timing assert with elapsed print for measurement; every functional assert retained; all exploration groups retained externally",
+        "measurement": "The original24 vectors x2queries x1024coords and all48 expected cosine scores remain a separate complete functional guard. One additional full32768-coordinate cosine call is independently timed and numerically checked; first3functional repairs on slow, GIVEN scaling/norm identical on both sides. Fixture/expected construction excluded from timer."
+      },
+      "overfix_guard": "Compare every score to correct non-unit cosine; preserve zero/opposite/non-unit behavior, inclusive projection dimensions, zero prefixes, source coordinates, metric-specific ordering and declaration ties. Finite tiny/huge/mixed-scale cosine and projection, prefix-before-scaling, subnormal multiple coordinates and a card that rejects nonzero tiny non-unit vectors remain checked.",
+      "given_helpers": [
+        "strict vector/record/count/dimension shapes",
+        "correct raw metric rank key",
+        "correct projection_card consumer assertion",
+        "correct max-absolute direction scaling and unit_direction for all finite binary64 directions, including subnormals and norms exceeding the largest float",
+        "correct math.hypot projection-card norm and math.dist Euclidean dispatch; numerical primitives are GIVEN, not a fifth planted layer"
+      ],
+      "deviation": "Stdlib numeric vectors replace numpy. Exposed distance score is raw positive distance; source uses negative distance then descending. Raw score convention is explicit. Projection is mechanics simulation, not trained Matryoshka efficacy. Correct stable stdlib direction primitives are an explicit local numerical adaptation: independently scale cosine operands, slice projection prefix before stable normalization; no finite-validator narrowing and no new candidate numerical algorithm. The source numpy formula is not claimed safe across the entire finite binary64 range. Raw dot and Euclidean outputs retain ordinary binary64 range limits rather than arbitrary-precision arithmetic."
+    },
+    {
+      "part": 2,
+      "test": "test_binary64_bank_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "docs212-216 numeric vector storage; embeddings.py98-107 stores vectors and metadata by one position",
+      "storage": "Local binary bank <4sBIII magic/version/dimension/count/metadata-byte-length + rowmajor little-endian binary64 payload; ordered UTF8JSON metadata sidecar",
+      "exactness": "struct bytes preserve -0.0, 5e-324, low mantissa bits and tiny signed values; labels/source CRLF/Unicode/empty values and bank association survive reopen. Direct payload bytes must match declared little-endian binary64 even if a wrong symmetric codec would round-trip.",
+      "traps": [
+        "float32 narrowing loses binary64 representation",
+        "dimension/count/full payload length disagreement incl extra bytes",
+        "metadata byte length and vector-order association",
+        "symmetric wrong-endian save/load passes equality but violates declared payload bytes"
+      ],
+      "clarifying_questions": [
+        "binary64 vs float32",
+        "UTF8 bytes",
+        "two-file failure boundary"
+      ],
+      "deviation": "Source has in-memory parallel arrays, no bank file format. This explicitly local persistence format is not a vector DB protocol or crash-atomic two-file transaction; packing/tailmask is not a P2 primary task."
+    },
+    {
+      "part": 3,
+      "test": "test_binary_first_dense_rerank",
+      "kind": "core algorithm",
+      "lesson_anchor": "docs214-216 binary Hamming firstpass + fullprecision rescore; code/embeddings.讲解.md371 explicitly packbits/XORpopcount/topNrerank; embeddings.py90-95 sign/Hamming primitives",
+      "algorithm": "Packed XOR/popcount with valid tailmask -> stable independent shortlist_m -> dense rescore ONLY shortlist via repaired P1 metric helpers -> final_k, retain binary and final rank",
+      "traps": [
+        "dirty unused low tail bits counted or bytealigned finalbyte cleared",
+        "conflate m/k or reintroduce excluded dense winners",
+        "coarse ties use key text; dense ties inherit coarse order rather than original bank index"
+      ],
+      "counts_and_ranks": "m/k nonnegative exact ints; zero budget nohits/no densecalls; empty bank none; m>Nclamp; m<k atmostm. index0based;binary_rank/rank1based; ties originalbankposition bothstages.",
+      "given_helpers": [
+        "repaired P1 signmapping/metric_values/direction/projection",
+        "correct sign-bit packer and strict packed byte length helper",
+        "no precomputed shortlist or completed Hamming reducer"
+      ],
+      "clarifying_questions": [
+        "valid bits",
+        "independent budgets",
+        "dense scope",
+        "ties/ranks"
+      ],
+      "deviation": "Packing/two-stage pipeline is source-described educational extension; original Python/TS only compare dense and direct-unpacked binary searches. No actual embedding model, exact dense recall or benchmark guarantee."
+    },
+    {
+      "part": 4,
+      "test": "test_packed_vector_wire_stream",
+      "kind": "streaming",
+      "lesson_anchor": "source embed_batch/index.add treats completed embeddings as ordered records; binary quantization docs214; main.ts132-136 sign values",
+      "wire_format": "Raw binary local BVS1/<Idimension header once; records <ImetadataUTF8bytecount + metadataJSONbytes + ceil(D/8)packed codebytes",
+      "algorithm": "Synchronous domain callbacks encode the BVS1 dimension header and each complete raw record: declared-dimension validation, metadata UTF8 byte extent, original ordered metadata and complete coordinate-order sign code. Correct GIVEN async driver invokes and publishes these callbacks without prefetch.",
+      "traps": [
+        "BVS1 header stores the vector coordinate dimension, not packed-code byte size",
+        "metadata UTF8 byte extent and metadata/code segment layout belong to one complete raw record",
+        "validate every row against the declared header dimension and preserve original coordinate order"
+      ],
+      "given_helpers": [
+        "Correct metadata codec and MSB-first sign packer including partial tail",
+        "Correct async header-before-pull/current-record publication and source/encoder close driver; no candidate async loop or cadence repair",
+        "Strict dimension/record validators and Struct definitions; no completed header or raw-record encoder"
+      ],
+      "clarifying_questions": [
+        "local format",
+        "empty source header",
+        "output chunks not records"
+      ],
+      "deviation": "Source embed_batch is synchronous. BVS1 is the declared local binary completed-record adapter, not a provider protocol. Its asynchronous pull/publication/lifecycle layer is correctly GIVEN. Candidate synchronous callbacks own the actual domain encoding, not sign packing or another incremental scheduling algorithm.",
+      "integration_guards": [
+        "Header before first pull, full current record before next pull, empty-source header and closure validate the correct GIVEN driver",
+        "Historical buffer-all and header-after-pull wrongs remain registered as explicit GIVEN-driver semantic mappings"
+      ],
+      "replacement_validation": {
+        "status": "FORMAL_CHECKER_WRITE_PASS",
+        "evidence": "/private/tmp/exam-11-16-work/draft11-04/p4-driver-replacement",
+        "original_asserts": 67,
+        "original_wrong_fixes": 31,
+        "wrong_mapping": "/private/tmp/exam-11-16-work/draft11-04/p4-driver-replacement/wrong-mapping.json",
+        "current_asserts": 68,
+        "current_wrong_fixes": 34,
+        "new_candidate_wrong_fixes": 3,
+        "actual_new_mutants": "/private/tmp/exam-11-16-work/draft11-04/p4-driver-replacement/actual-new-candidate-results.json",
+        "initial_reversed_sign": "/private/tmp/exam-11-16-work/draft11-04/p4-driver-replacement/initial-reversed-sign.json",
+        "root_evidence_review": "/tmp/exam-11-16-work/root04-p4-driver-evidence-review.json"
+      }
+    },
+    {
+      "part": 5,
+      "test": "test_supplied_layer_descent",
+      "kind": "nested structure",
+      "lesson_anchor": "docs126-143 HNSW multilayer graph, top-down greedy refinement",
+      "structure": "Supplied finite top-first ordered layer adjacency maps; upper nodes persist in lower layers; strict membership validator given Adjacency is directed as supplied; the greedy path may stop at a local optimum.",
+      "algorithm": "Greedy best of current+allneighbors with strictly improving metric/bankindex key, perlayer path and carrybestdownward",
+      "traps": [
+        "reset every layer to original entry",
+        "globalvisited suppresses different lowerlayer neighborhood",
+        "first improving neighbor or scoreonly tie rule misses declared stable minimum",
+        "silently symmetrize supplied directed edges or scan non-neighbor layer nodes past a local optimum"
+      ],
+      "clarifying_questions": [
+        "crosslayer node reuse",
+        "best entry handoff",
+        "plateau tie rule"
+      ],
+      "deviation": "Conceptual HNSW source has no graph algorithm implementation. This is supplied-graph greedy mechanics, not full HNSW construction/efSearch/ANN topk or complexity/recall guarantee."
+    }
+  ],
+  "boundaries": [
+    "No TF-IDF fit/search core copied from coderpad cosine/retrieval; supplied finite vectors only.",
+    "P3 owns packed tailmask; P2 binary64 precision/header consistency and P4 correctpacker are separate responsibilities.",
+    "P1 repaired sign/direction/projection are dependencies, not P3 new core.",
+    "Source code has embeddings.py/main.ts/embeddings.讲解.md and no code/tests; __main__ is printdemo. Coderpad tests are fixture wrappers, not source unit tests.",
+    "Source model/pricing/MTEB/recall estimates and lecture historical runs are not independently verified exam claims."
+  ],
+  "timed_session": "60minutes including2minuteopening+58minute parts(10+11+15+12+10);not human-calibrated",
+  "verification_boundary": "Local bounded numeric vectors/files/records and supplied graph only; no actual embedding generation, semantic quality, trained Matryoshka representation, actualcompressionbenefit/recall, vectorDB/HNSW build or crash durability established."
+}

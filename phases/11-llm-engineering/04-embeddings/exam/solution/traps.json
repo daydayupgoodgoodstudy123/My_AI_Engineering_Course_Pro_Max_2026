@@ -1,0 +1,496 @@
+{
+  "package": "bitvecbank",
+  "tests": [
+    "test_vector_inspection_pipeline",
+    "test_binary64_bank_roundtrip",
+    "test_binary_first_dense_rerank",
+    "test_packed_vector_wire_stream",
+    "test_supplied_layer_descent"
+  ],
+  "layers": [
+    {
+      "test": "test_vector_inspection_pipeline",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "projected vectors reach the inspection card at unit length"
+        },
+        {
+          "name": "normalize the retained projection rather than the original vector",
+          "edits": [
+            {
+              "file": "metrics.py",
+              "old": "    normalized = unit_direction(vector)\n    return normalized[:dimensions]",
+              "new": "    truncated = vector[:dimensions]\n    return unit_direction(truncated)"
+            }
+          ],
+          "expect": "only strictly positive coordinates set a sign bit"
+        },
+        {
+          "name": "+ map both zero signs to bit zero",
+          "edits": [
+            {
+              "file": "metrics.py",
+              "old": "value >= 0 else 0",
+              "new": "value > 0 else 0"
+            }
+          ],
+          "expect": "nearest raw distances rank before farther vectors"
+        },
+        {
+          "name": "+ use the supplied metric-specific order key",
+          "edits": [
+            {
+              "file": "metrics.py",
+              "old": "return sorted(hits, key=lambda hit: (-hit[\"score\"], hit[\"index\"]))",
+              "new": "return sorted(hits, key=lambda hit: score_key(hit[\"score\"], hit[\"index\"], metric))"
+            }
+          ],
+          "expect": "wide vector inspection should stay responsive"
+        },
+        {
+          "name": "+ compute the stored vector norm once per pair",
+          "edits": [
+            {
+              "file": "metrics.py",
+              "old": "    norm_b = 0.0\n    dot = 0.0\n    for left, right in zip(a, b):\n        dot += left * right\n        norm_b = norm(b)",
+              "new": "    norm_b = norm(b)\n    dot = 0.0\n    for left, right in zip(a, b):\n        dot += left * right"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_vector_inspection_pipeline",
+      "name": "replace cosine by raw dot to avoid norms",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "    a, b = direction_scale(a), direction_scale(b)\n",
+          "new": ""
+        },
+        {
+          "file": "metrics.py",
+          "old": "return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0",
+          "new": "return dot"
+        }
+      ],
+      "expect": "cosine ties preserve original bank order"
+    },
+    {
+      "test": "test_vector_inspection_pipeline",
+      "name": "set negative as well as positive nonzero sign bits",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "value > 0 else 0",
+          "new": "value != 0 else 0"
+        }
+      ],
+      "expect": "only strictly positive coordinates set a sign bit"
+    },
+    {
+      "test": "test_binary64_bank_roundtrip",
+      "name": "narrow values through float32 before storing binary64",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "payload = struct.pack(\"<\" + \"d\" * len(values), *values)",
+          "new": "values = [struct.unpack(\"<f\", struct.pack(\"<f\", value))[0] for value in values]\n        payload = struct.pack(\"<\" + \"d\" * len(values), *values)"
+        }
+      ],
+      "expect": "binary64 payload preserves signed zero, tiny values and low mantissa bits"
+    },
+    {
+      "test": "test_binary64_bank_roundtrip",
+      "name": "declare metadata character count instead of byte count",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "len(rows), len(metadata))",
+          "new": "len(rows), len(metadata.decode(\"utf-8\")))"
+        }
+      ],
+      "expect": "metadata byte length mismatch"
+    },
+    {
+      "test": "test_binary64_bank_roundtrip",
+      "name": "sort only metadata labels while vector payload stays in bank order",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "metadata = metadata_bytes(rows)",
+          "new": "metadata = metadata_bytes(sorted(rows, key=lambda row: row.key))"
+        }
+      ],
+      "expect": "binary bank dimensions and declaration order survive reopening"
+    },
+    {
+      "test": "test_binary64_bank_roundtrip",
+      "name": "accept and silently ignore trailing vector bytes",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "if len(payload) != count * dimension * 8:",
+          "new": "if len(payload) < count * dimension * 8:"
+        },
+        {
+          "file": "store.py",
+          "old": "values = struct.unpack(",
+          "new": "values = struct.unpack_from("
+        }
+      ],
+      "expect": "reject truncated or trailing bytes and inconsistent dimension count or metadata lengths"
+    },
+    {
+      "test": "test_binary_first_dense_rerank",
+      "name": "include unused low padding bits in popcount",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "difference &= (255 << (8 - dimension % 8)) & 255",
+          "new": "difference &= 255"
+        }
+      ],
+      "expect": "unused low padding bits never contribute to Hamming distance"
+    },
+    {
+      "test": "test_binary_first_dense_rerank",
+      "name": "apply partial-byte mask even to byte-aligned dimensions",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "if index == len(a) - 1 and dimension % 8:",
+          "new": "if index == len(a) - 1:"
+        }
+      ],
+      "expect": "byte-aligned dimensions keep the full final byte"
+    },
+    {
+      "test": "test_binary_first_dense_rerank",
+      "name": "use final_k as the binary shortlist budget",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "coarse[:shortlist_m]",
+          "new": "coarse[:final_k]"
+        }
+      ],
+      "expect": "dense scoring touches every shortlisted candidate and no excluded candidate"
+    },
+    {
+      "test": "test_binary_first_dense_rerank",
+      "name": "rescore the whole bank and let excluded dense winners re-enter",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "coarse[:shortlist_m]",
+          "new": "coarse"
+        }
+      ],
+      "expect": "dense scoring touches every shortlisted candidate and no excluded candidate"
+    },
+    {
+      "test": "test_binary_first_dense_rerank",
+      "name": "break coarse Hamming ties by key text",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "(value[0], value[1])",
+          "new": "(value[0], rows[value[1]].key)"
+        }
+      ],
+      "expect": "dense scoring touches every shortlisted candidate and no excluded candidate"
+    },
+    {
+      "test": "test_binary_first_dense_rerank",
+      "name": "inherit coarse order when dense values tie",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "selected = metrics.order_hits(hits, metric)[:final_k]",
+          "new": "selected = sorted(hits, key=lambda hit: -hit[\"score\"])[:final_k]"
+        }
+      ],
+      "expect": "dense ties do not inherit the coarse ranking order"
+    },
+    {
+      "test": "test_packed_vector_wire_stream",
+      "name": "buffer all completed embeddings before emitting records",
+      "edits": [
+        {
+          "file": "record_driver.py",
+          "old": "async for row in source:",
+          "new": "for row in [row async for row in source]:"
+        }
+      ],
+      "expect": "emit the first complete vector record before pulling the second"
+    },
+    {
+      "test": "test_packed_vector_wire_stream",
+      "name": "frame metadata with its Unicode character length",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "RECORD_PREFIX.pack(len(metadata))",
+          "new": "RECORD_PREFIX.pack(len(metadata.decode(\"utf-8\")))"
+        }
+      ],
+      "expect": "emit the first complete vector record before pulling the second"
+    },
+    {
+      "test": "test_packed_vector_wire_stream",
+      "name": "discard vector metadata from wire records",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "metadata = wire_metadata(row)",
+          "new": "metadata = b\"{}\""
+        }
+      ],
+      "expect": "UTF-8 metadata byte lengths preserve exact record associations"
+    },
+    {
+      "test": "test_packed_vector_wire_stream",
+      "name": "drop the final packed payload byte from each record",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "+ metadata + pack_sign_bits(row.vector)",
+          "new": "+ metadata + pack_sign_bits(row.vector)[:-1]"
+        }
+      ],
+      "expect": "emit the first complete vector record before pulling the second"
+    },
+    {
+      "test": "test_supplied_layer_descent",
+      "name": "restart every layer at the original entry",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "for level, layer in enumerate(layers):\n        path = [current]",
+          "new": "for level, layer in enumerate(layers):\n        current = entry\n        path = [current]"
+        }
+      ],
+      "expect": "carry the best node into each lower layer and inspect its new neighborhood"
+    },
+    {
+      "test": "test_supplied_layer_descent",
+      "name": "take the first improving neighbor rather than the best neighbor",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "candidate = min([current] + list(layer[current]), key=order)",
+          "new": "candidate = next((neighbor for neighbor in layer[current] if order(neighbor) < order(current)), current)"
+        }
+      ],
+      "expect": "carry the best node into each lower layer and inspect its new neighborhood"
+    },
+    {
+      "test": "test_supplied_layer_descent",
+      "name": "ignore bank-position improvements on equal-score plateaus",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "if order(candidate) >= order(current):",
+          "new": "if order(candidate)[0] >= order(current)[0]:"
+        }
+      ],
+      "expect": "strict improvement in score and bank-position key resolves cyclic plateaus"
+    },
+    {
+      "test": "test_supplied_layer_descent",
+      "name": "skip lower-layer neighborhoods of globally visited nodes",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "    report = []\n    for level, layer in enumerate(layers):\n        path = [current]",
+          "new": "    report = []\n    visited = set()\n    for level, layer in enumerate(layers):\n        if current in visited:\n            report.append({\"layer\": level, \"path\": [current], \"best\": current})\n            continue\n        path = [current]"
+        },
+        {
+          "file": "graph.py",
+          "old": "        report.append({\"layer\": level, \"path\": path, \"best\": current})",
+          "new": "        visited.update(path)\n        report.append({\"layer\": level, \"path\": path, \"best\": current})"
+        }
+      ],
+      "expect": "carry the best node into each lower layer and inspect its new neighborhood"
+    },
+    {
+      "test": "test_binary64_bank_roundtrip",
+      "name": "coerce false-valued stored coordinates to positive zero",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "values = [value for row in rows for value in row.vector]",
+          "new": "values = [value or 0.0 for row in rows for value in row.vector]"
+        }
+      ],
+      "expect": "binary64 payload preserves signed zero, tiny values and low mantissa bits"
+    },
+    {
+      "test": "test_binary64_bank_roundtrip",
+      "name": "use big-endian payload symmetrically for save and load",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "struct.pack(\"<\" + \"d\" * len(values), *values)",
+          "new": "struct.pack(\">\" + \"d\" * len(values), *values)"
+        },
+        {
+          "file": "store.py",
+          "old": "struct.unpack(\"<\" + \"d\" * (count * dimension), payload)",
+          "new": "struct.unpack(\">\" + \"d\" * (count * dimension), payload)"
+        }
+      ],
+      "expect": "bank payload uses the declared little-endian binary64 wire representation"
+    },
+    {
+      "test": "test_binary_first_dense_rerank",
+      "name": "normalize dot reranking through cosine despite repaired raw dense metrics",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "metrics.metric_value(query, row.vector, metric)",
+          "new": "metrics.metric_value(query, row.vector, \"cosine\" if metric == \"dot\" else metric)"
+        }
+      ],
+      "expect": "dense ties do not inherit the coarse ranking order"
+    },
+    {
+      "test": "test_binary_first_dense_rerank",
+      "name": "overwrite original binary rank with final dense rank",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "return [dict(hit, rank=rank) for rank, hit in enumerate(selected, 1)]",
+          "new": "return [dict(hit, rank=rank, binary_rank=rank) for rank, hit in enumerate(selected, 1)]"
+        }
+      ],
+      "expect": "shortlist budget is independent from final result count"
+    },
+    {
+      "test": "test_packed_vector_wire_stream",
+      "name": "validate each completed vector against its own size instead of the declared stream dimension",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "records_value([row], dimension)",
+          "new": "records_value([row], len(row.vector))"
+        }
+      ],
+      "expect": "wire records must match the declared stream dimension"
+    },
+    {
+      "test": "test_packed_vector_wire_stream",
+      "name": "pull the first embedding before emitting its stream header",
+      "edits": [
+        {
+          "file": "record_driver.py",
+          "old": "        yield header_encoder(dimension)\n        async for row in source:\n",
+          "new": "        header_sent = False\n        async for row in source:\n            if not header_sent:\n                yield header_encoder(dimension)\n                header_sent = True\n"
+        }
+      ],
+      "expect": "emit the header once before pulling the first embedding"
+    },
+    {
+      "test": "test_supplied_layer_descent",
+      "name": "silently add reverse neighbors to the supplied directed graph",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "list(layer[current])",
+          "new": "list(layer[current]) + [key for key, neighbors in layer.items() if current in neighbors]"
+        }
+      ],
+      "expect": "greedy descent respects directed edges and stops at a local optimum"
+    },
+    {
+      "test": "test_supplied_layer_descent",
+      "name": "choose the global best layer node rather than the current supplied neighborhood",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "candidate = min([current] + list(layer[current]), key=order)",
+          "new": "candidate = min(list(layer), key=order)"
+        }
+      ],
+      "expect": "strict improvement in score and bank-position key resolves cyclic plateaus"
+    },
+    {
+      "test": "test_vector_inspection_pipeline",
+      "name": "restore unscaled operands before cosine despite finite direction range",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "    a, b = direction_scale(a), direction_scale(b)\n",
+          "new": ""
+        }
+      ],
+      "expect": "finite direction cosine survives tiny, huge and mixed coordinate scales"
+    },
+    {
+      "test": "test_vector_inspection_pipeline",
+      "name": "normalize raw coordinates by hypot without first scaling their direction",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "    scaled = direction_scale(vector)\n    length = norm(scaled)",
+          "new": "    scaled = tuple(vector)\n    length = norm(scaled)"
+        }
+      ],
+      "expect": "every nonzero finite projection reaches the card as a unit direction"
+    },
+    {
+      "test": "test_vector_inspection_pipeline",
+      "name": "restore squared-coordinate norm and misclassify a tiny card as zero",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "return math.hypot(*vector)",
+          "new": "return math.sqrt(sum(value * value for value in vector))"
+        }
+      ],
+      "expect": "the given card never mistakes a nonzero subnormal vector for true zero"
+    },
+    {
+      "test": "test_packed_vector_wire_stream",
+      "name": "p4-domain-header-uses-packed-byte-count-as-vector-dimension",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "return STREAM_HEADER.pack(b\"BVS1\", dimension)",
+          "new": "return STREAM_HEADER.pack(b\"BVS1\", (dimension + 7) // 8)"
+        }
+      ],
+      "expect": "emit the header once before pulling the first embedding"
+    },
+    {
+      "test": "test_packed_vector_wire_stream",
+      "name": "p4-domain-record-puts-sign-code-before-metadata-bytes",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "return RECORD_PREFIX.pack(len(metadata)) + metadata + pack_sign_bits(row.vector)",
+          "new": "return RECORD_PREFIX.pack(len(metadata)) + pack_sign_bits(row.vector) + metadata"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_packed_vector_wire_stream",
+      "name": "p4-domain-reverses-vector-coordinate-order-before-canonical-packing",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "pack_sign_bits(row.vector)",
+          "new": "pack_sign_bits(tuple(reversed(row.vector)))"
+        }
+      ],
+      "expect": "the complete asymmetric wire record retains its original coordinates and metadata"
+    }
+  ]
+}
