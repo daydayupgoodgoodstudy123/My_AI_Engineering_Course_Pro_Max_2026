@@ -1,0 +1,955 @@
+{
+  "package": "orchestra",
+  "tests": [
+    "test_supervisor_routing",
+    "test_topology_snapshot",
+    "test_budgeted_hierarchy",
+    "test_tool_call_supervision",
+    "test_hierarchical_routing"
+  ],
+  "layers": [
+    {
+      "test": "test_supervisor_routing",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "prompt line is not a member"
+        },
+        {
+          "name": "fold descriptions onto one line",
+          "edits": [
+            {
+              "file": "supervisor.py",
+              "old": "{member.description.strip()}",
+              "new": "{' '.join(member.description.split())}"
+            }
+          ],
+          "expect": "the path starts at the supervisor that got the task"
+        },
+        {
+          "name": "+ put the parent in front of a sub-supervisor's outcome",
+          "edits": [
+            {
+              "file": "supervisor.py",
+              "old": "            return member.run(task)\n",
+              "new": "            below = member.run(task)\n            return Outcome(below.worker, (self.name, *below.path), below.answer, below.ops + 1)\n"
+            }
+          ],
+          "expect": "a task no member fits goes to a human"
+        },
+        {
+          "name": "+ escalate instead of taking the first member",
+          "edits": [
+            {
+              "file": "supervisor.py",
+              "old": "        return next(iter(self.members))\n",
+              "new": "        return ESCALATE\n"
+            }
+          ],
+          "expect": "routing many tasks through one supervisor should be fast"
+        },
+        {
+          "name": "+ build the prompt once per change",
+          "edits": [
+            {
+              "file": "supervisor.py",
+              "old": "        self.members: dict[str, Worker | Supervisor] = {}\n",
+              "new": "        self.members: dict[str, Worker | Supervisor] = {}\n        self._prompt: str | None = None\n"
+            },
+            {
+              "file": "supervisor.py",
+              "old": "        self.members[member.name] = member\n",
+              "new": "        self.members[member.name] = member\n        self._prompt = None\n"
+            },
+            {
+              "file": "supervisor.py",
+              "old": "        text = f\"{self.name}: pick the member that should handle the task, or reply none.\\n\"\n        for member in self.members.values():\n            text += f\"- {member.name}: {' '.join(member.description.split())}\\n\"\n        return text\n",
+              "new": "        if self._prompt is None:\n            text = f\"{self.name}: pick the member that should handle the task, or reply none.\\n\"\n            for member in self.members.values():\n                text += f\"- {member.name}: {' '.join(member.description.split())}\\n\"\n            self._prompt = text\n        return self._prompt\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_supervisor_routing",
+      "name": "prompt cached but never invalidated",
+      "edits": [
+        {
+          "file": "supervisor.py",
+          "old": "        self.members[member.name] = member\n        self._prompt = None\n",
+          "new": "        self.members[member.name] = member\n"
+        }
+      ],
+      "expect": "a member registered later takes its tasks"
+    },
+    {
+      "test": "test_supervisor_routing",
+      "name": "prompt rebuilt eagerly on every register",
+      "edits": [
+        {
+          "file": "supervisor.py",
+          "old": "        self.members[member.name] = member\n        self._prompt = None\n",
+          "new": "        self.members[member.name] = member\n        self._prompt = None\n        self.prompt()\n"
+        }
+      ],
+      "expect": "registering a member stays cheap"
+    },
+    {
+      "test": "test_supervisor_routing",
+      "name": "newlines deleted instead of folded",
+      "edits": [
+        {
+          "file": "supervisor.py",
+          "old": "{' '.join(m.description.split())}",
+          "new": "{m.description.replace(chr(10), '').strip()}"
+        }
+      ],
+      "expect": "one folded line per member, in registration order"
+    },
+    {
+      "test": "test_supervisor_routing",
+      "name": "nested outcome keeps the sub-supervisor's op count",
+      "edits": [
+        {
+          "file": "supervisor.py",
+          "old": "below.answer, below.ops + 1)",
+          "new": "below.answer, below.ops)"
+        }
+      ],
+      "expect": "the path starts at the supervisor that got the task"
+    },
+    {
+      "test": "test_supervisor_routing",
+      "name": "only the literal reply none escalates",
+      "edits": [
+        {
+          "file": "supervisor.py",
+          "old": "        return reply if reply in self.members else ESCALATE\n",
+          "new": "        if reply in self.members:\n            return reply\n        if reply == \"none\":\n            return ESCALATE\n        return next(iter(self.members))\n"
+        }
+      ],
+      "expect": "even one that names another team's worker"
+    },
+    {
+      "test": "test_supervisor_routing",
+      "name": "each newline replaced by one space, runs of spaces kept",
+      "edits": [
+        {
+          "file": "supervisor.py",
+          "old": "{' '.join(m.description.split())}",
+          "new": "{m.description.replace(chr(10), ' ').strip()}"
+        }
+      ],
+      "expect": "one folded line per member, in registration order"
+    },
+    {
+      "test": "test_topology_snapshot",
+      "name": "snapshot written in place",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f\".{target.name}.\", suffix=\".tmp\")\n",
+          "new": "    target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding=\"utf-8\")\n    return\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_topology_snapshot",
+      "name": "temp file left behind after a failed replace",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "    except BaseException:\n        if os.path.exists(tmp):\n            os.unlink(tmp)\n        raise\n",
+          "new": "    except BaseException:\n        raise\n"
+        }
+      ],
+      "expect": "a failed save leaves no temp file behind"
+    },
+    {
+      "test": "test_topology_snapshot",
+      "name": "temp file in the system temp directory",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "tempfile.mkstemp(dir=target.parent, ",
+          "new": "tempfile.mkstemp("
+        }
+      ],
+      "expect": "the temp file sits next to the snapshot"
+    },
+    {
+      "test": "test_topology_snapshot",
+      "name": "INHERIT written as null",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "    if team.router is not INHERIT:\n        data[\"router\"] = team.router\n",
+          "new": "    data[\"router\"] = None if team.router is INHERIT else team.router\n"
+        }
+      ],
+      "expect": "a topology must round-trip exactly"
+    },
+    {
+      "test": "test_topology_snapshot",
+      "name": "keywords read back as lists",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "tuple(w[\"keywords\"])",
+          "new": "w[\"keywords\"]"
+        }
+      ],
+      "expect": "a topology must round-trip exactly"
+    },
+    {
+      "test": "test_topology_snapshot",
+      "name": "teams written sorted by name",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "\"teams\": [_team_to_json(t) for t in topology.teams],",
+          "new": "\"teams\": sorted((_team_to_json(t) for t in topology.teams), key=lambda d: d[\"name\"]),"
+        }
+      ],
+      "expect": "a topology must round-trip exactly"
+    },
+    {
+      "test": "test_topology_snapshot",
+      "name": "descriptions folded on save",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "\"description\": w.description,",
+          "new": "\"description\": \" \".join(w.description.split()),"
+        }
+      ],
+      "expect": "a topology must round-trip exactly"
+    },
+    {
+      "test": "test_topology_snapshot",
+      "name": "validated after the snapshot is replaced",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "    _validate(topology)\n    data = {",
+          "new": "    data = {"
+        },
+        {
+          "file": "topology.py",
+          "old": "        os.replace(tmp, target)\n",
+          "new": "        os.replace(tmp, target)\n        _validate(topology)\n"
+        }
+      ],
+      "expect": "an invalid topology is rejected before anything is written"
+    },
+    {
+      "test": "test_topology_snapshot",
+      "name": "validated while writing the temp file, cleaned up only on OSError",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "    _validate(topology)\n    data = {",
+          "new": "    data = {"
+        },
+        {
+          "file": "topology.py",
+          "old": "        with os.fdopen(fd, \"w\", encoding=\"utf-8\") as fh:\n",
+          "new": "        with os.fdopen(fd, \"w\", encoding=\"utf-8\") as fh:\n            _validate(topology)\n"
+        },
+        {
+          "file": "topology.py",
+          "old": "    except BaseException:\n",
+          "new": "    except OSError:\n"
+        }
+      ],
+      "expect": "an invalid topology is rejected before anything is written"
+    },
+    {
+      "test": "test_topology_snapshot",
+      "name": "a missing router key read as None",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "t[\"router\"] if \"router\" in t else INHERIT",
+          "new": "t.get(\"router\")"
+        }
+      ],
+      "expect": "a topology must round-trip exactly"
+    },
+    {
+      "test": "test_topology_snapshot",
+      "name": "repeated names checked among workers and among teams only",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "    duplicates = sorted({n for n in names if names.count(n) > 1})\n",
+          "new": "    w = [n.name for n in topology.workers]\n    t = [n.name for n in topology.teams]\n    duplicates = sorted({n for n in w if w.count(n) > 1} | {n for n in t if t.count(n) > 1})\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_topology_snapshot",
+      "name": "root only checked to exist",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "    if topology.root not in {t.name for t in topology.teams}:\n",
+          "new": "    if topology.root not in known:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_budgeted_hierarchy",
+      "name": "fixed overhead left out of the budget",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "        used = overhead\n",
+          "new": "        used = 0\n"
+        },
+        {
+          "file": "budget.py",
+          "old": "group, used = [], overhead",
+          "new": "group, used = [], 0"
+        }
+      ],
+      "expect": "greedy groups, in order, each as long as the budget allows"
+    },
+    {
+      "test": "test_budgeted_hierarchy",
+      "name": "a prompt that exactly fills the budget treated as too big",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "if group and used + cost(item) > budget:",
+          "new": "if group and used + cost(item) >= budget:"
+        }
+      ],
+      "expect": "greedy groups, in order, each as long as the budget allows"
+    },
+    {
+      "test": "test_budgeted_hierarchy",
+      "name": "a group of one wrapped in its own supervisor",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "            if len(group) == 1:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "greedy groups, in order, each as long as the budget allows"
+    },
+    {
+      "test": "test_budgeted_hierarchy",
+      "name": "a sub-supervisor costed as the sum of its members",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "        return item.tokens if isinstance(item, WorkerSpec) else team_tokens\n",
+          "new": "        if isinstance(item, WorkerSpec):\n            return item.tokens\n        return sum(cost(next(x for x in [*workers, *teams] if x.name == m)) for m in item.members)\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_budgeted_hierarchy",
+      "name": "members' keywords concatenated with repeats",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "keywords += [k for k in member.keywords if k not in keywords]",
+          "new": "keywords += list(member.keywords)"
+        }
+      ],
+      "expect": "a supervisor's keywords are its members', in order, without repeats"
+    },
+    {
+      "test": "test_budgeted_hierarchy",
+      "name": "a level that fits exactly still gets grouped",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "while overhead + sum(cost(item) for item in level) > budget:",
+          "new": "while overhead + sum(cost(item) for item in level) >= budget:"
+        }
+      ],
+      "expect": "workers that fit under one supervisor get no extra layer"
+    },
+    {
+      "test": "test_budgeted_hierarchy",
+      "name": "no check for a worker too big for any prompt",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "    for worker in workers:\n        if overhead + worker.tokens > budget:\n",
+          "new": "    for worker in workers:\n        if False:\n"
+        }
+      ],
+      "expect": "the error names the worker that cannot fit in any prompt"
+    },
+    {
+      "test": "test_budgeted_hierarchy",
+      "name": "no check that a level shrinks",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "        if len(groups) == len(level):\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "instead of looping"
+    },
+    {
+      "test": "test_budgeted_hierarchy",
+      "name": "overhead left out of the check that a level fits",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "    while overhead + sum(cost(item) for item in level) > budget:\n",
+          "new": "    while sum(cost(item) for item in level) > budget:\n"
+        }
+      ],
+      "expect": "the root's prompt pays the overhead too"
+    },
+    {
+      "test": "test_budgeted_hierarchy",
+      "name": "supervisors numbered by group position, carried items included",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "        for group in groups:\n            if len(group) == 1:\n",
+          "new": "        for made, group in enumerate(groups):\n            if len(group) == 1:\n"
+        }
+      ],
+      "expect": "supervisors are numbered as made"
+    },
+    {
+      "test": "test_budgeted_hierarchy",
+      "name": "carried items moved after the new supervisors",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "        for group in groups:\n            if len(group) == 1:\n                level.append(group[0])\n                continue\n",
+          "new": "        carried = [g[0] for g in groups if len(g) == 1]\n        for group in groups:\n            if len(group) == 1:\n                continue\n"
+        },
+        {
+          "file": "budget.py",
+          "old": "            teams.append(team)\n            level.append(team)\n",
+          "new": "            teams.append(team)\n            level.append(team)\n        level += carried\n"
+        }
+      ],
+      "expect": "carried items keep their place"
+    },
+    {
+      "test": "test_budgeted_hierarchy",
+      "name": "keywords sorted and deduplicated through a set",
+      "edits": [
+        {
+          "file": "budget.py",
+          "old": "names, tuple(keywords), INHERIT)",
+          "new": "names, tuple(sorted(set(keywords))), INHERIT)"
+        }
+      ],
+      "expect": "a supervisor's keywords are its members', in order, without repeats"
+    },
+    {
+      "test": "test_tool_call_supervision",
+      "name": "every specialist gets the whole case",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "context = {field: case[field] for field in views[call.specialist] if field in case}",
+          "new": "context = dict(case)"
+        }
+      ],
+      "expect": "carrying exactly the fields its specialist may see"
+    },
+    {
+      "test": "test_tool_call_supervision",
+      "name": "missing case fields sent as null",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "context = {field: case[field] for field in views[call.specialist] if field in case}",
+          "new": "context = {field: case.get(field) for field in views[call.specialist]}"
+        }
+      ],
+      "expect": "carrying exactly the fields its specialist may see"
+    },
+    {
+      "test": "test_tool_call_supervision",
+      "name": "jsonrpc version sent as a number",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "            \"jsonrpc\": \"2.0\",\n",
+          "new": "            \"jsonrpc\": 2.0,\n"
+        }
+      ],
+      "expect": "carrying exactly the fields its specialist may see"
+    },
+    {
+      "test": "test_tool_call_supervision",
+      "name": "replies matched to calls in send order",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "        call = pending.pop(message[\"id\"])\n",
+          "new": "        call = pending.pop(next(iter(pending)))\n"
+        }
+      ],
+      "expect": "matched to calls by id"
+    },
+    {
+      "test": "test_tool_call_supervision",
+      "name": "error replies read as results",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "        if \"error\" in message:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "KeyError: 'result'"
+    },
+    {
+      "test": "test_tool_call_supervision",
+      "name": "notifications treated as replies",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "        if \"id\" not in message:\n            continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "KeyError: 'id'"
+    },
+    {
+      "test": "test_tool_call_supervision",
+      "name": "each call awaits its reply before the next is sent",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "        await channel.send(json.dumps(request))\n        pending[call_id] = call\n    while pending:\n",
+          "new": "        await channel.send(json.dumps(request))\n        pending[call_id] = call\n        while call_id in pending:\n"
+        },
+        {
+          "file": "rpc.py",
+          "old": "        message = json.loads(await channel.receive())\n        if \"id\" not in message:\n            continue\n        call = pending.pop(message[\"id\"])\n        if \"error\" in message:\n            yield ToolResult(message[\"id\"], call.specialist, False, message[\"error\"][\"message\"])\n        else:\n            yield ToolResult(message[\"id\"], call.specialist, True, message[\"result\"])\n",
+          "new": "            message = json.loads(await channel.receive())\n            if \"id\" not in message:\n                continue\n            call = pending.pop(message[\"id\"])\n            if \"error\" in message:\n                yield ToolResult(message[\"id\"], call.specialist, False, message[\"error\"][\"message\"])\n            else:\n                yield ToolResult(message[\"id\"], call.specialist, True, message[\"result\"])\n"
+        }
+      ],
+      "expect": "send every tool call before waiting for a reply"
+    },
+    {
+      "test": "test_tool_call_supervision",
+      "name": "all replies collected before the first is passed on",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "    while pending:\n",
+          "new": "    arrived = []\n    while pending:\n"
+        },
+        {
+          "file": "rpc.py",
+          "old": "            yield ToolResult(message[\"id\"], call.specialist, False, message[\"error\"][\"message\"])\n        else:\n            yield ToolResult(message[\"id\"], call.specialist, True, message[\"result\"])\n",
+          "new": "            arrived.append(ToolResult(message[\"id\"], call.specialist, False, message[\"error\"][\"message\"]))\n        else:\n            arrived.append(ToolResult(message[\"id\"], call.specialist, True, message[\"result\"]))\n    for result in arrived:\n        yield result\n"
+        }
+      ],
+      "expect": "pass each result on as soon as its reply arrives"
+    },
+    {
+      "test": "test_tool_call_supervision",
+      "name": "keeps reading after the last reply",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "    while pending:\n",
+          "new": "    while True:\n"
+        }
+      ],
+      "expect": "every call already has its reply; stop reading"
+    },
+    {
+      "test": "test_tool_call_supervision",
+      "name": "a background reader reads ahead and is never stopped",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "import json\n",
+          "new": "import asyncio\nimport json\n"
+        },
+        {
+          "file": "rpc.py",
+          "old": "    while pending:\n        message = json.loads(await channel.receive())\n",
+          "new": "    queue: asyncio.Queue = asyncio.Queue()\n\n    async def reader() -> None:\n        remaining = len(pending)\n        while remaining:\n            frame = json.loads(await channel.receive())\n            if \"id\" in frame:\n                remaining -= 1\n            await queue.put(frame)\n\n    task = asyncio.ensure_future(reader())\n    while pending:\n        message = await queue.get()\n"
+        }
+      ],
+      "expect": "read nothing the caller has not asked for"
+    },
+    {
+      "test": "test_tool_call_supervision",
+      "name": "call ids counted in arrival order",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "        call = pending.pop(message[\"id\"])\n",
+          "new": "        call = pending.pop(message[\"id\"])\n        message[\"id\"] = len(calls) - len(pending)\n"
+        }
+      ],
+      "expect": "matched to calls by id"
+    },
+    {
+      "test": "test_tool_call_supervision",
+      "name": "an error reply passed on with ok=True",
+      "edits": [
+        {
+          "file": "rpc.py",
+          "old": "call.specialist, False, message[\"error\"][\"message\"]",
+          "new": "call.specialist, True, message[\"error\"][\"message\"]"
+        }
+      ],
+      "expect": "results come out in the order their replies arrive"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "a team that came up empty is entered again",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "if name not in failed and matches(name):",
+          "new": "if matches(name):"
+        }
+      ],
+      "expect": "a team that came up empty is not entered again"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "keywords matched as substrings",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "return any(k.lower() in words for k in topology.find(name).keywords)",
+          "new": "return any(k.lower() in task.lower() for k in topology.find(name).keywords)"
+        }
+      ],
+      "expect": "keywords match whole words"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "an empty pick costs nothing",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "            ops += 1\n            pick = None\n",
+          "new": "            pick = None\n"
+        },
+        {
+          "file": "routing.py",
+          "old": "            indent = \"  \" * (len(path) - 1)\n",
+          "new": "            if pick is not None:\n                ops += 1\n            indent = \"  \" * (len(path) - 1)\n"
+        }
+      ],
+      "expect": "every pick costs an op, the empty ones too"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "backtrack limit off by one",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "            if backtracks == max_backtracks:\n                raise _GiveUp\n            backtracks += 1\n",
+          "new": "            backtracks += 1\n            if backtracks >= max_backtracks:\n                raise _GiveUp\n"
+        }
+      ],
+      "expect": "a team that came up empty is not entered again"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "dead-end team left on the path",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "                failed.add(team_name)\n                path.pop()\n",
+          "new": "                failed.add(team_name)\n"
+        }
+      ],
+      "expect": "a team that came up empty is not entered again"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "no check for a team inside itself",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "        if team_name in path:\n            raise ValueError",
+          "new": "        if False:\n            raise ValueError"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "words split on whitespace",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "    words = tokenize(task)\n",
+          "new": "    words = set(task.lower().split())\n"
+        }
+      ],
+      "expect": "keywords match whole words"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "a team that came up empty still offered, at the cost of an op",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "                if name not in failed and matches(name):\n",
+          "new": "                if matches(name):\n"
+        },
+        {
+          "file": "routing.py",
+          "old": "            if isinstance(topology.find(pick), WorkerSpec):\n",
+          "new": "            if pick in failed:\n                continue\n            if isinstance(topology.find(pick), WorkerSpec):\n"
+        }
+      ],
+      "expect": "every pick costs an op, the empty ones too"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "backtrack counted before the cap is checked with >",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "            if backtracks == max_backtracks:\n                raise _GiveUp\n            backtracks += 1\n",
+          "new": "            backtracks += 1\n            if backtracks > max_backtracks:\n                raise _GiveUp\n"
+        }
+      ],
+      "expect": "needing more backtracks than allowed leaves the task unresolved"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "a dead end at the root counted as a backtrack",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "    if worker is None:\n        return Route(None, (), ops, backtracks, tuple(trace))\n",
+          "new": "    if worker is None:\n        return Route(None, (), ops, backtracks + (topology.root in failed), tuple(trace))\n"
+        }
+      ],
+      "expect": "a dead end at the root leaves the task unresolved"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "teams that came up empty remembered across tasks",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "class _GiveUp(Exception):\n",
+          "new": "_FAILED: set = set()\n\n\nclass _GiveUp(Exception):\n"
+        },
+        {
+          "file": "routing.py",
+          "old": "    failed: set[str] = set()\n",
+          "new": "    failed = _FAILED\n"
+        }
+      ],
+      "expect": "needing more backtracks than allowed leaves the task unresolved"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the worker that takes the task not counted",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "                ops += 1\n                path.append(pick)\n",
+          "new": "                path.append(pick)\n"
+        }
+      ],
+      "expect": "one op per pick, plus one for the worker"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "a dead end ends the search instead of backing out",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "            if visit(pick) is not None:\n                return path[-1]\n",
+          "new": "            if visit(pick) is not None:\n                return path[-1]\n            raise _GiveUp\n"
+        }
+      ],
+      "expect": "back out of a dead end to the next matching member"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "empty picks left out of the trace",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "                trace.append(f\"{indent}{team_name} -> none{note}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "one trace line per pick, the empty ones too, and nothing else"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "an empty pick written as None",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "            trace.append(f\"{indent}{team_name} -> {pick}{note}\")\n            if isinstance(",
+          "new": "            if isinstance("
+        },
+        {
+          "file": "routing.py",
+          "old": "            if pick is None:\n                trace.append(f\"{indent}{team_name} -> none{note}\")\n",
+          "new": "            trace.append(f\"{indent}{team_name} -> {pick}{note}\")\n            if pick is None:\n"
+        }
+      ],
+      "expect": "names the team it came back from"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "a pick after a backtrack not marked with where the task came back from",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "            note = f\", back from {back_from}\" if back_from else \"\"\n",
+          "new": "            note = \"\"\n"
+        }
+      ],
+      "expect": "names the team it came back from"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the backtrack marked on the dead end's own line",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "            note = f\", back from {back_from}\" if back_from else \"\"\n",
+          "new": "            note = \"\"\n"
+        },
+        {
+          "file": "routing.py",
+          "old": "                trace.append(f\"{indent}{team_name} -> none{note}\")\n",
+          "new": "                trace.append(f\"{indent}{team_name} -> none\" + (f\", back to {path[-2]}\" if len(path) > 1 else \"\"))\n"
+        }
+      ],
+      "expect": "names the team it came back from"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the back mark left off an empty pick",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "                trace.append(f\"{indent}{team_name} -> none{note}\")\n",
+          "new": "                trace.append(f\"{indent}{team_name} -> none\")\n"
+        }
+      ],
+      "expect": "names the team it came back from"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "backtracks written as trace lines of their own",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "            back_from = pick\n",
+          "new": "            trace.append(f\"{indent}back from {pick}\")\n"
+        }
+      ],
+      "expect": "one trace line per pick, the empty ones too, and nothing else"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "trace depth raised on the way down, never lowered after a dead end",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "    backtracks = 0\n",
+          "new": "    backtracks = 0\n    depth = -1\n"
+        },
+        {
+          "file": "routing.py",
+          "old": "        nonlocal ops, backtracks\n",
+          "new": "        nonlocal ops, backtracks, depth\n"
+        },
+        {
+          "file": "routing.py",
+          "old": "        path.append(team_name)\n",
+          "new": "        path.append(team_name)\n        depth += 1\n"
+        },
+        {
+          "file": "routing.py",
+          "old": "            indent = \"  \" * (len(path) - 1)\n",
+          "new": "            indent = \"  \" * depth\n"
+        }
+      ],
+      "expect": "names the team it came back from"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the root's lines indented too",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "            indent = \"  \" * (len(path) - 1)\n",
+          "new": "            indent = \"  \" * len(path)\n"
+        }
+      ],
+      "expect": "two spaces for every team above it on the path"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the worker that takes the task written as a trace line",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "                ops += 1\n                path.append(pick)\n",
+          "new": "                ops += 1\n                trace.append(f\"{indent}  {pick} takes the task\")\n                path.append(pick)\n"
+        }
+      ],
+      "expect": "two spaces for every team above it on the path"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "an unresolved task returned without its trace",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "        return Route(None, (), ops, backtracks, tuple(trace))\n",
+          "new": "        return Route(None, (), ops, backtracks)\n"
+        }
+      ],
+      "expect": "an unresolved task keeps the trace of every pick it made"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "one trace list shared by every task",
+      "edits": [
+        {
+          "file": "routing.py",
+          "old": "class _GiveUp(Exception):\n",
+          "new": "_TRACE: list = []\n\n\nclass _GiveUp(Exception):\n"
+        },
+        {
+          "file": "routing.py",
+          "old": "    trace: list[str] = []\n",
+          "new": "    trace = _TRACE\n"
+        }
+      ],
+      "expect": "one trace line per pick, the empty ones too, and nothing else"
+    }
+  ]
+}

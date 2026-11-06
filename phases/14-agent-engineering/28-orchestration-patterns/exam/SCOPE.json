@@ -1,0 +1,145 @@
+{
+  "lesson": "phases/14-agent-engineering/28-orchestration-patterns",
+  "title": "Orchestration Patterns: Supervisor, Swarm, Hierarchical",
+  "format": "staged-brownfield",
+  "service": "Orchestra: supervisors that route through a routing LLM, a JSON topology snapshot, a context-budget hierarchy planner, tool-call supervision over JSON-RPC 2.0, and deterministic keyword routing with backtracking and a trace of every pick",
+  "sources": {
+    "docs/en.md": "c45bf70a77e6c5a172587da2d472cc0d398e62b3bd48352ad4da34d108a2a7f2",
+    "code/main.py": "6673d3b7fff2c994e9f1c07880a2e372049842e318f4f5db064c82bb3de12d17"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network and no LLM: the routing LLM and the specialists are deterministic objects the tests supply",
+  "deviations": [
+    "Part 1 leaves the swarm out: the plan's swarm defect (hops run out and the task is dropped) is the hop-counter trap of lesson 16, which this lesson is told to avoid. Part 1 instead debugs the supervisor itself: prompt folding, the nested outcome, the lesson code's default-to-sales fallback, and the prompt rebuilt on every decision.",
+    "Part 1 has no separate top/sub classify mismatch: with members owned per supervisor the hierarchy is consistent by construction. Its hierarchical defect is the nested outcome instead (a supervisor passes its sub-supervisor's outcome through without its own hop, so the hierarchy looks as cheap as one level), and the fallback to the first member is the defect that sends tasks to the wrong specialist. Lesson 12's Part 1 plants the raw-label lookup in route(), so this route() already strips the router's reply.",
+    "Part 2 models the router field as model name / null / missing, mapping the lesson's Crew (LLM router) and Flow (deterministic) modes plus inheritance; tuples for members and keywords give the round-trip type trap.",
+    "Part 3 returns a Topology from Part 2 and adds team keywords (members' keywords without repeats), which Part 5's routing uses.",
+    "Part 5 ships tokenize() in the starter: substring matching and word splitting are already main traps of lesson 26 (Part 1) and lesson 08 (Part 3), so here the 'debugger' and 'Quote,' tasks are side checks. Its main traps are the backtracking rule and the Build It trace (one line per pick, empty picks and backtracks included, indented like code/main.py's hierarchical trace). The backtrack cap stays a cap on search, not a hop counter: hop counting is lesson 16's Part 1 defect, and a team reached again on its own path raises ValueError, so picks cannot bounce."
+  ],
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_supervisor_routing",
+      "kind": "debug",
+      "lesson_anchor": "Supervisor-worker (central router; specialists do not talk to each other); Hierarchical; Build It (per-pattern trace and op count, hierarchical is deepest); code/main.py classify (unknown intents fall back to sales) and hierarchical (one op and one trace line per level)",
+      "planted_bugs": [
+        "prompt() only strips descriptions, so a multi-line description spills onto a second line; the failure surfaces inside the test's routing LLM stub ('prompt line is not a member'), one call away from prompt()",
+        "run() hands a sub-supervisor's outcome back as it is (return member.run(task)), so the path starts below the supervisor that got the task and the op count leaves out its own routing decision: desk -> customer_ops -> bug reports 2 ops instead of 3",
+        "a reply that names no member falls back to the first member, like main.py's return \"sales\", instead of ESCALATE; a reply that names another team's worker (refund, asked of commercial) escalates too",
+        "prompt() rebuilds every member line on every routing decision: 800 tasks over 3000 workers"
+      ],
+      "timing_assert": "800 routing decisions over 3000 workers under 0.04 s. Measured on this machine (Python 3.12.14, other agents running, load average 4-9): rebuilt prompt 0.45-1.1 s, cached prompt 0.51-1.33 ms. Registering 3000 workers under 0.05 s: 0.15-0.38 ms as shipped and in the reference, 0.74-1.34 s when register rebuilds the prompt eagerly, 5.5-7 ms when register appends one line to a cached prompt string",
+      "overfix_guard": "a worker registered between two batches gets its tasks and appears in the prompt (rules out a cache that never invalidates); registering stays cheap (rules out rebuilding in register, O(N^2)); the exact prompt text rules out deleting newlines, or replacing each one with a space, instead of folding whitespace; a reply naming another team's worker escalates (rules out escalating on the literal reply none only)"
+    },
+    {
+      "part": 2,
+      "test": "test_topology_snapshot",
+      "kind": "model and persistence",
+      "lesson_anchor": "Anthropic's guidance (decision order) and Autonomous crews vs deterministic flows: the topology as configuration; a team's router is an LLM model (Crew), null (Flow), or inherited",
+      "storage": "JSON snapshot, written to a temp file in the same directory and moved into place with os.replace",
+      "exactness": "workers and teams round-trip exactly, including order, non-ASCII and newlines in descriptions, tuple fields, and INHERIT (key missing) versus None (router null)",
+      "traps": [
+        "INHERIT written as null",
+        "a missing router key read as None",
+        "lists not converted back to tuples",
+        "teams sorted",
+        "descriptions folded on save",
+        "repeated names checked among workers and among teams only",
+        "root only checked to exist",
+        "validating after the replace",
+        "validating while the temp file is written, cleaned up only on OSError",
+        "writing the snapshot in place",
+        "temp file left behind after a failed replace",
+        "temp file in the system temp directory"
+      ],
+      "clarifying_questions": [
+        "indentation",
+        "fsync",
+        "unknown format version"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_budgeted_hierarchy",
+      "kind": "core algorithm",
+      "lesson_anchor": "Hierarchical: when a single supervisor's context budget cannot hold descriptions of all specialists; Exercise 3; Where this pattern goes wrong: Fake hierarchy (collapse); outputs/skill-orchestration-picker.md (a branch with one specialist is flattened)",
+      "traps": [
+        "fixed overhead left out",
+        "overhead left out of the check that a level fits (the root's prompt pays it too)",
+        "a prompt exactly at the budget",
+        "sub-supervisor costed as its members' tokens",
+        "a group of one wrapped in a supervisor",
+        "carried items moved after the new supervisors",
+        "supervisors numbered by group position",
+        "keywords with repeats, or sorted",
+        "a level that already fits grouped again",
+        "worker too big for any prompt",
+        "a level that cannot shrink loops forever"
+      ],
+      "clarifying_questions": [
+        "greedy versus optimal",
+        "root budget",
+        "single-member supervisors"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_tool_call_supervision",
+      "kind": "streaming",
+      "lesson_anchor": "2026 LangChain recommendation: supervision through direct tool calls, deciding exactly what each specialist sees",
+      "wire_format": "JSON-RPC 2.0 frames between supervisor and specialists: requests with jsonrpc \"2.0\", integer ids from 1, method = specialist, params {instruction, context}; replies with result or error {code, message}; notifications without id",
+      "traps": [
+        "whole case or null fields in context",
+        "jsonrpc version as a number",
+        "replies paired in send order",
+        "call ids counted in arrival order",
+        "error replies read as results, or passed on as ok",
+        "notifications treated as replies",
+        "send one, await one",
+        "buffering every reply before yielding",
+        "a background reader that reads ahead and is never stopped",
+        "reading after the last reply",
+        "unknown specialist refused before sending"
+      ],
+      "clarifying_questions": [
+        "one specialist failing",
+        "unknown reply id",
+        "forwarding progress"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_hierarchical_routing",
+      "kind": "recursive structure",
+      "lesson_anchor": "Hierarchical (nested subgraphs); CrewAI Flow (deterministic routing); Build It (per-pattern trace and op count; hierarchical is deepest); code/main.py hierarchical (one trace line per level, two more spaces per level) and classify (keywords as substrings, \"bug\" in t)",
+      "traps": [
+        "backtracking to the next matching member",
+        "a dead end ending the search",
+        "a dead end at the root counted as a backtrack",
+        "empty picks left out of the trace, or written as None",
+        "a pick after a backtrack not marked with the team it came back from, or the mark put on the dead end's line",
+        "trace depth not lowered after a dead end, so the dead-end team stays above later lines",
+        "the root's lines indented, the worker or a backtrack written as a line of its own",
+        "an unresolved task returned without its trace",
+        "one trace list shared across tasks",
+        "declared order among matches",
+        "a team that came up empty entered again through another parent",
+        "a team that came up empty offered again at the cost of an op",
+        "empty picks not counted as ops",
+        "the worker's op not counted",
+        "backtrack cap off by one, either way",
+        "dead ends remembered across tasks",
+        "dead-end team left on the path",
+        "team inside itself",
+        "side check, tokenize given: substring keyword match",
+        "side check, tokenize given: words split on whitespace"
+      ],
+      "clarifying_questions": [
+        "root keywords",
+        "workers refusing",
+        "a dead end at the root",
+        "a trace line for the worker",
+        "a trace line when the cap stops the search"
+      ]
+    }
+  ]
+}
