@@ -1,0 +1,531 @@
+{
+  "package": "asrkit",
+  "tests": [
+    "test_greedy_and_wer",
+    "test_transcript_store",
+    "test_prefix_beam_search",
+    "test_stream_words",
+    "test_lattice_nbest"
+  ],
+  "layers": [
+    {
+      "test": "test_greedy_and_wer",
+      "steps": [
+        {"name": "as shipped", "edits": [], "expect": "a clean decode scores zero"},
+        {
+          "name": "fix greedy_decode",
+          "edits": [{"file": "ctc.py",
+                       "old": "            out.append(token)\n            prev = token\n",
+                       "new": "            out.append(token)\n        prev = token\n"}],
+          "expect": "ZeroDivisionError"
+        },
+        {
+          "name": "+ divide by the reference length",
+          "edits": [{"file": "scoring.py",
+                       "old": "    return edit_distance(ref, hyp) / len(hyp)\n",
+                       "new": "    return edit_distance(ref, hyp) / len(ref)\n"}],
+          "expect": "scoring should stay fast as utterances grow"
+        },
+        {
+          "name": "+ memoize the recursion",
+          "edits": [{"file": "scoring.py",
+                       "old": "    def dist(i: int, j: int) -> int:\n",
+                       "new": "    @__import__(\"functools\").lru_cache(maxsize=None)\n    def dist(i: int, j: int) -> int:\n"}],
+          "expect": "maximum recursion depth exceeded"
+        },
+        {
+          "name": "+ bottom-up table instead of recursion",
+          "edits": [{"file": "scoring.py",
+                       "old": "    @__import__(\"functools\").lru_cache(maxsize=None)\n    def dist(i: int, j: int) -> int:\n        if i == 0:\n            return j\n        if j == 0:\n            return i\n        cost = 0 if ref[i - 1] == hyp[j - 1] else 1\n        return min(dist(i - 1, j) + 1, dist(i, j - 1) + 1, dist(i - 1, j - 1) + cost)\n\n    return dist(len(ref), len(hyp))\n",
+                       "new": "    prev = list(range(len(hyp) + 1))\n    for i, r in enumerate(ref, 1):\n        cur = [i]\n        for j, h in enumerate(hyp, 1):\n            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (r != h)))\n        prev = cur\n    return prev[-1]\n"}],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_greedy_and_wer",
+      "name": "WER clipped at 1",
+      "edits": [{"file": "scoring.py",
+                  "old": "    return edit_distance(ref, hyp) / len(ref)\n",
+                  "new": "    return min(1.0, edit_distance(ref, hyp) / len(ref))\n"}],
+      "expect": "insertions count in full, so WER can pass 1"
+    },
+    {
+      "test": "test_greedy_and_wer",
+      "name": "divided by the longer of the two transcripts",
+      "edits": [{"file": "scoring.py",
+                  "old": "    return edit_distance(ref, hyp) / len(ref)\n",
+                  "new": "    return edit_distance(ref, hyp) / max(len(ref), len(hyp))\n"}],
+      "expect": "insertions count in full, so WER can pass 1"
+    },
+    {
+      "test": "test_greedy_and_wer",
+      "name": "blanks dropped before repeats are merged",
+      "edits": [{"file": "ctc.py",
+                  "old": "    out: list[int] = []\n    prev = None\n    for token in map(argmax, frames):\n        if token != blank and token != prev:\n            out.append(token)\n        prev = token\n    return out\n",
+                  "new": "    kept = [t for t in map(argmax, frames) if t != blank]\n    return [t for i, t in enumerate(kept) if i == 0 or t != kept[i - 1]]\n"}],
+      "expect": "a clean decode scores zero"
+    },
+    {
+      "test": "test_greedy_and_wer",
+      "name": "empty hypothesis special-cased, still divided by its length",
+      "edits": [{"file": "scoring.py",
+                  "old": "    return edit_distance(ref, hyp) / len(ref)\n",
+                  "new": "    if not hyp:\n        return 1.0\n    return edit_distance(ref, hyp) / len(hyp)\n"}],
+      "expect": "WER counts errors per reference word"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "NFKC instead of NFC",
+      "edits": [{"file": "store.py",
+                  "old": "unicodedata.normalize(\"NFC\", text)",
+                  "new": "unicodedata.normalize(\"NFKC\", text)"}],
+      "expect": "transcripts come back exactly, in NFC"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "ids kept as given, only text normalized",
+      "edits": [{"file": "store.py",
+                  "old": "        utt_id = nfc(utt_id)\n        if self._reference(utt_id) is not None:\n",
+                  "new": "        if self._reference(utt_id) is not None:\n"}],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "reference stored as given",
+      "edits": [{"file": "store.py",
+                  "old": "(utt_id, nfc(reference))",
+                  "new": "(utt_id, reference)"}],
+      "expect": "transcripts come back exactly, in NFC"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "lowercased for WER on the way in",
+      "edits": [{"file": "store.py",
+                  "old": "(utt_id, nfc(reference))",
+                  "new": "(utt_id, nfc(reference).lower())"}],
+      "expect": "transcripts come back exactly, in NFC"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "no commit after inserting a hypothesis",
+      "edits": [{"file": "store.py",
+                  "old": "        with self._db:\n            self._db.execute(\n                \"INSERT INTO hypotheses",
+                  "new": "        if True:\n            self._db.execute(\n                \"INSERT INTO hypotheses"}],
+      "expect": "a reopened store sees earlier transcripts"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "INSERT OR REPLACE instead of the conflict check",
+      "edits": [{"file": "store.py",
+                  "old": "        row = self._db.execute(\n            \"SELECT text FROM hypotheses WHERE utt_id = ? AND model = ?\", (utt_id, model)\n        ).fetchone()\n        if row is not None:\n            if row[0] != text:\n                raise ValueError(f\"{model!r} already has a different transcript of {utt_id!r}\")\n            return\n        with self._db:\n            self._db.execute(\n                \"INSERT INTO hypotheses",
+                  "new": "        with self._db:\n            self._db.execute(\n                \"INSERT OR REPLACE INTO hypotheses"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "unknown utterances left to a FOREIGN KEY constraint",
+      "edits": [{"file": "store.py",
+                  "old": "        if self._reference(utt_id) is None:\n            raise KeyError(utt_id)\n        row = ",
+                  "new": "        row = "},
+                {"file": "store.py",
+                  "old": "    utt_id TEXT NOT NULL,\n    model TEXT NOT NULL,",
+                  "new": "    utt_id TEXT NOT NULL REFERENCES utterances (utt_id),\n    model TEXT NOT NULL,"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "same-transcript check made before NFC",
+      "edits": [{"file": "store.py",
+                  "old": "        utt_id, model, text = nfc(utt_id), nfc(model), nfc(text)\n",
+                  "new": "        utt_id, model = nfc(utt_id), nfc(model)\n"},
+                {"file": "store.py",
+                  "old": "                (utt_id, model, text),\n",
+                  "new": "                (utt_id, model, nfc(text)),\n"}],
+      "expect": "already has a different transcript"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "case-insensitive same-transcript check",
+      "edits": [{"file": "store.py",
+                  "old": "            if row[0] != text:\n",
+                  "new": "            if row[0].casefold() != text.casefold():\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "get looks the id up as given",
+      "edits": [{"file": "store.py",
+                  "old": "        utt_id = nfc(utt_id)\n        reference = self._reference(utt_id)\n",
+                  "new": "        reference = self._reference(utt_id)\n"}],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "hypothesis compared in NFC but stored as given",
+      "edits": [{"file": "store.py",
+                  "old": "        utt_id, model, text = nfc(utt_id), nfc(model), nfc(text)\n",
+                  "new": "        utt_id, model, given = nfc(utt_id), nfc(model), text\n        text = nfc(given)\n"},
+                {"file": "store.py",
+                  "old": "                (utt_id, model, text),\n",
+                  "new": "                (utt_id, model, given),\n"}],
+      "expect": "Hangul is stored composed too"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "pairs ordered by when the hypotheses were recorded",
+      "edits": [{"file": "store.py",
+                  "old": "ORDER BY u.seq",
+                  "new": "ORDER BY h.rowid"}],
+      "expect": "in the order the utterances were added"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "pairs ordered by id",
+      "edits": [{"file": "store.py",
+                  "old": "ORDER BY u.seq",
+                  "new": "ORDER BY u.utt_id"}],
+      "expect": "in the order the utterances were added"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "duplicate utterance left to the UNIQUE constraint",
+      "edits": [{"file": "store.py",
+                  "old": "        if self._reference(utt_id) is not None:\n            raise ValueError(f\"utterance {utt_id!r} already exists\")\n",
+                  "new": ""}],
+      "expect": "IntegrityError"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [{"file": "store.py",
+                  "old": "CREATE TABLE IF NOT EXISTS utterances",
+                  "new": "CREATE TABLE utterances"}],
+      "expect": "table utterances already exists"
+    },
+    {
+      "test": "test_transcript_store",
+      "name": "ids folded to plain letters, as for WER",
+      "edits": [{"file": "store.py",
+                  "old": "def nfc(text: str) -> str:\n    return unicodedata.normalize(\"NFC\", text)\n",
+                  "new": "def nfc(text: str) -> str:\n    return unicodedata.normalize(\"NFC\", text)\n\n\ndef fold(text: str) -> str:\n    return \"\".join(c for c in unicodedata.normalize(\"NFD\", text) if not unicodedata.combining(c))\n"},
+                {"file": "store.py",
+                  "old": "        utt_id = nfc(utt_id)\n        if self._reference(utt_id) is not None:\n",
+                  "new": "        utt_id = fold(utt_id)\n        if self._reference(utt_id) is not None:\n"},
+                {"file": "store.py",
+                  "old": "        utt_id, model, text = nfc(utt_id), nfc(model), nfc(text)\n",
+                  "new": "        utt_id, model, text = fold(utt_id), nfc(model), nfc(text)\n"},
+                {"file": "store.py",
+                  "old": "        utt_id = nfc(utt_id)\n        reference = self._reference(utt_id)\n",
+                  "new": "        utt_id = fold(utt_id)\n        reference = self._reference(utt_id)\n"}],
+      "expect": "transcripts come back exactly, in NFC"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "best alignment only (Viterbi) instead of the sum",
+      "edits": [{"file": "ctc.py",
+                  "old": "    if a == -math.inf:\n        return b\n    if b == -math.inf:\n        return a\n    return max(a, b) + math.log1p(math.exp(-abs(a - b)))\n",
+                  "new": "    return max(a, b)\n"}],
+      "expect": "a prefix is as likely as all of its alignments together"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "a repeated letter always merges, as in the lesson's simple beam",
+      "edits": [{"file": "ctc.py",
+                  "old": "                    add(prefix + (token,), ends_token=p_blank + lp)  # a blank came between\n",
+                  "new": ""}],
+      "expect": "a blank between repeats keeps both letters"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "a repeat after a blank extends from the whole prefix",
+      "edits": [{"file": "ctc.py",
+                  "old": "ends_token=p_blank + lp)",
+                  "new": "ends_token=total + lp)"}],
+      "expect": "a prefix is as likely as all of its alignments together"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "a new letter extends only the blank-ending mass",
+      "edits": [{"file": "ctc.py",
+                  "old": "add(prefix + (token,), ends_token=total + lp)",
+                  "new": "add(prefix + (token,), ends_token=p_blank + lp)"}],
+      "expect": "with nothing pruned, every possible prefix gets its exact probability"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "score counts only alignments that end in a letter",
+      "edits": [{"file": "ctc.py",
+                  "old": "    result = [(prefix, log_add(*mass)) for prefix, mass in beams.items()]\n",
+                  "new": "    result = [(prefix, mass[1]) for prefix, mass in beams.items()]\n"}],
+      "expect": "a prefix is as likely as all of its alignments together"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "the lesson's log(exp(a) + exp(b)), with -inf guards",
+      "edits": [{"file": "ctc.py",
+                  "old": "    return max(a, b) + math.log1p(math.exp(-abs(a - b)))\n",
+                  "new": "    return math.log(math.exp(a) + math.exp(b))\n"}],
+      "expect": "math domain error"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "stable log_add without the -inf guards",
+      "edits": [{"file": "ctc.py",
+                  "old": "    if a == -math.inf:\n        return b\n    if b == -math.inf:\n        return a\n",
+                  "new": ""}],
+      "expect": "a prefix is as likely as all of its alignments together"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "no pruning",
+      "edits": [{"file": "ctc.py",
+                  "old": "ranked[:beam]",
+                  "new": "ranked"}],
+      "expect": "only the beam best prefixes survive each frame"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "pruned only once, at the end",
+      "edits": [{"file": "ctc.py",
+                  "old": "        beams = {prefix: nxt[prefix] for prefix, score in ranked[:beam] if score > neg}\n",
+                  "new": "        beams = {prefix: nxt[prefix] for prefix, score in ranked if score > neg}\n"},
+                {"file": "ctc.py",
+                  "old": "    return sorted(result, key=lambda item: (-item[1], item[0]))\n",
+                  "new": "    return sorted(result, key=lambda item: (-item[1], item[0]))[:beam]\n"}],
+      "expect": "only the beam best prefixes survive each frame"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "zero-probability prefixes kept",
+      "edits": [{"file": "ctc.py",
+                  "old": " if score > neg}",
+                  "new": "}"}],
+      "expect": "a prefix is as likely as all of its alignments together"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "beam ranked by the larger of the two masses",
+      "edits": [{"file": "ctc.py",
+                  "old": "            ((prefix, log_add(*mass)) for prefix, mass in nxt.items()),\n",
+                  "new": "            ((prefix, max(mass)) for prefix, mass in nxt.items()),\n"}],
+      "expect": "the beam keeps the prefixes with the most probability over all their alignments"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "candidates cut to the beam before equal prefixes are merged",
+      "edits": [{"file": "ctc.py",
+                  "old": "        nxt: dict[Prefix, tuple[float, float]] = {}\n\n        def add(prefix: Prefix, ends_blank: float = neg, ends_token: float = neg) -> None:\n            b, t = nxt.get(prefix, (neg, neg))\n            nxt[prefix] = (log_add(b, ends_blank), log_add(t, ends_token))\n",
+                  "new": "        candidates = []\n\n        def add(prefix: Prefix, ends_blank: float = neg, ends_token: float = neg) -> None:\n            candidates.append((prefix, ends_blank, ends_token))\n"},
+                {"file": "ctc.py",
+                  "old": "        ranked = sorted(\n            ((prefix, log_add(*mass)) for prefix, mass in nxt.items()),",
+                  "new": "        candidates.sort(key=lambda c: -log_add(c[1], c[2]))\n        nxt = {}\n        for prefix, ends_blank, ends_token in candidates[:beam]:\n            b, t = nxt.get(prefix, (neg, neg))\n            nxt[prefix] = (log_add(b, ends_blank), log_add(t, ends_token))\n        ranked = sorted(\n            ((prefix, log_add(*mass)) for prefix, mass in nxt.items()),"}],
+      "expect": "the beam keeps the prefixes with the most probability over all their alignments"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "blank extends only the blank-ending mass",
+      "edits": [{"file": "ctc.py",
+                  "old": "add(prefix, ends_blank=total + frame[blank])",
+                  "new": "add(prefix, ends_blank=p_blank + frame[blank])"}],
+      "expect": "a prefix is as likely as all of its alignments together"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "held letter not merged back into its prefix",
+      "edits": [{"file": "ctc.py",
+                  "old": "                    add(prefix, ends_token=p_token + lp)  # the same token held: no new letter\n",
+                  "new": ""}],
+      "expect": "a prefix is as likely as all of its alignments together"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "empty prefix starts with both masses at log 1",
+      "edits": [{"file": "ctc.py",
+                  "old": "{(): (0.0, neg)}",
+                  "new": "{(): (0.0, 0.0)}"}],
+      "expect": "a prefix is as likely as all of its alignments together"
+    },
+    {
+      "test": "test_prefix_beam_search",
+      "name": "beam rescaled to a total of one after every frame",
+      "edits": [{"file": "ctc.py",
+                  "old": "        beams = {prefix: nxt[prefix] for prefix, score in ranked[:beam] if score > neg}\n",
+                  "new": "        beams = {prefix: nxt[prefix] for prefix, score in ranked[:beam] if score > neg}\n        z = neg\n        for p_blank, p_token in beams.values():\n            z = log_add(z, log_add(p_blank, p_token))\n        beams = {prefix: (b - z, t - z) for prefix, (b, t) in beams.items()}\n"}],
+      "expect": "only the beam best prefixes survive each frame"
+    },
+    {
+      "test": "test_stream_words",
+      "name": "collapse state reset for every chunk",
+      "edits": [{"file": "stream.py",
+                  "old": "    async for chunk in chunks:\n        for frame in chunk:\n",
+                  "new": "    async for chunk in chunks:\n        prev = None\n        for frame in chunk:\n"}],
+      "expect": "same events whatever the chunking"
+    },
+    {
+      "test": "test_stream_words",
+      "name": "frames counted within each chunk",
+      "edits": [{"file": "stream.py",
+                  "old": "    async for chunk in chunks:\n        for frame in chunk:\n",
+                  "new": "    async for chunk in chunks:\n        index = 0\n        for frame in chunk:\n"}],
+      "expect": "same events whatever the chunking"
+    },
+    {
+      "test": "test_stream_words",
+      "name": "one newline between messages",
+      "edits": [{"file": "stream.py",
+                  "old": "    return f\"event: {kind}\\ndata: {json.dumps(data)}\\n\\n\"\n",
+                  "new": "    return f\"event: {kind}\\ndata: {json.dumps(data)}\\n\"\n"}],
+      "expect": "every message ends with a blank line"
+    },
+    {
+      "test": "test_stream_words",
+      "name": "last word never flushed",
+      "edits": [{"file": "stream.py",
+                  "old": "    if word:\n        yield _final(word, start, end, frame_ms)\n\n\n",
+                  "new": "\n\n"}],
+      "expect": "same events whatever the chunking"
+    },
+    {
+      "test": "test_stream_words",
+      "name": "empty words from doubled spaces",
+      "edits": [{"file": "stream.py",
+                  "old": "            if token == SPACE:\n                if word:\n                    yield _final(word, start, end, frame_ms)\n                    word = \"\"\n",
+                  "new": "            if token == SPACE:\n                yield _final(word, start, end, frame_ms)\n                word = \"\"\n"}],
+      "expect": "same events whatever the chunking"
+    },
+    {
+      "test": "test_stream_words",
+      "name": "reads the whole stream before decoding",
+      "edits": [{"file": "stream.py",
+                  "old": "    async for chunk in chunks:\n        for frame in chunk:\n",
+                  "new": "    everything = [frame async for chunk in chunks for frame in chunk]\n    for chunk in [everything]:\n        for frame in chunk:\n"}],
+      "expect": "emit each event as soon as it is known"
+    },
+    {
+      "test": "test_stream_words",
+      "name": "word start set after the space that closed the last word",
+      "edits": [{"file": "stream.py",
+                  "old": "                    word = \"\"\n",
+                  "new": "                    word = \"\"\n                start = index + 1\n"},
+                {"file": "stream.py",
+                  "old": "                    if not word:\n                        start = index\n",
+                  "new": ""}],
+      "expect": "same events whatever the chunking"
+    },
+    {
+      "test": "test_stream_words",
+      "name": "end moved only when a letter is added",
+      "edits": [{"file": "stream.py",
+                  "old": "                    yield _event(\"partial\", {\"text\": word})\n                end = index + 1\n",
+                  "new": "                    end = index + 1\n                    yield _event(\"partial\", {\"text\": word})\n"}],
+      "expect": "same events whatever the chunking"
+    },
+    {
+      "test": "test_stream_words",
+      "name": "an empty chunk taken as the end of the stream",
+      "edits": [{"file": "stream.py",
+                  "old": "    async for chunk in chunks:\n        for frame in chunk:\n",
+                  "new": "    async for chunk in chunks:\n        if not chunk:\n            break\n        for frame in chunk:\n"}],
+      "expect": "same events whatever the chunking"
+    },
+    {
+      "test": "test_stream_words",
+      "name": "timestamps in seconds",
+      "edits": [{"file": "stream.py",
+                  "old": "\"start_ms\": start * frame_ms, \"end_ms\": end * frame_ms",
+                  "new": "\"start_ms\": start * frame_ms / 1000, \"end_ms\": end * frame_ms / 1000"}],
+      "expect": "same events whatever the chunking"
+    },
+    {
+      "test": "test_stream_words",
+      "name": "prev not updated on space frames",
+      "edits": [{"file": "stream.py",
+                  "old": "            prev = token\n            index += 1\n",
+                  "new": "            if token != SPACE:\n                prev = token\n            index += 1\n"}],
+      "expect": "a word can start with the letter the previous word ended with"
+    },
+    {
+      "test": "test_lattice_nbest",
+      "name": "nodes taken in id order",
+      "edits": [{"file": "lattice.py",
+                  "old": "    for node in order:\n        paths = reached.pop(node, None)",
+                  "new": "    for node in sorted(nodes):\n        paths = reached.pop(node, None)"}],
+      "expect": "no path from 0 to 7"
+    },
+    {
+      "test": "test_lattice_nbest",
+      "name": "one arc kept per pair of nodes",
+      "edits": [{"file": "lattice.py",
+                  "old": "    leaving: dict[int, list[Arc]] = defaultdict(list)\n",
+                  "new": "    arcs = list({(arc.src, arc.dst): arc for arc in arcs}.values())\n    leaving: dict[int, list[Arc]] = defaultdict(list)\n"}],
+      "expect": "alternatives between the same two nodes included"
+    },
+    {
+      "test": "test_lattice_nbest",
+      "name": "a transcript listed once per path",
+      "edits": [{"file": "lattice.py",
+                  "old": "    best: dict[tuple[str, ...], float] = {}\n    for words, score in paths:\n        if words not in best or score > best[words]:\n            best[words] = score\n    return sorted(best.items(),",
+                  "new": "    return sorted(paths,"}],
+      "expect": "n-best lists each transcript once"
+    },
+    {
+      "test": "test_lattice_nbest",
+      "name": "lm_weight applied to the whole arc",
+      "edits": [{"file": "lattice.py",
+                  "old": "            step = arc.am + lm_weight * arc.lm\n",
+                  "new": "            step = lm_weight * (arc.am + arc.lm)\n"}],
+      "expect": "lm_weight scales the language-model scores only"
+    },
+    {
+      "test": "test_lattice_nbest",
+      "name": "no cycle check",
+      "edits": [{"file": "lattice.py",
+                  "old": "    if len(order) < len(nodes):\n        raise ValueError(\"the lattice has a cycle\")\n",
+                  "new": ""}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_lattice_nbest",
+      "name": "every path enumerated",
+      "edits": [{"file": "lattice.py",
+                  "old": "    # node -> (words so far, score) for the paths that have reached it\n    reached: dict[int, list[tuple[tuple[str, ...], float]]] = {start: [((), 0.0)]}\n    for node in order:\n        paths = reached.pop(node, None)\n        if not paths:\n            continue\n        top = _best_distinct(paths, n)\n        if node == end:\n            return [(\" \".join(words), score) for words, score in top]\n        for arc in leaving[node]:\n            step = arc.am + lm_weight * arc.lm\n            extra = () if arc.word is None else (arc.word,)\n            arriving = reached.setdefault(arc.dst, [])\n            arriving.extend((words + extra, score + step) for words, score in top)\n    raise ValueError(f\"no path from {start} to {end}\")\n",
+                  "new": "    found: dict[str, float] = {}\n\n    def walk(node: int, words: tuple[str, ...], score: float) -> None:\n        if node == end:\n            text = \" \".join(words)\n            found[text] = max(score, found.get(text, score))\n            return\n        for arc in leaving[node]:\n            extra = () if arc.word is None else (arc.word,)\n            walk(arc.dst, words + extra, score + arc.am + lm_weight * arc.lm)\n\n    walk(start, (), 0.0)\n    if not found:\n        raise ValueError(f\"no path from {start} to {end}\")\n    return sorted(found.items(), key=lambda item: (-item[1], item[0]))[:n]\n"}],
+      "expect": "the work should grow with the arcs, not with the 2**20 paths"
+    },
+    {
+      "test": "test_lattice_nbest",
+      "name": "duplicates removed only at the end node",
+      "edits": [{"file": "lattice.py",
+                  "old": "        top = _best_distinct(paths, n)\n        if node == end:\n            return [(\" \".join(words), score) for words, score in top]\n",
+                  "new": "        if node == end:\n            top = _best_distinct(paths, n)\n            return [(\" \".join(words), score) for words, score in top]\n        top = sorted(paths, key=lambda item: (-item[1], \" \".join(item[0])))[:n]\n"}],
+      "expect": "n-best lists each transcript once"
+    },
+    {
+      "test": "test_lattice_nbest",
+      "name": "silence arcs add no score",
+      "edits": [{"file": "lattice.py",
+                  "old": "            step = arc.am + lm_weight * arc.lm\n",
+                  "new": "            step = 0.0 if arc.word is None else arc.am + lm_weight * arc.lm\n"}],
+      "expect": "follow the arcs, whatever the node numbers"
+    },
+    {
+      "test": "test_lattice_nbest",
+      "name": "no path returns an empty list",
+      "edits": [{"file": "lattice.py",
+                  "old": "    raise ValueError(f\"no path from {start} to {end}\")\n",
+                  "new": "    return []\n"}],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_lattice_nbest",
+      "name": "lm_weight scales the acoustic score",
+      "edits": [{"file": "lattice.py",
+                  "old": "            step = arc.am + lm_weight * arc.lm\n",
+                  "new": "            step = lm_weight * arc.am + arc.lm\n"}],
+      "expect": "lm_weight scales the language-model scores only"
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+{
+  "lesson": "phases/06-speech-and-audio/04-speech-recognition-asr",
+  "title": "Speech Recognition (ASR) — CTC, RNN-T, Attention",
+  "format": "staged-brownfield",
+  "service": "ASRKit: CTC decoding of acoustic-model frames, WER, a SQLite transcript store, streaming word events and word-lattice rescoring",
+  "sources": {
+    "docs/en.md": "8636c6f5f698e085af96b807aff2733d606e41728a174fe1b80e31508c02f721",
+    "code/main.py": "6e5bd81c7ded72910f676beef40e9631ac10645ad3c5ef4fbb5b618b9e7e20c0"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_greedy_and_wer",
+      "kind": "debug",
+      "lesson_anchor": "Build It, Steps 1 and 3: greedy CTC decode and WER; quiz Q9(b), Q8 and Q11",
+      "planted_bugs": [
+        "greedy_decode updates prev only when it emits a letter, so a blank no longer separates repeats and hello decodes as helo; the failure shows up two calls away, in the test's WER check",
+        "wer divides by the number of hypothesis words; silence that decodes to an empty string raises ZeroDivisionError",
+        "edit_distance is a plain three-way recursion, exponential in the transcript length",
+        "memoizing that recursion still overflows Python's recursion limit on a 600-word meeting transcript"
+      ],
+      "timing_assert": "10x10-word WER under 0.03 s; every word is misheard, so a match shortcut does not help (the exponential recursion takes 0.5-1.4 s, the shortcut variant about 0.5 s, the table under 0.1 ms)",
+      "overfix_guard": "wer('a b', 'a b c d e') == 1.5, which rules out clipping WER at 1 or dividing by the longer transcript",
+      "clarifying_questions": ["normalize before scoring", "empty reference", "WER above 1"],
+      "deviation": "The greedy bug is planted as the quiz Q9(b) form (prev updated only on emit), which behaves exactly like dropping blanks before merging; that second form is a wrong fix in traps.json. A fourth layer was added: memoization passes the timing check but not a meeting-length transcript, so the fix ends at the lesson's bottom-up table."
+    },
+    {
+      "part": 2,
+      "test": "test_transcript_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "WER is reported per model against stored references; Pitfalls: normalize before scoring, which belongs to the scorer and not to storage",
+      "exactness": "references and hypotheses round-trip code point for code point in NFC, including m², the ﬁ ligature and Hangul given in NFD, across close and reopen",
+      "traps": ["ids not normalized on write or on lookup (NFD file names miss NFC rows)", "hypotheses compared in NFC but stored as given", "NFKC instead of NFC", "WER-style lowercasing or accent folding in storage", "INSERT OR REPLACE over an immutable model version", "same-transcript check before NFC or case-insensitive", "UNIQUE constraint raises IntegrityError, not ValueError", "FOREIGN KEY not enforced by default", "missing commit", "CREATE TABLE without IF NOT EXISTS", "utterance order, not hypothesis order or id order"],
+      "clarifying_questions": ["NFC or NFKC", "normalize case and punctuation in the store", "re-recording a model version", "case and accents in ids"]
+    },
+    {
+      "part": 3,
+      "test": "test_prefix_beam_search",
+      "kind": "core algorithm",
+      "lesson_anchor": "Build It, Step 2 and Exercise 2: prefix beam search with P_blank / P_nonblank; quiz Q10 and Q12",
+      "traps": ["max (Viterbi) instead of summing alignments", "one probability per prefix loses double letters", "new letter extended from the blank-ending mass only", "score that leaves out the blank-ending mass", "the lesson's log(exp(a) + exp(b)) in the starter's log_add: -inf inputs and underflow on 1800 frames", "zero-probability prefixes returned", "pruning skipped, or done only at the end (a beam of 1 must return the empty prefix)", "beam ranked by the larger of the two masses, or cut before equal prefixes are merged", "scores rescaled every frame instead of log probabilities"],
+      "integration": "soft frames go through the service; greedy and beam hypotheses are stored in Part 2's store and scored with Part 1's WER",
+      "clarifying_questions": ["log-probabilities or probabilities", "language model", "fewer than beam prefixes", "equal scores"],
+      "deviation": "The starter ships log_add with the formula from the lesson's ctc_beam, so quiz Q12's underflow is a live trap rather than something the candidate has to think of."
+    },
+    {
+      "part": 4,
+      "test": "test_stream_words",
+      "kind": "streaming",
+      "lesson_anchor": "Build It, Step 5: streaming needs carryover state and timestamps; CTC is streamable with zero lookahead",
+      "wire_format": "Server-Sent Events: an event line, a data line with one JSON object, a blank line; decided by the test's parse_sse",
+      "traps": ["collapse state reset per chunk (a repeat split across chunks doubles a letter)", "frame index counted per chunk", "an empty chunk taken as the end of the stream", "empty words from doubled or leading spaces", "start_ms after the last space instead of at the first letter frame", "end_ms moved only on new letters", "prev not updated on space frames (go on decodes as go n)", "timestamps in seconds", "last word never flushed", "single newline between messages", "reading the whole stream first"],
+      "clarifying_questions": ["partial per held frame", "last word without a trailing space", "timestamp units"],
+      "deviation": "Finality comes from the space token or the end of the stream, not from a prefix staying stable for N frames. Greedy CTC never rewrites what it has emitted, so a stability window would only add latency, and a decoder that does rewrite is Part 3's beam search; building Part 4 on it would make Part 4 fail whenever Part 3 is unfinished. The stability rule for beam search is a follow-up question instead."
+    },
+    {
+      "part": 5,
+      "test": "test_lattice_nbest",
+      "kind": "graph",
+      "lesson_anchor": "LM fusion (Key Terms; Use It: domain LM fusion): acoustic and LM scores combined over decoder hypotheses",
+      "traps": ["node ids not in topological order", "parallel arcs between the same two nodes", "the same transcript through four paths (a pause before the first word, two trailing silences), deduplicated at every node and not only at the end", "silence arcs that add no score", "lm_weight applied to the acoustic score", "no path returning an empty list instead of raising", "a cycle on a dead end that does not block the end node", "enumerating 2**20 paths"],
+      "timing_assert": "20-stage ladder n-best under 0.05 s (path enumeration takes 0.7-1.05 s; the DP under 0.1 ms)",
+      "clarifying_questions": ["topological node ids", "duplicate transcripts", "cycles"],
+      "deviation": "Besides best path, n-best and cycle detection, the lattice carries acoustic and LM scores with an lm_weight, so the part exercises the lesson's LM fusion; a timing check rules out path enumeration."
+    }
+  ]
+}
