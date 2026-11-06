@@ -1,0 +1,1921 @@
+{
+  "package": "taskscope",
+  "tests": [
+    "test_scope_check",
+    "test_archive_roundtrip",
+    "test_glob_dialect",
+    "test_diff_scan",
+    "test_contract_chain"
+  ],
+  "layers": [
+    {
+      "test": "test_scope_check",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a path is in scope only when both contracts allow it"
+        },
+        {
+          "name": "merge keeps both allow-lists",
+          "edits": [
+            {
+              "file": "contract.py",
+              "old": "        allowed_files=sorted(set(parent.allowed_files) & set(child.allowed_files)),\n",
+              "new": "        allowed_files=list(child.allowed_files),\n        allowed_within=[*parent.allowed_within, list(parent.allowed_files), *child.allowed_within],\n"
+            }
+          ],
+          "expect": "the violation budget counts off-scope files"
+        },
+        {
+          "name": "+ budget counts off-scope files",
+          "edits": [
+            {
+              "file": "check.py",
+              "old": "        over_budget=warn_count > contract.violation_budget,\n",
+              "new": "        over_budget=len(off_scope) > contract.violation_budget,\n"
+            }
+          ],
+          "expect": "hosts compare case-insensitively and without a port"
+        },
+        {
+          "name": "+ hosts lowercased, port dropped",
+          "edits": [
+            {
+              "file": "check.py",
+              "old": "        bad_hosts = [h for h in run.network_hosts if h not in contract.network_egress]\n",
+              "new": "        allowed = {_host(h) for h in contract.network_egress}\n        bad_hosts = [h for h in run.network_hosts if _host(h) not in allowed]\n"
+            },
+            {
+              "file": "check.py",
+              "old": "def scope_check(",
+              "new": "def _host(host: str) -> str:\n    host = host.strip().lower()\n    if host.startswith(\"[\"):\n        return host[: host.find(\"]\") + 1]\n    return host.split(\":\")[0] if host.count(\":\") == 1 else host\n\n\ndef scope_check("
+            }
+          ],
+          "expect": "scope_check should be fast on large contracts and large diffs"
+        },
+        {
+          "name": "+ globs indexed by literal directory",
+          "edits": [
+            {
+              "file": "patterns.py",
+              "old": "    def __init__(self, patterns: Iterable[str]) -> None:\n        self.patterns = list(patterns)\n\n    def matches(self, path: str) -> bool:\n        return any(fnmatch.fnmatch(path, pattern) for pattern in self.patterns)\n",
+              "new": "    def __init__(self, patterns: Iterable[str]) -> None:\n        self.patterns = list(patterns)\n        self._exact = set()\n        self._by_directory = {}\n        for pattern in self.patterns:\n            first = min((pattern.find(c) for c in \"*?[\" if c in pattern), default=-1)\n            if first == -1:\n                self._exact.add(pattern)\n            else:\n                directory = pattern[: max(pattern.rfind(\"/\", 0, first), 0)]\n                self._by_directory.setdefault(directory, []).append(pattern)\n\n    def matches(self, path: str) -> bool:\n        if path in self._exact:\n            return True\n        cut = 0\n        while cut != -1:\n            for pattern in self._by_directory.get(path[:cut], ()):\n                if fnmatch.fnmatch(path, pattern):\n                    return True\n            cut = path.find(\"/\", cut + 1)\n        return False\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_scope_check",
+      "name": "allow-lists merged by union",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "        allowed_files=list(child.allowed_files),\n",
+          "new": "        allowed_files=sorted(set(parent.allowed_files) | set(child.allowed_files)),\n"
+        },
+        {
+          "file": "contract.py",
+          "old": "        allowed_within=[*parent.allowed_within, list(parent.allowed_files), *child.allowed_within],\n",
+          "new": ""
+        }
+      ],
+      "expect": "a path is in scope only when both contracts allow it"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "the child's allow-list replaces the parent's",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "        allowed_within=[*parent.allowed_within, list(parent.allowed_files), *child.allowed_within],\n",
+          "new": "        allowed_within=list(child.allowed_within),\n"
+        }
+      ],
+      "expect": "a path is in scope only when both contracts allow it"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "the parent's allow-list replaces the child's",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "        allowed_files=list(child.allowed_files),\n",
+          "new": "        allowed_files=list(parent.allowed_files),\n"
+        }
+      ],
+      "expect": "a path is in scope only when both contracts allow it"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "an empty child allow-list falls back to the parent's",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "        allowed_files=list(child.allowed_files),\n",
+          "new": "        allowed_files=list(child.allowed_files or parent.allowed_files),\n"
+        }
+      ],
+      "expect": "an empty allowed_files allows nothing"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "classifier ignores allowed_within",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "        self.allowed = [PatternSet(contract.allowed_files), *map(PatternSet, contract.allowed_within)]\n",
+          "new": "        self.allowed = [PatternSet(contract.allowed_files)]\n"
+        }
+      ],
+      "expect": "a path is in scope only when both contracts allow it"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "allowed checked before forbidden",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "        if self.forbidden.matches(path):\n            return \"forbidden\"\n        if all(allowed.matches(path) for allowed in self.allowed):\n            return \"in_scope\"\n",
+          "new": "        if all(allowed.matches(path) for allowed in self.allowed):\n            return \"in_scope\"\n        if self.forbidden.matches(path):\n            return \"forbidden\"\n"
+        }
+      ],
+      "expect": "every forbidden glob still applies"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "budget counts every finding",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "        over_budget=len(off_scope) > contract.violation_budget,\n",
+          "new": "        over_budget=len(findings) > contract.violation_budget,\n"
+        }
+      ],
+      "expect": "the violation budget counts off-scope files"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "budget counts soft files too",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "        over_budget=len(off_scope) > contract.violation_budget,\n",
+          "new": "        over_budget=len(off_scope) + len(soft) > contract.violation_budget,\n"
+        }
+      ],
+      "expect": "soft files and repeated touches do not count against the budget"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "budget counts repeated touches",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "        over_budget=len(off_scope) > contract.violation_budget,\n",
+          "new": "        over_budget=sum(1 for p in run.touched_files if p in set(off_scope)) > contract.violation_budget,\n"
+        }
+      ],
+      "expect": "soft files and repeated touches do not count against the budget"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "budget counts forbidden files too",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "        over_budget=len(off_scope) > contract.violation_budget,\n",
+          "new": "        over_budget=len(off_scope) + len(forbidden) > contract.violation_budget,\n"
+        }
+      ],
+      "expect": "forbidden files block on their own"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "budget exceeded at the budget itself",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "        over_budget=len(off_scope) > contract.violation_budget,\n",
+          "new": "        over_budget=len(off_scope) >= contract.violation_budget,\n"
+        }
+      ],
+      "expect": "soft files and repeated touches do not count against the budget"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "time budget exceeded at the budget itself",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "run.elapsed_minutes > contract.time_budget_minutes:",
+          "new": "run.elapsed_minutes >= contract.time_budget_minutes:"
+        }
+      ],
+      "expect": "one finding per kind; 30 minutes fits a 30-minute budget"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "hosts lowercased but the port kept",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "    host = host.strip().lower()\n    if host.startswith(\"[\"):\n        end = host.find(\"]\")\n        return host[: end + 1] if end != -1 else host\n    if host.count(\":\") == 1:\n        return host.split(\":\", 1)[0]\n    return host\n",
+          "new": "    return host.strip().lower()\n"
+        }
+      ],
+      "expect": "hosts compare case-insensitively and without a port"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "port stripped at the first colon",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "    host = host.strip().lower()\n    if host.startswith(\"[\"):\n        end = host.find(\"]\")\n        return host[: end + 1] if end != -1 else host\n    if host.count(\":\") == 1:\n        return host.split(\":\", 1)[0]\n    return host\n",
+          "new": "    return host.strip().lower().split(\":\")[0]\n"
+        }
+      ],
+      "expect": "another IPv6 address is still refused"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "port stripped at the last colon",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "    host = host.strip().lower()\n    if host.startswith(\"[\"):\n        end = host.find(\"]\")\n        return host[: end + 1] if end != -1 else host\n    if host.count(\":\") == 1:\n        return host.split(\":\", 1)[0]\n    return host\n",
+          "new": "    return host.strip().lower().rsplit(\":\", 1)[0]\n"
+        }
+      ],
+      "expect": "an IPv6 address keeps its brackets"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "observed hosts split at the first colon, allowlist left alone",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "        bad_hosts = [h for h in run.network_hosts if normalize_host(h) not in allowed]\n",
+          "new": "        bad_hosts = [h for h in run.network_hosts if h.lower().split(\":\")[0] not in allowed]\n"
+        }
+      ],
+      "expect": "an IPv6 address keeps its brackets"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "an empty allowlist taken as no enforcement",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "    if contract.network_egress is not None and run.network_hosts:\n",
+          "new": "    if contract.network_egress and run.network_hosts:\n"
+        }
+      ],
+      "expect": "an empty network_egress allows no host"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "network_egress None taken as deny-all",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "    if contract.network_egress is not None and run.network_hosts:\n        allowed = {normalize_host(h) for h in contract.network_egress}\n",
+          "new": "    if run.network_hosts:\n        allowed = {normalize_host(h) for h in contract.network_egress or []}\n"
+        }
+      ],
+      "expect": "network_egress None means no enforcement"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "globs without a literal directory dropped from the index",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "            else:\n                self._by_directory.setdefault(directory, []).append(pattern)\n",
+          "new": "            elif directory:\n                self._by_directory.setdefault(directory, []).append(pattern)\n"
+        }
+      ],
+      "expect": "every forbidden glob still applies, with or without a literal directory"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "globs bucketed by their first segment only",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "                self._by_directory.setdefault(directory, []).append(pattern)\n",
+          "new": "                self._by_directory.setdefault(directory.split(\"/\")[0], []).append(pattern)\n"
+        },
+        {
+          "file": "patterns.py",
+          "old": "        for directory in _directories(path):\n",
+          "new": "        for directory in (\"\", path.split(\"/\")[0]):\n"
+        }
+      ],
+      "expect": "scope_check should be fast on large contracts and large diffs"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "every glob tried on every path, compiled once",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "        if path in self._exact:\n            return True\n",
+          "new": "        return any(compile_glob(p).match(path) for p in self.patterns)\n"
+        }
+      ],
+      "expect": "scope_check should be fast on large contracts and large diffs"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "a second close overwrites the file",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "os.O_WRONLY | os.O_CREAT | os.O_EXCL",
+          "new": "os.O_WRONLY | os.O_CREAT | os.O_TRUNC"
+        }
+      ],
+      "expect": "a task is closed once: closing it again raises FileExistsError"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "exists() checked, then written",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)\n        try:\n            with os.fdopen(fd, \"wb\") as out:\n                out.write(payload)\n        except BaseException:\n            path.unlink(missing_ok=True)\n            raise\n",
+          "new": "        if path.exists():\n            raise FileExistsError(path)\n        path.write_bytes(payload)\n"
+        }
+      ],
+      "expect": "an existing entry of any kind blocks the close"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "written to a temporary file, then os.replace",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)\n        try:\n            with os.fdopen(fd, \"wb\") as out:\n                out.write(payload)\n        except BaseException:\n            path.unlink(missing_ok=True)\n            raise\n",
+          "new": "        if path.exists():\n            raise FileExistsError(path)\n        temporary = path.with_name(\".\" + path.name + \".tmp\")\n        temporary.write_bytes(payload)\n        os.replace(temporary, path)\n"
+        }
+      ],
+      "expect": "an existing entry of any kind blocks the close"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "NaN written as JSON's NaN",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "allow_nan=False",
+          "new": "allow_nan=True"
+        }
+      ],
+      "expect": "the archive holds strict JSON: NaN raises ValueError"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "record dumped straight into the exclusive file",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        payload = (json.dumps(record, indent=2, ensure_ascii=False, allow_nan=False) + \"\\n\").encode(\"utf-8\")\n        self.directory.mkdir(parents=True, exist_ok=True)\n        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)\n        try:\n            with os.fdopen(fd, \"wb\") as out:\n                out.write(payload)\n        except BaseException:\n            path.unlink(missing_ok=True)\n            raise\n",
+          "new": "        self.directory.mkdir(parents=True, exist_ok=True)\n        with open(path, \"x\", encoding=\"utf-8\") as out:\n            json.dump(record, out, indent=2, ensure_ascii=False, allow_nan=False)\n"
+        }
+      ],
+      "expect": "a failed close leaves nothing behind"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "network_egress None stored as []",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            \"contract\": asdict(task.contract),\n",
+          "new": "            \"contract\": {**asdict(task.contract), \"network_egress\": task.contract.network_egress or []},\n"
+        }
+      ],
+      "expect": "network_egress None (no enforcement) stays None"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "network_egress [] read back as None",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            contract=ScopeContract(**record[\"contract\"]),\n",
+          "new": "            contract=ScopeContract(**{**record[\"contract\"], \"network_egress\": record[\"contract\"][\"network_egress\"] or None}),\n"
+        }
+      ],
+      "expect": "the contract comes back as it was"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "allowed_within flattened",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            contract=ScopeContract(**record[\"contract\"]),\n",
+          "new": "            contract=ScopeContract(**{**record[\"contract\"], \"allowed_within\": [[p for ps in record[\"contract\"][\"allowed_within\"] for p in ps]]}),\n"
+        }
+      ],
+      "expect": "the contract comes back as it was"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "findings left as dicts",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        report[\"findings\"] = [Finding(**finding) for finding in report[\"findings\"]]\n",
+          "new": ""
+        }
+      ],
+      "expect": "findings come back as Findings"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "findings sorted by severity",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        report[\"findings\"] = [Finding(**finding) for finding in report[\"findings\"]]\n",
+          "new": "        report[\"findings\"] = sorted((Finding(**f) for f in report[\"findings\"]), key=lambda f: f.severity)\n"
+        }
+      ],
+      "expect": "findings come back as Findings"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "repeated touches dropped",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            \"run\": asdict(task.run),\n",
+          "new": "            \"run\": {**asdict(task.run), \"touched_files\": list(dict.fromkeys(task.run.touched_files))},\n"
+        }
+      ],
+      "expect": "the run is evidence: touches stay in order, repeats included"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "touches sorted",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            \"run\": asdict(task.run),\n",
+          "new": "            \"run\": {**asdict(task.run), \"touched_files\": sorted(task.run.touched_files)},\n"
+        }
+      ],
+      "expect": "the run is evidence: touches stay in order, repeats included"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "elapsed minutes rounded",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            \"run\": asdict(task.run),\n",
+          "new": "            \"run\": {**asdict(task.run), \"elapsed_minutes\": round(task.run.elapsed_minutes, 2)},\n"
+        }
+      ],
+      "expect": "numbers come back exactly"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "closed_at rounded to microseconds",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            \"closed_at\": task.closed_at,\n",
+          "new": "            \"closed_at\": round(task.closed_at, 6),\n"
+        }
+      ],
+      "expect": "auditors read task_id, passed (a JSON boolean) and closed_at at the top level"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "closed_at kept as an ISO timestamp",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            \"closed_at\": task.closed_at,\n",
+          "new": "            \"closed_at\": __import__(\"datetime\").datetime.fromtimestamp(task.closed_at, __import__(\"datetime\").timezone.utc).isoformat(),\n"
+        },
+        {
+          "file": "archive.py",
+          "old": "            closed_at=record[\"closed_at\"],\n",
+          "new": "            closed_at=__import__(\"datetime\").datetime.fromisoformat(record[\"closed_at\"]).timestamp(),\n"
+        }
+      ],
+      "expect": "auditors read task_id, passed (a JSON boolean) and closed_at at the top level"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "passed written as 0 or 1",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            \"passed\": task.report.passed(),\n",
+          "new": "            \"passed\": int(task.report.passed()),\n"
+        }
+      ],
+      "expect": "auditors read task_id, passed (a JSON boolean) and closed_at at the top level"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "passed written as text",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            \"passed\": task.report.passed(),\n",
+          "new": "            \"passed\": str(task.report.passed()).lower(),\n"
+        }
+      ],
+      "expect": "auditors read task_id, passed (a JSON boolean) and closed_at at the top level"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "task ids not checked",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if not isinstance(task_id, str) or not TASK_ID.fullmatch(task_id):\n            raise ValueError(f\"not a plain task id: {task_id!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "'../T-004' is not a plain task id"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "task ids may hold a slash",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "TASK_ID = re.compile(r\"[A-Za-z0-9][A-Za-z0-9._-]*\")",
+          "new": "TASK_ID = re.compile(r\"[A-Za-z0-9][A-Za-z0-9._/-]*\")"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "task ids checked on close only",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        path = self._path(task_id)\n        try:\n",
+          "new": "        path = self.directory / f\"{task_id}.json\"\n        try:\n"
+        }
+      ],
+      "expect": "load takes plain task ids only"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "archived under the contract's task_id",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        path = self._path(task.report.task_id)\n",
+          "new": "        path = self._path(task.contract.task_id)\n"
+        }
+      ],
+      "expect": "FileExistsError"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "an unknown task raises FileNotFoundError",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        try:\n            record = json.loads(path.read_text(encoding=\"utf-8\"))\n        except FileNotFoundError:\n            raise KeyError(task_id) from None\n",
+          "new": "        record = json.loads(path.read_text(encoding=\"utf-8\"))\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "closed tasks kept in memory",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        self.directory = Path(root) / \"closed\"\n",
+          "new": "        self.directory = Path(root) / \"closed\"\n        self._closed = {}\n"
+        },
+        {
+          "file": "archive.py",
+          "old": "        return path\n\n    def load",
+          "new": "        self._closed[task.report.task_id] = task\n        return path\n\n    def load"
+        },
+        {
+          "file": "archive.py",
+          "old": "        path = self._path(task_id)\n        try:\n",
+          "new": "        return self._closed[task_id]\n        path = self._path(task_id)\n        try:\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "task_ids from every file's stem",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        return sorted(\n            entry.name[: -len(\".json\")]\n            for entry in self.directory.iterdir()\n            if entry.name.endswith(\".json\") and TASK_ID.fullmatch(entry.name[: -len(\".json\")])\n        )\n",
+          "new": "        return sorted(entry.stem for entry in self.directory.iterdir())\n"
+        }
+      ],
+      "expect": "task_ids lists closed tasks only, sorted"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "**/ needs at least one directory",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "            parts.append(\".+\" if i == last else \"(?:[^/]+/)*\")\n",
+          "new": "            parts.append(\".+\" if i == last else \"(?:[^/]+/)+\")\n"
+        }
+      ],
+      "expect": "**/ matches zero directories"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "* crosses /",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "            out.append(\"[^/]*\")\n            continue\n",
+          "new": "            out.append(\".*\")\n            continue\n"
+        }
+      ],
+      "expect": "* stays inside one segment"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "? matches /",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "            out.append(\"[^/]\")\n",
+          "new": "            out.append(\".\")\n"
+        }
+      ],
+      "expect": "? never matches /"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "a negated class matches /",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "    return (f\"[^{body}/]\" if negate else f\"(?!/)[{body}]\"), i + 1\n",
+          "new": "    return (f\"[^{body}]\" if negate else f\"(?!/)[{body}]\"), i + 1\n"
+        }
+      ],
+      "expect": "a class never matches /"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "** inside a segment crosses /",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "        if c == \"*\":\n            while i < n and segment[i] == \"*\":\n                i += 1\n            out.append(\"[^/]*\")\n",
+          "new": "        if c == \"*\":\n            run = i\n            while i < n and segment[i] == \"*\":\n                i += 1\n            out.append(\".*\" if i - run > 1 else \"[^/]*\")\n"
+        }
+      ],
+      "expect": "** inside a segment is *"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "dir/** also matches dir",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "            parts.append(\".+\" if i == last else \"(?:[^/]+/)*\")\n",
+          "new": "            if i == last and parts:\n                parts[-1] = \"(?:/.*)?\"\n            else:\n                parts.append(\".+\" if i == last else \"(?:[^/]+/)*\")\n"
+        }
+      ],
+      "expect": "dir/** matches below dir, not dir itself"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "dir/** without the slash",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "            parts.append(\".+\" if i == last else \"(?:[^/]+/)*\")\n",
+          "new": "            if i == last and parts:\n                parts[-1] = \".+\"\n            else:\n                parts.append(\".+\" if i == last else \"(?:[^/]+/)*\")\n"
+        }
+      ],
+      "expect": "dir/** stops at the directory name"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "trailing slash ignored",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "    if pattern.endswith(\"/\"):\n        pattern += \"**\"\n    segments = pattern.split(\"/\")\n",
+          "new": "    segments = pattern.rstrip(\"/\").split(\"/\")\n"
+        }
+      ],
+      "expect": "a trailing / names a directory"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "matching ignores case",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "        return Glob(pattern, re.compile(translate(pattern)))\n",
+          "new": "        return Glob(pattern, re.compile(translate(pattern), re.IGNORECASE))\n"
+        }
+      ],
+      "expect": "matching is case-sensitive"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "backslash kept as a literal character",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "        elif c == \"\\\\\":\n            i += 1\n            if i == n:\n                raise ValueError(f\"lone backslash at the end of {segment!r}\")\n            out.append(re.escape(segment[i]))\n",
+          "new": "        elif c == \"\\\\\":\n            out.append(re.escape(c))\n"
+        },
+        {
+          "file": "globs.py",
+          "old": "        if c == \"\\\\\":\n            i += 1\n            if i >= len(segment):\n                raise ValueError(f\"unclosed [ in {segment!r}\")\n            c = segment[i]\n",
+          "new": ""
+        }
+      ],
+      "expect": "a backslash makes the next character literal"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "an unclosed [ taken literally",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "        if i >= len(segment):\n            raise ValueError(f\"unclosed [ in {segment!r}\")\n        c = segment[i]\n",
+          "new": "        if i >= len(segment):\n            return re.escape(\"[\"), start + 1\n        c = segment[i]\n"
+        }
+      ],
+      "expect": "'lib/[ab.py' is not a valid glob"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "an absolute glob accepted",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "    if pattern.startswith(\"/\"):\n        raise ValueError(f\"absolute glob: {pattern!r}\")\n    if pattern.endswith(\"/\"):\n        pattern += \"**\"\n    segments",
+          "new": "    if pattern.endswith(\"/\"):\n        pattern += \"**\"\n    segments"
+        }
+      ],
+      "expect": "'/app.py' is not a valid glob"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "a lone trailing backslash accepted",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "            if i == n:\n                raise ValueError(f\"lone backslash at the end of {segment!r}\")\n            out.append(re.escape(segment[i]))\n",
+          "new": "            if i == n:\n                out.append(re.escape(\"\\\\\"))\n                break\n            out.append(re.escape(segment[i]))\n"
+        }
+      ],
+      "expect": "is not a valid glob"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "normalized with posixpath.normpath",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "    if path.startswith(\"/\"):\n        raise ValueError(f\"absolute path: {path!r}\")\n    names: list[str] = []\n",
+          "new": "    if path.startswith(\"/\"):\n        raise ValueError(f\"absolute path: {path!r}\")\n    return __import__(\"posixpath\").normpath(path)\n    names: list[str] = []\n"
+        }
+      ],
+      "expect": "'' is not a file inside the repository"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "any name starting with .. taken as a parent",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "        if segment == \"..\":\n",
+          "new": "        if segment.startswith(\"..\"):\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "path case folded",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "    return \"/\".join(names)\n\n\ndef translate",
+          "new": "    return \"/\".join(names).lower()\n\n\ndef translate"
+        }
+      ],
+      "expect": "case is kept"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "an empty result taken as the root",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "    if not names:\n        raise ValueError(f\"not a file path: {path!r}\")\n",
+          "new": "    if not names:\n        return \".\"\n"
+        }
+      ],
+      "expect": "'' is not a file inside the repository"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": ".. above the root ignored",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "            if not names:\n                raise ValueError(f\"path leaves the repository: {path!r}\")\n            names.pop()\n",
+          "new": "            if names:\n                names.pop()\n"
+        }
+      ],
+      "expect": "'../secrets.env' is not a file inside the repository"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "touched paths not normalized",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "            path = normalize_path(raw)\n",
+          "new": "            path = normalize_path(raw) and raw\n"
+        }
+      ],
+      "expect": "the checker matches contract globs in this dialect, on normalized paths"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "repeats dropped before normalizing",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "        if path in seen:\n            continue\n        seen.add(path)\n",
+          "new": "        if raw in seen:\n            continue\n        seen.add(raw)\n"
+        }
+      ],
+      "expect": "the checker matches contract globs in this dialect, on normalized paths"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "a path outside the repository dropped",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "        except ValueError:\n            path, kind = raw, \"forbidden\"\n",
+          "new": "        except ValueError:\n            continue\n"
+        }
+      ],
+      "expect": "a path outside the repository is forbidden"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "a path outside the repository counted off scope",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "            path, kind = raw, \"forbidden\"\n",
+          "new": "            path, kind = raw, \"off_scope\"\n"
+        }
+      ],
+      "expect": "a path outside the repository is forbidden"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "PatternSet still matching with fnmatch",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "                if compile_glob(pattern).match(path):\n",
+          "new": "                if __import__(\"fnmatch\").fnmatch(path, pattern):\n"
+        }
+      ],
+      "expect": "the checker matches contract globs in this dialect, on normalized paths"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "the index files a trailing-slash glob as a literal",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "        raise ValueError(f\"absolute glob: {pattern!r}\")\n    if pattern.endswith(\"/\"):\n        pattern += \"**\"\n    found",
+          "new": "        raise ValueError(f\"absolute glob: {pattern!r}\")\n    found"
+        }
+      ],
+      "expect": "a trailing / names a directory in the checker too"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "the index files an escaped glob under its raw text",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "    if pattern[found.start()] != \"\\\\\":\n",
+          "new": "    if pattern[found.start()] == \"\\\\\":\n        return pattern, \"\"\n    if True:\n"
+        }
+      ],
+      "expect": "forbidden globs use the dialect too"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "no newline after a result",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    }) + \"\\n\"\n",
+          "new": "    })\n"
+        }
+      ],
+      "expect": "Extra data"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "a blank line after each result",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    }) + \"\\n\"\n",
+          "new": "    }) + \"\\n\\n\"\n"
+        }
+      ],
+      "expect": "Expecting value"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "a rename checks its destination only",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "        return [moves[b\"rename from \"], moves[b\"rename to \"]]\n",
+          "new": "        return [moves[b\"rename to \"]]\n"
+        }
+      ],
+      "expect": "both sides of a rename are checked"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "a copy checked like a rename",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    if b\"copy to \" in moves:\n        return [moves[b\"copy to \"]]\n",
+          "new": "    if b\"copy to \" in moves:\n        return [moves[b\"copy from \"], moves[b\"copy to \"]]\n"
+        }
+      ],
+      "expect": "a copy writes only its destination"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "paths read from the ---/+++ lines",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    moves: dict[bytes, str] = {}\n    for line in header[1:]:\n",
+          "new": "    names = [_decode(line[6:].rstrip(b\"\\t\")) for line in header[1:] if line.startswith((b\"--- a/\", b\"+++ b/\"))]\n    return list(dict.fromkeys(names))\n    moves: dict[bytes, str] = {}\n    for line in header[1:]:\n"
+        }
+      ],
+      "expect": "binary files, deletions, mode changes and new empty files are writes too"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "deleted files skipped",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    moves: dict[bytes, str] = {}\n    for line in header[1:]:\n",
+          "new": "    if any(line.startswith(b\"deleted file mode\") for line in header):\n        return []\n    moves: dict[bytes, str] = {}\n    for line in header[1:]:\n"
+        }
+      ],
+      "expect": "binary files, deletions, mode changes and new empty files are writes too"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "the header split at spaces",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    size, odd = divmod(len(rest) - 5, 2)\n",
+          "new": "    return _decode(rest.split(b\" \")[0][2:])\n    size, odd = divmod(len(rest) - 5, 2)\n"
+        }
+      ],
+      "expect": "a path may contain spaces, even ' b/'"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "the header split at the first ' b/'",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    size, odd = divmod(len(rest) - 5, 2)\n",
+          "new": "    return _decode(rest.split(b\" b/\", 1)[0][2:])\n    size, odd = divmod(len(rest) - 5, 2)\n"
+        }
+      ],
+      "expect": "a path may contain spaces, even ' b/'"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "quoted names left quoted",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    if rest.startswith(b'\"'):\n        name, _ = _unquote(rest)\n",
+          "new": "    if False:\n        name, _ = _unquote(rest)\n"
+        }
+      ],
+      "expect": "a quoted path is C-unescaped, and its bytes are UTF-8"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "escaped bytes decoded as Latin-1",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    return name.decode(\"utf-8\", \"surrogateescape\")\n",
+          "new": "    return name.decode(\"latin-1\")\n"
+        }
+      ],
+      "expect": "a quoted path is C-unescaped, and its bytes are UTF-8"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "backslash escapes other than octal kept as written",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "            out.append(C_ESCAPES.get(d, d))\n            i += 2\n            continue\n",
+          "new": "            out.append(c)\n            i += 1\n            continue\n"
+        }
+      ],
+      "expect": "a quoted path is C-unescaped, and its bytes are UTF-8"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "each chunk decoded as UTF-8",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "        buffer += chunk\n",
+          "new": "        buffer += chunk.decode(\"utf-8\").encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "a path reported once per section",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "            if path in seen:\n                continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "each path is reported once"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "over budget reported for every file past it",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "                if off_scope == contract.violation_budget + 1:\n",
+          "new": "                if off_scope > contract.violation_budget:\n"
+        }
+      ],
+      "expect": "one over-budget result, for the file that tips the budget"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "over budget once the budget is reached",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "                if off_scope == contract.violation_budget + 1:\n",
+          "new": "                if off_scope == contract.violation_budget:\n"
+        }
+      ],
+      "expect": "one over-budget result, for the file that tips the budget"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "soft files counted against the budget",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "            if kind == \"off_scope\":\n",
+          "new": "            if kind in (\"off_scope\", \"soft\"):\n"
+        }
+      ],
+      "expect": "one over-budget result, for the file that tips the budget"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "forbidden files counted against the budget",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "            if kind == \"off_scope\":\n",
+          "new": "            if kind in (\"off_scope\", \"forbidden\"):\n"
+        }
+      ],
+      "expect": "one over-budget result, for the file that tips the budget"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "levels taken from the checker's severities",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    \"forbidden\": (\"scope/forbidden\", \"error\",",
+          "new": "    \"forbidden\": (\"scope/forbidden\", \"block\","
+        }
+      ],
+      "expect": "one result per violating path, in diff order"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "uri left as the raw path",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    uri = quote(path, errors=\"surrogateescape\")\n",
+          "new": "    uri = path\n"
+        }
+      ],
+      "expect": "uri is the path as a percent-encoded URI reference"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "uri encodes the slashes too",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    uri = quote(path, errors=\"surrogateescape\")\n",
+          "new": "    uri = quote(path, safe=\"\", errors=\"surrogateescape\")\n"
+        }
+      ],
+      "expect": "uri is the path as a percent-encoded URI reference"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "message without the path",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "\"{path} is forbidden by the contract\"",
+          "new": "\"forbidden by the contract\""
+        }
+      ],
+      "expect": "message.text names the path"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "a line cut across chunks dropped",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "        del buffer[:start]\n",
+          "new": "        del buffer[:]\n"
+        }
+      ],
+      "expect": "the same results whatever the chunk size"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "the last line dropped without its newline",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    if buffer:\n        for result in feed(bytes(buffer)):\n            yield result\n",
+          "new": ""
+        }
+      ],
+      "expect": "the last line counts even without a newline"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "results held until the stream ends",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    buffer = bytearray()\n",
+          "new": "    buffer = bytearray()\n    pending: list[str] = []\n"
+        },
+        {
+          "file": "diffscan.py",
+          "old": "            for result in feed(bytes(buffer[start:end])):\n                yield result\n",
+          "new": "            pending.extend(feed(bytes(buffer[start:end])))\n"
+        },
+        {
+          "file": "diffscan.py",
+          "old": "    if buffer:\n        for result in feed(bytes(buffer)):\n",
+          "new": "    for result in pending:\n        yield result\n    if buffer:\n        for result in feed(bytes(buffer)):\n"
+        }
+      ],
+      "expect": "report a file as soon as its header is complete"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "a file reported when its section ends",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "        if line.startswith(b\"@@\"):\n            done, header = finish(header), None\n            return done\n",
+          "new": ""
+        }
+      ],
+      "expect": "report a file as soon as its header is complete"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "not-allowed explained from the leaf up",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        for layer in self.layers:\n            for allowed in",
+          "new": "        for layer in reversed(self.layers):\n            for allowed in"
+        }
+      ],
+      "expect": "the layer nearest the project explains"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "forbidden explained from the leaf up",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        for layer in self.layers:\n            for pattern in layer.forbidden_files:",
+          "new": "        for layer in reversed(self.layers):\n            for pattern in layer.forbidden_files:"
+        }
+      ],
+      "expect": "the first matching glob of the layer nearest the project"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "the last matching glob of a layer",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "            for pattern in layer.forbidden_files:",
+          "new": "            for pattern in reversed(layer.forbidden_files):"
+        }
+      ],
+      "expect": "the first matching glob of the layer nearest the project"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "one pass: each layer asked forbidden, then allowed",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        for layer in self.layers:\n            for pattern in layer.forbidden_files:\n                if PatternSet([pattern]).matches(path):\n                    return Explanation(\"forbidden\", layer.task_id, pattern)\n        for layer in self.layers:\n            for allowed in",
+          "new": "        for layer in self.layers:\n            for pattern in layer.forbidden_files:\n                if PatternSet([pattern]).matches(path):\n                    return Explanation(\"forbidden\", layer.task_id, pattern)\n            for allowed in"
+        }
+      ],
+      "expect": "forbidden wins over not allowed, whichever layer says it"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "only the leaf's allowed_files checked",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        for layer in self.layers:\n            for allowed in",
+          "new": "        for layer in self.layers[-1:]:\n            for allowed in"
+        }
+      ],
+      "expect": "the layer nearest the project explains"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "network_egress None taken as deny-all",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "            if layer.network_egress is None:\n                continue\n            if host not in {normalize_host(h) for h in layer.network_egress}:\n",
+          "new": "            if host not in {normalize_host(h) for h in layer.network_egress or []}:\n"
+        }
+      ],
+      "expect": "an empty network_egress allows no host"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "an empty network_egress taken as no restriction",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "            if layer.network_egress is None:\n",
+          "new": "            if not layer.network_egress:\n"
+        }
+      ],
+      "expect": "an empty network_egress allows no host"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "hosts compared as written",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        host = normalize_host(host)\n",
+          "new": ""
+        },
+        {
+          "file": "layers.py",
+          "old": "            if host not in {normalize_host(h) for h in layer.network_egress}:\n",
+          "new": "            if host not in layer.network_egress:\n"
+        }
+      ],
+      "expect": "network_egress None does not restrict, and hosts compare as in scope_check"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "hosts explained from the leaf up",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        host = normalize_host(host)\n        for layer in self.layers:\n",
+          "new": "        host = normalize_host(host)\n        for layer in reversed(self.layers):\n"
+        }
+      ],
+      "expect": "a subtask cannot widen network_egress either"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "empty allowlists skipped in the merged contract",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "            merged = merge_contracts(merged, layer)\n        return merged\n",
+          "new": "            merged = merge_contracts(merged, layer)\n        lists = [set(layer.network_egress) for layer in self.layers if layer.network_egress]\n        merged.network_egress = sorted(set.intersection(*lists)) if lists else None\n        return merged\n"
+        }
+      ],
+      "expect": "deny-all stays deny-all down the chain"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "the leaf contract taken as the merged one",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        merged = self.layers[0]\n        for layer in self.layers[1:]:\n            merged = merge_contracts(merged, layer)\n        return merged\n",
+          "new": "        return self.layers[-1]\n"
+        }
+      ],
+      "expect": "deny-all stays deny-all down the chain"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "layers merged from the leaf up",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        merged = self.layers[0]\n        for layer in self.layers[1:]:\n",
+          "new": "        merged = self.layers[-1]\n        for layer in reversed(self.layers[:-1]):\n"
+        }
+      ],
+      "expect": "approvals accumulate from the project down"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "a missing parent taken as the top",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        if parent is None:\n            raise ValueError(f\"{current.task_id}: parent {current.parent!r} is missing\")\n",
+          "new": "        if parent is None:\n            break\n"
+        }
+      ],
+      "expect": "a missing layer raises ValueError"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "altitudes not checked",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        if parent.altitude != ALTITUDES[level - 1]:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "a task sits under a feature"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "a contract without a parent taken as the top",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        if current.parent is None:\n            raise ValueError(f\"{current.task_id} ({current.altitude}) has no parent\")\n",
+          "new": "        if current.parent is None:\n            break\n"
+        }
+      ],
+      "expect": "only the project contract has no parent"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "duplicate ids: the last one wins",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        if contract.task_id in by_id:\n            raise ValueError(f\"two contracts are called {contract.task_id!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "two contracts with one task_id raise ValueError"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "duplicate ids: the first one wins",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        if contract.task_id in by_id:\n            raise ValueError(f\"two contracts are called {contract.task_id!r}\")\n",
+          "new": "        if contract.task_id in by_id:\n            continue\n"
+        }
+      ],
+      "expect": "two contracts with one task_id raise ValueError"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "layers listed from the leaf up",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "    chain.reverse()\n",
+          "new": ""
+        }
+      ],
+      "expect": "the layers run from the project down"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "an unknown task_id raises ValueError",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        raise KeyError(task_id)\n",
+          "new": "        raise ValueError(f\"no contract {task_id!r}\")\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "any one allow-list is enough",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "        if all(allowed.matches(path) for allowed in self.allowed):\n",
+          "new": "        if any(allowed.matches(path) for allowed in self.allowed):\n"
+        }
+      ],
+      "expect": "a path is in scope only when both contracts allow it"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "soft paths checked before allowed ones",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "        if all(allowed.matches(path) for allowed in self.allowed):\n            return \"in_scope\"\n        if self.soft.matches(path):\n            return \"soft\"\n",
+          "new": "        if self.soft.matches(path):\n            return \"soft\"\n        if all(allowed.matches(path) for allowed in self.allowed):\n            return \"in_scope\"\n"
+        }
+      ],
+      "expect": "a docs path the contract allows is in scope"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "allowlist entries compared as written",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "        allowed = {normalize_host(h) for h in contract.network_egress}\n",
+          "new": "        allowed = set(contract.network_egress)\n"
+        }
+      ],
+      "expect": "allowlist entries compare case-insensitively too"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "merge keeps only the parent's own allow-list",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "        allowed_within=[*parent.allowed_within, list(parent.allowed_files), *child.allowed_within],\n",
+          "new": "        allowed_within=[list(parent.allowed_files)],\n"
+        }
+      ],
+      "expect": "the merged contract checks a run the way the chain explains it"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "task_ids from every .json file",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        return sorted(\n            entry.name[: -len(\".json\")]\n            for entry in self.directory.iterdir()\n            if entry.name.endswith(\".json\") and TASK_ID.fullmatch(entry.name[: -len(\".json\")])\n        )\n",
+          "new": "        return sorted(entry.stem for entry in self.directory.iterdir() if entry.suffix == \".json\")\n"
+        }
+      ],
+      "expect": "task_ids lists closed tasks only, sorted"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "task id checked after the file is written",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        path = self._path(task.report.task_id)\n        record = {\n",
+          "new": "        path = self.directory / f\"{task.report.task_id}.json\"\n        record = {\n"
+        },
+        {
+          "file": "archive.py",
+          "old": "            path.unlink(missing_ok=True)\n            raise\n        return path\n",
+          "new": "            path.unlink(missing_ok=True)\n            raise\n        self._path(task.report.task_id)\n        return path\n"
+        }
+      ],
+      "expect": "a bad task id writes nothing"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "literal characters left unescaped",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "        else:\n            out.append(re.escape(c))\n        i += 1\n    return \"\".join(out)\n\n\ndef _char_class",
+          "new": "        else:\n            out.append(c)\n        i += 1\n    return \"\".join(out)\n\n\ndef _char_class"
+        }
+      ],
+      "expect": "characters other than * ? [ and"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "a removed SQL comment read as a file header",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "        if line.startswith(b\"@@\"):\n            done, header = finish(header), None\n            return done\n",
+          "new": ""
+        },
+        {
+          "file": "diffscan.py",
+          "old": "    return [_header_name(header[0][len(b\"diff --git \"):])]\n",
+          "new": "    named = [_decode(line[6:].rstrip(b\"\\t\")) for line in header[1:] if line.startswith((b\"--- a/\", b\"+++ b/\"))]\n    return list(dict.fromkeys([_header_name(header[0][len(b\"diff --git \"):])] + named))\n"
+        }
+      ],
+      "expect": "a removed SQL comment is not a file header"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "over budget reported before the file's own result",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "            results.append(_result(rule, level, text.format(path=path), path))\n            if kind == \"off_scope\":\n",
+          "new": "            own = _result(rule, level, text.format(path=path), path)\n            if kind == \"off_scope\":\n"
+        },
+        {
+          "file": "diffscan.py",
+          "old": "                        path,\n                    ))\n        return results\n",
+          "new": "                        path,\n                    ))\n            results.append(own)\n        return results\n"
+        }
+      ],
+      "expect": "one result per violating path, in diff order"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "the index keyed by the literal text before the first wildcard",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "        cut = pattern.rfind(\"/\", 0, found.start())\n        return None, pattern[:cut] if cut > 0 else \"\"\n",
+          "new": "        return None, pattern[: found.start()]\n"
+        }
+      ],
+      "expect": "a path is in scope only when both contracts allow it"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "a leading / stripped instead of refused",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "    if path.startswith(\"/\"):\n        raise ValueError(f\"absolute path: {path!r}\")\n    names",
+          "new": "    path = path.lstrip(\"/\")\n    names"
+        }
+      ],
+      "expect": "'/etc/passwd' is not a file inside the repository"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "a trailing slash kept",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "    return \"/\".join(names)\n\n\ndef translate",
+          "new": "    return \"/\".join(names) + (\"/\" if path.endswith(\"/\") else \"\")\n\n\ndef translate"
+        }
+      ],
+      "expect": "a trailing slash goes away"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "rename lines taken as written",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "                moves[key] = _name(line[len(key):])\n",
+          "new": "                moves[key] = _decode(line[len(key):])\n"
+        }
+      ],
+      "expect": "a quoted path is C-unescaped, and its bytes are UTF-8"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "is_file() checked, then written",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)\n        try:\n            with os.fdopen(fd, \"wb\") as out:\n                out.write(payload)\n        except BaseException:\n            path.unlink(missing_ok=True)\n            raise\n",
+          "new": "        if path.is_file():\n            raise FileExistsError(path)\n        path.write_bytes(payload)\n"
+        }
+      ],
+      "expect": "an existing entry of any kind blocks the close"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "task_ids from glob('*.json')",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        return sorted(\n            entry.name[: -len(\".json\")]\n            for entry in self.directory.iterdir()\n            if entry.name.endswith(\".json\") and TASK_ID.fullmatch(entry.name[: -len(\".json\")])\n        )\n",
+          "new": "        return sorted(entry.stem for entry in self.directory.glob(\"*.json\"))\n"
+        }
+      ],
+      "expect": "task_ids lists closed tasks only, sorted"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "the child's allowed_within dropped in the merge",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "        allowed_within=[*parent.allowed_within, list(parent.allowed_files), *child.allowed_within],\n",
+          "new": "        allowed_within=[*parent.allowed_within, list(parent.allowed_files)],\n"
+        }
+      ],
+      "expect": "a merged contract keeps every allow-list when it is merged again"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "only :443 stripped from hosts",
+      "edits": [
+        {
+          "file": "check.py",
+          "old": "    host = host.strip().lower()\n    if host.startswith(\"[\"):\n        end = host.find(\"]\")\n        return host[: end + 1] if end != -1 else host\n    if host.count(\":\") == 1:\n        return host.split(\":\", 1)[0]\n    return host\n",
+          "new": "    return host.strip().lower().removesuffix(\":443\")\n"
+        }
+      ],
+      "expect": "an IPv6 address keeps its brackets"
+    },
+    {
+      "test": "test_scope_check",
+      "name": "the index keyed by everything before the last slash",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "    if pattern[found.start()] != \"\\\\\":\n        cut = pattern.rfind(\"/\", 0, found.start())\n        return None, pattern[:cut] if cut > 0 else \"\"\n",
+          "new": "    if pattern[found.start()] != \"\\\\\":\n        return None, pattern.rsplit(\"/\", 1)[0] if \"/\" in pattern else \"\"\n"
+        }
+      ],
+      "expect": "a path is in scope only when both contracts allow it"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "passed written as 'no findings'",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            \"passed\": task.report.passed(),\n",
+          "new": "            \"passed\": not task.report.findings,\n"
+        }
+      ],
+      "expect": "passed is report.passed(): an info finding still passes"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "the file created exclusively, then the record serialized",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        payload = (json.dumps(record, indent=2, ensure_ascii=False, allow_nan=False) + \"\\n\").encode(\"utf-8\")\n        self.directory.mkdir(parents=True, exist_ok=True)\n        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)\n        try:\n            with os.fdopen(fd, \"wb\") as out:\n                out.write(payload)\n        except BaseException:\n            path.unlink(missing_ok=True)\n            raise\n",
+          "new": "        self.directory.mkdir(parents=True, exist_ok=True)\n        path.touch(exist_ok=False)\n        payload = (json.dumps(record, indent=2, ensure_ascii=False, allow_nan=False) + \"\\n\").encode(\"utf-8\")\n        path.write_bytes(payload)\n"
+        }
+      ],
+      "expect": "a failed close leaves nothing behind"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "task ids checked with re.match",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        if not isinstance(task_id, str) or not TASK_ID.fullmatch(task_id):\n",
+          "new": "        if not isinstance(task_id, str) or not TASK_ID.match(task_id):\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "closed/ created without exist_ok",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        self.directory.mkdir(parents=True, exist_ok=True)\n",
+          "new": "        self.directory.mkdir(parents=True)\n"
+        }
+      ],
+      "expect": "FileExistsError"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "task ids may start with a dot",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "TASK_ID = re.compile(r\"[A-Za-z0-9][A-Za-z0-9._-]*\")",
+          "new": "TASK_ID = re.compile(r\"[A-Za-z0-9._-]+\")"
+        }
+      ],
+      "expect": "'.hidden' is not a plain task id"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "task_ids from every stem that looks like a task id",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "            entry.name[: -len(\".json\")]\n            for entry in self.directory.iterdir()\n            if entry.name.endswith(\".json\") and TASK_ID.fullmatch(entry.name[: -len(\".json\")])\n",
+          "new": "            entry.stem\n            for entry in self.directory.iterdir()\n            if TASK_ID.fullmatch(entry.stem)\n"
+        }
+      ],
+      "expect": "task_ids lists closed tasks only, sorted"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "closing again returns the existing file",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)\n",
+          "new": "        try:\n            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)\n        except FileExistsError:\n            return path\n"
+        }
+      ],
+      "expect": "a task is closed once: closing it again raises FileExistsError"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "a range escaped into literals",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "        if i + 2 < len(segment) and segment[i + 1] == \"-\" and segment[i + 2] != \"]\":\n            items.append(re.escape(c) + \"-\" + re.escape(segment[i + 2]))\n            i += 3\n        else:\n            items.append(re.escape(c))\n            i += 1\n",
+          "new": "        items.append(re.escape(c))\n        i += 1\n"
+        }
+      ],
+      "expect": "a class can hold a range"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "a leading **/ translated as .*",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "            parts.append(\".+\" if i == last else \"(?:[^/]+/)*\")\n",
+          "new": "            parts.append(\".+\" if i == last else (\".*\" if i == 0 else \"(?:[^/]+/)*\"))\n"
+        }
+      ],
+      "expect": "a leading **/ matches whole directories only"
+    },
+    {
+      "test": "test_glob_dialect",
+      "name": "posixpath.normpath, then startswith('..')",
+      "edits": [
+        {
+          "file": "globs.py",
+          "old": "    if path.startswith(\"/\"):\n        raise ValueError(f\"absolute path: {path!r}\")\n    names: list[str] = []\n",
+          "new": "    if path.startswith(\"/\"):\n        raise ValueError(f\"absolute path: {path!r}\")\n    normal = __import__(\"posixpath\").normpath(path)\n    if normal == \".\" or normal.startswith(\"..\"):\n        raise ValueError(f\"path leaves the repository: {path!r}\")\n    return normal\n    names: list[str] = []\n"
+        }
+      ],
+      "expect": "ValueError: path leaves the repository: '..notes/todo.md'"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "the last header finished only when bytes are left over",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    if buffer:\n        for result in feed(bytes(buffer)):\n            yield result\n    if header is not None:\n        for result in finish(header):\n            yield result\n",
+          "new": "    if buffer:\n        for result in feed(bytes(buffer)):\n            yield result\n        if header is not None:\n            for result in finish(header):\n                yield result\n"
+        }
+      ],
+      "expect": "a file whose header ends the stream is checked too"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "off-scope files counted before the repeat check",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "        for path in _paths(lines):\n            if path in seen:\n                continue\n            seen.add(path)\n            kind = classifier.classify(path)\n            if kind == \"in_scope\":\n                continue\n            rule, level, text = RULES[kind]\n            results.append(_result(rule, level, text.format(path=path), path))\n            if kind == \"off_scope\":\n                off_scope += 1\n                if off_scope == contract.violation_budget + 1:\n",
+          "new": "        for path in _paths(lines):\n            kind = classifier.classify(path)\n            if kind == \"off_scope\":\n                off_scope += 1\n            if path in seen:\n                continue\n            seen.add(path)\n            if kind == \"in_scope\":\n                continue\n            rule, level, text = RULES[kind]\n            results.append(_result(rule, level, text.format(path=path), path))\n            if kind == \"off_scope\":\n                if off_scope == contract.violation_budget + 1:\n"
+        }
+      ],
+      "expect": "the budget counts distinct off-scope files"
+    },
+    {
+      "test": "test_diff_scan",
+      "name": "quoted names unescaped with ast.literal_eval",
+      "edits": [
+        {
+          "file": "diffscan.py",
+          "old": "    out = bytearray()\n    i = 1\n    while i < len(raw):\n",
+          "new": "    import ast\n    end = raw.index(b'\"', 1)\n    while raw[end - 1:end] == b\"\\\\\":\n        end = raw.index(b'\"', end + 1)\n    return ast.literal_eval(raw[: end + 1].decode(\"ascii\")).encode(\"utf-8\"), end + 1\n    out = bytearray()\n    i = 1\n    while i < len(raw):\n"
+        }
+      ],
+      "expect": "a quoted path is C-unescaped, and its bytes are UTF-8"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "explained hosts lowercased, the port kept",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        host = normalize_host(host)\n        for layer in self.layers:\n            if layer.network_egress is None:\n                continue\n            if host not in {normalize_host(h) for h in layer.network_egress}:\n",
+          "new": "        host = host.lower()\n        for layer in self.layers:\n            if layer.network_egress is None:\n                continue\n            if host not in {h.lower() for h in layer.network_egress}:\n"
+        }
+      ],
+      "expect": "network_egress None does not restrict, and hosts compare as in scope_check"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "a parent anywhere above accepted",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        if parent.altitude != ALTITUDES[level - 1]:\n",
+          "new": "        if parent.altitude not in ALTITUDES[:level]:\n"
+        }
+      ],
+      "expect": "a task sits under a feature"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "a project contract with a parent accepted",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        if level == 0:\n            if current.parent is not None:\n                raise ValueError(f\"the project contract {current.task_id} has a parent\")\n            break\n",
+          "new": "        if level == 0:\n            break\n"
+        }
+      ],
+      "expect": "a project contract has no parent"
+    },
+    {
+      "test": "test_contract_chain",
+      "name": "the forbidden glob taken from the sorted merged list",
+      "edits": [
+        {
+          "file": "layers.py",
+          "old": "        for layer in self.layers:\n            for pattern in layer.forbidden_files:\n                if PatternSet([pattern]).matches(path):\n                    return Explanation(\"forbidden\", layer.task_id, pattern)\n",
+          "new": "        for pattern in sorted({p for layer in self.layers for p in layer.forbidden_files}):\n            if PatternSet([pattern]).matches(path):\n                layer = next(layer for layer in self.layers if pattern in layer.forbidden_files)\n                return Explanation(\"forbidden\", layer.task_id, pattern)\n"
+        }
+      ],
+      "expect": "the first matching glob of the layer nearest the project"
+    }
+  ]
+}

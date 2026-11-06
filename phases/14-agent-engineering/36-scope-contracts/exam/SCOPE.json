@@ -1,0 +1,118 @@
+{
+  "lesson": "phases/14-agent-engineering/36-scope-contracts",
+  "title": "Scope Contracts and Task Boundaries",
+  "format": "staged-brownfield",
+  "service": "TaskScope: a scope gate for agent tasks with least-privilege contract merge, a violation budget counted in files, normalized egress hosts, an index over thousands of contract globs, an exclusive-create archive of closed reports, a real glob dialect with path normalization, a streaming git-diff scanner that emits SARIF results as JSON Lines, and project/feature/task/subtask contract chains with per-layer explanations",
+  "sources": {
+    "docs/en.md": "993c6db81c5c0d8fdd66023e9588fc4777a1461b76bf078cf96db7c94caf3c85",
+    "code/main.py": "70d338be3e7c313d822072be800ab80fcf8e0a89fa16dc557081e5fb427acc32",
+    "quiz/quiz.md": "10a11df5c3da63862b35e7186870bdfd536db1d5ab3071d235fd32a003eb8d3a"
+  },
+  "runtime": "Python 3.11+ (3.10's fnmatch caches only 256 compiled patterns, so the slow layer of Part 1 runs for minutes there), standard library, pytest; no network and no LLM: runs are RunSummary values and diffs are byte strings written in the test",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_scope_check",
+      "kind": "debug",
+      "lesson_anchor": "Production patterns: Multi-contract merge semantics (intersect allowed_files, union forbidden_files, min budgets, network_egress None / [] / list), Violation budgets, Time and network budgets; Globs, not raw paths; code/main.py matches_any, merge_contracts, scope_check; quiz Q5, Q9, Q10",
+      "planted_bugs": [
+        "merge_contracts intersects the two allowed glob lists as strings, so lib/**/*.py and lib/upload/*.py leave only the literal app.py; it surfaces one call later, in scope_check, where lib/upload/pdf.py lands in off_scope_writes. The docstring keeps both lists (allowed_files from the child, the parent's in allowed_within)",
+        "over_budget counts warn-level findings, and every off-scope file shares one finding, so three off-scope files never exceed a budget of two; the docstring counts distinct off-scope files",
+        "network egress compares host strings as written, so API.Anthropic.com:443 is not api.anthropic.com; the docstring compares lowercased, without the port, IPv6 brackets kept",
+        "PatternSet tries every glob on every path with fnmatch: 1,700 touched files against 3,000 globs is about 5 million fnmatch calls"
+      ],
+      "timing_assert": "one scope_check of 1,700 touched files (plus six checks) against a merged contract of 2,500 allowed service globs and 500 protected files, under 0.1 s. Measured on this machine at load average 5 to 11, one fresh process per run: the starter after the three logic fixes 1.0-2.5 s on Python 3.12 and 0.93-1.3 s on 3.11, 3.13 and 3.14 (145-175 s on 3.10, whose fnmatch cache holds 256 patterns); the fnmatch version indexed by literal directory 5.5-12 ms; the reference (glob dialect, lazy compile) 4.8-10 ms, on every version from 3.10 to 3.14. Indexing by first segment only takes 0.44-0.95 s, and a Python loop over every precompiled glob 0.4-0.7 s. Two approaches sit at the limit and pass or fail with the load: precompiling all 3,000 globs in PatternSet.__init__ (60-120 ms) and one alternation of all fnmatch.translate patterns (60-180 ms); the interviewer guide steers both to compiling only the candidate buckets",
+      "overfix_guard": "union, child-only and parent-only merges; an empty child allow-list that falls back to the parent's (a read-only task must allow nothing); a merge that drops the child's own allowed_within, so a merged contract merged again under an org-wide ** loses the project's list; the classifier checking only allowed_files or any one list; soft files, repeated touches and forbidden files kept out of the budget, and > rather than >=; 30 minutes fits a 30-minute budget; hosts split at the first or last colon, only :443 stripped, the allowlist left unnormalized, [] taken as no enforcement and None as deny-all; globs without a literal directory (**/secrets/**, *.lock) still apply to every path; buckets keyed by the first segment, by a prefix cut mid-segment (tests/test_) or by everything before the last slash (lib/**/*.py filed under lib/**); forbidden before allowed, allowed before soft"
+    },
+    {
+      "part": 2,
+      "test": "test_archive_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Use It: when the task closes, the contract is archived under outputs/scope/closed/; code/main.py archive (closed/<task_id>.json, overwritten on a second write); quiz Q11 (one file left, the clean run lost; make archived records auditable and never overwritten)",
+      "exactness": "load gives back the same ClosedTask after a reopen: the effective contract with network_egress [] (deny-all) and, for another task, None (no enforcement), allowed_within as a list of lists, touched_files in order with a repeat, elapsed_minutes 0.1 + 0.2, closed_at 1767225600.1234567, findings as Finding objects with severity and detail; the top level carries task_id, passed as a JSON boolean, and closed_at",
+      "traps": [
+        "opened with w or O_TRUNC, so a second close overwrites the evidence",
+        "exists() and then write, which follows a dangling symlink out of closed/; a temporary file and os.replace, which replaces the existing entry",
+        "json.dumps allowing NaN, or dumping straight into the exclusive file so a failure leaves a half-written report that blocks the next close",
+        "None and [] collapsed into each other, allowed_within flattened, findings left as dicts or reordered",
+        "touches deduplicated or sorted, elapsed_minutes rounded, closed_at rounded or stored as an ISO time",
+        "passed written as 0/1 or as text, or as 'no findings' (T-010 carries one info finding and passes)",
+        "closed/ created without exist_ok, or a second close that returns the existing file instead of raising",
+        "task ids not checked, checked after the write, allowing a slash or a leading dot, checked with re.match, or checked on close only",
+        "archived under the contract's task_id instead of the report's",
+        "an unknown task raising FileNotFoundError, or closed tasks kept in memory only",
+        "task_ids taken from every stem or every .json file, listing a temporary file or macOS ._T-001.json"
+      ],
+      "clarifying_questions": ["what the file holds", "overwrite when identical", "an existing symlink or directory", "NaN in the record", "duplicate touches", "two closers at once", "fsync"]
+    },
+    {
+      "part": 3,
+      "test": "test_glob_dialect",
+      "kind": "core algorithm",
+      "lesson_anchor": "Globs, not raw paths (pin contracts to globs such as app/**/*.py); quiz Q3 and the code walkthrough 3.2 (fnmatch: ** cannot match zero directories, * crosses /, **/*.md misses README.md, fnmatch.fnmatch case-folds on Windows); Exercise 2 (path families)",
+      "traps": [
+        "**/ that needs at least one directory, a leading **/ taken as .* (**/.env against deploy/prod.env), or * and ? that cross /",
+        "** inside a segment treated as crossing directories",
+        "dir/** matching dir itself or docsite/",
+        "the trailing / ignored",
+        "a negated class that matches /, or a range escaped into literals",
+        "backslash escapes ignored (Next.js app/[slug]/ routes), or other characters left unescaped (v1.2, c++)",
+        "case-insensitive matching",
+        "an unclosed [, an absolute glob or a lone trailing backslash accepted",
+        "normalize_path via posixpath.normpath, rejecting ..notes, accepting lib/.., stripping a leading / or keeping a trailing one, folding case",
+        "the checker left on fnmatch, touched paths not normalized, repeats dropped before normalizing, a path outside the repository dropped or counted off scope",
+        "an index that files docs/ as a literal or an escaped glob under its raw text"
+      ],
+      "integration": "the Part 1 checker reads a contract in the new dialect: ./lib/pdf.py and lib/../app/main.py are in scope, app//api/routes.py is off scope, web/app/[slug]/page.tsx and .env are forbidden by web/app/\\[slug\\]/** and **/.env, ../secrets.env is forbidden as written, and docs/ makes docs/guide/install.md soft",
+      "clarifying_questions": ["** and zero directories", "case on macOS", "braces or ^", "normalizing patterns", "../ in the checker"]
+    },
+    {
+      "part": 4,
+      "test": "test_diff_scan",
+      "kind": "streaming",
+      "lesson_anchor": "Scope check is a diff check (the checker reads the diff and the globs; each violation is a tagged finding the verification gate can refuse); Use It: CI runs the scope checker against the merge diff; Build It (a diff parser that turns touched files into a RunSummary, which code/main.py does not have; quiz Q11.2)",
+      "wire_format": "SARIF-style JSON Lines: one result per line, {ruleId, level, message.text, locations[0].physicalLocation.artifactLocation.uri}, decided by the test's join, splitlines, json.loads and the uri lookup; ruleIds scope/forbidden (error), scope/off-scope (warning), scope/soft-off-scope (note), scope/over-budget (error); uri percent-encoded with urllib.parse.quote",
+      "traps": [
+        "missing newline or blank lines between results",
+        "each chunk decoded as UTF-8 (a Latin-1 hunk line), a line cut across chunks dropped, the last line without a newline dropped, or the last file left unjudged when the stream ends on a newline after a header with no hunk",
+        "paths read from ---/+++ lines only, which binary files, mode changes, empty new files and pure renames do not have; deletions skipped",
+        "the header split at spaces or at the first ' b/' (docs/release notes.md, notes/plan b/todo.md)",
+        "quoted names left quoted, escape bytes decoded as Latin-1, backslash escapes kept as written, rename lines not unquoted",
+        "a rename that checks only its destination, a copy checked like a rename",
+        "a removed SQL comment (--- a/b test cohort) read as a file header",
+        "a path reported once per section",
+        "over-budget for every file past the budget, at the budget itself, counting soft or forbidden files, counting a repeated off-scope file twice, or placed before the file's own result",
+        "levels taken from the checker's severities, uri left raw or with / encoded, message.text without the path",
+        "results held until the stream ends or until the next section"
+      ],
+      "clarifying_questions": ["encoding of the diff", "copies", "mode changes", "when to emit", "over-budget once", "a full SARIF log", "a file in two commits"]
+    },
+    {
+      "part": 5,
+      "test": "test_contract_chain",
+      "kind": "graph",
+      "lesson_anchor": "Two altitudes of scope: the feature list and the task contract (the contract and the list compose by least privilege; the task contract's allowed_files must sit inside whatever the active feature touches); Multi-contract merge semantics (None defers, [] stays deny-all)",
+      "traps": [
+        "explanations taken from the leaf up, for paths or for hosts",
+        "one pass that asks each layer forbidden then allowed, so not allowed above beats forbidden below",
+        "the last matching forbidden glob of a layer, or the first glob of the sorted merged list (the task's **/release.sh)",
+        "only the leaf's allow-list checked, or ancestors dropped when merges nest (tools/upload_cli.py three layers down)",
+        "network_egress None taken as deny-all, [] taken as no restriction, hosts compared as written or only lowercased (API.Anthropic.com:443)",
+        "effective() that skips empty allowlists, returns the leaf, or folds from the leaf up",
+        "a missing parent, a skipped or misplaced altitude, a parent accepted anywhere above, a parentless task taken as the top, or a project contract with a parent",
+        "duplicate task_ids resolved silently, either way",
+        "layers listed leaf first, or an unknown task_id raising ValueError"
+      ],
+      "clarifying_questions": ["which layer explains", "forbidden and not allowed together", "a subtask widening its task", "a task under the project", "None and []", "duplicate ids"]
+    }
+  ],
+  "deviations": [
+    "Python 3.11+ rather than the course's 3.10+: the Part 1 starter matches with fnmatch.fnmatch, as code/main.py does, and Python 3.10's fnmatch keeps only 256 compiled patterns, so the slow layer (about 3,000 globs per path) recompiles on every call and runs for 145-175 s there instead of about a second. A starter with its own unbounded cache runs on 3.10 but drops to 8 times the limit or less on 3.12, so the exam asks for 3.11; the reference itself passes on 3.10.",
+    "Part 1: the suggested timing (500,000 touched files against 2,000 globs) would run for minutes in the slow version, so the test uses 1,700 touched files against 3,000 globs with a 0.1 s limit. The globs have the monorepo shape services/svc-NNNN/**, which is why a first-segment index is not enough. The merged contract keeps both allow-lists in a new allowed_within field (a list of lists), so allowed_files keeps its type for contracts read from disk. A fourth guard came from the lesson's own code: forbidden before allowed, and an allowed docs path is in scope rather than soft.",
+    "Part 1 and Part 3: the starter matches with fnmatch, as code/main.py does, and Part 3 switches the checker to the glob dialect and to normalized paths. Part 1's tests use only globs and paths on which fnmatch and the dialect agree, so Part 1 passes before and after Part 3; Part 3 adds that a touched path outside the repository is forbidden.",
+    "Part 2: as assigned, one JSON file per task created exclusively. The record holds the effective contract, the run and the report, so the archive is auditable (quiz Q11.3). Besides the suggested exactness (path order, finding severity and detail, passed), the test covers None versus [] for network_egress, a dangling symlink at the target, strict JSON that leaves nothing behind, and task ids that would leave closed/.",
+    "Part 3: the dialect is written as translate(pattern) -> regex, the way fnmatch.translate works; compile_glob and Glob are given. A class never matches /, ** inside a segment is *, and a malformed glob raises ValueError instead of matching literally.",
+    "Part 4: git does not quote paths that contain spaces, as the suggestion assumed. Checked against git 2.50.1 on this machine: a space stays bare in the diff --git line (and gets a trailing tab on ---/+++), while a double quote, a backslash, a control character or a non-ASCII byte gets C quoting with one octal escape per UTF-8 byte, in rename lines too. So the space trap is the ambiguous header (with ' b/' inside a name) and the quoting trap is the UTF-8 octal form. The input is bytes, as a git subprocess gives it. Added from git's formats: a copy writes only its destination, and a mode change, an empty new file and a binary file count as writes. The violation budget appears online as one scope/over-budget result.",
+    "Part 5: contracts gain altitude and parent fields, so a chain is resolved from a flat list of contracts, as separate scope_contract.json files would give it. explain() lets forbidden win over not allowed, so it agrees with the checker's order. effective() folds merge_contracts from Part 1, which ties the chain back to the two-contract merge. The feature list's one-in_progress startup check is left out, so the part stays on contract chains."
+  ]
+}
