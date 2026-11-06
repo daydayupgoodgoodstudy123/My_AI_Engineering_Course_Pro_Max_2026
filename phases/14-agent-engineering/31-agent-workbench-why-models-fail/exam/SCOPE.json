@@ -1,0 +1,134 @@
+{
+  "lesson": "phases/14-agent-engineering/31-agent-workbench-why-models-fail",
+  "title": "Agent Workbench Engineering: Why Capable Models Still Fail",
+  "format": "staged-brownfield",
+  "service": "Surfaces: the lesson's prompt-only versus workbench run comparison with a failure-mode report that works for any task, an append-only CSV scorecard of 0-2 workbench audits with refused scores, a first-catch matrix along the lesson's flowchart with greedy next-surface picks, an online monitor over an at-least-once, out-of-order run log that reports surface violations as NDJSON, and a structure check of nested harness descriptions against the lesson's primitives",
+  "sources": {
+    "docs/en.md": "2575fa8bca26da9a545cfc45d79237eac2911e977d5b9e3a77b1a21675111850",
+    "code/main.py": "ff2f814d5d9017c4a9455c1eae61a242657d990abd3fa28abfe84c10a02c7cc7",
+    "outputs/skill-workbench-audit.md": "ca6976a96dd5e90482ae691bfbc7be1d5fda99d89412cc1fe0629271b287826d",
+    "quiz/quiz.md": "9a4c90c31bbf02809c94b56e18eddccfd2306cf98223feda1dfb402127878b60"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network and no LLM: the agent is the lesson's rule-based stub, and run events and harness descriptions are test data",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_failure_report",
+      "kind": "debug",
+      "lesson_anchor": "Build It: code/main.py stub_agent, RunResult.missing_surfaces and failure_report; the seven-surface table (Failure when missing); Verification 'Fails closed'; mission.md acceptance (every missed surface with its symptom); Exercise 4 (a stub that hallucinates an extra write); quiz Q6, Q9, Q10",
+      "planted_bugs": [
+        "RunResult.missing_surfaces returns set(WORKBENCH_SURFACES).difference(...), although its docstring and annotation promise a list in table order; 'TypeError: Object of type set is not JSON serializable' surfaces in json's encoder, called from write_report inside compare, two calls from the root cause, which is not in the traceback",
+        "failure_report keeps the lesson's hard-coded allow-list {'app.py', 'test_app.py'} (quiz Q9), so the three allowed files of the login task count as off-scope",
+        "stub_agent labels any non-empty surface list 'workbench', as code/main.py does; the docstring asks for 'partial' unless all seven surfaces are present",
+        "stub_agent's verification branch ignores tests_run, so a run with verification and no feedback passes (quiz Q6); the docstring says the gate reads the captured run and fails closed",
+        "off-scope and forbidden writes come from set operations put back into write order with sorted(key=result.files_touched.index), one linear scan per file"
+      ],
+      "timing_assert": "failure_report on a 24,800-write codemod (8,000 allowed files, 16,000 off-scope, 800 forbidden) under 0.05 s. Measured on this machine with other agents running (load average 4 to 13). Python 3.12: the list.index version 1.0-2.0 s (at least 20x the limit); scanning task.allowed_files or task.forbidden_files as a list, or dropping repeats by searching the output lists, 0.33-0.83 s (each caught, at least 6x the limit); the reference 1.2-1.3 ms median and 4.0-4.5 ms worst over 2,000 runs (at least 11x under); a first-write index dict feeding the same sorted calls 4.2 ms median, 12 ms worst. Python 3.10: 1.0 s and 1.7 ms median; 3.13: 1.1-2.0 s and 1.4 ms; 3.14: 1.3-2.3 s and 1.5-2.6 ms median, 5.5 ms worst",
+      "overfix_guard": "off-scope means outside the task's own allow-list: flagging only the stub's known leaks (README.md, scripts/release.sh) or treating everything not forbidden as allowed misses the hallucinated CHANGELOG.md; the speed fix must keep write order and drop repeats (sorted(set), list(set) and a plain comprehension fail); missing surfaces sorted alphabetically fail the table order; 'tests ran' is not a pass without the gate; the label fix keeps prompt-only for a run with no surfaces; fail closed lives in stub_agent (the blind run's actually_passing is false), not only in unverified_success"
+    },
+    {
+      "part": 2,
+      "test": "test_scorecard_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Exercise 1 (score the seven surfaces from 0 to 2); outputs/skill-workbench-audit.md (0 missing, 1 partial, 2 healthy; refuse the verification score when the repo has no test command); Exercise 3 (an eighth surface); 'The repo is the system of record'; quiz Q12",
+      "storage": "append-only CSV: the header repo,audited_at,<the seven surfaces>,notes, then one csv.writer row per audit, a refused score as an empty field",
+      "exactness": "audits read back equal after a reopen, one of them given its scores dict in another key order: integer scores, None for a refused score next to a real 0, audited_at text with its own UTC offset, notes with commas, double quotes and a line break; the raw file has one header row and an empty refused field; the bytes before a later append are a prefix of the file after it; a file that exists but is empty still starts with the header row; two audits at the same instant come back in the order they were recorded",
+      "traps": [
+        "a refused score read back as 0 (int(v or 0)) or crashing on int('')",
+        "a surface left out of scores written as refused through scores.get",
+        "an eighth surface, a score of 3 or a time without a UTC offset accepted; a rejected audit that changes the file",
+        "history sorted by the text of audited_at or left in file order (17:30 at -08:00 on 13 March is later than 00:15 at +00:00 on 14 March)",
+        "audits at the same instant reordered by a text tie-break or lost in a dict keyed by the instant",
+        "audited_at rewritten in UTC so that the text sorts, which breaks the round trip",
+        "a row written from scores.values(), so a dict in another key order puts scores in the wrong columns",
+        "a header written only when the file does not exist, so a file that exists but is empty starts with an audit row"
+      ],
+      "clarifying_questions": [
+        "refused versus 0",
+        "a surface left out of scores",
+        "an eighth surface",
+        "normalizing to UTC",
+        "times without an offset",
+        "audits at the same instant",
+        "the order of the scores keys",
+        "rewriting to keep order",
+        "concurrent writers"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_catch_matrix",
+      "kind": "core algorithm",
+      "lesson_anchor": "The Concept flowchart (Task, Scope Contract, Repo Memory, Agent Loop, Runtime Feedback, Verification Gate, Reviewer, Handoff); Instructions as policy attached to the runtime's startup; Exercise 4 (which surface catches a hallucinated write first; quiz Q11: scope first, verification second); Exercise 5 (which failure mode each surface absorbs); the workbench-audit skill's three priorities ordered by leverage",
+      "traps": [
+        "catchers tried in the order the failure lists them, or surfaces in the table order instead of the flowchart order",
+        "every present catcher counted instead of the first one",
+        "a failure that no surface is built for left out of escaped",
+        "leverage counted over every failure a surface could stop, or not recomputed after a pick (review, verification, scope instead of review, state)",
+        "ties broken alphabetically or in table order (instructions before state)",
+        "a surface that stops nothing still picked",
+        "unknown surface names ('observability', 'Scope') or duplicate failure ids accepted"
+      ],
+      "integration": "WorkbenchService.next_surfaces reads Part 2's latest audit by instant (recorded before an older, backfilled audit) and counts only healthy (2) surfaces as present; counting partial surfaces gives []",
+      "clarifying_questions": [
+        "where instructions sit on the flow",
+        "catchers order",
+        "ties",
+        "surfaces that stop nothing",
+        "partial surfaces in the service"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_monitor_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Feedback as an invocation log written into a queue ('Every shell call is a record, durable, replayable'); Queue (back-pressure, retry, idempotency); the Failure-when-missing column for scope, feedback ('Agent declares success on a 400') and handoff; Handoff as a durable record emitted by a session-end trigger",
+      "wire_format": "NDJSON: each yielded string is one JSON object ending in one newline, {seq, surface: scope, path}, {seq, surface: feedback, exit_code as an int or null} or {seq, surface: handoff}; decided by the test's endswith/count check per string and json.loads",
+      "traps": [
+        "events checked in arrival order: a claim judged before the run that precedes it in the log (a missed violation), end before handoff (a false one), and without deduplication a late failing run turning a good claim into a violation",
+        "late redeliveries put back into the buffer and reported as a gap at the end",
+        "the whole log read and sorted before checking (the probe sends seq 2, then seq 1, then 297 runs; the violation must come out right after seq 1)",
+        "an off-scope path reported on every write",
+        "an uncaptured exit code (None) or no run at all taken as a pass ('if code:')",
+        "the first run instead of the latest run before the claim",
+        "a gap at the end of the stream dropped instead of ValueError naming the missing seqs, or named as the range or span up to the last arrival (5 and 7 are missing, 6, 8 and 9 arrived)"
+      ],
+      "clarifying_questions": [
+        "redelivered copies",
+        "a gap at the end",
+        "a claim with no run",
+        "the same off-scope path twice",
+        "events after end"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_harness_primitives",
+      "kind": "recursive structure and graph",
+      "lesson_anchor": "Reasoning from primitives (function, worker, trigger, runtime, queue, session persistence, authorization policy); the surfaces mapped onto primitives (State as session persistence, Scope as authorization policy, Feedback written into a queue, Handoff read by the next session's startup trigger); 'The loop closes on the state file, not on chat history'; sandbox agents as runtimes and MCP servers as workers",
+      "traps": [
+        "only the top runtime walked, so refs into sandbox/... are unresolved and the nested worker without a policy is missed (nesting goes three levels down: sandbox/mcp/github)",
+        "a trigger that names a worker counted as reaching a function",
+        "a queue cycle followed by recursion without a visited set (RecursionError)",
+        "a broken ref reported only as unresolved, not also as no_function for its trigger",
+        "the loop counted as closed by any cycle (the chat loop) or by a durable store that is only written",
+        "a cycle reachable from a durable store taken for the store on a cycle: feedback_log reaches the chat loop through on_feedback but never returns to itself (three-colour DFS), and the same search without a visited set recurses forever",
+        "a trigger's on edge drawn from the trigger to the store, so the closed harness still reports open_loop",
+        "findings in traversal order instead of sorted by (path, code, detail)"
+      ],
+      "clarifying_questions": [
+        "relative refs",
+        "unresolved and no_function together",
+        "a cycle through chat",
+        "checking policy contents"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the plan's defects are kept: the hard-coded allow-list (with forbidden writes reported on their own), the partial label and unverified success. unverified_success itself is computed correctly; the defect behind it is the lesson's verification branch, which passes without a captured run (quiz Q6, 'Fails closed'). The missing_surfaces set was added so that the first error surfaces two calls away from its root cause. The plan's timing defect (list membership, 20,000 touched files against 5,000 allowed) is replaced by sorted(key=list.index): lessons 14, 20 and 34 already use a linear scan replaced by a hash lookup, and lesson 36 a per-glob scan in its scope check. Keeping the lesson's set literal also means the obvious fix of the allow-list is fast, so the slow path is in restoring write order. Quiz Q9's sample fix lists forbidden files in off_scope_writes too; here the docstring and the plan keep them in forbidden_writes only. The first error is json's TypeError two calls away, as in lesson 37, where a timeout's stdout is bytes; here the cause is a set where the docstring promises a list in table order, so the trace back ends at a different bug with a different fix (the lesson's own comprehension).",
+    "Part 2: CSV as assigned, with the plan's exactness cases (commas, quotes and a line break in notes, integer scores 0-2, history in time order). The designed traps come from the audit skill: a refused score (None) next to a missing one (0), a surface left out versus a refusal, an instant with an offset versus its text, and the offset kept as written. Not used as designed traps because this chapter already has them: CSV read without newline='' turning CRLF into LF (lesson 19, so notes carry only an LF), rows joined by hand (lessons 03, 09, 20, 25), bool or float scores (lesson 39), validating while writing (lesson 19) and rewriting the file (lessons 17, 33). The append-only prefix check stays as a plain requirement.",
+    "Part 3: the plan's fixed order, first catcher only, escapes even with all seven surfaces and the escaped list are kept. Added the audit skill's three priorities ordered by leverage as a greedy pick with recomputation, and an end-to-end check through Part 2's scorecard. The flowchart has no Instructions node; FLOW_ORDER puts instructions at the agent loop, because the lesson calls the router policy attached to the runtime's startup. The catchers of each failure are test data, so the exam claims nothing about which surface absorbs which failure beyond the lesson's table.",
+    "Part 4: NDJSON as assigned. The plan's 'the same violation once', 'a missing handoff reported at the end', 'out-of-order events processed by seq' and 'emit at once' are kept; the end of a session is an explicit end event checked in seq order, and redelivered events (the queue's at-least-once side) were added. Only three shallow checks (scope, feedback, handoff), because lessons 32 to 42 build each surface in depth. A stream that stops with a gap raises ValueError instead of reporting the waiting events.",
+    "Part 5: the plan's nested runtime tree, trigger-to-function reachability through queues, a policy on every worker, the loop closing on durable state and sorted findings are kept. The reviewer's read-only access to builder artifacts is left out: modelling artifacts inside policies needs path or glob semantics (lesson 36) and overlaps the reviewer lesson (39). The edges are explicit: a trigger fires 'on' a store, and triggers, queues and functions point 'to' their targets."
+  ]
+}

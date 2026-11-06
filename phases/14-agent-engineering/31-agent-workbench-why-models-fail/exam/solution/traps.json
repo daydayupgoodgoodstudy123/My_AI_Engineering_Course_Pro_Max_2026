@@ -1,0 +1,1187 @@
+{
+  "package": "surfaces",
+  "tests": [
+    "test_failure_report",
+    "test_scorecard_roundtrip",
+    "test_catch_matrix",
+    "test_monitor_stream",
+    "test_harness_primitives"
+  ],
+  "layers": [
+    {
+      "test": "test_failure_report",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "not JSON serializable"
+        },
+        {
+          "name": "missing surfaces as a list in table order",
+          "edits": [
+            {
+              "file": "report.py",
+              "old": "        return set(WORKBENCH_SURFACES).difference(self.surfaces_present)\n",
+              "new": "        return [s for s in WORKBENCH_SURFACES if s not in self.surfaces_present]\n"
+            }
+          ],
+          "expect": "off-scope writes are the files the task neither allows nor forbids"
+        },
+        {
+          "name": "+ allowed files from the task",
+          "edits": [
+            {
+              "file": "report.py",
+              "old": "    allowed = {\"app.py\", \"test_app.py\"}\n",
+              "new": "    allowed = set(task.allowed_files)\n"
+            }
+          ],
+          "expect": "a run that lacks any surface is partial"
+        },
+        {
+          "name": "+ partial label",
+          "edits": [
+            {
+              "file": "report.py",
+              "old": "    result = RunResult(label=\"prompt-only\" if not surfaces else \"workbench\")\n",
+              "new": "    missing = [s for s in WORKBENCH_SURFACES if s not in surfaces]\n    result = RunResult(label=\"prompt-only\" if not surfaces else \"partial\" if missing else \"workbench\")\n"
+            }
+          ],
+          "expect": "verification fails closed without a captured test run"
+        },
+        {
+          "name": "+ verification reads the captured run",
+          "edits": [
+            {
+              "file": "report.py",
+              "old": "    if has_verification:\n",
+              "new": "    if has_verification and result.tests_run:\n"
+            }
+          ],
+          "expect": "the report should be fast on large runs"
+        },
+        {
+          "name": "+ first-write index built once",
+          "edits": [
+            {
+              "file": "report.py",
+              "old": "    in_order = result.files_touched.index\n",
+              "new": "    first: dict[str, int] = {}\n    for i, path in enumerate(result.files_touched):\n        first.setdefault(path, i)\n    in_order = first.__getitem__\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_failure_report",
+      "name": "missing surfaces sorted instead of table order",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "        return [s for s in WORKBENCH_SURFACES if s not in self.surfaces_present]\n",
+          "new": "        return sorted(set(WORKBENCH_SURFACES).difference(self.surfaces_present))\n"
+        }
+      ],
+      "expect": "missing surfaces keep the lesson's table order"
+    },
+    {
+      "test": "test_failure_report",
+      "name": "off-scope means the stub's known leaks, not outside the allow-list",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "        elif path not in allowed:\n",
+          "new": "        elif path in (\"README.md\", \"scripts/release.sh\"):\n"
+        }
+      ],
+      "expect": "off-scope writes are the files the task neither allows nor forbids"
+    },
+    {
+      "test": "test_failure_report",
+      "name": "one pass over the writes without dropping repeats",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    for path in dict.fromkeys(result.files_touched):\n",
+          "new": "    for path in result.files_touched:\n"
+        }
+      ],
+      "expect": "off-scope writes are the files the task neither allows nor forbids"
+    },
+    {
+      "test": "test_failure_report",
+      "name": "a captured test run counted as passing without the gate",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    if has_verification and result.tests_run:\n",
+          "new": "    if result.tests_run:\n"
+        }
+      ],
+      "expect": "a captured test run is not a verdict; the gate is"
+    },
+    {
+      "test": "test_failure_report",
+      "name": "forbidden files also listed as off-scope, as in quiz Q9's sample fix",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "        elif path not in allowed:\n",
+          "new": "        if path not in allowed:\n"
+        }
+      ],
+      "expect": "off-scope writes are the files the task neither allows nor forbids"
+    },
+    {
+      "test": "test_failure_report",
+      "name": "everything the task does not forbid counts as allowed",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    allowed = set(task.allowed_files)\n",
+          "new": "    allowed = set(result.files_touched) - set(task.forbidden_files)\n"
+        }
+      ],
+      "expect": "off-scope writes are the files the task neither allows nor forbids"
+    },
+    {
+      "test": "test_failure_report",
+      "name": "the forbidden list scanned for every write",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "        if path in forbidden:\n",
+          "new": "        if path in task.forbidden_files:\n"
+        }
+      ],
+      "expect": "the report should be fast on large runs"
+    },
+    {
+      "test": "test_failure_report",
+      "name": "the forbidden list scanned for every write outside the allow-list",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "        if path in forbidden:\n            forbidden_writes.append(path)\n        elif path not in allowed:\n            off_scope.append(path)\n",
+          "new": "        if path in allowed:\n            continue\n        if path in task.forbidden_files:\n            forbidden_writes.append(path)\n        else:\n            off_scope.append(path)\n"
+        }
+      ],
+      "expect": "the report should be fast on large runs"
+    },
+    {
+      "test": "test_failure_report",
+      "name": "repeats dropped by searching the output lists",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    for path in dict.fromkeys(result.files_touched):\n        if path in forbidden:\n            forbidden_writes.append(path)\n        elif path not in allowed:\n            off_scope.append(path)\n",
+          "new": "    for path in result.files_touched:\n        if path in forbidden:\n            if path not in forbidden_writes:\n                forbidden_writes.append(path)\n        elif path not in allowed and path not in off_scope:\n            off_scope.append(path)\n"
+        }
+      ],
+      "expect": "the report should be fast on large runs"
+    },
+    {
+      "test": "test_failure_report",
+      "name": "the allow-list scanned for every write",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "        elif path not in allowed:\n",
+          "new": "        elif path not in task.allowed_files:\n"
+        }
+      ],
+      "expect": "the report should be fast on large runs"
+    },
+    {
+      "test": "test_failure_report",
+      "name": "label rewritten without the prompt-only case",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    result = RunResult(label=\"prompt-only\" if not surfaces else \"partial\" if missing else \"workbench\")\n",
+          "new": "    result = RunResult(label=\"partial\" if missing else \"workbench\")\n"
+        }
+      ],
+      "expect": "a run with no surfaces is prompt-only"
+    },
+    {
+      "test": "test_failure_report",
+      "name": "fail closed patched into unverified_success while the stub still passes the run",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    if has_verification and result.tests_run:\n",
+          "new": "    if has_verification:\n"
+        },
+        {
+          "file": "report.py",
+          "old": "        \"unverified_success\": result.declared_success and not result.actually_passing,\n",
+          "new": "        \"unverified_success\": result.declared_success and not (result.actually_passing and result.tests_run),\n"
+        }
+      ],
+      "expect": "verification fails closed without a captured test run"
+    },
+    {
+      "test": "test_failure_report",
+      "name": "write order taken from a dict that keeps each file's last write",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    for path in dict.fromkeys(result.files_touched):\n        if path in forbidden:\n            forbidden_writes.append(path)\n        elif path not in allowed:\n            off_scope.append(path)\n",
+          "new": "    last = {p: i for i, p in enumerate(result.files_touched)}\n    written = set(result.files_touched)\n    off_scope = sorted(written - allowed - forbidden, key=last.__getitem__)\n    forbidden_writes = sorted(written & forbidden, key=last.__getitem__)\n"
+        }
+      ],
+      "expect": "off-scope writes are the files the task neither allows nor forbids, once each, in write order"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "a refused score read back as 0",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "{s: None if v == \"\" else int(v) for s, v in zip(WORKBENCH_SURFACES, scores)}",
+          "new": "{s: int(v or 0) for s, v in zip(WORKBENCH_SURFACES, scores)}"
+        }
+      ],
+      "expect": "an audit round-trips exactly, refused scores included"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "audited_at rewritten in UTC so the text sorts",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "        row = [audit.repo, audit.audited_at, ",
+          "new": "        row = [audit.repo, datetime.fromisoformat(audit.audited_at).astimezone(__import__('datetime').timezone.utc).isoformat(), "
+        }
+      ],
+      "expect": "an audit round-trips exactly, refused scores included"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "history sorted by the text of audited_at",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "key=lambda audit: datetime.fromisoformat(audit.audited_at)",
+          "new": "key=lambda audit: audit.audited_at"
+        }
+      ],
+      "expect": "history is oldest first by the instant, whatever the UTC offset"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "history in file order",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "        return sorted(audits, key=lambda audit: datetime.fromisoformat(audit.audited_at))\n",
+          "new": "        return audits\n"
+        }
+      ],
+      "expect": "history is oldest first by the instant, whatever the UTC offset"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "a surface left out of scores written as refused",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "    if set(audit.scores) != set(WORKBENCH_SURFACES):\n",
+          "new": "    if not set(audit.scores) <= set(WORKBENCH_SURFACES):\n"
+        },
+        {
+          "file": "scorecard.py",
+          "old": "*(audit.scores[s] for s in WORKBENCH_SURFACES)",
+          "new": "*(audit.scores.get(s) for s in WORKBENCH_SURFACES)"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "a time without a UTC offset accepted",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "    if datetime.fromisoformat(audit.audited_at).utcoffset() is None:\n",
+          "new": "    if datetime.fromisoformat(audit.audited_at) is None:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "header written by every new Scorecard",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "        new = not os.path.exists(self.path) or os.path.getsize(self.path) == 0\n",
+          "new": "        new = not getattr(self, '_wrote_header', False)\n        self._wrote_header = True\n"
+        }
+      ],
+      "expect": "one header row, then one row per audit"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "scorecard opened with 'w'",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "open(self.path, \"a\", newline=\"\"",
+          "new": "open(self.path, \"w\", newline=\"\""
+        }
+      ],
+      "expect": "audits are appended; earlier rows never change"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "UTC offset checked after the row is written",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "    if datetime.fromisoformat(audit.audited_at).utcoffset() is None:\n        raise ValueError(f\"audited_at needs a UTC offset, got {audit.audited_at!r}\")\n",
+          "new": ""
+        },
+        {
+          "file": "scorecard.py",
+          "old": "            writer.writerow(row)\n",
+          "new": "            writer.writerow(row)\n        if datetime.fromisoformat(audit.audited_at).utcoffset() is None:\n            raise ValueError(f\"audited_at needs a UTC offset, got {audit.audited_at!r}\")\n"
+        }
+      ],
+      "expect": "a rejected audit leaves the file as it was"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "only scores above 2 rejected",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "        if score is not None and (type(score) is not int or score not in SCORES):\n",
+          "new": "        if score is not None and score > 2:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "history ordered by local wall time",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "key=lambda audit: datetime.fromisoformat(audit.audited_at)",
+          "new": "key=lambda audit: datetime.fromisoformat(audit.audited_at).replace(tzinfo=None)"
+        }
+      ],
+      "expect": "history is oldest first by the instant, whatever the UTC offset"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "a refused score written as the text None",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "*(audit.scores[s] for s in WORKBENCH_SURFACES)",
+          "new": "*(str(audit.scores[s]) for s in WORKBENCH_SURFACES)"
+        },
+        {
+          "file": "scorecard.py",
+          "old": "None if v == \"\" else int(v)",
+          "new": "None if v == \"None\" else int(v)"
+        }
+      ],
+      "expect": "a refused score is an empty field"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "an eighth surface silently dropped",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "    if set(audit.scores) != set(WORKBENCH_SURFACES):\n",
+          "new": "    if not set(WORKBENCH_SURFACES) <= set(audit.scores):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "scores written in the order of the dict",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "*(audit.scores[s] for s in WORKBENCH_SURFACES)",
+          "new": "*audit.scores.values()"
+        }
+      ],
+      "expect": "each score lands in its own surface's column"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "history collected in a dict keyed by the instant",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "        return sorted(audits, key=lambda audit: datetime.fromisoformat(audit.audited_at))\n",
+          "new": "        by_instant = {datetime.fromisoformat(a.audited_at): a for a in audits}\n        return [by_instant[k] for k in sorted(by_instant)]\n"
+        }
+      ],
+      "expect": "audits at the same instant keep the order they were recorded in"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "audits at the same instant ordered by their text",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "key=lambda audit: datetime.fromisoformat(audit.audited_at))",
+          "new": "key=lambda audit: (datetime.fromisoformat(audit.audited_at), audit.audited_at))"
+        }
+      ],
+      "expect": "audits at the same instant keep the order they were recorded in"
+    },
+    {
+      "test": "test_scorecard_roundtrip",
+      "name": "header written only when the file does not exist yet",
+      "edits": [
+        {
+          "file": "scorecard.py",
+          "old": "        new = not os.path.exists(self.path) or os.path.getsize(self.path) == 0\n",
+          "new": "        new = not os.path.exists(self.path)\n"
+        }
+      ],
+      "expect": "an empty file gets the header row too"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "catchers tried in the order the failure lists them",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "        stop = next((s for s in FLOW_ORDER if s in present and s in failure.catchers), None)\n",
+          "new": "        stop = next((s for s in failure.catchers if s in present), None)\n"
+        }
+      ],
+      "expect": "a failure stops at the first surface on the flow"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "surfaces tried in the lesson's table order",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "for s in FLOW_ORDER if s in present and s in failure.catchers",
+          "new": "for s in (\"instructions\", \"state\", \"scope\", \"feedback\", \"verification\", \"review\", \"handoff\") if s in present and s in failure.catchers"
+        }
+      ],
+      "expect": "the surfaces meet a failure in flowchart order"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "every present catcher counted",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "            counts[stop] += 1\n",
+          "new": "            for s in failure.catchers:\n                counts[s] += s in present\n"
+        }
+      ],
+      "expect": "each failure counts once, for the surface that stops it"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "a failure with no catchers left out",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "        if stop is None:\n            escaped.append(failure)\n",
+          "new": "        if stop is None:\n            if failure.catchers:\n                escaped.append(failure)\n"
+        }
+      ],
+      "expect": "a failure no surface is built for escapes even the full workbench"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "leverage counted over every failure, not the escapes",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "            s: sum(s in failure.catchers for failure in remaining)\n",
+          "new": "            s: sum(s in failure.catchers for failure in failures)\n"
+        }
+      ],
+      "expect": "the next surface stops the most failures that still escape"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "leverage not recomputed after a pick",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "        remaining = [failure for failure in remaining if best not in failure.catchers]\n",
+          "new": ""
+        }
+      ],
+      "expect": "the next surface stops the most failures that still escape"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "a surface that stops nothing still picked",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "        if best is None or gains[best] == 0:\n",
+          "new": "        if best is None:\n"
+        }
+      ],
+      "expect": "the next surface stops the most failures that still escape"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "ties broken alphabetically",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "        best = max(gains, key=gains.__getitem__, default=None)",
+          "new": "        best = max(sorted(gains), key=gains.__getitem__, default=None)"
+        }
+      ],
+      "expect": "a tie goes to the surface earlier on the flow"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "partial surfaces counted as present",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "if score == 2]",
+          "new": "if score]"
+        }
+      ],
+      "expect": "the latest audit decides, and only healthy surfaces are present"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "ties broken in the lesson's table order",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "            for s in FLOW_ORDER\n            if s not in present and s not in picks\n",
+          "new": "            for s in (\"instructions\", \"state\", \"scope\", \"feedback\", \"verification\", \"review\", \"handoff\")\n            if s not in present and s not in picks\n"
+        }
+      ],
+      "expect": "a tie goes to the surface earlier on the flow"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "Counter.most_common picks, ties in the order catchers are listed",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "        gains = {\n            s: sum(s in failure.catchers for failure in remaining)\n            for s in FLOW_ORDER\n            if s not in present and s not in picks\n        }\n        best = max(gains, key=gains.__getitem__, default=None)  # the first maximum in FLOW_ORDER\n        if best is None or gains[best] == 0:\n            break\n",
+          "new": "        from collections import Counter\n        tally = Counter(s for failure in remaining for s in failure.catchers if s not in present and s not in picks)\n        if not tally:\n            break\n        best = tally.most_common(1)[0][0]\n"
+        }
+      ],
+      "expect": "a tie goes to the surface earlier on the flow"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "leverage recounted over every failure the picks miss, caught ones included",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "    remaining = escaped\n",
+          "new": "    remaining = list(failures)\n"
+        }
+      ],
+      "expect": "the next surface stops the most failures that still escape"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "one pick past the limit",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "    while len(picks) < limit:\n",
+          "new": "    while len(picks) <= limit:\n"
+        }
+      ],
+      "expect": "at most limit surfaces"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "escaped failures sorted",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "    return CatchReport(caught, [failure.failure_id for failure in escaped], counts, picks)",
+          "new": "    return CatchReport(caught, sorted(failure.failure_id for failure in escaped), counts, picks)"
+        }
+      ],
+      "expect": "escaped failures are listed in input order"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "counts only for surfaces that stopped something",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "    counts = dict.fromkeys(FLOW_ORDER, 0)\n",
+          "new": "    counts = {}\n"
+        },
+        {
+          "file": "catch.py",
+          "old": "            counts[stop] += 1\n",
+          "new": "            counts[stop] = counts.get(stop, 0) + 1\n"
+        }
+      ],
+      "expect": "each failure counts once, for the surface that stops it"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "surface names checked only in present",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "    named = present.union(*(failure.catchers for failure in failures))\n",
+          "new": "    named = set(present)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "duplicate failure ids accepted",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "    if len(set(ids)) != len(ids):\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "ties broken by the larger name",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "        best = max(gains, key=gains.__getitem__, default=None)  # the first maximum in FLOW_ORDER\n",
+          "new": "        best = max(gains, key=lambda s: (gains[s], s), default=None)\n"
+        }
+      ],
+      "expect": "a tie goes to the surface earlier on the flow"
+    },
+    {
+      "test": "test_catch_matrix",
+      "name": "only a failure's first catcher on the flow tried, present or not",
+      "edits": [
+        {
+          "file": "catch.py",
+          "old": "        stop = next((s for s in FLOW_ORDER if s in present and s in failure.catchers), None)\n",
+          "new": "        first = min(failure.catchers, key=FLOW_ORDER.index, default=None)\n        stop = first if first in present else None\n"
+        }
+      ],
+      "expect": "a missing surface lets the failure on to the next one"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "events checked in arrival order",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "    async for event in events:\n        if event.seq < next_seq or event.seq in waiting:\n            continue  # a redelivery\n        waiting[event.seq] = event\n        while next_seq in waiting:\n            for violation in checks(waiting.pop(next_seq)):\n                yield json.dumps(violation) + \"\\n\"\n            next_seq += 1\n",
+          "new": "    seen: set[int] = set()\n    async for event in events:\n        if event.seq in seen:\n            continue\n        seen.add(event.seq)\n        for violation in checks(event):\n            yield json.dumps(violation) + \"\\n\"\n"
+        }
+      ],
+      "expect": "same violations whatever the arrival order"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "the whole log read and sorted before checking",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "    async for event in events:\n",
+          "new": "    for event in sorted([e async for e in events], key=lambda e: e.seq):\n"
+        }
+      ],
+      "expect": "a violation goes out as soon as its event can be checked"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "every write of an off-scope path reported",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "            if event.path not in self.allowed and event.path not in self.reported:\n",
+          "new": "            if event.path not in self.allowed:\n"
+        }
+      ],
+      "expect": "an off-scope path is reported once, at its first write"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "an uncaptured exit code taken as a pass",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "            if code != 0:\n",
+          "new": "            if code:\n"
+        }
+      ],
+      "expect": "a claim is judged by the latest run before it"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "a claim judged by the first run",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "            self.last_run = event\n",
+          "new": "            self.last_run = self.last_run or event\n"
+        }
+      ],
+      "expect": "a claim is judged by the latest run before it"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "late redeliveries kept in the buffer",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "        if event.seq < next_seq or event.seq in waiting:\n",
+          "new": "        if event.seq in waiting:\n"
+        }
+      ],
+      "expect": "seqs missing"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "a gap at the end ignored",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "    if waiting:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "forbidden writes left out, as in Part 1's off_scope_writes",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "    checks = _Checks(set(task.allowed_files))\n",
+          "new": "    checks = _Checks(set(task.allowed_files) | set(task.forbidden_files))\n"
+        }
+      ],
+      "expect": "an off-scope path is reported once, at its first write"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "a missing handoff reported when the stream stops",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "        elif event.kind == \"end\":\n            if not self.handoff:\n                return [{\"seq\": event.seq, \"surface\": \"handoff\"}]\n",
+          "new": "        elif event.kind == \"end\":\n            self.end = event.seq\n"
+        },
+        {
+          "file": "monitor.py",
+          "old": "        self.handoff = False\n",
+          "new": "        self.handoff = False\n        self.end = None\n"
+        },
+        {
+          "file": "monitor.py",
+          "old": "    if waiting:\n",
+          "new": "    if checks.end is not None and not checks.handoff:\n        yield json.dumps({\"seq\": checks.end, \"surface\": \"handoff\"}) + \"\\n\"\n    if waiting:\n"
+        }
+      ],
+      "expect": "a missing handoff goes out at the end event, not when the stream stops"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "missing seqs named as the whole range up to the last arrival",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "        missing = [seq for seq in range(next_seq, max(waiting)) if seq not in waiting]\n",
+          "new": "        missing = list(range(next_seq, max(waiting)))\n"
+        }
+      ],
+      "expect": "Regex pattern did not match"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "only the first missing seq named",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "        missing = [seq for seq in range(next_seq, max(waiting)) if seq not in waiting]\n",
+          "new": "        missing = [next_seq]\n"
+        }
+      ],
+      "expect": "Regex pattern did not match"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "violations without the newline",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "                yield json.dumps(violation) + \"\\n\"\n",
+          "new": "                yield json.dumps(violation)\n"
+        }
+      ],
+      "expect": "one JSON object per line"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "violations as indented JSON",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "                yield json.dumps(violation) + \"\\n\"\n",
+          "new": "                yield json.dumps(violation, indent=2) + \"\\n\"\n"
+        }
+      ],
+      "expect": "one JSON object per line"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "a claim uses up the run before it",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "            code = None if self.last_run is None else self.last_run.exit_code\n",
+          "new": "            code = None if self.last_run is None else self.last_run.exit_code\n            self.last_run = None\n"
+        }
+      ],
+      "expect": "every claim is judged on its own"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "a failed run taints every later claim",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "            self.last_run = event\n",
+          "new": "            self.last_run = event if (self.last_run is None or self.last_run.exit_code == 0) else self.last_run\n"
+        }
+      ],
+      "expect": "a claim is judged by the latest run before it"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "an event below a buffered seq dropped as a repeat",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "        if event.seq < next_seq or event.seq in waiting:\n",
+          "new": "        if event.seq < next_seq or event.seq in waiting or (waiting and event.seq < max(waiting)):\n"
+        }
+      ],
+      "expect": "seqs missing"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "the gap named as a span from the first missing seq to the last arrival",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "        missing = [seq for seq in range(next_seq, max(waiting)) if seq not in waiting]\n        raise ValueError(f\"the log stopped with seqs missing: {missing}\")\n",
+          "new": "        raise ValueError(f\"the log stopped with seqs {next_seq} to {max(waiting) - 1} missing\")\n"
+        }
+      ],
+      "expect": "Regex pattern did not match"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "a run without an exit code not taken as the latest run",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "            self.last_run = event\n",
+          "new": "            if event.exit_code is not None:\n                self.last_run = event\n"
+        }
+      ],
+      "expect": "a claim is judged by the latest run before it"
+    },
+    {
+      "test": "test_monitor_stream",
+      "name": "one buffered event released per arrival",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "        while next_seq in waiting:\n",
+          "new": "        if next_seq in waiting:\n"
+        }
+      ],
+      "expect": "seqs missing"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "only the top runtime walked",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        if kind == \"runtime\":\n",
+          "new": "        if kind == \"runtime\" and not path:\n"
+        }
+      ],
+      "expect": "through nested runtimes"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "a trigger that names a worker counted as reaching a function",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    return ref in nodes and nodes[ref][\"kind\"] == \"function\"\n",
+          "new": "    return ref in nodes and nodes[ref][\"kind\"] in (\"function\", \"worker\")\n"
+        }
+      ],
+      "expect": "a trigger must reach a function, through any number of queues"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "queues followed by recursion with no visited set",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    seen: set[str] = set()\n    ref = nodes[trigger][\"to\"]\n    while ref in nodes and nodes[ref][\"kind\"] == \"queue\" and ref not in seen:\n        seen.add(ref)\n        ref = nodes[ref][\"to\"]\n    return ref in nodes and nodes[ref][\"kind\"] == \"function\"\n",
+          "new": "    return _follow(nodes[trigger][\"to\"], nodes)\n\n\ndef _follow(ref: str, nodes: dict[str, dict]) -> bool:\n    if ref in nodes and nodes[ref][\"kind\"] == \"queue\":\n        return _follow(nodes[ref][\"to\"], nodes)\n    return ref in nodes and nodes[ref][\"kind\"] == \"function\"\n"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "any cycle closes the loop, chat history included",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": " if node[\"kind\"] == \"store\" and node.get(\"durable\")]\n",
+          "new": " if node[\"kind\"] == \"store\"]\n"
+        }
+      ],
+      "expect": "a loop through chat history does not close the workbench"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "a durable store that exists closes the loop",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    if not any(_on_cycle(store, edges) for store in durable):\n",
+          "new": "    if not durable:\n"
+        }
+      ],
+      "expect": "a loop through chat history does not close the workbench"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "a trigger's on edge drawn from the trigger to the store",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "                edges[node[\"on\"]].append(path)\n",
+          "new": "                edges[path].append(node[\"on\"])\n"
+        }
+      ],
+      "expect": "the loop closes on the state file"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "findings in traversal order",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    return sorted(findings)\n",
+          "new": "    return findings\n"
+        }
+      ],
+      "expect": "findings are sorted by path, then code"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "only a trigger's to checked for unresolved refs",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "            if ref in nodes:\n                edges[path].append(ref)\n            else:\n                findings.append(Finding(path, \"unresolved\", ref))\n",
+          "new": "            if ref in nodes:\n                edges[path].append(ref)\n            elif kind == \"trigger\":\n                findings.append(Finding(path, \"unresolved\", ref))\n"
+        },
+        {
+          "file": "harness.py",
+          "old": "            else:\n                findings.append(Finding(path, \"unresolved\", node[\"on\"]))\n",
+          "new": ""
+        }
+      ],
+      "expect": "every ref (to, on, a function's to) is a full path"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "a trigger's on never checked",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "            else:\n                findings.append(Finding(path, \"unresolved\", node[\"on\"]))\n",
+          "new": ""
+        }
+      ],
+      "expect": "every ref (to, on, a function's to) is a full path"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "a function's refs never checked",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "            if ref in nodes:\n                edges[path].append(ref)\n            else:\n                findings.append(Finding(path, \"unresolved\", ref))\n",
+          "new": "            if ref in nodes:\n                edges[path].append(ref)\n            elif kind != \"function\":\n                findings.append(Finding(path, \"unresolved\", ref))\n"
+        }
+      ],
+      "expect": "every ref (to, on, a function's to) is a full path"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "a trigger's on resolved but drawn as no edge",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "                edges[node[\"on\"]].append(path)\n",
+          "new": "                pass\n"
+        }
+      ],
+      "expect": "the loop closes on the state file"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "a durable store that is written and fired on counts as closed",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    if not any(_on_cycle(store, edges) for store in durable):\n",
+          "new": "    if not any(edges[store] and any(store in out for out in edges.values()) for store in durable):\n"
+        }
+      ],
+      "expect": "a loop through chat history does not close the workbench"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "queues followed one hop",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    while ref in nodes and nodes[ref][\"kind\"] == \"queue\" and ref not in seen:\n        seen.add(ref)\n        ref = nodes[ref][\"to\"]\n",
+          "new": "    if ref in nodes and nodes[ref][\"kind\"] == \"queue\":\n        ref = nodes[ref][\"to\"]\n"
+        }
+      ],
+      "expect": "a trigger must reach a function, through any number of queues"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "policy checked only on top-level workers",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        if kind == \"worker\" and \"policy\" not in node:\n",
+          "new": "        if kind == \"worker\" and \"policy\" not in node and \"/\" not in path:\n"
+        }
+      ],
+      "expect": "every worker needs a policy, at any depth"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "findings sorted by path and code only",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    return sorted(findings)\n",
+          "new": "    return sorted(findings, key=lambda f: (f.path, f.code))\n"
+        }
+      ],
+      "expect": "findings are sorted by path, then code, then detail"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "a cycle reachable from a durable store taken for the loop closing (three-colour DFS)",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "def _on_cycle(start: str, edges: dict[str, list[str]]) -> bool:\n    stack = list(edges[start])\n    seen: set[str] = set()\n    while stack:\n        node = stack.pop()\n        if node == start:\n            return True\n        if node not in seen:\n            seen.add(node)\n            stack.extend(edges[node])\n    return False\n",
+          "new": "def _on_cycle(start: str, edges: dict[str, list[str]]) -> bool:\n    state: dict[str, int] = {}\n\n    def visit(node: str) -> bool:\n        state[node] = 1\n        for nxt in edges[node]:\n            if state.get(nxt) == 1:\n                return True\n            if nxt not in state and visit(nxt):\n                return True\n        state[node] = 2\n        return False\n\n    return visit(start)\n"
+        }
+      ],
+      "expect": "a loop through chat history does not close the workbench"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "any node met twice on a walk from a durable store taken for the loop closing",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "def _on_cycle(start: str, edges: dict[str, list[str]]) -> bool:\n    stack = list(edges[start])\n    seen: set[str] = set()\n    while stack:\n        node = stack.pop()\n        if node == start:\n            return True\n        if node not in seen:\n            seen.add(node)\n            stack.extend(edges[node])\n    return False\n",
+          "new": "def _on_cycle(start: str, edges: dict[str, list[str]]) -> bool:\n    stack = [start]\n    seen: set[str] = set()\n    while stack:\n        node = stack.pop()\n        if node in seen:\n            return True\n        seen.add(node)\n        stack.extend(edges[node])\n    return False\n"
+        }
+      ],
+      "expect": "a loop through chat history does not close the workbench"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "the path back to a store searched by recursion without a visited set",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "def _on_cycle(start: str, edges: dict[str, list[str]]) -> bool:\n    stack = list(edges[start])\n    seen: set[str] = set()\n    while stack:\n        node = stack.pop()\n        if node == start:\n            return True\n        if node not in seen:\n            seen.add(node)\n            stack.extend(edges[node])\n    return False\n",
+          "new": "def _on_cycle(start: str, edges: dict[str, list[str]]) -> bool:\n    def reaches(node: str) -> bool:\n        return any(nxt == start or reaches(nxt) for nxt in edges[node])\n\n    return reaches(start)\n"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "no_function skipped when the trigger's to is unresolved",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        if kind == \"trigger\" and not _reaches_function(path, nodes):\n",
+          "new": "        if kind == \"trigger\" and node[\"to\"] in nodes and not _reaches_function(path, nodes):\n"
+        }
+      ],
+      "expect": "a trigger must reach a function, through any number of queues"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "a function's unresolved ref reported on its worker",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "                findings.append(Finding(path, \"unresolved\", ref))\n",
+          "new": "                findings.append(Finding(path.rsplit(\"/\", 1)[0] if kind == \"function\" else path, \"unresolved\", ref))\n"
+        }
+      ],
+      "expect": "every ref (to, on, a function's to) is a full path"
+    },
+    {
+      "test": "test_harness_primitives",
+      "name": "nested runtimes walked two levels deep only",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        if kind == \"runtime\":\n",
+          "new": "        if kind == \"runtime\" and path.count(\"/\") < 1:\n"
+        }
+      ],
+      "expect": "every ref (to, on, a function's to) is a full path, through nested runtimes"
+    }
+  ]
+}
