@@ -1,0 +1,898 @@
+{
+  "package": "debate",
+  "tests": [
+    "test_lesson_runner",
+    "test_transcript_roundtrip",
+    "test_sparse_debate",
+    "test_live_rounds",
+    "test_topology_analysis"
+  ],
+  "layers": [
+    {
+      "test": "test_lesson_runner",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "the spokes read only the hub, 12 critique ops"
+        },
+        {
+          "name": "fix the star: the hub reads no one",
+          "edits": [
+            {
+              "file": "protocol.py",
+              "old": "    new_answers[hub.name] = hub.drift(question, Counter(prior[n] for n in spoke_names))\n    ops += len(spoke_names)\n",
+              "new": "    new_answers[hub.name] = hub.drift(question, Counter())\n"
+            }
+          ],
+          "expect": "a tie goes to the alphabetically first answer, whatever the seating"
+        },
+        {
+          "name": "+ majority breaks ties alphabetically",
+          "edits": [
+            {
+              "file": "protocol.py",
+              "old": "    return votes.most_common(1)[0][0]\n",
+              "new": "    top = max(votes.values())\n    return min(answer for answer, n in votes.items() if n == top)\n"
+            }
+          ],
+          "expect": "converged_round is where the final agreement started"
+        },
+        {
+          "name": "+ converged_round resets on disagreement",
+          "edits": [
+            {
+              "file": "protocol.py",
+              "old": "        if all(v == list(new.values())[0] for v in new.values()) and converged_round == -1:\n            converged_round = r + 1\n",
+              "new": "        if all(v == list(new.values())[0] for v in new.values()):\n            if converged_round == -1:\n                converged_round = r + 1\n        else:\n            converged_round = -1\n"
+            }
+          ],
+          "expect": "a full-mesh round should be fast for 5000 debaters"
+        },
+        {
+          "name": "+ count all answers once, then take out the debater's own",
+          "edits": [
+            {
+              "file": "protocol.py",
+              "old": "    for debater in debaters:\n        votes = Counter(prior[d.name] for d in debaters if d.name != debater.name)\n",
+              "new": "    everyone = Counter(prior.values())\n    for debater in debaters:\n        votes = everyone.copy()\n        votes[prior[debater.name]] -= 1\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_lesson_runner",
+      "name": "everyone's answers counted once, own vote left in",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "        votes = everyone.copy()\n        own = prior[debater.name]\n        votes[own] -= 1\n        if not votes[own]:\n            del votes[own]\n",
+          "new": "        votes = everyone.copy()\n"
+        }
+      ],
+      "expect": "a debater counts its peers' answers, never its own"
+    },
+    {
+      "test": "test_lesson_runner",
+      "name": "one shared Counter, own vote subtracted in place",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "        votes = everyone.copy()\n        own = prior[debater.name]\n        votes[own] -= 1\n        if not votes[own]:\n            del votes[own]\n",
+          "new": "        votes = everyone\n        votes[prior[debater.name]] -= 1\n"
+        }
+      ],
+      "expect": "a debater counts its peers' answers, never its own"
+    },
+    {
+      "test": "test_lesson_runner",
+      "name": "converged_round keeps the first agreement",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "        if len(set(new.values())) != 1:\n            converged_round = -1\n        elif converged_round == -1 or set(new.values()) != set(prior.values()):\n            converged_round = r\n",
+          "new": "        if len(set(new.values())) == 1 and converged_round == -1:\n            converged_round = r\n"
+        }
+      ],
+      "expect": "converged_round is where the final agreement started"
+    },
+    {
+      "test": "test_lesson_runner",
+      "name": "hub still reads the spokes, only its ops dropped",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "    new_answers = {hub.name: hub.drift(question, Counter())}\n",
+          "new": "    new_answers = {hub.name: hub.drift(question, Counter(prior[s.name] for s in spokes))}\n"
+        }
+      ],
+      "expect": "the hub reads no one"
+    },
+    {
+      "test": "test_lesson_runner",
+      "name": "tie rule fixed only in the final vote",
+      "edits": [
+        {
+          "file": "protocol.py",
+          "old": "    top = max(votes.values())\n    return min(answer for answer, n in votes.items() if n == top)\n",
+          "new": "    return votes.most_common(1)[0][0]\n"
+        },
+        {
+          "file": "protocol.py",
+          "old": "    return majority(Counter(prior.values())), converged_round, total_ops\n",
+          "new": "    final = Counter(prior.values())\n    top = max(final.values())\n    return min(a for a, n in final.items() if n == top), converged_round, total_ops\n"
+        }
+      ],
+      "expect": "a tie among a debater's peers also goes to the alphabetically first answer"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "confidence stored as a 32-bit float",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "struct.pack(\">d\", t.confidence)",
+          "new": "struct.pack(\">f\", t.confidence)"
+        },
+        {
+          "file": "transcript.py",
+          "old": "struct.unpack(\">d\", reader.take(8))",
+          "new": "struct.unpack(\">f\", reader.take(4))"
+        }
+      ],
+      "expect": "every turn round-trips exactly"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "confidence written little-endian",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "struct.pack(\">d\", t.confidence)",
+          "new": "struct.pack(\"<d\", t.confidence)"
+        },
+        {
+          "file": "transcript.py",
+          "old": "struct.unpack(\">d\", reader.take(8))",
+          "new": "struct.unpack(\"<d\", reader.take(8))"
+        }
+      ],
+      "expect": "bytes follow the layout in the module docstring"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "text length counted in characters",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    return _varint(len(raw)) + raw\n",
+          "new": "    return _varint(len(s)) + raw\n"
+        }
+      ],
+      "expect": "transcript is cut off"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "peers written in sorted order",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "            for peer in t.read:\n",
+          "new": "            for peer in sorted(t.read):\n"
+        }
+      ],
+      "expect": "every turn round-trips exactly"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "read loaded as a list",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "            read = tuple(reader.varint() for _ in range(reader.varint()))\n",
+          "new": "            read = [reader.varint() for _ in range(reader.varint())]\n"
+        }
+      ],
+      "expect": "every turn round-trips exactly"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "confidence checked with < and >, NaN gets in",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "        if not 0.0 <= turn.confidence <= 1.0:  # also rejects NaN\n",
+          "new": "        if turn.confidence < 0.0 or turn.confidence > 1.0:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "short reads not turned into ValueError",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "        if self.pos + n > len(self.data):\n            raise ValueError(\"transcript is cut off\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "trailing bytes accepted",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "        if reader.pos != len(data):\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "loaded turns not validated",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "            transcript.add(Turn(round_, debater, answer, confidence, read))\n",
+          "new": "            transcript.turns.append(Turn(round_, debater, answer, confidence, read))\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "varint groups written high group first",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    out = bytearray()\n    while True:\n        low, n = n & 0x7F, n >> 7\n        if n:\n            out.append(low | 0x80)\n        else:\n            out.append(low)\n            return bytes(out)\n",
+          "new": "    groups = [n & 0x7F]\n    n >>= 7\n    while n:\n        groups.append(n & 0x7F)\n        n >>= 7\n    groups.reverse()\n    return bytes([g | 0x80 for g in groups[:-1]] + [groups[-1]])\n"
+        },
+        {
+          "file": "transcript.py",
+          "old": "        value = shift = 0\n        while True:\n            byte = self.take(1)[0]\n            value |= (byte & 0x7F) << shift\n            shift += 7\n            if not byte & 0x80:\n                return value\n",
+          "new": "        value = 0\n        while True:\n            byte = self.take(1)[0]\n            value = (value << 7) | (byte & 0x7F)\n            if not byte & 0x80:\n                return value\n"
+        }
+      ],
+      "expect": "bytes follow the layout in the module docstring"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "counts and indexes as fixed 4-byte integers",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    out = bytearray()\n    while True:\n        low, n = n & 0x7F, n >> 7\n        if n:\n            out.append(low | 0x80)\n        else:\n            out.append(low)\n            return bytes(out)\n",
+          "new": "    return struct.pack(\">I\", n)\n"
+        },
+        {
+          "file": "transcript.py",
+          "old": "        value = shift = 0\n        while True:\n            byte = self.take(1)[0]\n            value |= (byte & 0x7F) << shift\n            shift += 7\n            if not byte & 0x80:\n                return value\n",
+          "new": "        return struct.unpack(\">I\", self.take(4))[0]\n"
+        }
+      ],
+      "expect": "bytes follow the layout in the module docstring"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "debater checked only against the end of the roster",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "        if not 0 <= turn.debater < n:\n",
+          "new": "        if turn.debater >= n:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "peer checked only against the end of the roster",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "            if not 0 <= peer < n:\n",
+          "new": "            if peer >= n:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "turn appended before it is checked",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "            raise ValueError(f\"debater {turn.debater} reads a peer twice\")\n        self.turns.append(turn)\n",
+          "new": "            raise ValueError(f\"debater {turn.debater} reads a peer twice\")\n"
+        },
+        {
+          "file": "transcript.py",
+          "old": "        n = len(self.roster)\n        if turn.round < 0:\n",
+          "new": "        n = len(self.roster)\n        self.turns.append(turn)\n        if turn.round < 0:\n"
+        }
+      ],
+      "expect": "a refused turn is not stored"
+    },
+    {
+      "test": "test_transcript_roundtrip",
+      "name": "confidence unpacked in place, no bounds check",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "            (confidence,) = struct.unpack(\">d\", reader.take(8))\n",
+          "new": "            (confidence,) = struct.unpack_from(\">d\", reader.data, reader.pos)\n            reader.pos += 8\n"
+        }
+      ],
+      "expect": "struct.error"
+    },
+    {
+      "test": "test_sparse_debate",
+      "name": "replies updated in place, so later debaters read this round",
+      "edits": [
+        {
+          "file": "engine.py",
+          "old": "            peers = tuple((peer, prior[peer]) for peer in reads[name])\n",
+          "new": "            peers = tuple((peer, current.get(peer, prior[peer])) for peer in reads[name])\n"
+        }
+      ],
+      "expect": "critique rounds are synchronous"
+    },
+    {
+      "test": "test_sparse_debate",
+      "name": "openings not told what is taken",
+      "edits": [
+        {
+          "file": "engine.py",
+          "old": "Ask(question, 0, None, (), tuple(taken))",
+          "new": "Ask(question, 0, None, ())"
+        }
+      ],
+      "expect": "each opening is told the answers already proposed"
+    },
+    {
+      "test": "test_sparse_debate",
+      "name": "taken repeats duplicate openings",
+      "edits": [
+        {
+          "file": "engine.py",
+          "old": "        if reply.answer not in taken:\n            taken.append(reply.answer)\n",
+          "new": "        taken.append(reply.answer)\n"
+        }
+      ],
+      "expect": "taken lists each answer once"
+    },
+    {
+      "test": "test_sparse_debate",
+      "name": "min_rounds ignored",
+      "edits": [
+        {
+          "file": "engine.py",
+          "old": "        if r >= min_rounds and len(",
+          "new": "        if len("
+        }
+      ],
+      "expect": "no early stop before min_rounds"
+    },
+    {
+      "test": "test_sparse_debate",
+      "name": "highest weight with max(), first answer wins a tie",
+      "edits": [
+        {
+          "file": "engine.py",
+          "old": "    answer = min(weights, key=lambda a: (-weights[a], -supporters[a], first_seat[a]))\n",
+          "new": "    answer = max(weights, key=weights.get)\n"
+        }
+      ],
+      "expect": "a weight tie goes to the answer with more supporters"
+    },
+    {
+      "test": "test_sparse_debate",
+      "name": "tie broken alphabetically",
+      "edits": [
+        {
+          "file": "engine.py",
+          "old": "    answer = min(weights, key=lambda a: (-weights[a], -supporters[a], first_seat[a]))\n",
+          "new": "    answer = min(weights, key=lambda a: (-weights[a], -supporters[a], a))\n"
+        }
+      ],
+      "expect": "a full tie goes to the first supporter in roster order"
+    },
+    {
+      "test": "test_sparse_debate",
+      "name": "weights summed over every round",
+      "edits": [
+        {
+          "file": "engine.py",
+          "old": "    final = history[-1]\n    weights: dict[str, float] = {}\n    supporters: dict[str, int] = {}\n    first_seat: dict[str, int] = {}\n    for seat, name in enumerate(names):\n        reply = final[name]\n",
+          "new": "    weights: dict[str, float] = {}\n    supporters: dict[str, int] = {}\n    first_seat: dict[str, int] = {}\n    for seat, (name, reply) in enumerate((n, h[n]) for h in history for n in names):\n"
+        }
+      ],
+      "expect": "weights come from the last round only"
+    },
+    {
+      "test": "test_sparse_debate",
+      "name": "peers sorted by name",
+      "edits": [
+        {
+          "file": "engine.py",
+          "old": "for peer in reads[name])\n",
+          "new": "for peer in sorted(reads[name]))\n"
+        }
+      ],
+      "expect": "peers come in reads order"
+    },
+    {
+      "test": "test_sparse_debate",
+      "name": "plain majority vote, confidence ignored",
+      "edits": [
+        {
+          "file": "engine.py",
+          "old": "    answer = min(weights, key=lambda a: (-weights[a], -supporters[a], first_seat[a]))\n",
+          "new": "    answer = min(weights, key=lambda a: (-supporters[a], first_seat[a]))\n"
+        }
+      ],
+      "expect": "the largest total confidence wins"
+    },
+    {
+      "test": "test_sparse_debate",
+      "name": "supporters compared before confidence",
+      "edits": [
+        {
+          "file": "engine.py",
+          "old": "    answer = min(weights, key=lambda a: (-weights[a], -supporters[a], first_seat[a]))\n",
+          "new": "    answer = min(weights, key=lambda a: (-supporters[a], -weights[a], first_seat[a]))\n"
+        }
+      ],
+      "expect": "the largest total confidence wins"
+    },
+    {
+      "test": "test_sparse_debate",
+      "name": "agreeing openings end the debate",
+      "edits": [
+        {
+          "file": "engine.py",
+          "old": "    converged: int | None = None\n\n",
+          "new": "    converged: int | None = None\n    if len({reply.answer for reply in opening.values()}) == 1:\n        converged, rounds = 0, 0\n\n"
+        }
+      ],
+      "expect": "only a critique round can end the debate"
+    },
+    {
+      "test": "test_sparse_debate",
+      "name": "own reply taken from the opening round",
+      "edits": [
+        {
+          "file": "engine.py",
+          "old": "            current[name] = ask(name, Ask(question, r, prior[name], peers))\n",
+          "new": "            current[name] = ask(name, Ask(question, r, history[0][name], peers))\n"
+        }
+      ],
+      "expect": "round r shows a debater its own reply"
+    },
+    {
+      "test": "test_sparse_debate",
+      "name": "taken sorted by name",
+      "edits": [
+        {
+          "file": "engine.py",
+          "old": "Ask(question, 0, None, (), tuple(taken))",
+          "new": "Ask(question, 0, None, (), tuple(sorted(taken)))"
+        }
+      ],
+      "expect": "each opening is told the answers already proposed"
+    },
+    {
+      "test": "test_sparse_debate",
+      "name": "one critique round short",
+      "edits": [
+        {
+          "file": "engine.py",
+          "old": "    for r in range(1, rounds + 1):\n",
+          "new": "    for r in range(1, rounds):\n"
+        }
+      ],
+      "expect": "critique rounds are synchronous"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "elapsed counted from the start of the debate",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    for r in range(rounds + 1):\n        asks: dict[str, Ask] = {}\n",
+          "new": "    start = time.perf_counter()\n    for r in range(rounds + 1):\n        asks: dict[str, Ask] = {}\n"
+        },
+        {
+          "file": "live.py",
+          "old": "        start = time.perf_counter()\n        replies",
+          "new": "        replies"
+        }
+      ],
+      "expect": "each round is timed on its own"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "abstainers still counted as ops",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "            ops += len(peers)\n",
+          "new": "            ops += len(reads[name]) if r else 0\n"
+        }
+      ],
+      "expect": "an abstainer has an empty cell"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "debaters awaited one after another",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        replies = await asyncio.gather(*(_ask(debaters[n], asks[n], timeout_s) for n in names))\n",
+          "new": "        replies = [await _ask(debaters[n], asks[n], timeout_s) for n in names]\n"
+        }
+      ],
+      "expect": "the debaters of a round are asked concurrently"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "records joined with commas by hand",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    out = io.StringIO()\n    csv.writer(out).writerow(row)\n    return out.getvalue()\n",
+          "new": "    return \",\".join(str(cell) for cell in row) + \"\\n\"\n"
+        }
+      ],
+      "expect": "one CSV record per round, stopping at the first agreement"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "records held until the debate ends",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    last: dict[str, Reply] = {}  # each",
+          "new": "    held = []\n    last: dict[str, Reply] = {}  # each"
+        },
+        {
+          "file": "live.py",
+          "old": "        yield _record([r, *cells, ratio, ops, elapsed_ms])\n        if r >= 1 and len(current) == len(names) and len(set(answers)) == 1:\n            return\n        prior = current\n",
+          "new": "        held.append(_record([r, *cells, ratio, ops, elapsed_ms]))\n        if r >= 1 and len(current) == len(names) and len(set(answers)) == 1:\n            break\n        prior = current\n    for record in held:\n        yield record\n"
+        }
+      ],
+      "expect": "report each round as soon as it ends"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "abstainers counted in agree_ratio",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "max(Counter(answers).values()) / len(answers)",
+          "new": "max(Counter(answers).values()) / len(names)"
+        }
+      ],
+      "expect": "an abstainer has an empty cell, is not counted in agree_ratio"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "agreement among those who answered ends the debate",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        if r >= 1 and len(current) == len(names) and len(set(answers)) == 1:\n",
+          "new": "        if r >= 1 and len(set(answers)) == 1:\n"
+        }
+      ],
+      "expect": "an abstainer has an empty cell, is not counted in agree_ratio, and blocks convergence"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "timed-out call abandoned, not cancelled",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    try:\n        return await asyncio.wait_for(debater(ask), timeout_s)\n    except asyncio.TimeoutError:\n        return None\n",
+          "new": "    task = asyncio.ensure_future(debater(ask))\n    done, _ = await asyncio.wait({task}, timeout=timeout_s)\n    return task.result() if task in done else None\n"
+        }
+      ],
+      "expect": "a timed-out call is cancelled before its round is reported"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "elapsed written in whole seconds",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        elapsed_ms = int((time.perf_counter() - start) * 1000)\n",
+          "new": "        elapsed_ms = int(time.perf_counter() - start)\n"
+        }
+      ],
+      "expect": "a round lasts until its timeout"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "an abstainer forgets its last reply",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        last.update(current)\n",
+          "new": "        last = dict(current)\n"
+        }
+      ],
+      "expect": "an abstainer keeps its last reply"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "timed-out calls cancelled but not awaited",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        replies = await asyncio.gather(*(_ask(debaters[n], asks[n], timeout_s) for n in names))\n",
+          "new": "        tasks = [asyncio.ensure_future(debaters[n](asks[n])) for n in names]\n        done, pending = await asyncio.wait(tasks, timeout=timeout_s)\n        for task in pending:\n            task.cancel()\n        replies = [task.result() if task in done else None for task in tasks]\n"
+        }
+      ],
+      "expect": "a timed-out call is cancelled before its round is reported"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "one timeout for the whole round",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        replies = await asyncio.gather(*(_ask(debaters[n], asks[n], timeout_s) for n in names))\n",
+          "new": "        try:\n            replies = await asyncio.wait_for(asyncio.gather(*(debaters[n](asks[n]) for n in names)), timeout_s)\n        except asyncio.TimeoutError:\n            replies = [None] * len(names)\n"
+        }
+      ],
+      "expect": "an abstainer has an empty cell"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "agreeing openings end the debate",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        if r >= 1 and len(current) == len(names)",
+          "new": "        if len(current) == len(names)"
+        }
+      ],
+      "expect": "agreeing openings do not end the debate"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "agree_ratio written as 0.000 when nobody answered",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        ratio = f\"{max(Counter(answers).values()) / len(answers):.3f}\" if answers else \"\"\n",
+          "new": "        ratio = f\"{max(Counter(answers).values(), default=0) / max(len(answers), 1):.3f}\"\n"
+        }
+      ],
+      "expect": "a round nobody answered has an empty agree_ratio"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "agree_ratio not guarded when nobody answered",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        ratio = f\"{max(Counter(answers).values()) / len(answers):.3f}\" if answers else \"\"\n",
+          "new": "        ratio = f\"{max(Counter(answers).values()) / len(answers):.3f}\"\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "agree_ratio measured against the first answer",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "max(Counter(answers).values()) / len(answers)",
+          "new": "answers.count(answers[0]) / len(answers)"
+        }
+      ],
+      "expect": "one CSV record per round"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "peers read from their latest reply, even an old one",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "            peers = tuple((peer, prior[peer]) for peer in reads[name] if peer in prior)\n",
+          "new": "            peers = tuple((peer, last[peer]) for peer in reads[name] if peer in last)\n"
+        }
+      ],
+      "expect": "an abstainer has an empty cell"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "agree_ratio written with round()",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        ratio = f\"{max(Counter(answers).values()) / len(answers):.3f}\" if answers else \"\"\n",
+          "new": "        ratio = str(round(max(Counter(answers).values()) / len(answers), 3)) if answers else \"\"\n"
+        }
+      ],
+      "expect": "one CSV record per round"
+    },
+    {
+      "test": "test_live_rounds",
+      "name": "one critique round short",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    for r in range(rounds + 1):\n        asks",
+          "new": "    for r in range(rounds):\n        asks"
+        }
+      ],
+      "expect": "the debate ends after round"
+    },
+    {
+      "test": "test_topology_analysis",
+      "name": "edges followed from reader to peer",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "            listeners[peer].append(reader)\n",
+          "new": "            listeners[reader].append(peer)\n"
+        }
+      ],
+      "expect": "information flows from the peer to its reader"
+    },
+    {
+      "test": "test_topology_analysis",
+      "name": "unreachable debaters ignored",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "        name: max(dist.values()) if len(dist) == len(names) else None\n",
+          "new": "        name: max(dist.values())\n"
+        }
+      ],
+      "expect": "information flows from the peer to its reader"
+    },
+    {
+      "test": "test_topology_analysis",
+      "name": "depth-first search depth instead of fewest rounds",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "        dist = {source: 0}\n        queue = deque([source])\n        while queue:\n            node = queue.popleft()\n            for reader in listeners[node]:\n                if reader not in dist:\n                    dist[reader] = dist[node] + 1\n                    queue.append(reader)\n",
+          "new": "        dist = {source: 0}\n\n        def walk(node: str) -> None:\n            for reader in listeners[node]:\n                if reader not in dist:\n                    dist[reader] = dist[node] + 1\n                    walk(reader)\n\n        walk(source)\n"
+        }
+      ],
+      "expect": "on a full mesh one round reaches everyone"
+    },
+    {
+      "test": "test_topology_analysis",
+      "name": "self-reads kept",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "list(dict.fromkeys(p for p in listed if p != name))",
+          "new": "list(dict.fromkeys(listed))"
+        }
+      ],
+      "expect": "self-reads and repeated peers are not ops"
+    },
+    {
+      "test": "test_topology_analysis",
+      "name": "repeated peers kept",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "list(dict.fromkeys(p for p in listed if p != name))",
+          "new": "[p for p in listed if p != name]"
+        }
+      ],
+      "expect": "self-reads and repeated peers are not ops"
+    },
+    {
+      "test": "test_topology_analysis",
+      "name": "camp from one-way reach",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "if other in rounds_to[name] and name in rounds_to[other]]",
+          "new": "if other in rounds_to[name]]"
+        }
+      ],
+      "expect": "a camp needs both directions"
+    },
+    {
+      "test": "test_topology_analysis",
+      "name": "rounds simulated in place",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "        dist = {source: 0}\n        queue = deque([source])\n        while queue:\n            node = queue.popleft()\n            for reader in listeners[node]:\n                if reader not in dist:\n                    dist[reader] = dist[node] + 1\n                    queue.append(reader)\n",
+          "new": "        dist = {source: 0}\n        r = 0\n        while True:\n            r += 1\n            grew = False\n            for reader in names:\n                if reader not in dist and any(p in dist for p in peers[reader]):\n                    dist[reader] = r\n                    grew = True\n            if not grew:\n                break\n"
+        }
+      ],
+      "expect": "an answer moves one hop per round"
+    },
+    {
+      "test": "test_topology_analysis",
+      "name": "camps sorted by name",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "        camps.append(camp)\n",
+          "new": "        camps.append(sorted(camp))\n"
+        },
+        {
+          "file": "topology.py",
+          "old": "        camps=camps,\n",
+          "new": "        camps=sorted(camps),\n"
+        }
+      ],
+      "expect": "deaf and camps keep the roster order"
+    },
+    {
+      "test": "test_topology_analysis",
+      "name": "deaf sorted by name",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "deaf=[name for name in names if not peers[name]]",
+          "new": "deaf=sorted(name for name in names if not peers[name])"
+        }
+      ],
+      "expect": "deaf and camps keep the roster order"
+    },
+    {
+      "test": "test_topology_analysis",
+      "name": "deaf taken as nobody reading them",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "deaf=[name for name in names if not peers[name]]",
+          "new": "deaf=[name for name in names if not listeners[name]]"
+        }
+      ],
+      "expect": "a debater that reads no one is deaf"
+    },
+    {
+      "test": "test_topology_analysis",
+      "name": "rounds_needed over the reachable answers only",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "    rounds_needed = None if None in values or not values else max(values)\n",
+          "new": "    rounds_needed = max((v for v in values if v is not None), default=None)\n"
+        }
+      ],
+      "expect": "a spoke's answer never reaches anyone"
+    },
+    {
+      "test": "test_topology_analysis",
+      "name": "unknown peers dropped",
+      "edits": [
+        {
+          "file": "topology.py",
+          "old": "        if unknown:\n",
+          "new": "        if False:\n"
+        },
+        {
+          "file": "topology.py",
+          "old": "list(dict.fromkeys(p for p in listed if p != name))",
+          "new": "list(dict.fromkeys(p for p in listed if p != name and p in known))"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    }
+  ]
+}
