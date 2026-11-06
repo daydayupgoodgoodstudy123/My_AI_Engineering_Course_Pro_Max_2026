@@ -1,0 +1,379 @@
+{
+  "package": "promote",
+  "tests": [
+    "test_correction_pipeline",
+    "test_ratchet_record_roundtrip",
+    "test_cause_not_symptom",
+    "test_online_promotion",
+    "test_effective_owner_in_why_graph"
+  ],
+  "layers": [
+    {
+      "test": "test_correction_pipeline",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "product disagreements become human decisions"
+        },
+        {
+          "name": "route product disagreement to the human layer",
+          "edits": [
+            {
+              "file": "controls.py",
+              "old": "    if any(x in text for x in (\"regression\",",
+              "new": "    if \"product disagreement\" in text:\n        return \"human\"\n    if any(x in text for x in (\"regression\","
+            }
+          ],
+          "expect": "a one-off preference does not earn a permanent control"
+        },
+        {
+          "name": "+ recurrence or consequence earns promotion",
+          "edits": [
+            {
+              "file": "controls.py",
+              "old": "return correction.recurrence >= 1 or",
+              "new": "return correction.recurrence >= 2 or"
+            }
+          ],
+          "expect": "equivalent cause spacing names one control"
+        },
+        {
+          "name": "+ canonical cause whitespace",
+          "edits": [
+            {
+              "file": "controls.py",
+              "old": "return cause.strip().rstrip(\".\").lower()",
+              "new": "return \" \".join(cause.split()).rstrip(\".\").lower()"
+            }
+          ],
+          "expect": "independent correction counts add and severe consequence survives"
+        },
+        {
+          "name": "+ independent counts accumulate",
+          "edits": [
+            {
+              "file": "controls.py",
+              "old": "recurrence=control.recurrence",
+              "new": "recurrence=old.recurrence + control.recurrence"
+            }
+          ],
+          "expect": "batch promotion must not re-sort every growing prefix"
+        },
+        {
+          "name": "+ sort the grouped controls once",
+          "edits": [
+            {
+              "file": "controls.py",
+              "old": "        ordered = sorted(grouped.values(), key=lambda c:(c.target,c.fingerprint))\n",
+              "new": ""
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_correction_pipeline",
+      "name": "canonicalizing the displayed cause",
+      "edits": [
+        {
+          "file": "controls.py",
+          "old": "correction.symptom, correction.cause, correction.recurrence",
+          "new": "correction.symptom, normalize_cause(correction.cause), correction.recurrence"
+        }
+      ],
+      "expect": "canonical identity must not rewrite observed text"
+    },
+    {
+      "test": "test_ratchet_record_roundtrip",
+      "name": "adding to a saved cumulative snapshot",
+      "edits": [
+        {
+          "file": "records.py",
+          "old": "payload=json.dumps(asdict(record),ensure_ascii=False)",
+          "new": "raw=asdict(record)\n        raw[\"control\"][\"recurrence\"] += 1\n        payload=json.dumps(raw,ensure_ascii=False)"
+        }
+      ],
+      "expect": "every ratchet field round-trips"
+    },
+    {
+      "test": "test_ratchet_record_roundtrip",
+      "name": "ignoring the owning target filter",
+      "edits": [
+        {
+          "file": "records.py",
+          "old": "if target is None or record.control.target==target:",
+          "new": "if True:"
+        }
+      ],
+      "expect": "target selection reads stored owning layers"
+    },
+    {
+      "test": "test_ratchet_record_roundtrip",
+      "name": "restoring a record with a plain control dictionary",
+      "edits": [
+        {
+          "file": "records.py",
+          "old": "Record(Control(**raw[\"control\"]),raw[\"owner\"],raw[\"review_date\"])",
+          "new": "Record(raw[\"control\"],raw[\"owner\"],raw[\"review_date\"])"
+        }
+      ],
+      "expect": "every ratchet field round-trips"
+    },
+    {
+      "test": "test_cause_not_symptom",
+      "name": "grouping controls by symptom",
+      "edits": [
+        {
+          "file": "causes.py",
+          "old": "groups.setdefault(normalize_cause(c.cause),[]).append(c)",
+          "new": "groups.setdefault(normalize_cause(c.symptom),[]).append(c)"
+        }
+      ],
+      "expect": "each cause gets its own effective control"
+    },
+    {
+      "test": "test_cause_not_symptom",
+      "name": "choosing an unverified canonical example",
+      "edits": [
+        {
+          "file": "causes.py",
+          "old": "if p.verified and cause in p.covers",
+          "new": "if cause in p.covers"
+        }
+      ],
+      "expect": "each cause gets its own effective control"
+    },
+    {
+      "test": "test_cause_not_symptom",
+      "name": "accepting a rule that repeats the symptom",
+      "edits": [
+        {
+          "file": "causes.py",
+          "old": "and normalize_cause(p.rule) not in {normalize_cause(s) for s in symptoms}",
+          "new": "and True"
+        }
+      ],
+      "expect": "each cause gets its own effective control"
+    },
+    {
+      "test": "test_online_promotion",
+      "name": "waiting for recurrence even after severe consequence",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "(severe or count>=threshold)",
+          "new": "(count>=threshold)"
+        }
+      ],
+      "expect": "window expiry and severe consequence decide promotions"
+    },
+    {
+      "test": "test_online_promotion",
+      "name": "ending the stream after its first promotion",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            yield _line(key,count,event.at)",
+          "new": "            yield _line(key,count,event.at)\n            return"
+        }
+      ],
+      "expect": "window expiry and severe consequence decide promotions"
+    },
+    {
+      "test": "test_online_promotion",
+      "name": "buffering all corrections before emitting",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for event in events:",
+          "new": "    for event in [e async for e in events]:"
+        }
+      ],
+      "expect": "emit before pulling future corrections"
+    },
+    {
+      "test": "test_effective_owner_in_why_graph",
+      "name": "preferring the shallowest owned cause",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "key=lambda c:(-c[0],c[1],c[2])",
+          "new": "key=lambda c:(c[0],c[1],c[2])"
+        }
+      ],
+      "expect": "shared causes merge symptoms after their deepest effective placement"
+    },
+    {
+      "test": "test_effective_owner_in_why_graph",
+      "name": "retaining duplicate symptom observations",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "if symptom not in symptoms: symptoms.append(symptom)",
+          "new": "symptoms.append(symptom)"
+        }
+      ],
+      "expect": "shared causes merge symptoms after their deepest effective placement"
+    },
+    {
+      "test": "test_effective_owner_in_why_graph",
+      "name": "choosing the last lexical cause in a depth tie",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "min(choices,key=lambda c:(-c[0],c[1],c[2]))",
+          "new": "max(choices,key=lambda c:(c[0],c[1],c[2]))"
+        }
+      ],
+      "expect": "unowned or ineffective causes cannot defeat a valid depth tie"
+    },
+    {
+      "test": "test_ratchet_record_roundtrip",
+      "name": "lossy ASCII storage of observed evidence",
+      "edits": [
+        {
+          "file": "records.py",
+          "old": "(record.control.fingerprint,payload))",
+          "new": "(record.control.fingerprint,payload.encode(\"ascii\",\"replace\").decode(\"ascii\")))"
+        }
+      ],
+      "expect": "every ratchet field round-trips"
+    },
+    {
+      "test": "test_cause_not_symptom",
+      "name": "late instructions displacing an earlier effective layer",
+      "edits": [
+        {
+          "file": "causes.py",
+          "old": "LAYERS.index(p.target),p.id",
+          "new": "-LAYERS.index(p.target),p.id"
+        }
+      ],
+      "expect": "each cause gets its own effective control"
+    },
+    {
+      "test": "test_cause_not_symptom",
+      "name": "product disagreements allowed to use an automatic layer",
+      "edits": [
+        {
+          "file": "causes.py",
+          "old": "(p.target==\"human\" if human else p.target in LAYERS)",
+          "new": "(p.target in (\"human\",*LAYERS))"
+        }
+      ],
+      "expect": "product judgment cannot be reassigned to an executable layer"
+    },
+    {
+      "test": "test_online_promotion",
+      "name": "retaining evidence exactly at the expired window boundary",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "rows[0].at<=event.at-self.width",
+          "new": "rows[0].at<event.at-self.width"
+        }
+      ],
+      "expect": "window expiry and severe consequence decide promotions"
+    },
+    {
+      "test": "test_effective_owner_in_why_graph",
+      "name": "treating unowned causes as effective placements",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "if node.owner and node.effective:",
+          "new": "if node.effective:"
+        }
+      ],
+      "expect": "unowned or ineffective causes cannot defeat a valid depth tie"
+    },
+    {
+      "test": "test_effective_owner_in_why_graph",
+      "name": "dropping the explicit gap for an unplaceable symptom",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "if not choices: raise ValueError(\"no effective owned cause\")",
+          "new": "if not choices: continue"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_ratchet_record_roundtrip",
+      "name": "replace snapshot by deleting and reinserting its first-seen slot",
+      "edits": [
+        {
+          "file": "records.py",
+          "old": "INSERT INTO controls(fingerprint,payload) VALUES(?,?) ON CONFLICT(fingerprint) DO UPDATE SET payload=excluded.payload",
+          "new": "INSERT OR REPLACE INTO controls(fingerprint,payload) VALUES(?,?)"
+        }
+      ],
+      "expect": "save replaces a snapshot instead of adding its already accumulated recurrence"
+    },
+    {
+      "test": "test_ratchet_record_roundtrip",
+      "name": "replace an empty accountable owner with a storage default",
+      "edits": [
+        {
+          "file": "records.py",
+          "old": "payload=json.dumps(asdict(record),ensure_ascii=False)",
+          "new": "raw=asdict(record)\n        raw[\"owner\"]=raw[\"owner\"] or \"unassigned\"\n        payload=json.dumps(raw,ensure_ascii=False)"
+        }
+      ],
+      "expect": "storage preserves empty owner and a free-form review date"
+    },
+    {
+      "test": "test_cause_not_symptom",
+      "name": "reject only a rule repeating the first grouped symptom",
+      "edits": [
+        {
+          "file": "causes.py",
+          "old": "{normalize_cause(s) for s in symptoms}",
+          "new": "{normalize_cause(symptoms[0])}"
+        }
+      ],
+      "expect": "rule repeating any grouped symptom is not an effective control"
+    },
+    {
+      "test": "test_online_promotion",
+      "name": "ignore a requested promotion threshold and retain the default two",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "(severe or count>=threshold)",
+          "new": "(severe or count>=2)"
+        }
+      ],
+      "expect": "custom recurrence threshold controls the triggering observation"
+    },
+    {
+      "test": "test_effective_owner_in_why_graph",
+      "name": "globally visit a shared DAG node only at its first path depth",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        def walk(node,depth):\n            if node.owner and node.effective:",
+          "new": "        seen=set()\n        def walk(node,depth):\n            if id(node) in seen: return\n            seen.add(id(node))\n            if node.owner and node.effective:"
+        }
+      ],
+      "expect": "deeper occurrence of shared cause defeats a shallower lexical competitor"
+    },
+    {
+      "test": "test_effective_owner_in_why_graph",
+      "name": "sort input children in place to simplify deterministic ties",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "            for child in node.why: walk(child,depth+1)",
+          "new": "            node.why.sort(key=lambda c:c.name)\n            for child in node.why: walk(child,depth+1)"
+        }
+      ],
+      "expect": "placing controls does not reorder input DAG children"
+    }
+  ]
+}
