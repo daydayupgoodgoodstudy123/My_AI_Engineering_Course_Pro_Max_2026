@@ -1,0 +1,134 @@
+{
+  "lesson": "phases/14-agent-engineering/04-tree-of-thoughts-lats",
+  "title": "Tree of Thoughts and LATS: Deliberate Search",
+  "format": "staged-brownfield",
+  "service": "ThoughTree: Game of 24 search with a ToT beam search and a sure/likely/impossible judge, a LATS-style MCTS with struct-packed checkpoints, budgeted concurrent judging streamed as NDJSON, and expression trees for solutions",
+  "sources": {
+    "docs/en.md": "c0d4e1af4425b9cc2a97b944e4b538fb2bcef90e4469acab0d547c69e317e92f",
+    "code/main.py": "4405bb61ebdb617564a6268670311e2585b81c6eb41bbaf7cd9c1f7b446a6a17"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_tot_search",
+      "kind": "debug",
+      "lesson_anchor": "The Concept: Tree of Thoughts (self-evaluation with sure / likely / impossible, BFS or beam); code/main.py expand, value and tot_bfs; code walkthrough warnings (a op b only because the state is sorted, no deduplication, float division); quiz Q6 and Q9 (two identical (24, 4, 1) states crowd the beam), Q17 (transposition table)",
+      "planted_bugs": [
+        "tot_bfs stops at the first child whose value is above 0.99, as code/main.py does; this judge scores sure states 1.0, so [4, 4, 10, 10] returns the one step 10 * 10 = 100",
+        "start() keeps the deal's ints, so every division makes a float; the failure surfaces four calls away: the judge's exhaustive check of (8, 3, 8/3) gets 8 / (3 - 2.6666666666666665) = 23.99999999999999, calls it impossible, and [3, 3, 8, 8] returns None",
+        "children() makes a op b only, as code/main.py does; states are sorted largest first, so b - a and b / a never appear and [1, 5, 5, 5] (5 * (5 - 1 / 5)) has no solution",
+        "tot_bfs keeps every path to a state within a level (no transposition table), so plain BFS over a five-number deal expands 243,060 children"
+      ],
+      "timing_assert": "plain BFS (beam=None) proving five 7s, five 9s and five 10s unsolvable under 0.15 s (without per-level deduplication 1.55 to 1.71 s; fixed 0.007 to 0.011 s on Python 3.12 and about 0.018 s on 3.10; a list as the seen set about 0.04 s, which still passes)",
+      "overfix_guard": "the children of (5, 1) are exactly 6 in the docstring's order and (6, 4, 4, 1) has 36 children, which rules out computing + and * in both orders, deduplicating inside children(), or skipping b - a when a == b",
+      "guards": [
+        "[1, 5, 5, 5, 13] at beam 5 needs deduplication before the beam is cut; deduplicating after the cut or by the sequence of steps leaves copies of one state in the beam",
+        "[5, 6, 6, 6, 7, 10] needs one seen set for the whole level: a set per parent keeps a state that two parents reach twice, the second level fills with copies and ToT finds nothing (the timing cannot tell, about 0.016 s)",
+        "[1, 2, 3, 8] fixes the tie order (stable sort by score, not by (score, state))",
+        "[1, 2, 3, 4, 6, 11] is solvable but a beam of 5 per level misses it; a beam per parent or an exact judge for every size finds it"
+      ]
+    },
+    {
+      "part": 2,
+      "test": "test_checkpoint_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "MCTS, minimally (visit counts and value estimates); code/main.py Node (state, trace, visits, value_sum, children); The cost reality: searches long enough to be worth interrupting and resuming",
+      "storage": "binary format: struct-packed node records written depth first, each Fraction as a signed 64-bit numerator and denominator; layout chosen by the candidate within fixed rules (MAGIC, little-endian u16 VERSION, bit-exact floats)",
+      "exactness": "a search with duplicate children, a node reached by 4 / 1 = 4 (which 4 * 1 = 4 also reaches), negative and non-dyadic fractions (2/3, -10/3, -1/3), value_sum values 0.1 + 0.2, 1/3, 2.5e-310 and -12345.678, c = sqrt(2), a negative seed and a three-step solution round-trips equal, with Fraction numbers and an int seed, iteration count and visits, and saves to the same bytes again; 1000033 * 1000003 round-trips; an empty solution stays [] and no solution stays None",
+      "traps": [
+        "numbers through float, unsigned numerators, 32-bit numerators",
+        "value_sum or c stored as a 32-bit float",
+        "struct.error instead of ValueError for a number past 64 bits or for truncated data",
+        "trailing bytes, another magic or another version accepted",
+        "None and [] confused through a zero step count",
+        "children reversed, or merged by state",
+        "traces appended to the parent's list, or rebuilt from the states (4 / 1 = 4 comes back as 4 * 1 = 4)",
+        "whole numbers loaded as ints; visits, the seed or the iteration count loaded as floats",
+        "iterations not saved; VERSION written big-endian"
+      ],
+      "clarifying_questions": [
+        "byte layout",
+        "storing traces",
+        "pickle or JSON",
+        "numbers past 64 bits"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_mcts_search",
+      "kind": "core algorithm",
+      "lesson_anchor": "MCTS, minimally (select, expand, simulate, backpropagate; UCT Q + c * sqrt(ln N / n); tune c per task); code/main.py uct, mcts (expansion on the second visit), simulate and backprop; Exercise 1 (c = 0.1 vs c = 2.0); quiz Q7 and Q11 (rollout solutions thrown away), Q12 (c cannot be passed)",
+      "traps": [
+        "an unvisited child scored as if visited once instead of +inf",
+        "ties going to the later child",
+        "a leaf expanded on its first visit, a finished leaf expanded (IndexError), the rollout started from the expanded leaf",
+        "backpropagation skipping the root (the root is never expanded) or the new child",
+        "visits counted on the way down instead of in backpropagation, so UCT's N(s) includes the current iteration ([2, 3] at c = 0.1, 70 iterations)",
+        "one generator per run() call, a per-call iteration index, seed + i, rollouts over distinct states",
+        "a rollout's solution ignored or cut to the tree part; the solving iteration not counted; the search going on after its first solution",
+        "the solution checked by truthiness, so the empty solution of [24] never stops the search",
+        "c fixed at 1.4; N taken as the sum of the children's visits (math domain error); UCB1's 2 ln N"
+      ],
+      "integration": "a search checkpointed after 60 iterations with Part 2, loaded and resumed, ends with the same bytes as an uninterrupted search that solves [4, 6, 4, 1] at iteration 150",
+      "clarifying_questions": [
+        "expansion on the second visit",
+        "parent visits of 0",
+        "which random generator",
+        "stopping at the first solution"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_stream_judging",
+      "kind": "streaming",
+      "lesson_anchor": "The cost reality (ToT uses 100-1000x the tokens of CoT; budget before you adopt); LATS: the LLM as value function; a cheap, reliable check of the answer (explicit target for math)",
+      "wire_format": "NDJSON: one object per judgement in the order the judgements come back ({depth, state as strings, value, tokens_used}), then one stop object (solved with the trace, budget, or exhausted); decided by the test's join, splitlines and json.loads",
+      "traps": [
+        "lines in the order sent, judging one state at a time, or waiting for the whole level",
+        "tokens counted before they are spent, budget checked with > or only between levels, the budget winning over a solution, budget stop before the line that spent it; the budget stop line reporting the budget instead of what was spent",
+        "the beam ranked by game.value instead of the judge's verdicts (a judge that gets every verdict backwards must lead the search away)",
+        "stop line before the solved line, the search going on after it, a solved child stopped before it is judged",
+        "in-flight judgements not cancelled, cancelled but not awaited, awaited for only one turn",
+        "beam ties broken by return order, the next level keeping every state, a state judged twice in a level",
+        "numbers as floats, no newline, depth from 0, the trace of the last path to the answer",
+        "a deal that is already 24 sent to the judge or through the levels instead of one solved line"
+      ],
+      "clarifying_questions": [
+        "judging solved states",
+        "simultaneous replies",
+        "cancelled calls and the budget",
+        "a concurrency cap"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_expression_tree",
+      "kind": "recursive structure",
+      "lesson_anchor": "Game of 24: each step combines two numbers with + - * /; code/main.py trace strings such as 24/1=24.0 that cannot be read back as one expression",
+      "traps": [
+        "two equal numbers mapped to one leaf (latest match, operands kept in the pool, both looked up before removal)",
+        "a result equal to a deal number taken from the wrong place",
+        "operands of - and / swapped",
+        "parentheses everywhere, right operands treated like left ones, every equally tight right operand parenthesized, equally tight left operands parenthesized",
+        "a one-number deal with no steps",
+        "wrong results and leftover expressions accepted",
+        "evaluation in floats, through eval of the rendered text, or converted to float at the end; repr leaves, 1-based or sorted leaf indices, int leaves"
+      ],
+      "clarifying_questions": [
+        "which of two equal numbers",
+        "checking for 24 in build"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the suggested float defect is planted in start() instead of in the solution check, so the error surfaces four calls away inside the judge; 8 / (3 - 8 / 3) in doubles is 23.99999999999999, not 23.999999999999996 as the plan said.",
+    "Part 1: the suggested value-function defect became the stop rule. The judge scores states on the lesson's sure / likely / impossible scale (exact up to three numbers, closeness-scored 'likely' above that), so the lesson's own `value(child) > 0.99` stops at a promising state. The judge itself is correct and keeps its memo table.",
+    "Part 1: the timing defect and the beam crowding share one root cause, the missing per-level transposition table. A state can only appear at one depth, so a set per level is the transposition table the plan asked for; the judge's solvable() table already caches values. The timing uses plain BFS over three all-equal five-number deals instead of a six-number instance, because without deduplication a six-number plain BFS takes minutes; all-equal deals also make deduplication by step sequence as fast as the real fix, so that wrong fix is caught by the crowding check every time instead of sitting next to the time limit.",
+    "Part 1: with a judge that is exact up to three numbers, ToT never fails on four numbers, so the crowding check uses [1, 5, 5, 5, 13] and a six-number deal ([1, 2, 3, 4, 6, 11]) shows a beam of 5 missing a solvable deal, which also pins the beam to one count per level.",
+    "Part 2: the 'resume gives the same result as never stopping' check sits at the end of Part 3, because it needs the MCTS loop; Part 2 checks every field the resume depends on, plus byte-stable re-saving. The byte layout is left to the candidate within fixed rules, so field-width mistakes stay possible, and the test feeds load every prefix of a checkpoint.",
+    "Part 3: rollouts use random.Random(f'{seed}:{i}') per iteration with i counted over the whole search, so a checkpoint only needs the seed and the iteration count. Expansion happens on the second visit, as in code/main.py; the reward is 1 / (1 + |r - 24|); the search stops at its first solution. With that expansion rule and a correct backpropagation a parent never has zero visits, so the planned log(0) trap shows up as a root that is never expanded when backpropagation skips it; four UCT formulas that differ only in rounding give identical trees, so the exact visit counts do not depend on how the formula is written.",
+    "Part 4: solved states are judged too (the judge's reply confirms an answer), so an answer can arrive while other judgements are in flight. The fake judge counts event-loop turns instead of sleeping, answers the newest question first with latencies 5 turns apart, and takes 3 turns to hang up, so the line order is deterministic for as_completed, wait or a queue, and cancelling without waiting fails.",
+    "Part 5: as planned. Because a step records values, not positions, the docstring fixes which operand a step takes (the earliest in the pool with that value, deal numbers first), and the wrong-result trace has a single step so only the result check can catch it."
+  ]
+}
