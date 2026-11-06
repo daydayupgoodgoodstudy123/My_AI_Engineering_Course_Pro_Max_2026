@@ -1,0 +1,70 @@
+{
+  "lesson": "phases/06-speech-and-audio/14-voice-activity-detection-turn-taking",
+  "title": "Voice Activity Detection & Turn-Taking — Silero, Cobra, and the Flush Trick",
+  "format": "staged-brownfield",
+  "service": "TurnKit: an energy gate, a SQLite table of sample-exact speech segments, a turn-end state machine with pre-roll and flush, a streaming gate-then-model VAD cascade, and the overlap structure of a conversation",
+  "sources": {
+    "docs/en.md": "ba520338d01743a41fd7f4343a64af318241ce7e72e752afe8a98773e5f876fb",
+    "code/main.py": "d7ebf87e929299912563a180df3388f70b9ffd21a9a443d79b8e0707b383d992"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_energy_gate",
+      "kind": "debug",
+      "lesson_anchor": "Build It, Step 1: the energy gate (RMS, dBFS, -40 dBFS threshold); Tier 1 of the cascade",
+      "planted_bugs": [
+        "rms returns the signed mean of the samples; the negative 'level' surfaces one call later as ValueError: math domain error in dbfs, whose guard only covers digital silence",
+        "energy_gate compares the mean square (a power) with the threshold converted to an amplitude, 10 ** (dB / 20), so frames between -40 and -20 dBFS read as silence",
+        "energy_gate converts hangover_ms into frames by dividing by frame_len (samples) instead of frame_ms, so the hangover is 0 frames at 8 and 16 kHz",
+        "apply_hangover looks for the last loud frame by scanning the whole history for every frame, O(n^2)"
+      ],
+      "timing_assert": "apply_hangover on 16,000 frames (about five minutes of 20 ms frames: 20 s of talk, then a long quiet stretch) under 0.1 s; the quadratic version takes about 1.3 s (1.33-1.44 s measured), a backward scan that stops at the first loud frame about 1.1 s (1.09-1.21 s), the fixed one about 0.4 ms",
+      "overfix_guard": "the usual O(n) rewrites break the edges: a 'frames since the last loud frame' counter that starts at 0 marks the leading silence as speech, and the window slice loud[i - frames : i + 1] goes negative at the start and loses a loud first frame"
+    },
+    {
+      "part": 2,
+      "test": "test_segment_table",
+      "kind": "model and persistence",
+      "lesson_anchor": "Step 2 get_speech_timestamps returns sample offsets; skill-vad-tuner guard 'audit log every VAD-fire event for tuning'",
+      "exactness": "segment boundaries round-trip to the sample (16001, 24005, an offset past 2^31 at 48 kHz) across close and reopen; whole milliseconds or REAL seconds read back with int() lose samples",
+      "traps": ["boundaries in milliseconds or float seconds", "touching half-open ranges must merge", "a one-sample gap must not merge", "a new segment that bridges two stored ones", "a new segment inside a stored one", "merging only within the same recording", "missing commit", "CREATE TABLE without IF NOT EXISTS", "time order rather than insertion order", "one sample rate per recording"],
+      "clarifying_questions": ["seconds or samples", "another sample rate for the same recording", "unknown recording"]
+    },
+    {
+      "part": 3,
+      "test": "test_turn_detector",
+      "kind": "core algorithm",
+      "lesson_anchor": "Build It, Step 3 (TurnDetector) and Step 4 (flush); Key parameters (min speech, silence hangover, pre-roll); code/main.讲解.md and quiz Q10-Q11 on the idle speech_ms bug and the unused pre_roll_ms",
+      "traps": ["min_speech_ms must be one run of consecutive speech; the lesson's TurnDetector adds up speech across silence while idle", "min_speech_ms that is not a whole number of frames: 250 ms of 20 ms frames needs 13 frames, as in the lesson's stream", "the start is decided late but its audio begins pre_roll_ms before the onset", "pre-roll clamped at sample 0 and at the end of the previous turn", "a pause shorter than the hangover restarts the silence run", "the end sample is the end of the last speech frame, not the decision point", "flush ends an open turn at once and drops speech shorter than min_speech_ms", "flush right after a speech frame ends the turn at the current position", "a flushed turn bounds the next pre-roll too"],
+      "integration": "the lesson's own synthetic stream (speech, silence, a cough, speech) through Part 1's gate, this detector and Part 2's table; the service sends each finished turn to a recording STT, then a flush",
+      "clarifying_questions": ["flush with no open turn", "pre-roll longer than the gap to the previous turn"]
+    },
+    {
+      "part": 4,
+      "test": "test_cascade_stream",
+      "kind": "streaming",
+      "lesson_anchor": "The three-tier VAD cascade: a cheap energy gate in front of Silero; Silero's ~1 ms per 30 ms chunk on a stateful, context-hungry model",
+      "wire_format": "server-sent events: an 'event:' line, a 'data:' JSON line and a blank line per event, decided by the test's parse_sse",
+      "traps": ["the model runs only for frames the gate passes, once each", "the model's context includes earlier frames the gate rejected", "the context spans chunk boundaries", "frames cut across chunks of any size, including empty ones", "send each change as soon as its frame is complete, not a sample or a chunk later", "a trailing partial frame is not a frame", "every event ends with a blank line"],
+      "clarifying_questions": ["trailing samples", "an initial silence event", "context at the start of the stream", "a probability exactly at speech_prob"]
+    },
+    {
+      "part": 5,
+      "test": "test_overlap_tree",
+      "kind": "recursive structure",
+      "lesson_anchor": "Turn-taking beyond one channel: backchannels and talk-over that a turn detector must not mistake for a new turn; pyannote segmentation for diarization in the VAD comparison",
+      "traps": ["nest under the innermost container, at any depth", "a spurt that outlasts its container is a new turn", "touching spurts do not nest, and one speaker's touching spurts are legal", "equal starts: the longer spurt holds the floor", "backchannel_ms against a length in samples, strictly shorter", "one speaker's overlapping spurts raise ValueError, also with another speaker's spurt between them", "an empty spurt raises ValueError"],
+      "clarifying_questions": ["two spurts with the same span", "a speaker inside their own spurt"]
+    }
+  ],
+  "deviations": [
+    "Part 1 keeps to measurement and the frame-level hangover. The suggested guard 'a single loud frame must not start speech' (minimum speech duration) moves to Part 3, where the lesson puts min_speech_ms; Part 1's guards are the two edges the usual O(n) rewrite of the hangover gets wrong.",
+    "Part 1's dBFS/linear mix-up is a power (mean square) compared with an amplitude threshold, not a wrong dBFS formula, so it does not repeat a dBFS-meter bug; dbfs itself is correct as shipped.",
+    "Part 3 has no maximum turn length: the lesson never mentions one. Its place is taken by pre-roll (a Key parameter and a Pitfall, unused in the lesson's code) and by flush, the detector's side of the lesson's flush trick; the service shows the STT side (audio, then flush, as soon as a turn ends).",
+    "Part 4 stops at Tiers 1 and 2. Tier 3 is Part 3's detector, so the cascade's correctness is checked on frame decisions, model calls and the model's context instead of on turns.",
+    "Part 4 uses server-sent events rather than NDJSON, which 06/03 already uses.",
+    "Part 5: the lesson has no tree of its own. The overlap structure of a conversation (turns, backchannels inside them, talk-over nested to any depth) is the nested structure turn-taking produces, and it is built from flat per-speaker segments like the ones Part 2 stores."
+  ]
+}

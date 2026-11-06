@@ -1,0 +1,480 @@
+{
+  "package": "turnkit",
+  "tests": [
+    "test_energy_gate",
+    "test_segment_table",
+    "test_turn_detector",
+    "test_cascade_stream",
+    "test_overlap_tree"
+  ],
+  "layers": [
+    {
+      "test": "test_energy_gate",
+      "steps": [
+        {"name": "as shipped", "edits": [], "expect": "math domain error"},
+        {"name": "fix rms", "edits": [{"file": "energy.py", "old": "    return sum(samples) / len(samples)\n", "new": "    return math.sqrt(sum(x * x for x in samples) / len(samples))\n"}], "expect": "a frame is speech when its RMS level is above threshold_dbfs"},
+        {"name": "+ compare power with power", "edits": [{"file": "energy.py", "old": "        loud.append(power > limit)\n", "new": "        loud.append(power > limit * limit)\n"}], "expect": "a loud frame and the hangover_ms after it are speech"},
+        {"name": "+ hangover counted in frames", "edits": [{"file": "energy.py", "old": "hangover_ms // frame_len)", "new": "hangover_ms // frame_ms)"}], "expect": "the hangover pass should keep up with a long stream"},
+        {"name": "+ last loud frame tracked", "edits": [{"file": "energy.py", "old": "    for i in range(len(loud)):\n        last = max((j for j in range(i + 1) if loud[j]), default=None)\n        out.append(last is not None and i - last <= frames)\n", "new": "    last = None\n    for i, is_loud in enumerate(loud):\n        if is_loud:\n            last = i\n        out.append(last is not None and i - last <= frames)\n"}], "expect": "PASSED"}
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_energy_gate",
+      "name": "hangover counter that starts at zero",
+      "edits": [
+        {"file": "energy.py", "old": "    last = None\n    for i, is_loud in enumerate(loud):\n        if is_loud:\n            last = i\n        out.append(last is not None and i - last <= frames)\n", "new": "    since = 0\n    for is_loud in loud:\n        since = 0 if is_loud else since + 1\n        out.append(since <= frames)\n"}
+      ],
+      "expect": "frames before the first loud frame are not speech"
+    },
+    {
+      "test": "test_energy_gate",
+      "name": "window slice that goes negative at the start",
+      "edits": [
+        {"file": "energy.py", "old": "    out: list[bool] = []\n    last = None\n    for i, is_loud in enumerate(loud):\n        if is_loud:\n            last = i\n        out.append(last is not None and i - last <= frames)\n    return out\n", "new": "    return [any(loud[i - frames : i + 1]) for i in range(len(loud))]\n"}
+      ],
+      "expect": "a loud first frame bridges like any other"
+    },
+    {
+      "test": "test_energy_gate",
+      "name": "mean absolute value instead of RMS",
+      "edits": [
+        {"file": "energy.py", "old": "    return math.sqrt(sum(x * x for x in samples) / len(samples))\n", "new": "    return sum(abs(x) for x in samples) / len(samples)\n"}
+      ],
+      "expect": "a frame's level is 20 * log10(RMS)"
+    },
+    {
+      "test": "test_energy_gate",
+      "name": "RMS compared with a power threshold, 10 ** (dB / 10)",
+      "edits": [
+        {"file": "energy.py", "old": "        loud.append(power > limit * limit)\n", "new": "        loud.append(math.sqrt(power) > 10.0 ** (threshold_dbfs / 10.0))\n"}
+      ],
+      "expect": "a frame is speech when its RMS level is above threshold_dbfs"
+    },
+    {
+      "test": "test_energy_gate",
+      "name": "backward scan that stops at the first loud frame",
+      "edits": [
+        {"file": "energy.py", "old": "    last = None\n    for i, is_loud in enumerate(loud):\n        if is_loud:\n            last = i\n        out.append(last is not None and i - last <= frames)\n", "new": "    for i in range(len(loud)):\n        last = next((j for j in range(i, -1, -1) if loud[j]), None)\n        out.append(last is not None and i - last <= frames)\n"}
+      ],
+      "expect": "the hangover pass should keep up with a long stream"
+    },
+    {
+      "test": "test_segment_table",
+      "name": "boundaries stored in whole milliseconds",
+      "edits": [
+        {"file": "segments.py", "old": "        with self._db:\n            if row is None:", "new": "        start, end = start * 1000 // sample_rate, end * 1000 // sample_rate\n        with self._db:\n            if row is None:"},
+        {"file": "segments.py", "old": "        return Segment(recording, sample_rate, start, end)\n", "new": "        return Segment(recording, sample_rate, start * sample_rate // 1000, end * sample_rate // 1000)\n"},
+        {"file": "segments.py", "old": "        return [Segment(recording, row[0], start, end) for start, end in rows]\n", "new": "        return [Segment(recording, row[0], s * row[0] // 1000, e * row[0] // 1000) for s, e in rows]\n"}
+      ],
+      "expect": "segments are kept to the sample"
+    },
+    {
+      "test": "test_segment_table",
+      "name": "boundaries stored as REAL seconds, read back with int()",
+      "edits": [
+        {"file": "segments.py", "old": "        with self._db:\n            if row is None:", "new": "        start, end = start / sample_rate, end / sample_rate\n        with self._db:\n            if row is None:"},
+        {"file": "segments.py", "old": "        return Segment(recording, sample_rate, start, end)\n", "new": "        return Segment(recording, sample_rate, int(start * sample_rate), int(end * sample_rate))\n"},
+        {"file": "segments.py", "old": "        return [Segment(recording, row[0], start, end) for start, end in rows]\n", "new": "        return [Segment(recording, row[0], int(s * row[0]), int(e * row[0])) for s, e in rows]\n"}
+      ],
+      "expect": "a reopened table has the same segments, to the sample, in time order"
+    },
+    {
+      "test": "test_segment_table",
+      "name": "only overlapping segments merge, touching ones do not",
+      "edits": [
+        {"file": "segments.py", "old": "start_sample <= ? AND end_sample >= ?", "new": "start_sample < ? AND end_sample > ?"}
+      ],
+      "expect": "a segment that touches its neighbours merges with both"
+    },
+    {
+      "test": "test_segment_table",
+      "name": "inclusive ends: a one-sample gap merges too",
+      "edits": [
+        {"file": "segments.py", "old": "start_sample <= ? AND end_sample >= ?", "new": "start_sample <= ? + 1 AND end_sample + 1 >= ?"}
+      ],
+      "expect": "a one-sample gap keeps segments apart"
+    },
+    {
+      "test": "test_segment_table",
+      "name": "merges with the first touching segment only",
+      "edits": [
+        {"file": "segments.py", "old": "            ).fetchall()\n", "new": "            ).fetchall()[:1]\n"}
+      ],
+      "expect": "a segment that touches its neighbours merges with both"
+    },
+    {
+      "test": "test_segment_table",
+      "name": "no commit after insert",
+      "edits": [
+        {"file": "segments.py", "old": "        with self._db:\n            if row is None:", "new": "        if True:\n            if row is None:"}
+      ],
+      "expect": "a reopened table has the same segments"
+    },
+    {
+      "test": "test_segment_table",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [
+        {"file": "segments.py", "old": "CREATE TABLE IF NOT EXISTS segments", "new": "CREATE TABLE segments"}
+      ],
+      "expect": "table segments already exists"
+    },
+    {
+      "test": "test_segment_table",
+      "name": "segments listed in insertion order",
+      "edits": [
+        {"file": "segments.py", "old": "ORDER BY start_sample", "new": "ORDER BY rowid"}
+      ],
+      "expect": "a reopened table has the same segments, to the sample, in time order"
+    },
+    {
+      "test": "test_segment_table",
+      "name": "sample rate remembered in memory only",
+      "edits": [
+        {"file": "segments.py", "old": "        self._db = sqlite3.connect(path)\n", "new": "        self._db = sqlite3.connect(path)\n        self._rates: dict[str, int] = {}\n"},
+        {"file": "segments.py", "old": "        if row is not None and row[0] != sample_rate:\n", "new": "        if self._rates.setdefault(recording, sample_rate) != sample_rate:\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_segment_table",
+      "name": "overlap found by a stored endpoint inside the new range",
+      "edits": [
+        {"file": "segments.py", "old": "\" WHERE recording = ? AND start_sample <= ? AND end_sample >= ?\",\n                (recording, end, start),", "new": "\" WHERE recording = ? AND (start_sample BETWEEN ? AND ? OR end_sample BETWEEN ? AND ?)\",\n                (recording, start, end, start, end),"}
+      ],
+      "expect": "a segment inside a stored one merges into it"
+    },
+    {
+      "test": "test_segment_table",
+      "name": "merge query not filtered by recording",
+      "edits": [
+        {"file": "segments.py", "old": "\" WHERE recording = ? AND start_sample <= ? AND end_sample >= ?\",\n                (recording, end, start),", "new": "\" WHERE start_sample <= ? AND end_sample >= ?\",\n                (end, start),"}
+      ],
+      "expect": "segments merge only within their own recording"
+    },
+    {
+      "test": "test_segment_table",
+      "name": "only segments that start inside the new range merge",
+      "edits": [
+        {"file": "segments.py", "old": "\" WHERE recording = ? AND start_sample <= ? AND end_sample >= ?\",\n                (recording, end, start),", "new": "\" WHERE recording = ? AND start_sample BETWEEN ? AND ?\",\n                (recording, start, end),"}
+      ],
+      "expect": "a segment that touches its neighbours merges with both"
+    },
+    {
+      "test": "test_segment_table",
+      "name": "empty range accepted",
+      "edits": [
+        {"file": "segments.py", "old": "        if not 0 <= start < end:\n", "new": "        if not 0 <= start <= end:\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "speech counted across silence, as in the lesson's TurnDetector",
+      "edits": [
+        {"file": "turns.py", "old": "            if not is_speech:\n                self.run = 0\n                return None\n", "new": "            if not is_speech:\n                return None\n"}
+      ],
+      "expect": "isolated clicks never add up to a turn"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "start reported at the onset, without pre-roll",
+      "edits": [
+        {"file": "turns.py", "old": "max(self.run_start - self.pre_roll, self.floor)", "new": "self.run_start"}
+      ],
+      "expect": "with pre_roll_ms of audio before the onset"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "pre-roll clamped at sample 0 only",
+      "edits": [
+        {"file": "turns.py", "old": "max(self.run_start - self.pre_roll, self.floor)", "new": "max(self.run_start - self.pre_roll, 0)"}
+      ],
+      "expect": "pre-roll never reaches before the stream or into the previous turn"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "end reported where it is decided",
+      "edits": [
+        {"file": "turns.py", "old": "        return self._end(self.run_start)\n", "new": "        return self._end(self.position)\n"}
+      ],
+      "expect": "it ends where its last speech frame ends"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "a speech frame does not restart the silence run",
+      "edits": [
+        {"file": "turns.py", "old": "        if is_speech:\n            self.run = 0\n            return None\n", "new": "        if is_speech:\n            return None\n"}
+      ],
+      "expect": "a short pause does not end the turn"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "flush ends the turn at the current position",
+      "edits": [
+        {"file": "turns.py", "old": "        return self._end(self.run_start if self.run else self.position)\n", "new": "        return self._end(self.position)\n"}
+      ],
+      "expect": "flush ends the turn at its last speech frame"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "flush keeps the pending speech run",
+      "edits": [
+        {"file": "turns.py", "old": "        if not self.speaking:\n            self.run = 0\n            return None\n        return self._end(", "new": "        if not self.speaking:\n            return None\n        return self._end("}
+      ],
+      "expect": "after a flush, a turn needs min_speech_ms of new speech"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "min speech counted in whole frames, rounded down",
+      "edits": [
+        {"file": "turns.py", "old": "            if self.run < self.min_speech:\n", "new": "            if self.run < self.min_speech // self.frame_len * self.frame_len:\n"}
+      ],
+      "expect": "a turn needs min_speech_ms of speech, even when that is not a whole number of frames"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "start needs more than min_speech_ms",
+      "edits": [
+        {"file": "turns.py", "old": "            if self.run < self.min_speech:\n", "new": "            if self.run <= self.min_speech:\n"}
+      ],
+      "expect": "a turn starts min_speech_ms into the speech, with pre_roll_ms of audio before the onset"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "start sample counted back from the decision point",
+      "edits": [
+        {"file": "turns.py", "old": "max(self.run_start - self.pre_roll, self.floor)", "new": "max(self.position - self.min_speech - self.pre_roll, self.floor)"}
+      ],
+      "expect": "the lesson's stream holds two turns, and the cough is not one"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "pre-roll not clamped",
+      "edits": [
+        {"file": "turns.py", "old": "max(self.run_start - self.pre_roll, self.floor)", "new": "self.run_start - self.pre_roll"}
+      ],
+      "expect": "pre-roll never reaches before the stream or into the previous turn"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "pre-roll floor at the previous turn's decision point",
+      "edits": [
+        {"file": "turns.py", "old": "        self.floor = end\n", "new": "        self.floor = self.position\n"}
+      ],
+      "expect": "pre-roll never reaches before the stream or into the previous turn"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "end needs more than the hangover",
+      "edits": [
+        {"file": "turns.py", "old": "        if self.run < self.silence_hangover:\n", "new": "        if self.run <= self.silence_hangover:\n"}
+      ],
+      "expect": "a short pause does not end the turn; it ends where its last speech frame ends, a hangover later"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "flush always ends where the last silence run started",
+      "edits": [
+        {"file": "turns.py", "old": "        return self._end(self.run_start if self.run else self.position)\n", "new": "        return self._end(self.run_start)\n"}
+      ],
+      "expect": "flush right after a speech frame ends the turn at the end of that frame"
+    },
+    {
+      "test": "test_turn_detector",
+      "name": "flush does not move the pre-roll floor",
+      "edits": [
+        {"file": "turns.py", "old": "        return self._end(self.run_start if self.run else self.position)\n", "new": "        floor = self.floor\n        event = self._end(self.run_start if self.run else self.position)\n        self.floor = floor\n        return event\n"}
+      ],
+      "expect": "pre-roll never reaches into a flushed turn"
+    },
+    {
+      "test": "test_cascade_stream",
+      "name": "no blank line after each event",
+      "edits": [
+        {"file": "cascade.py", "old": "\\ndata: {json.dumps(data)}\\n\\n\"", "new": "\\ndata: {json.dumps(data)}\\n\""}
+      ],
+      "expect": "every event ends with a blank line"
+    },
+    {
+      "test": "test_cascade_stream",
+      "name": "model called on every frame, then ANDed with the gate",
+      "edits": [
+        {"file": "cascade.py", "old": "            speech = False\n            if gate(frame):\n                calls += 1\n                speech = model([x for f in context for x in f]) >= speech_prob\n", "new": "            prob = model([x for f in context for x in f])\n            speech = False\n            if gate(frame):\n                calls += 1\n                speech = prob >= speech_prob\n"}
+      ],
+      "expect": "the model runs once per frame the gate passes"
+    },
+    {
+      "test": "test_cascade_stream",
+      "name": "context built from gated frames only",
+      "edits": [
+        {"file": "cascade.py", "old": "            context.append(frame)\n            frames += 1\n            speech = False\n            if gate(frame):\n", "new": "            frames += 1\n            speech = False\n            if gate(frame):\n                context.append(frame)\n"}
+      ],
+      "expect": "the model runs once per frame the gate passes"
+    },
+    {
+      "test": "test_cascade_stream",
+      "name": "context restarts with every chunk",
+      "edits": [
+        {"file": "cascade.py", "old": "    async for chunk in chunks:\n        pending.extend(chunk)\n", "new": "    async for chunk in chunks:\n        context.clear()\n        pending.extend(chunk)\n"}
+      ],
+      "expect": "the model runs once per frame the gate passes"
+    },
+    {
+      "test": "test_cascade_stream",
+      "name": "reads the whole stream before deciding",
+      "edits": [
+        {"file": "cascade.py", "old": "    async for chunk in chunks:\n        pending.extend(chunk)\n", "new": "    everything = [x async for chunk in chunks for x in chunk]\n    for chunk in [everything]:\n        pending.extend(chunk)\n"}
+      ],
+      "expect": "send each change as soon as its frame is complete"
+    },
+    {
+      "test": "test_cascade_stream",
+      "name": "context of context_frames earlier frames plus the current one",
+      "edits": [
+        {"file": "cascade.py", "old": "deque(maxlen=context_frames)", "new": "deque(maxlen=context_frames + 1)"}
+      ],
+      "expect": "the model runs once per frame the gate passes, on it and the frames before it"
+    },
+    {
+      "test": "test_cascade_stream",
+      "name": "gate run on the whole context",
+      "edits": [
+        {"file": "cascade.py", "old": "            if gate(frame):\n", "new": "            if gate([x for f in context for x in f]):\n"}
+      ],
+      "expect": "the model runs once per frame the gate passes, on it and the frames before it"
+    },
+    {
+      "test": "test_cascade_stream",
+      "name": "context cleared whenever the gate rejects a frame",
+      "edits": [
+        {"file": "cascade.py", "old": "            speech = False\n            if gate(frame):\n", "new": "            speech = False\n            if not gate(frame):\n                context.clear()\n            if gate(frame):\n"}
+      ],
+      "expect": "the model runs once per frame the gate passes, on it and the frames before it"
+    },
+    {
+      "test": "test_cascade_stream",
+      "name": "trailing partial frame zero-padded and counted",
+      "edits": [
+        {"file": "cascade.py", "old": "    yield _event(\"stats\"", "new": "    if pending:\n        frame = pending + [0.0] * (frame_len - len(pending))\n        context.append(frame)\n        frames += 1\n        if gate(frame):\n            calls += 1\n            model([x for f in context for x in f])\n    yield _event(\"stats\""}
+      ],
+      "expect": "the model runs once per frame the gate passes, on it and the frames before it"
+    },
+    {
+      "test": "test_cascade_stream",
+      "name": "event placed at the end of the frame",
+      "edits": [
+        {"file": "cascade.py", "old": "{\"sample\": position}", "new": "{\"sample\": position + frame_len}"}
+      ],
+      "expect": "speech starts and stops where the cascade decides"
+    },
+    {
+      "test": "test_cascade_stream",
+      "name": "a frame handled only once a sample past it has arrived",
+      "edits": [
+        {"file": "cascade.py", "old": "        while len(pending) >= frame_len:\n", "new": "        while len(pending) > frame_len:\n"}
+      ],
+      "expect": "send each change as soon as its frame is complete"
+    },
+    {
+      "test": "test_cascade_stream",
+      "name": "frames handled one chunk late, drained at the end",
+      "edits": [
+        {"file": "cascade.py", "old": "    async for chunk in chunks:\n        pending.extend(chunk)\n        while len(pending) >= frame_len:\n", "new": "    iterator, done = chunks.__aiter__(), False\n    while not done:\n        try:\n            chunk = await iterator.__anext__()\n        except StopAsyncIteration:\n            chunk, done = [], True\n        while len(pending) >= frame_len:\n"},
+        {"file": "cascade.py", "old": "            position += frame_len\n    yield _event(\"stats\"", "new": "            position += frame_len\n        pending.extend(chunk)\n    yield _event(\"stats\""}
+      ],
+      "expect": "send each change as soon as its frame is complete"
+    },
+    {
+      "test": "test_overlap_tree",
+      "name": "a spurt that outlasts its container still nests",
+      "edits": [
+        {"file": "overlap.py", "old": "if n[\"end\"] >= end and n[\"speaker\"] != speaker", "new": "if n[\"speaker\"] != speaker"}
+      ],
+      "expect": "a spurt that outlasts the current speaker is a new turn"
+    },
+    {
+      "test": "test_overlap_tree",
+      "name": "nested under the outermost container",
+      "edits": [
+        {"file": "overlap.py", "old": "for n in reversed(running)", "new": "for n in running"}
+      ],
+      "expect": "a spurt goes inside the innermost spurt that contains it"
+    },
+    {
+      "test": "test_overlap_tree",
+      "name": "sorted by start only",
+      "edits": [
+        {"file": "overlap.py", "old": "key=lambda s: (s[1], -s[2])", "new": "key=lambda s: s[1]"}
+      ],
+      "expect": "of two that start together, the longer one holds the floor"
+    },
+    {
+      "test": "test_overlap_tree",
+      "name": "a speaker's touching spurts rejected as an overlap",
+      "edits": [
+        {"file": "overlap.py", "old": "if start < busy_until.get(speaker, start):", "new": "if start <= busy_until.get(speaker, -1):"}
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_overlap_tree",
+      "name": "backchannel_ms compared with a length in samples",
+      "edits": [
+        {"file": "overlap.py", "old": "short = (end - start) * 1000 < backchannel_ms * sample_rate", "new": "short = end - start < backchannel_ms"}
+      ],
+      "expect": "a nested spurt is a backchannel when shorter than backchannel_ms"
+    },
+    {
+      "test": "test_overlap_tree",
+      "name": "a spurt exactly backchannel_ms long counted as a backchannel",
+      "edits": [
+        {"file": "overlap.py", "old": "short = (end - start) * 1000 < backchannel_ms * sample_rate", "new": "short = (end - start) * 1000 <= backchannel_ms * sample_rate"}
+      ],
+      "expect": "a nested spurt is a backchannel when shorter than backchannel_ms"
+    },
+    {
+      "test": "test_overlap_tree",
+      "name": "own overlaps not checked",
+      "edits": [
+        {"file": "overlap.py", "old": "if start < busy_until.get(speaker, start):", "new": "if False:"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_overlap_tree",
+      "name": "a spurt that ends with its container left outside it",
+      "edits": [
+        {"file": "overlap.py", "old": "if n[\"end\"] >= end and n[\"speaker\"] != speaker", "new": "if n[\"end\"] > end and n[\"speaker\"] != speaker"}
+      ],
+      "expect": "a nested spurt is a backchannel when shorter than backchannel_ms, else an overlap"
+    },
+    {
+      "test": "test_overlap_tree",
+      "name": "sorted by (start, end), the shorter spurt first",
+      "edits": [
+        {"file": "overlap.py", "old": "key=lambda s: (s[1], -s[2])", "new": "key=lambda s: (s[1], s[2])"}
+      ],
+      "expect": "of two that start together, the longer one holds the floor"
+    },
+    {
+      "test": "test_overlap_tree",
+      "name": "own overlaps checked against the previous spurt only",
+      "edits": [
+        {"file": "overlap.py", "old": "    busy_until: dict[str, int] = {}\n", "new": "    previous: tuple[str, int, int] | None = None\n"},
+        {"file": "overlap.py", "old": "        if start < busy_until.get(speaker, start):\n", "new": "        if previous is not None and previous[0] == speaker and start < previous[2]:\n"},
+        {"file": "overlap.py", "old": "        busy_until[speaker] = end\n", "new": "        previous = (speaker, start, end)\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_overlap_tree",
+      "name": "empty spurt not rejected",
+      "edits": [
+        {"file": "overlap.py", "old": "        if not start < end:\n            raise ValueError(f\"empty spurt {speaker!r} [{start}, {end})\")\n", "new": ""}
+      ],
+      "expect": "DID NOT RAISE"
+    }
+  ]
+}
