@@ -1,0 +1,297 @@
+{
+  "package": "metricplan",
+  "tests": [
+    "test_metric_contract_report",
+    "test_replay_store_roundtrip",
+    "test_predeclared_measurement_decision",
+    "test_pilot_metric_stream",
+    "test_goal_question_metric_trace"
+  ],
+  "layers": [
+    {
+      "test": "test_metric_contract_report",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a metric without its population is not a reproducible contract"
+        },
+        {
+          "name": "require population in metric contract",
+          "edits": [
+            {
+              "file": "contract.py",
+              "old": "('name','source','window')",
+              "new": "('name','source','window','population')"
+            }
+          ],
+          "expect": "counter metrics remain visible beside outcomes and guardrails"
+        },
+        {
+          "name": "+ retain optional counter measurements",
+          "edits": [
+            {
+              "file": "contract.py",
+              "old": "        if m.kind=='counter':continue\n",
+              "new": ""
+            }
+          ],
+          "expect": "read a bounded source snapshot without a system call for every byte"
+        },
+        {
+          "name": "+ read the bounded snapshot in bulk",
+          "edits": [
+            {
+              "file": "contract.py",
+              "old": "with open(path,'rb',buffering=0) as f:\n        raw=bytearray()\n        while chunk:=f.read(1):raw.extend(chunk)",
+              "new": "with open(path,'rb',buffering=0) as f:raw=f.read()"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_metric_contract_report",
+      "name": "faster source drops receipt metadata",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "return json.loads(raw.decode('utf-8'))",
+          "new": "return {'values':json.loads(raw.decode('utf-8'))['values']}"
+        }
+      ],
+      "expect": "reading a source snapshot preserves every receipt and Unicode field"
+    },
+    {
+      "test": "test_replay_store_roundtrip",
+      "name": "excluded evidence never persisted",
+      "edits": [
+        {
+          "file": "replays.py",
+          "old": "        with self.db:self.db.execute('INSERT INTO replay",
+          "new": "        if not replay.included:return\n        with self.db:self.db.execute('INSERT INTO replay"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_replay_store_roundtrip",
+      "name": "newest rows chosen by id instead of observation instant",
+      "edits": [
+        {
+          "file": "replays.py",
+          "old": "ORDER BY instant DESC,id DESC",
+          "new": "ORDER BY id DESC"
+        }
+      ],
+      "expect": "latest evidence uses true instants and stable ids then returns oldest first"
+    },
+    {
+      "test": "test_replay_store_roundtrip",
+      "name": "rewriting raw timestamp into canonical UTC text",
+      "edits": [
+        {
+          "file": "replays.py",
+          "old": "json.dumps(asdict(replay),ensure_ascii=False)",
+          "new": "json.dumps(dict(asdict(replay),at=instant(replay.at)),ensure_ascii=False)"
+        }
+      ],
+      "expect": "replay milliseconds population receipt text and exclusion flags round-trip exactly"
+    },
+    {
+      "test": "test_predeclared_measurement_decision",
+      "name": "safe outcome can hide an excluded production write",
+      "edits": [
+        {
+          "file": "decision.py",
+          "old": "    if writes:status='fail'",
+          "new": "    if False:status='fail'"
+        }
+      ],
+      "expect": "pilot writes fail even when excluded from the outcome denominator"
+    },
+    {
+      "test": "test_predeclared_measurement_decision",
+      "name": "even median takes the lower center value",
+      "edits": [
+        {
+          "file": "decision.py",
+          "old": "median(r.elapsed_ms for r in used)/1000",
+          "new": "sorted(r.elapsed_ms for r in used)[(len(used)-1)//2]/1000"
+        }
+      ],
+      "expect": "inclusive accuracy and even median jointly meet the registered pass contract"
+    },
+    {
+      "test": "test_predeclared_measurement_decision",
+      "name": "counter ambiguity erases an existing failure",
+      "edits": [
+        {
+          "file": "decision.py",
+          "old": "if status=='pass' and workload>current.max_workload:",
+          "new": "if workload>current.max_workload:"
+        }
+      ],
+      "expect": "fail evidence outranks both passing speed and counter ambiguity"
+    },
+    {
+      "test": "test_pilot_metric_stream",
+      "name": "excluded unsafe replays do not stop pilot",
+      "edits": [
+        {
+          "file": "pilot.py",
+          "old": "if row.writes:yield 'Bail out! production write\\n';return",
+          "new": "if row.writes and row.included:yield 'Bail out! production write\\n';return"
+        }
+      ],
+      "expect": "a write bails out before a success window even when its replay is excluded"
+    },
+    {
+      "test": "test_pilot_metric_stream",
+      "name": "every population fills the outcome window",
+      "edits": [
+        {
+          "file": "pilot.py",
+          "old": "if row.included and row.population==plan.population:count+=1",
+          "new": "if row.included:count+=1"
+        }
+      ],
+      "expect": "empty outcome windows emit no fictitious metrics"
+    },
+    {
+      "test": "test_pilot_metric_stream",
+      "name": "new batch retains previous batch evidence",
+      "edits": [
+        {
+          "file": "pilot.py",
+          "old": "rows=[];count=0;window+=1;number+=3",
+          "new": "count=0;window+=1;number+=3"
+        }
+      ],
+      "expect": "fixed disjoint windows keep global numbering and flush only a real partial batch"
+    },
+    {
+      "test": "test_goal_question_metric_trace",
+      "name": "every question must have both metric roles",
+      "edits": [
+        {
+          "file": "gqm.py",
+          "old": "state=worst(found);questions.append((where,state));values.append(state)",
+          "new": "state=worst(found)\n            if not {'outcome','guardrail'}<={by_name[n].kind for n in q.metrics if n in by_name}:state='ambiguous'\n            questions.append((where,state));values.append(state)"
+        }
+      ],
+      "expect": "shared risk metrics and child goals retain every trace and the worst decision"
+    },
+    {
+      "test": "test_goal_question_metric_trace",
+      "name": "ignore child goal results",
+      "edits": [
+        {
+          "file": "gqm.py",
+          "old": "values.extend(walk(child,path) for child in goal.children)",
+          "new": "pass"
+        }
+      ],
+      "expect": "shared risk metrics and child goals retain every trace and the worst decision"
+    },
+    {
+      "test": "test_goal_question_metric_trace",
+      "name": "unreferenced catalog metrics disappear silently",
+      "edits": [
+        {
+          "file": "gqm.py",
+          "old": "orphans=tuple(name for name in by_name if name not in seen)",
+          "new": "orphans=()"
+        }
+      ],
+      "expect": "orphans and bad links remain explicit rather than silently passing"
+    },
+    {
+      "test": "test_metric_contract_report",
+      "name": "ASCII replacement destroys Unicode receipt metadata",
+      "edits": [
+        {
+          "file": "contract.py",
+          "old": "raw.decode('utf-8')",
+          "new": "raw.decode('ascii',errors='replace')"
+        }
+      ],
+      "expect": "reading a source snapshot preserves every receipt and Unicode field"
+    },
+    {
+      "test": "test_replay_store_roundtrip",
+      "name": "replace a replay payload but leave its indexed observation instant stale",
+      "edits": [
+        {
+          "file": "replays.py",
+          "old": "population=excluded.population,instant=excluded.instant,payload=excluded.payload",
+          "new": "population=excluded.population,payload=excluded.payload"
+        }
+      ],
+      "expect": "replacing a replay must update its indexed instant as well as its payload"
+    },
+    {
+      "test": "test_predeclared_measurement_decision",
+      "name": "allow passing accuracy to bypass the registered median time threshold",
+      "edits": [
+        {
+          "file": "decision.py",
+          "old": "accuracy>=current.pass_rate and seconds<=current.max_seconds",
+          "new": "accuracy>=current.pass_rate"
+        }
+      ],
+      "expect": "passing accuracy cannot bypass the registered speed threshold"
+    },
+    {
+      "test": "test_predeclared_measurement_decision",
+      "name": "select the latest arrivals rather than the first registered batch",
+      "edits": [
+        {
+          "file": "decision.py",
+          "old": "used=batch_rows(current,rows);",
+          "new": "used=batch_rows(current,rows[::-1]);"
+        }
+      ],
+      "expect": "later arrivals do not replace the first registered outcome batch"
+    },
+    {
+      "test": "test_pilot_metric_stream",
+      "name": "discard other-population rows before checking the entire pilot write guardrail",
+      "edits": [
+        {
+          "file": "pilot.py",
+          "old": "    async for row in source:\n        if row.writes:",
+          "new": "    async for row in source:\n        if row.population!=plan.population:continue\n        if row.writes:"
+        }
+      ],
+      "expect": "a different outcome population remains inside the pilot write guardrail"
+    },
+    {
+      "test": "test_goal_question_metric_trace",
+      "name": "downgrade an already failing GQM result when any trace issue exists",
+      "edits": [
+        {
+          "file": "gqm.py",
+          "old": "if issues and status=='pass':status='ambiguous'",
+          "new": "if issues:status='ambiguous'"
+        }
+      ],
+      "expect": "trace issues cannot downgrade an already failing measured result"
+    },
+    {
+      "test": "test_goal_question_metric_trace",
+      "name": "treat an unmeasured shared metric as passing by default",
+      "edits": [
+        {
+          "file": "gqm.py",
+          "old": "states.get(name,'ambiguous')",
+          "new": "states.get(name,'pass')"
+        }
+      ],
+      "expect": "an unmeasured counter is ambiguous rather than a passing leaf"
+    }
+  ]
+}
