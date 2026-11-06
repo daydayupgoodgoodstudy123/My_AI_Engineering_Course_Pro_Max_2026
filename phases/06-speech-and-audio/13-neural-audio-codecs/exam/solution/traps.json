@@ -1,0 +1,876 @@
+{
+  "package": "rvqcodec",
+  "tests": [
+    "test_rvq_quantizer",
+    "test_packet_roundtrip",
+    "test_train_codebooks",
+    "test_stream_codec",
+    "test_tree_search"
+  ],
+  "layers": [
+    {
+      "test": "test_rvq_quantizer",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "IndexError"
+        },
+        {
+          "name": "fix the argmin axis in assign",
+          "edits": [
+            {
+              "file": "quantize.py",
+              "old": "    return [min(range(len(row)), key=row.__getitem__) for row in zip(*scores)]\n",
+              "new": "    return [min(range(len(row)), key=row.__getitem__) for row in scores]\n"
+            }
+          ],
+          "expect": "every later stage quantizes what the stages before it left"
+        },
+        {
+          "name": "+ quantize the residual",
+          "edits": [
+            {
+              "file": "quantize.py",
+              "old": "        indices = assign(frames, codebook)\n",
+              "new": "        indices = assign(residual, codebook)\n"
+            }
+          ],
+          "expect": "decoding adds up one codeword per stage, frame by frame"
+        },
+        {
+          "name": "+ one output list per frame",
+          "edits": [
+            {
+              "file": "quantize.py",
+              "old": "    out = [[0.0] * dim] * len(codes[0])\n",
+              "new": "    out = [[0.0] * dim for _ in codes[0]]\n"
+            }
+          ],
+          "expect": "nearest-codeword search should be fast on a 1024-entry codebook"
+        },
+        {
+          "name": "+ codeword energies computed once",
+          "edits": [
+            {
+              "file": "quantize.py",
+              "old": "    scores = [\n        [energies(codebook)[k] - 2.0 * dot(frame, codeword) for k, codeword in enumerate(codebook)]\n",
+              "new": "    energy = energies(codebook)\n    scores = [\n        [e - 2.0 * dot(frame, codeword) for e, codeword in zip(energy, codebook)]\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_rvq_quantizer",
+      "name": "rank codewords by the dot product alone, dropping ||c||^2 for speed",
+      "edits": [
+        {
+          "file": "quantize.py",
+          "old": "        [e - 2.0 * dot(frame, codeword) for e, codeword in zip(energy, codebook)]\n",
+          "new": "        [-2.0 * dot(frame, codeword) for codeword in codebook]\n"
+        }
+      ],
+      "expect": "adding a stage must never make the reconstruction worse"
+    },
+    {
+      "test": "test_rvq_quantizer",
+      "name": "residual taken from the original frame at every stage",
+      "edits": [
+        {
+          "file": "quantize.py",
+          "old": "        residual = [[r - c for r, c in zip(res, codebook[i])] for res, i in zip(residual, indices)]\n",
+          "new": "        residual = [[r - c for r, c in zip(f, codebook[i])] for f, i in zip(frames, indices)]\n"
+        }
+      ],
+      "expect": "every later stage quantizes what the stages before it left"
+    },
+    {
+      "test": "test_rvq_quantizer",
+      "name": "residual subtracted in place from the caller's frames",
+      "edits": [
+        {
+          "file": "quantize.py",
+          "old": "    residual = [list(frame) for frame in frames]\n    codes = []\n    for codebook in codebooks:\n        indices = assign(residual, codebook)\n        codes.append(indices)\n        residual = [[r - c for r, c in zip(res, codebook[i])] for res, i in zip(residual, indices)]\n",
+          "new": "    residual = frames\n    codes = []\n    for codebook in codebooks:\n        indices = assign(residual, codebook)\n        codes.append(indices)\n        for res, i in zip(residual, indices):\n            for j, c in enumerate(codebook[i]):\n                res[j] -= c\n"
+        }
+      ],
+      "expect": "adding a stage must never make the reconstruction worse"
+    },
+    {
+      "test": "test_rvq_quantizer",
+      "name": "ties go to the higher index",
+      "edits": [
+        {
+          "file": "quantize.py",
+          "old": "    return [min(range(len(row)), key=row.__getitem__) for row in scores]\n",
+          "new": "    return [max(range(len(row)), key=lambda k: (-row[k], k)) for row in scores]\n"
+        }
+      ],
+      "expect": "ties go to the lower index"
+    },
+    {
+      "test": "test_rvq_quantizer",
+      "name": "decode output sized by the codebook instead of the frames",
+      "edits": [
+        {
+          "file": "quantize.py",
+          "old": "    out = [[0.0] * dim for _ in codes[0]]\n",
+          "new": "    out = [[0.0] * dim for _ in codebooks[0]]\n"
+        }
+      ],
+      "expect": "IndexError: list index out of range"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "bits per code from K.bit_length()",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "        return (self.codebook_size - 1).bit_length()\n",
+          "new": "        return self.codebook_size.bit_length()\n"
+        }
+      ],
+      "expect": "1024 codes need 10 bits"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "bits per code from int(log2(K))",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "        return (self.codebook_size - 1).bit_length()\n",
+          "new": "        return int(__import__('math').log2(self.codebook_size))\n"
+        },
+        {
+          "file": "bitstream.py",
+          "old": "    bits = (codebook_size - 1).bit_length()\n",
+          "new": "    bits = int(__import__('math').log2(codebook_size))\n"
+        }
+      ],
+      "expect": "a 1000-entry codebook still takes 10 bits per code"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "frame rate by floor division",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "        return self.sample_rate / self.hop\n",
+          "new": "        return self.sample_rate // self.hop\n"
+        }
+      ],
+      "expect": "Mimi runs 8 codebooks of 2048 codes at 12.5 Hz"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "codes written codebook by codebook",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "    for t in range(n_frames):\n        for row in packet.codes:\n            code = row[t]\n",
+          "new": "    for row in packet.codes:\n        for t in range(n_frames):\n            code = row[t]\n"
+        }
+      ],
+      "expect": "frame by frame with codebook 0 first"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "frame count read off the payload length",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "    n_frames = _n_frames(n_samples, hop)\n    bits = (codebook_size - 1).bit_length()\n",
+          "new": "    bits = (codebook_size - 1).bit_length()\n    n_frames = (len(data) - HEADER.size) * 8 // (n_q * bits) if n_q * bits else 0\n"
+        }
+      ],
+      "expect": "a packet must round-trip exactly"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "out-of-range code masked to fit",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "            if not 0 <= code < packet.codebook_size:\n",
+          "new": "            code &= (1 << bits) - 1\n            if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "short data reaches struct unchecked",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "    if len(data) < HEADER.size:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "struct.error"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "truncated payload not detected",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "    if len(payload) != (n_bits + 7) // 8:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "decompress plays a packet from another frame rate",
+      "edits": [
+        {
+          "file": "codec.py",
+          "old": "        if made != (self.sample_rate, self.hop, self.codebook_size):\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "bitrate from log2(K) instead of the bits each code takes",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "        return self.frame_rate * len(self.codes) * self.bits_per_code\n",
+          "new": "        return self.frame_rate * len(self.codes) * __import__('math').log2(self.codebook_size)\n"
+        }
+      ],
+      "expect": "a 1000-entry codebook still takes 10 bits per code"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "least significant bit first within a code",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "            value = (value << bits) | code\n",
+          "new": "            value = (value << bits) | (int(format(code, f'0{bits}b')[::-1], 2) if bits else 0)\n"
+        },
+        {
+          "file": "bitstream.py",
+          "old": "    flat = [(value >> (n_bits - bits * (i + 1))) & mask for i in range(n_frames * n_q)]\n",
+          "new": "    flat = [(value >> (n_bits - bits * (i + 1))) & mask for i in range(n_frames * n_q)]\n    flat = [int(format(c, f'0{bits}b')[::-1], 2) if bits else 0 for c in flat]\n"
+        }
+      ],
+      "expect": "most significant bit first"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "frame count by floor division",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "    return -(-n_samples // hop)\n",
+          "new": "    return n_samples // hop\n"
+        }
+      ],
+      "expect": "every row of codes needs 3 codes"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "unpack reads the codes back codebook by codebook",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "    codes = [flat[q::n_q] for q in range(n_q)]\n",
+          "new": "    codes = [flat[q * n_frames : (q + 1) * n_frames] for q in range(n_q)]\n"
+        }
+      ],
+      "expect": "a packet must round-trip exactly"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "code range checked with <=",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "            if not 0 <= code < packet.codebook_size:\n",
+          "new": "            if not 0 <= code <= packet.codebook_size:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "row of the wrong length packed anyway",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "    if any(len(row) != n_frames for row in packet.codes):\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "trailing bytes after the payload accepted",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "    if len(payload) != (n_bits + 7) // 8:\n",
+          "new": "    if len(payload) < (n_bits + 7) // 8:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "decompress drops codes for codebooks it does not have",
+      "edits": [
+        {
+          "file": "codec.py",
+          "old": "        if len(packet.codes) > len(self.codebooks):\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_packet_roundtrip",
+      "name": "payload padded at the front instead of the end",
+      "edits": [
+        {
+          "file": "bitstream.py",
+          "old": "    return header + (value << pad).to_bytes((n_bits + pad) // 8, \"big\")\n",
+          "new": "    return header + value.to_bytes((n_bits + pad) // 8, \"big\")\n"
+        },
+        {
+          "file": "bitstream.py",
+          "old": "    value = int.from_bytes(payload, \"big\") >> (-n_bits % 8)\n",
+          "new": "    value = int.from_bytes(payload, \"big\")\n"
+        }
+      ],
+      "expect": "most significant bit first"
+    },
+    {
+      "test": "test_train_codebooks",
+      "name": "uniform seeding inside the data's bounding box, as in the lesson code",
+      "edits": [
+        {
+          "file": "train.py",
+          "old": "    codebook = [list(vectors[rng.randrange(len(vectors))])]\n",
+          "new": "    lo = [min(col) for col in zip(*vectors)]\n    hi = [max(col) for col in zip(*vectors)]\n    codebook = [[a + (b - a) * rng.random() for a, b in zip(lo, hi)] for _ in range(size)]\n"
+        }
+      ],
+      "expect": "probability proportional to D(x)^2"
+    },
+    {
+      "test": "test_train_codebooks",
+      "name": "seeding weighted by D(x) instead of D(x)^2",
+      "edits": [
+        {
+          "file": "train.py",
+          "old": "        total = sum(d2)\n",
+          "new": "        total = sum(w ** 0.5 for w in d2)\n"
+        },
+        {
+          "file": "train.py",
+          "old": "            running += w\n",
+          "new": "            running += w ** 0.5\n"
+        }
+      ],
+      "expect": "probability proportional to D(x)^2"
+    },
+    {
+      "test": "test_train_codebooks",
+      "name": "D(x) measured to the newest codeword only",
+      "edits": [
+        {
+          "file": "train.py",
+          "old": "        d2 = [min(w, _sq_dist(v, codebook[-1])) for w, v in zip(d2, vectors)]\n",
+          "new": "        d2 = [_sq_dist(v, codebook[-1]) for v in vectors]\n"
+        }
+      ],
+      "expect": "probability proportional to D(x)^2"
+    },
+    {
+      "test": "test_train_codebooks",
+      "name": "random distinct vectors as seeds (Forgy)",
+      "edits": [
+        {
+          "file": "train.py",
+          "old": "    codebook = [list(vectors[rng.randrange(len(vectors))])]\n",
+          "new": "    codebook = [list(v) for v in rng.sample(vectors, size)]\n"
+        }
+      ],
+      "expect": "probability proportional to D(x)^2"
+    },
+    {
+      "test": "test_train_codebooks",
+      "name": "codebook sorted before returning, as in the lesson code",
+      "edits": [
+        {
+          "file": "train.py",
+          "old": "    return codebook\n\n\ndef train_rvq",
+          "new": "    return sorted(codebook)\n\n\ndef train_rvq"
+        }
+      ],
+      "expect": "probability proportional to D(x)^2"
+    },
+    {
+      "test": "test_train_codebooks",
+      "name": "random.choices with no case for all-zero D(x)^2",
+      "edits": [
+        {
+          "file": "train.py",
+          "old": "        total = sum(d2)\n        if total == 0:\n            codebook.append(list(codebook[0]))\n            continue\n        r = rng.random() * total\n        running = 0.0\n        pick = len(vectors) - 1\n        for i, w in enumerate(d2):\n            running += w\n            if running > r:\n                pick = i\n                break\n",
+          "new": "        pick = rng.choices(range(len(vectors)), weights=d2)[0]\n"
+        }
+      ],
+      "expect": "Total of weights must be greater than zero"
+    },
+    {
+      "test": "test_train_codebooks",
+      "name": "empty cluster divides by zero",
+      "edits": [
+        {
+          "file": "train.py",
+          "old": "            [s / n for s in total] if n else old\n",
+          "new": "            [s / n for s in total]\n"
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_train_codebooks",
+      "name": "every stage trained on the raw frames",
+      "edits": [
+        {
+          "file": "train.py",
+          "old": "        codebook = learn_codebook(residual, size, iterations, seed + q)\n",
+          "new": "        codebook = learn_codebook(frames, size, iterations, seed + q)\n"
+        }
+      ],
+      "expect": "every stage is trained on what the stages before it left"
+    },
+    {
+      "test": "test_train_codebooks",
+      "name": "first codeword always vectors[0]",
+      "edits": [
+        {
+          "file": "train.py",
+          "old": "    codebook = [list(vectors[rng.randrange(len(vectors))])]\n",
+          "new": "    codebook = [list(vectors[0])]\n"
+        }
+      ],
+      "expect": "probability proportional to D(x)^2"
+    },
+    {
+      "test": "test_train_codebooks",
+      "name": "farthest vector taken instead of sampling by D(x)^2",
+      "edits": [
+        {
+          "file": "train.py",
+          "old": "        r = rng.random() * total\n        running = 0.0\n        pick = len(vectors) - 1\n        for i, w in enumerate(d2):\n            running += w\n            if running > r:\n                pick = i\n                break\n",
+          "new": "        pick = max(range(len(vectors)), key=d2.__getitem__)\n"
+        }
+      ],
+      "expect": "probability proportional to D(x)^2"
+    },
+    {
+      "test": "test_train_codebooks",
+      "name": "one Lloyd round more than iterations",
+      "edits": [
+        {
+          "file": "train.py",
+          "old": "    for _ in range(iterations):\n",
+          "new": "    for _ in range(iterations + 1):\n"
+        }
+      ],
+      "expect": "probability proportional to D(x)^2"
+    },
+    {
+      "test": "test_train_codebooks",
+      "name": "Lloyd stops after one round",
+      "edits": [
+        {
+          "file": "train.py",
+          "old": "        if moved == codebook:\n            break\n        codebook = moved\n",
+          "new": "        codebook = moved\n        break\n"
+        }
+      ],
+      "expect": "Lloyd keeps going until the codewords stop moving"
+    },
+    {
+      "test": "test_train_codebooks",
+      "name": "next residual taken from the codes of the raw frames",
+      "edits": [
+        {
+          "file": "train.py",
+          "old": "        indices = assign(residual, codebook)\n",
+          "new": "        indices = assign(frames, codebook)\n"
+        }
+      ],
+      "expect": "every stage is trained on what the stages before it left"
+    },
+    {
+      "test": "test_train_codebooks",
+      "name": "seed codewords alias the input vectors, and Lloyd moves them in place",
+      "edits": [
+        {
+          "file": "train.py",
+          "old": "    codebook = [list(vectors[rng.randrange(len(vectors))])]\n",
+          "new": "    codebook = [vectors[rng.randrange(len(vectors))]]\n"
+        },
+        {
+          "file": "train.py",
+          "old": "        codebook.append(list(vectors[pick]))\n",
+          "new": "        codebook.append(vectors[pick])\n"
+        },
+        {
+          "file": "train.py",
+          "old": "        moved = [\n            [s / n for s in total] if n else old\n            for total, n, old in zip(sums, counts, codebook)\n        ]\n        if moved == codebook:\n            break\n        codebook = moved\n",
+          "new": "        before = [list(c) for c in codebook]\n        for c, total, n in zip(codebook, sums, counts):\n            if n:\n                c[:] = [s / n for s in total]\n        if before == codebook:\n            break\n"
+        }
+      ],
+      "expect": "Lloyd moves every codeword to the mean of its vectors, in seeding order"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "frames restart at every chunk",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        buffer.extend(chunk)\n",
+          "new": "        buffer = list(chunk)\n"
+        }
+      ],
+      "expect": "the same codes as Codec.encode, whatever the chunking"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "partial last frame dropped, as a window tagger would",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    if buffer:\n        length = len(buffer)\n",
+          "new": "    if False:\n        length = len(buffer)\n"
+        }
+      ],
+      "expect": "the same codes as Codec.encode, whatever the chunking"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "last frame padded with its last sample instead of zeros",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        yield _encode_frame(codec, index, buffer + [0.0] * (codec.hop - length), length)\n",
+          "new": "        yield _encode_frame(codec, index, buffer + buffer[-1:] * (codec.hop - length), length)\n"
+        }
+      ],
+      "expect": "the same codes as Codec.encode, whatever the chunking"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "padding played as audio",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        yield samples[: frame.length]\n",
+          "new": "        yield samples\n"
+        }
+      ],
+      "expect": "streaming decode plays exactly what Codec.decode plays"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "encoder looks for whole frames before adding the new chunk",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for chunk in chunks:\n        buffer.extend(chunk)\n        while len(buffer) >= codec.hop:\n            yield _encode_frame(codec, index, buffer[: codec.hop], codec.hop)\n            del buffer[: codec.hop]\n            index += 1\n",
+          "new": "    async for chunk in chunks:\n        while len(buffer) >= codec.hop:\n            yield _encode_frame(codec, index, buffer[: codec.hop], codec.hop)\n            del buffer[: codec.hop]\n            index += 1\n        buffer.extend(chunk)\n    while len(buffer) >= codec.hop:\n        yield _encode_frame(codec, index, buffer[: codec.hop], codec.hop)\n        del buffer[: codec.hop]\n        index += 1\n"
+        }
+      ],
+      "expect": "every frame is played as soon as its last sample has arrived"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "decoder holds each frame until the next one arrives",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for frame in frames:\n",
+          "new": "    held = None\n    async for frame in frames:\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "        yield samples[: frame.length]\n",
+          "new": "        if held is not None:\n            yield held\n        held = samples[: frame.length]\n    if held is not None:\n        yield held\n"
+        }
+      ],
+      "expect": "every frame is played as soon as its last sample has arrived"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "reads the whole stream before encoding",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for chunk in chunks:\n        buffer.extend(chunk)\n",
+          "new": "    everything = [s async for chunk in chunks for s in chunk]\n    for chunk in [everything]:\n        buffer.extend(chunk)\n"
+        }
+      ],
+      "expect": "every frame is played as soon as its last sample has arrived"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "decoder assumes every codebook's code is present",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        (samples,) = rvq_decode([[code] for code in frame.codes], codec.codebooks)\n",
+          "new": "        (samples,) = rvq_decode([[frame.codes[q]] for q in range(len(codec.codebooks))], codec.codebooks)\n"
+        }
+      ],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "frame without codes decodes as silence",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if not frame.codes:\n            raise ValueError(f\"frame {frame.index} has no semantic code\")\n",
+          "new": ""
+        },
+        {
+          "file": "stream.py",
+          "old": "        (samples,) = rvq_decode([[code] for code in frame.codes], codec.codebooks)\n",
+          "new": "        samples = [0.0] * codec.hop\n        for code, book in zip(frame.codes, codec.codebooks):\n            samples = [s + v for s, v in zip(samples, book[code])]\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "an empty chunk taken for the end of the stream",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for chunk in chunks:\n        buffer.extend(chunk)\n",
+          "new": "    async for chunk in chunks:\n        if not chunk:\n            break\n        buffer.extend(chunk)\n"
+        }
+      ],
+      "expect": "the same codes as Codec.encode, whatever the chunking"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "at most one frame per chunk (if instead of while)",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        while len(buffer) >= codec.hop:\n",
+          "new": "        if len(buffer) >= codec.hop:\n"
+        }
+      ],
+      "expect": "the same codes as Codec.encode, whatever the chunking"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "frame indices start at 1",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    index = 0\n",
+          "new": "    index = 1\n"
+        }
+      ],
+      "expect": "the last frame is zero-padded and says how many of its samples are real"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "an empty last frame sent when the stream ends on a frame boundary",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    if buffer:\n        length = len(buffer)\n",
+          "new": "    if True:\n        length = len(buffer)\n"
+        }
+      ],
+      "expect": "a stream that ends on a frame boundary has no partial frame"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "encoder waits for more than a whole frame (> instead of >=)",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        while len(buffer) >= codec.hop:\n",
+          "new": "        while len(buffer) > codec.hop:\n"
+        }
+      ],
+      "expect": "every frame is played as soon as its last sample has arrived"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "missing acoustic codes filled in with code 0",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        (samples,) = rvq_decode([[code] for code in frame.codes], codec.codebooks)\n",
+          "new": "        codes = list(frame.codes) + [0] * (len(codec.codebooks) - len(frame.codes))\n        (samples,) = rvq_decode([[code] for code in codes], codec.codebooks)\n"
+        }
+      ],
+      "expect": "a frame that lost its acoustic codes still plays from codebook 0"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "frames that lost acoustic codes rejected",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if len(frame.codes) > len(codec.codebooks):\n",
+          "new": "        if len(frame.codes) != len(codec.codebooks):\n"
+        }
+      ],
+      "expect": "ValueError: frame 1"
+    },
+    {
+      "test": "test_stream_codec",
+      "name": "decoder yields one sample at a time",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        yield samples[: frame.length]\n",
+          "new": "        for s in samples[: frame.length]:\n            yield [s]\n"
+        }
+      ],
+      "expect": "every frame is played as soon as its last sample has arrived"
+    },
+    {
+      "test": "test_tree_search",
+      "name": "tree search done as a full search",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    node, code, computed = tree, 0, 0\n",
+          "new": "    return full_search(tree, vector)\n    node, code, computed = tree, 0, 0\n"
+        }
+      ],
+      "expect": "tree search descends greedily; it does not look at every leaf"
+    },
+    {
+      "test": "test_tree_search",
+      "name": "leaves numbered breadth first",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    children = _children(tree)\n    if not children:\n        return [tree[\"centroid\"]]\n    return [centroid for child in children for centroid in leaf_codebook(child)]\n",
+          "new": "    queue, out = [tree], []\n    while queue:\n        node = queue.pop(0)\n        if _children(node):\n            queue.extend(_children(node))\n        else:\n            out.append(node[\"centroid\"])\n    return out\n"
+        }
+      ],
+      "expect": "numbered left to right, depth first"
+    },
+    {
+      "test": "test_tree_search",
+      "name": "an empty children list taken for an internal node",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    children = _children(tree)\n    if not children:\n        return [tree[\"centroid\"]]\n",
+          "new": "    children = _children(tree)\n    if \"children\" not in tree:\n        return [tree[\"centroid\"]]\n"
+        }
+      ],
+      "expect": "numbered left to right, depth first"
+    },
+    {
+      "test": "test_tree_search",
+      "name": "one comparison counted per level",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "        computed += len(children)\n",
+          "new": "        computed += 1\n"
+        }
+      ],
+      "expect": "counting every distance"
+    },
+    {
+      "test": "test_tree_search",
+      "name": "ties go to the later child",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "        best = min(range(len(children)), key=distances.__getitem__)\n",
+          "new": "        best = max(range(len(children)), key=lambda k: (-distances[k], k))\n"
+        }
+      ],
+      "expect": "ties go to the earlier child"
+    },
+    {
+      "test": "test_tree_search",
+      "name": "zip hides a vector of the wrong length",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    if len(centroid) != len(vector):\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_tree_search",
+      "name": "code built from the path as a mixed-radix number",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "        code += sum(_n_leaves(child) for child in children[:best])\n",
+          "new": "        code = code * len(children) + best\n"
+        }
+      ],
+      "expect": "step to the nearest child at every level, counting every distance"
+    },
+    {
+      "test": "test_tree_search",
+      "name": "distance to the root counted too",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    node, code, computed = tree, 0, 0\n",
+          "new": "    node, code, computed = tree, 0, 1\n"
+        }
+      ],
+      "expect": "step to the nearest child at every level, counting every distance"
+    },
+    {
+      "test": "test_tree_search",
+      "name": "full search counts every node, not just the leaves",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    return min(range(len(leaves)), key=distances.__getitem__), len(leaves)\n",
+          "new": "    n_nodes = (lambda f: f(f, tree))(lambda f, n: 1 + sum(f(f, c) for c in _children(n)))\n    return min(range(len(leaves)), key=distances.__getitem__), n_nodes - 1\n"
+        }
+      ],
+      "expect": "full search checks every leaf and finds the nearest one"
+    },
+    {
+      "test": "test_tree_search",
+      "name": "full-search ties go to the higher code",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    return min(range(len(leaves)), key=distances.__getitem__), len(leaves)\n",
+          "new": "    return max(range(len(leaves)), key=lambda k: (-distances[k], k)), len(leaves)\n"
+        }
+      ],
+      "expect": "ties go to the lower code"
+    }
+  ]
+}

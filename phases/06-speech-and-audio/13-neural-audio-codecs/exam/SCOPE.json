@@ -1,0 +1,104 @@
+{
+  "lesson": "phases/06-speech-and-audio/13-neural-audio-codecs",
+  "title": "Neural Audio Codecs — EnCodec, SNAC, Mimi, DAC and the Semantic-Acoustic Split",
+  "format": "staged-brownfield",
+  "service": "RVQCodec: the bottleneck of a toy neural audio codec, with residual VQ, a bit-packed bitstream, k-means++ codebook training, frame-by-frame streaming and a tree-structured codebook",
+  "sources": {
+    "docs/en.md": "4fc76820d2dc2bafeda60c77018b05b52b4ee1febbdbe2a32b2ac76bcd4f3feb",
+    "code/main.py": "5d3af3c4dbd01a3c9794e434ac736aafb544d3b2aeac32a89d7d448ab4d2a046"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_rvq_quantizer",
+      "kind": "debug",
+      "lesson_anchor": "The core trick: RVQ; code/main.py quantize_with_codebook, rvq_encode and rvq_decode; code walkthrough pitfall [[]] * size",
+      "planted_bugs": [
+        "assign takes the argmin over zip(*scores), the transposed T x K table, so it returns the nearest frame for every codeword; the IndexError surfaces one call up, in rvq_encode, when those indices look up the codebook",
+        "rvq_encode hands the original frames to every stage; the residual it computes is never quantized",
+        "rvq_decode builds its output as [[0.0] * dim] * n, n references to one list, so every frame comes out as the sum of all codewords",
+        "assign calls energies(codebook) for every (frame, codeword) pair, O(T K^2 D)"
+      ],
+      "timing_assert": "8 frames against a 1024-entry codebook under 0.1 s (energies recomputed: about 1.6 to 2 s; fixed: about 0.002 s)",
+      "overfix_guard": "with residual codebooks that hold a zero codeword and codewords of different lengths, adding a stage never increases the error; this rules out ranking codewords by the dot product alone (dropping ||c||^2 for speed), which is only valid for L2-normalized codebooks like DAC's"
+    },
+    {
+      "part": 2,
+      "test": "test_packet_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Frame rates matter; bitrate = frame rate x codebooks x bits (EnCodec 6 kbps with 8 codebooks); frame_t -> [semantic_token_t, acoustic tokens]; Pitfall: frame-rate mismatch fails silently",
+      "exactness": "codes round-trip bit for bit through pack and unpack with a non-power-of-two codebook (K = 1000, code 999), codes straddling byte boundaries, a padded last frame (1000 samples at hop 320), 6 padding bits after a single 2-bit code, and an empty clip; the header keeps sample_rate and hop (Mimi's 12.5 Hz is not an integer) and the clip length in samples",
+      "traps": [
+        "bits per code from K.bit_length() (11 for 1024) or int(log2(K)) (9 for 1000)",
+        "bitrate from log2(K) instead of the 10 bits a code of a 1000-entry codebook takes",
+        "frame rate by floor division (Mimi 12 Hz, 1056 bps)",
+        "codebook-by-codebook order or least significant bit first",
+        "frame count from the payload length (padding read as frames) or floor(n_samples / hop)",
+        "out-of-range code masked to fit, or a row of the wrong length packed anyway",
+        "truncated or short data reaching struct (struct.error, not ValueError), or trailing bytes accepted",
+        "decompress playing a packet from another frame rate, or dropping codes for codebooks it does not have"
+      ],
+      "clarifying_questions": ["why the header has no frame count", "out-of-range codes", "byte and bit order", "a packet with more or fewer codebooks than the codec"]
+    },
+    {
+      "part": 3,
+      "test": "test_train_codebooks",
+      "kind": "core algorithm",
+      "lesson_anchor": "code/main.py learn_codebook (1-D k-means) and rvq_encode (greedy stage-by-stage training); Exercise 1 (error vs number of codebooks); Pitfalls: too many codebooks, assuming all codebooks equal; quiz Q10 codebook ablation",
+      "traps": [
+        "uniform seeding inside the data's bounding box, as in the lesson code",
+        "D(x) instead of D(x)^2, D(x) to the newest codeword only, or Forgy seeding",
+        "codebook sorted, as in the lesson's 1-D code",
+        "all D(x)^2 zero (random.choices raises)",
+        "empty cluster divided by zero",
+        "seed codewords aliasing the input vectors while Lloyd moves them in place",
+        "Lloyd stopped after one round (five points on a line need three moves)",
+        "every stage trained on the raw frames instead of the residual"
+      ],
+      "integration": "four stages trained on the lesson's sine-plus-noise signal, evaluated on a held-out signal: every stage at least halves the error, and dropping codebook 0 costs over 100 times more than dropping the last codebook",
+      "clarifying_questions": ["sorting the codebook", "fewer distinct vectors than codewords", "how many Lloyd rounds"]
+    },
+    {
+      "part": 4,
+      "test": "test_stream_codec",
+      "kind": "streaming",
+      "lesson_anchor": "Mimi 12.5 Hz streaming speech; SoundStream, the original streamable RVQ codec; codebook 0 carries content, the last codebooks barely matter",
+      "wire_format": "async generators: Frame(index, codes, length) objects out of the encoder, lists of float samples out of the decoder; the test joins the blocks and compares them with Codec.decode sample for sample",
+      "traps": [
+        "frames restarted at every chunk",
+        "partial last frame dropped, or padded with the last sample instead of zeros",
+        "an empty last frame sent when the stream ends on a frame boundary",
+        "zero padding played as audio",
+        "encoder checking for whole frames before adding the new chunk (one chunk late)",
+        "decoder holding a frame back, or reading the whole stream first",
+        "decoder assuming every codebook's code is present, or filling the missing codes in with code 0",
+        "frame without its semantic code decoded as silence"
+      ],
+      "clarifying_questions": ["trailing samples", "a stream that ends on a frame boundary", "codes dropped in transit"]
+    },
+    {
+      "part": 5,
+      "test": "test_tree_search",
+      "kind": "recursive structure",
+      "lesson_anchor": "The core trick: one big codebook would need millions of codes; tree-structured VQ is the classic structured alternative to RVQ for searching a large codebook",
+      "traps": [
+        "tree search done as a full search",
+        "leaves numbered breadth first",
+        "an empty children list taken for an internal node",
+        "one comparison counted per level instead of one per distance",
+        "ties going to the later child, or to the higher code in the full search",
+        "zip hiding a vector of the wrong length"
+      ],
+      "clarifying_questions": ["greedy versus exact", "what counts as a comparison"]
+    }
+  ],
+  "adjustments": [
+    "Part 1: the suggested k-means empty-cluster bug moved to Part 3. Part 1 is the inference path (nearest-codeword search, residual encoding, decoding with given codebooks) and Part 3 is codebook learning, so an empty-cluster bug in Part 1 would have put both parts into the same function. Its place is taken by the lesson walkthrough's own pitfall, the shared-row list [[0.0] * dim] * n, in rvq_decode.",
+    "Part 1: the hand example uses codewords of equal length, so the dot-product shortcut passes every assertion except the guard; the guard is the suggested monotone-error check, run on codebooks with a zero codeword, where greedy RVQ provably never gets worse.",
+    "Part 2: the header stores sample_rate and hop instead of a frame rate, because Mimi's 12.5 Hz is not an integer, and the clip length in samples instead of frames. Codec.decompress was added to turn the lesson's frame-rate-mismatch pitfall into a ValueError.",
+    "Part 3: the stages are evaluated on a held-out signal, following the code walkthrough's warning that learning and scoring codebooks on the same signal measures overfitting. The quiz Q10 codebook-0 ablation was added to cover the semantic/acoustic split.",
+    "Part 4: the trailing partial frame is zero-padded and carries its real length instead of being dropped, because a codec must not lose audio (06/03's window tagger drops it). Fixed decode latency is checked per frame as one frame behind the input. Frames that lost trailing acoustic codes must still decode from codebook 0. The wire objects are Frame dataclasses and float blocks rather than NDJSON.",
+    "Part 5: tree-structured VQ as suggested. The tree is unbalanced, with a 3-way node, a leaf at depth 1 and a leaf written with an empty children list; codes are leaves in depth-first order; comparisons count distance computations; a 64-leaf balanced tree shows 12 distances against 64."
+  ]
+}
