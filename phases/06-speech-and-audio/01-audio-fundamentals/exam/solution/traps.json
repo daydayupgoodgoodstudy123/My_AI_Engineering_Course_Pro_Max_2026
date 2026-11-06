@@ -1,0 +1,549 @@
+{
+  "package": "wavlab",
+  "tests": [
+    "test_pcm16_codec",
+    "test_wav_roundtrip",
+    "test_dominant_frequency",
+    "test_stream_downsample",
+    "test_riff_walk"
+  ],
+  "layers": [
+    {
+      "test": "test_pcm16_codec",
+      "steps": [
+        {"name": "as shipped", "edits": [], "expect": "<= number <= 32767"},
+        {
+          "name": "saturate after scaling",
+          "edits": [
+            {"file": "pcm.py", "old": "    x = max(-1.0, min(1.0, x))\n    return int(x * 32768)\n", "new": "    return max(-32768, min(32767, int(x * 32768)))\n"}
+          ],
+          "expect": "decoding splits interleaved frames"
+        },
+        {
+          "name": "+ de-interleave",
+          "edits": [
+            {"file": "pcm.py", "old": "    n = len(values) // n_channels\n    return [[pcm16_to_float(v) for v in values[c * n : (c + 1) * n]] for c in range(n_channels)]\n", "new": "    return [[pcm16_to_float(v) for v in values[c::n_channels]] for c in range(n_channels)]\n"}
+          ],
+          "expect": "samples round to the nearest int16 step"
+        },
+        {
+          "name": "+ round",
+          "edits": [
+            {"file": "pcm.py", "old": "int(x * 32768)", "new": "round(x * 32768)"}
+          ],
+          "expect": "encoding should be fast on long clips"
+        },
+        {
+          "name": "+ build the list once",
+          "edits": [
+            {"file": "pcm.py", "old": "    ints: list[int] = []\n    for frame in zip(*channels):\n        ints = ints + [float_to_pcm16(x) for x in frame]\n", "new": "    ints = [float_to_pcm16(x) for frame in zip(*channels) for x in frame]\n"}
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_pcm16_codec",
+      "name": "scale by 32767 so that 1.0 fits, as the lesson's write_wav does",
+      "edits": [
+        {"file": "pcm.py", "old": "round(x * 32768)", "new": "round(x * 32767)"}
+      ],
+      "expect": "decoding and re-encoding must not change a single sample"
+    },
+    {
+      "test": "test_pcm16_codec",
+      "name": "wrap out-of-range samples instead of saturating",
+      "edits": [
+        {"file": "pcm.py", "old": "    return max(-32768, min(32767, round(x * 32768)))\n", "new": "    return (round(x * 32768) + 32768) % 65536 - 32768\n"}
+      ],
+      "expect": "loud samples saturate at full scale"
+    },
+    {
+      "test": "test_pcm16_codec",
+      "name": "decode by dividing by 32767",
+      "edits": [
+        {"file": "pcm.py", "old": "    return value / 32768\n", "new": "    return value / 32767\n"}
+      ],
+      "expect": "becomes a float by dividing by 32768"
+    },
+    {
+      "test": "test_pcm16_codec",
+      "name": "saturate the packed ints in encode_pcm16, leaving float_to_pcm16 clipping before the scale",
+      "edits": [
+        {"file": "pcm.py", "old": "    return max(-32768, min(32767, round(x * 32768)))\n", "new": "    x = max(-1.0, min(1.0, x))\n    return round(x * 32768)\n"},
+        {"file": "pcm.py", "old": "struct.pack(f\"<{len(ints)}h\", *ints)", "new": "struct.pack(f\"<{len(ints)}h\", *[max(-32768, min(32767, v)) for v in ints])"}
+      ],
+      "expect": "float_to_pcm16 itself saturates"
+    },
+    {
+      "test": "test_pcm16_codec",
+      "name": "round half up as int(x + 0.5), which still truncates negative samples toward zero",
+      "edits": [
+        {"file": "pcm.py", "old": "round(x * 32768)", "new": "int(x * 32768 + 0.5)"}
+      ],
+      "expect": "frames go L R L R, and loud samples saturate at full scale"
+    },
+    {
+      "test": "test_pcm16_codec",
+      "name": "encode writes one channel after another instead of interleaving frames",
+      "edits": [
+        {"file": "pcm.py", "old": "for frame in zip(*channels) for x in frame]", "new": "for channel in channels for x in channel]"}
+      ],
+      "expect": "frames go L R L R"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "RIFF size of 36 + data size, as the wave module writes it",
+      "edits": [
+        {"file": "wavfile.py", "old": "    return _chunk(b\"RIFF\", b\"WAVE\" + _chunk(b\"fmt \", fmt) + _chunk(b\"data\", data))\n", "new": "    body = b\"WAVE\" + _chunk(b\"fmt \", fmt) + _chunk(b\"data\", data)\n    return b\"RIFF\" + struct.pack(\"<I\", 36 + len(data)) + body\n"}
+      ],
+      "expect": "the RIFF size counts the pad byte"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "no pad byte after an odd-sized chunk",
+      "edits": [
+        {"file": "wavfile.py", "old": " + payload + b\"\\x00\" * (len(payload) % 2)\n", "new": " + payload\n"}
+      ],
+      "expect": "an odd-sized chunk is followed by a pad byte"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "pad byte counted in the chunk's own size",
+      "edits": [
+        {"file": "wavfile.py", "old": "struct.pack(\"<I\", len(payload))", "new": "struct.pack(\"<I\", len(payload) + len(payload) % 2)"}
+      ],
+      "expect": "a chunk's own size does not count its pad byte"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "samples truncated instead of rounded",
+      "edits": [
+        {"file": "wavfile.py", "old": "max(-full, min(full - 1, round(x * full)))", "new": "max(-full, min(full - 1, int(x * full)))"}
+      ],
+      "expect": "24-bit samples saturate and round too"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "24-bit samples read without sign extension",
+      "edits": [
+        {"file": "wavfile.py", "old": "\"little\", signed=True) / full", "new": "\"little\", signed=width == 2) / full"}
+      ],
+      "expect": "24-bit samples keep their sign and every bit"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "sample width dropped when reading",
+      "edits": [
+        {"file": "wavfile.py", "old": "    return Audio(sample_rate, [values[c::n_channels] for c in range(n_channels)], width)\n", "new": "    return Audio(sample_rate, [values[c::n_channels] for c in range(n_channels)])\n"}
+      ],
+      "expect": "24-bit samples keep their sign and every bit"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "bytes per frame counted for one channel",
+      "edits": [
+        {"file": "wavfile.py", "old": "    block_align = n_channels * width\n", "new": "    block_align = width\n"}
+      ],
+      "expect": "write the same bytes as the wave module"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "channels of different lengths cut to the shortest by zip",
+      "edits": [
+        {"file": "wavfile.py", "old": "    if not audio.channels or len({len(channel) for channel in audio.channels}) != 1:\n", "new": "    if not audio.channels:\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "channels read back as tuples",
+      "edits": [
+        {"file": "wavfile.py", "old": "[values[c::n_channels] for c in range(n_channels)]", "new": "[tuple(values[c::n_channels]) for c in range(n_channels)]"}
+      ],
+      "expect": "a 16-bit file reads back exactly"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "24-bit sign bit tested with > instead of >=, so -8388608 reads as +1.0",
+      "edits": [
+        {"file": "wavfile.py", "old": "int.from_bytes(data[i : i + width], \"little\", signed=True)", "new": "(int.from_bytes(data[i : i + width], \"little\", signed=True) if width == 2 else (lambda u: u - (1 << 24) if u > (1 << 23) else u)(int.from_bytes(data[i : i + width], \"little\")))"}
+      ],
+      "expect": "24-bit samples keep their sign and every bit"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "saturate at 2 ** 23, one past the largest 24-bit value",
+      "edits": [
+        {"file": "wavfile.py", "old": "max(-full, min(full - 1, round(x * full)))", "new": "max(-full, min(full, round(x * full)))"}
+      ],
+      "expect": "OverflowError"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "24-bit samples packed as struct '<i' cut to 3 bytes, without saturation",
+      "edits": [
+        {"file": "wavfile.py", "old": "max(-full, min(full - 1, round(x * full))).to_bytes(width, \"little\", signed=True)", "new": "struct.pack(\"<i\", round(x * full))[:width]"}
+      ],
+      "expect": "24-bit samples saturate and round too"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "data read from byte 44 to the end of the file, pad byte included",
+      "edits": [
+        {"file": "wavfile.py", "old": "    data = data[: len(data) - len(data) % block_align]\n", "new": "    data = blob[44:]\n"}
+      ],
+      "expect": "a padded file reads back"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "bytes per second counted for one channel",
+      "edits": [
+        {"file": "wavfile.py", "old": "audio.sample_rate * block_align", "new": "audio.sample_rate * width"}
+      ],
+      "expect": "write the same bytes as the wave module"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "24-bit samples scaled by 2 ** 23 - 1",
+      "edits": [
+        {"file": "wavfile.py", "old": "    full = 1 << (8 * width - 1)\n", "new": "    full = (1 << (8 * width - 1)) - (width == 3)\n"}
+      ],
+      "expect": "24-bit files match the wave module too"
+    },
+    {
+      "test": "test_wav_roundtrip",
+      "name": "8-bit files decoded as signed samples instead of rejected",
+      "edits": [
+        {"file": "wavfile.py", "old": "bits % 8 or width not in SAMPLE_WIDTHS", "new": "bits % 8 or width not in (1,) + SAMPLE_WIDTHS"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_dominant_frequency",
+      "name": "plain peak bin, as the lesson's peak_freq",
+      "edits": [
+        {"file": "spectrum.py", "old": "    offset = 0.5 * (a - c) / curve if curve else 0.0\n", "new": "    offset = 0.0\n"}
+      ],
+      "expect": "refine the peak between bins"
+    },
+    {
+      "test": "test_dominant_frequency",
+      "name": "parabola vertex with the sign flipped",
+      "edits": [
+        {"file": "spectrum.py", "old": "0.5 * (a - c) / curve", "new": "0.5 * (c - a) / curve"}
+      ],
+      "expect": "refine the peak between bins"
+    },
+    {
+      "test": "test_dominant_frequency",
+      "name": "parabola through linear magnitudes",
+      "edits": [
+        {"file": "spectrum.py", "old": "    a, b, c = (math.log(max(m, 1e-300)) for m in mags[k - 1 : k + 2])\n", "new": "    a, b, c = mags[k - 1 : k + 2]\n"}
+      ],
+      "expect": "refine the peak between bins"
+    },
+    {
+      "test": "test_dominant_frequency",
+      "name": "no window before the DFT",
+      "edits": [
+        {"file": "spectrum.py", "old": "zip(samples, hann(n))", "new": "zip(samples, [1.0] * n)"}
+      ],
+      "expect": "refine the peak between bins"
+    },
+    {
+      "test": "test_dominant_frequency",
+      "name": "bin 0 skipped but the mean left in",
+      "edits": [
+        {"file": "spectrum.py", "old": "    mean = sum(samples) / n\n", "new": "    mean = 0.0\n"}
+      ],
+      "expect": "a DC offset is not a tone"
+    },
+    {
+      "test": "test_dominant_frequency",
+      "name": "alias as sample_rate - freq, the lesson's special case",
+      "edits": [
+        {"file": "spectrum.py", "old": "    folded = abs(freq) % sample_rate\n    return sample_rate - folded if folded > sample_rate / 2 else folded\n", "new": "    return sample_rate - freq if freq > sample_rate / 2 else freq\n"}
+      ],
+      "expect": "fold every frequency back into 0 .. Nyquist"
+    },
+    {
+      "test": "test_dominant_frequency",
+      "name": "alias: subtract the sample rate once, then sr - f",
+      "edits": [
+        {"file": "spectrum.py", "old": "    folded = abs(freq) % sample_rate\n    return sample_rate - folded if folded > sample_rate / 2 else folded\n", "new": "    if freq > sample_rate:\n        freq -= sample_rate\n    return sample_rate - freq if freq > sample_rate / 2 else freq\n"}
+      ],
+      "expect": "fold every frequency back into 0 .. Nyquist"
+    },
+    {
+      "test": "test_dominant_frequency",
+      "name": "alias folded modulo the Nyquist frequency",
+      "edits": [
+        {"file": "spectrum.py", "old": "    folded = abs(freq) % sample_rate\n    return sample_rate - folded if folded > sample_rate / 2 else folded\n", "new": "    return abs(freq) % (sample_rate / 2)\n"}
+      ],
+      "expect": "fold every frequency back into 0 .. Nyquist"
+    },
+    {
+      "test": "test_dominant_frequency",
+      "name": "silence returns a frequency instead of raising",
+      "edits": [
+        {"file": "spectrum.py", "old": "    if mags[k] == 0.0:\n        raise ValueError(\"no tone: the clip is silent once the mean is removed\")\n", "new": ""}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_dominant_frequency",
+      "name": "fractional bin converted to Hz with sr / (N - 1)",
+      "edits": [
+        {"file": "spectrum.py", "old": "(k + offset) * sample_rate / n", "new": "(k + offset) * sample_rate / (n - 1)"}
+      ],
+      "expect": "refine the peak between bins"
+    },
+    {
+      "test": "test_dominant_frequency",
+      "name": "parabola vertex without the 1/2",
+      "edits": [
+        {"file": "spectrum.py", "old": "0.5 * (a - c) / curve", "new": "(a - c) / curve"}
+      ],
+      "expect": "refine the peak between bins"
+    },
+    {
+      "test": "test_dominant_frequency",
+      "name": "mean subtracted after the window",
+      "edits": [
+        {"file": "spectrum.py", "old": "    mean = sum(samples) / n\n    mags = dft_magnitudes([(x - mean) * w for x, w in zip(samples, hann(n))])\n", "new": "    windowed = [x * w for x, w in zip(samples, hann(n))]\n    mean = sum(windowed) / n\n    mags = dft_magnitudes([v - mean for v in windowed])\n"}
+      ],
+      "expect": "a DC offset is not a tone"
+    },
+    {
+      "test": "test_stream_downsample",
+      "name": "filter history restarts with every read",
+      "edits": [
+        {"file": "resample.py", "old": "    async for chunk in chunks:\n        pending += chunk\n", "new": "    async for chunk in chunks:\n        recent = deque([0.0] * len(taps), maxlen=len(taps))\n        pending += chunk\n"}
+      ],
+      "expect": "the samples decimate() gives, whatever the reads"
+    },
+    {
+      "test": "test_stream_downsample",
+      "name": "every third sample counted from the start of each read",
+      "edits": [
+        {"file": "resample.py", "old": "    async for chunk in chunks:\n        pending += chunk\n", "new": "    async for chunk in chunks:\n        index = 0\n        pending += chunk\n"}
+      ],
+      "expect": "the samples decimate() gives, whatever the reads"
+    },
+    {
+      "test": "test_stream_downsample",
+      "name": "a sample split across two reads is dropped",
+      "edits": [
+        {"file": "resample.py", "old": "        pending = pending[whole:]\n", "new": "        pending = b\"\"\n"}
+      ],
+      "expect": "the samples decimate() gives, whatever the reads"
+    },
+    {
+      "test": "test_stream_downsample",
+      "name": "naive decimation without the low-pass, as the lesson's downsample_naive",
+      "edits": [
+        {"file": "resample.py", "old": "                acc = 0.0\n                for h, v in zip(taps, recent):\n                    acc += h * v\n                out.append(acc)\n", "new": "                out.append(x)\n"}
+      ],
+      "expect": "the samples decimate() gives, whatever the reads"
+    },
+    {
+      "test": "test_stream_downsample",
+      "name": "float lists yielded instead of PCM bytes",
+      "edits": [
+        {"file": "resample.py", "old": "            yield encode_pcm16([out])\n", "new": "            yield out\n"}
+      ],
+      "expect": "every message is a non-empty block of PCM bytes"
+    },
+    {
+      "test": "test_stream_downsample",
+      "name": "an empty block yielded when a read completes no output sample",
+      "edits": [
+        {"file": "resample.py", "old": "        if out:\n            yield encode_pcm16([out])\n", "new": "        yield encode_pcm16([out])\n"}
+      ],
+      "expect": "every message is a non-empty block of PCM bytes"
+    },
+    {
+      "test": "test_stream_downsample",
+      "name": "reads the whole stream before filtering",
+      "edits": [
+        {"file": "resample.py", "old": "    async for chunk in chunks:\n        pending += chunk\n", "new": "    everything = b\"\".join([c async for c in chunks])\n    for chunk in [everything]:\n        pending += chunk\n"}
+      ],
+      "expect": "send each block as soon as it is ready"
+    },
+    {
+      "test": "test_stream_downsample",
+      "name": "output samples truncated with int() instead of rounded",
+      "edits": [
+        {"file": "resample.py", "old": "from collections import deque\n", "new": "import struct\nfrom collections import deque\n"},
+        {"file": "resample.py", "old": "            yield encode_pcm16([out])\n", "new": "            yield struct.pack(f\"<{len(out)}h\", *[int(v * 32768) for v in out])\n"}
+      ],
+      "expect": "the samples decimate() gives, whatever the reads"
+    },
+    {
+      "test": "test_stream_downsample",
+      "name": "samples 2, 5, 8, ... kept instead of 0, 3, 6, ...",
+      "edits": [
+        {"file": "resample.py", "old": "if index % factor == 0:", "new": "if index % factor == factor - 1:"}
+      ],
+      "expect": "the samples decimate() gives, whatever the reads"
+    },
+    {
+      "test": "test_stream_downsample",
+      "name": "an output held back until its group of factor inputs is complete",
+      "edits": [
+        {"file": "resample.py", "old": "                out.append(acc)\n            index += 1\n", "new": "                held = acc\n            if index % factor == factor - 1:\n                out.append(held)\n            index += 1\n"}
+      ],
+      "expect": "the samples decimate() gives, whatever the reads"
+    },
+    {
+      "test": "test_stream_downsample",
+      "name": "output gathered into 10 ms blocks of 160 samples",
+      "edits": [
+        {"file": "resample.py", "old": "    index = 0  # stream position of the next input sample\n", "new": "    index = 0  # stream position of the next input sample\n    block = []\n"},
+        {"file": "resample.py", "old": "        if out:\n            yield encode_pcm16([out])\n", "new": "        block += out\n        while len(block) >= 160:\n            yield encode_pcm16([block[:160]])\n            block = block[160:]\n    if block:\n        yield encode_pcm16([block])\n"}
+      ],
+      "expect": "send each block as soon as it is ready"
+    },
+    {
+      "test": "test_stream_downsample",
+      "name": "filter history one sample short",
+      "edits": [
+        {"file": "resample.py", "old": "deque([0.0] * len(taps), maxlen=len(taps))", "new": "deque([0.0] * (len(taps) - 1), maxlen=len(taps) - 1)"}
+      ],
+      "expect": "the samples decimate() gives, whatever the reads"
+    },
+    {
+      "test": "test_stream_downsample",
+      "name": "bytearray messages instead of bytes",
+      "edits": [
+        {"file": "resample.py", "old": "            yield encode_pcm16([out])\n", "new": "            yield bytearray(encode_pcm16([out]))\n"}
+      ],
+      "expect": "every message is a non-empty block of PCM bytes"
+    },
+    {
+      "test": "test_stream_downsample",
+      "name": "big-endian output",
+      "edits": [
+        {"file": "resample.py", "old": "from collections import deque\n", "new": "import struct\nfrom collections import deque\n"},
+        {"file": "resample.py", "old": "            yield encode_pcm16([out])\n", "new": "            yield struct.pack(f\">{len(out)}h\", *[round(v * 32768) for v in out])\n"}
+      ],
+      "expect": "the samples decimate() gives, whatever the reads"
+    },
+    {
+      "test": "test_riff_walk",
+      "name": "pad bytes ignored",
+      "edits": [
+        {"file": "riff.py", "old": "    return stop + size % 2\n", "new": "    return stop\n"}
+      ],
+      "expect": "at byte 61 runs past the end of its parent"
+    },
+    {
+      "test": "test_riff_walk",
+      "name": "lists parsed one level deep",
+      "edits": [
+        {"file": "riff.py", "old": "    if chunk_id in CONTAINERS:\n", "new": "    if chunk_id in CONTAINERS and prefix.count(\"/\") < 2:\n"}
+      ],
+      "expect": "lists nest to any depth"
+    },
+    {
+      "test": "test_riff_walk",
+      "name": "the last chunk's pad byte required",
+      "edits": [
+        {"file": "riff.py", "old": "    if stop > end:\n", "new": "    if stop + size % 2 > end:\n"}
+      ],
+      "expect": "chunk b'RIFF' at byte 0 runs past the end of its parent"
+    },
+    {
+      "test": "test_riff_walk",
+      "name": "no check that a chunk fits inside its parent",
+      "edits": [
+        {"file": "riff.py", "old": "    if stop > end:\n        raise ValueError(f\"chunk {chunk_id!r} at byte {pos} runs past the end of its parent\")\n", "new": ""}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_riff_walk",
+      "name": "tags read from every list",
+      "edits": [
+        {"file": "riff.py", "old": "parts[1] == \"LIST:INFO\"", "new": "parts[1].startswith(\"LIST:\")"}
+      ],
+      "expect": "tags come from LIST:INFO only, as text"
+    },
+    {
+      "test": "test_riff_walk",
+      "name": "NUL terminators kept",
+      "edits": [
+        {"file": "riff.py", "old": ".rstrip(b\"\\x00\").decode", "new": ".decode"}
+      ],
+      "expect": "tags come from LIST:INFO only, as text"
+    },
+    {
+      "test": "test_riff_walk",
+      "name": "chunk bounds checked against the whole file, not the parent",
+      "edits": [
+        {"file": "riff.py", "old": "    if pos + 8 > end:\n", "new": "    if pos + 8 > len(blob):\n"},
+        {"file": "riff.py", "old": "    if stop > end:\n", "new": "    if stop > len(blob):\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_riff_walk",
+      "name": "a list's offset recorded where its children start",
+      "edits": [
+        {"file": "riff.py", "old": "        out.append((name, start, size))\n        child = start + 4\n", "new": "        out.append((name, start + 4, size))\n        child = start + 4\n"}
+      ],
+      "expect": "offset is where the payload starts, for lists too"
+    },
+    {
+      "test": "test_riff_walk",
+      "name": "a list's size recorded without its 4-byte type",
+      "edits": [
+        {"file": "riff.py", "old": "        out.append((name, start, size))\n        child = start + 4\n", "new": "        out.append((name, start, size - 4))\n        child = start + 4\n"}
+      ],
+      "expect": "every chunk, depth first, in file order"
+    },
+    {
+      "test": "test_riff_walk",
+      "name": "children listed before their parent",
+      "edits": [
+        {"file": "riff.py", "old": "        out.append((name, start, size))\n        child = start + 4\n        while child < stop:\n            child = _read_chunk(blob, child, stop, name + \"/\", out)\n", "new": "        child = start + 4\n        while child < stop:\n            child = _read_chunk(blob, child, stop, name + \"/\", out)\n        out.append((name, start, size))\n"}
+      ],
+      "expect": "every chunk, depth first, in file order"
+    },
+    {
+      "test": "test_riff_walk",
+      "name": "chunks kept in a dict keyed by path",
+      "edits": [
+        {"file": "riff.py", "old": "    _read_chunk(blob, 0, len(blob), \"\", out)\n    return out\n", "new": "    _read_chunk(blob, 0, len(blob), \"\", out)\n    return list({p: (p, o, s) for p, o, s in out}.values())\n"}
+      ],
+      "expect": "every chunk, depth first, in file order"
+    },
+    {
+      "test": "test_riff_walk",
+      "name": "no check that the file starts with RIFF",
+      "edits": [
+        {"file": "riff.py", "old": "    if blob[:4] != b\"RIFF\":\n        raise ValueError(\"not a RIFF file\")\n", "new": ""}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_riff_walk",
+      "name": "tags decoded as latin-1",
+      "edits": [
+        {"file": "riff.py", "old": ".decode(\"utf-8\")", "new": ".decode(\"latin-1\")"}
+      ],
+      "expect": "tags come from LIST:INFO only, as text"
+    },
+    {
+      "test": "test_riff_walk",
+      "name": "str.strip() used to drop the NUL terminator",
+      "edits": [
+        {"file": "riff.py", "old": ".rstrip(b\"\\x00\").decode(\"utf-8\")", "new": ".decode(\"utf-8\").strip()"}
+      ],
+      "expect": "tags come from LIST:INFO only, as text"
+    }
+  ]
+}

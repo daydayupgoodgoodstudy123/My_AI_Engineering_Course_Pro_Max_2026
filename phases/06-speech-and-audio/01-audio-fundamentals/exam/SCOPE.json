@@ -1,0 +1,69 @@
+{
+  "lesson": "phases/06-speech-and-audio/01-audio-fundamentals",
+  "title": "Audio Fundamentals — Waveforms, Sampling, Fourier Transform",
+  "format": "staged-brownfield",
+  "service": "WavLab: an audio intake with a 16-bit PCM codec, archive WAV files, tone detection, streaming downsampling and a RIFF chunk walker",
+  "sources": {
+    "docs/en.md": "9ef0e33271e866ee2ec72280d40ffed14a488cce7941780b2495ccbadf77f7ee",
+    "code/main.py": "bf8c77ea011a1cc98ed03790121aeb3167c454956d00142abf2fe7ec3909335a"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_pcm16_codec",
+      "kind": "debug",
+      "lesson_anchor": "Bit depth; Build It Step 2 and code/main.py write_wav/read_wav (16-bit PCM)",
+      "planted_bugs": [
+        "float_to_pcm16 clips the float to [-1, 1] before scaling by 32768, so 1.0 becomes 32768; the struct.error surfaces one call later in encode_pcm16",
+        "decode_pcm16 slices planar channel blocks instead of de-interleaving L R L R frames (the lesson's read_wav only handles mono)",
+        "float_to_pcm16 truncates with int() instead of rounding, as the lesson's write_wav does",
+        "encode_pcm16 rebuilds the whole list for every frame, O(n^2)"
+      ],
+      "timing_assert": "40,000 samples encoded in under 0.12 s (quadratic version about 1.6 s, fixed version about 7 ms)",
+      "overfix_guard": "every int16 value survives decode then encode, which rules out writing with a 32767 scale (the lesson's write_wav) to dodge the overflow; float_to_pcm16 is also checked on its own, so clamping inside encode_pcm16 instead of fixing the root cause does not pass"
+    },
+    {
+      "part": 2,
+      "test": "test_wav_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Bit depth (16-bit exchange format, 24-bit for music); Build It Steps 1-2, WAV files through the stdlib wave module",
+      "exactness": "16- and 24-bit samples round-trip exactly through encode_wav and decode_wav, headers match the stdlib wave module byte for byte, and re-saving a decoded file gives the same bytes",
+      "traps": ["bytes per second and per frame count every channel", "24-bit sign extension", "sample width kept on the Audio", "pad byte after an odd-sized chunk, which the wave module leaves out", "RIFF size counts the pad byte, the chunk's own size does not", "zip cutting unequal channels to the shortest", "8-bit files rejected"],
+      "clarifying_questions": ["8-bit or float files", "WAVE_FORMAT_EXTENSIBLE", "using the wave module", "chunks before or after data"]
+    },
+    {
+      "part": 3,
+      "test": "test_dominant_frequency",
+      "kind": "core algorithm",
+      "lesson_anchor": "Build It Steps 3-5: DFT, dominant frequency k * sr / N, aliasing; code walkthrough notes on bin 0 and parabolic interpolation",
+      "traps": ["mean removed before the Hann window (skipping bin 0 is not enough)", "parabola through log magnitudes", "sign of the vertex offset", "alias folds modulo sr, then mirrors at sr / 2 (sr - f fails above sr; subtracting sr once fails above 2 * sr)", "silence raises"],
+      "integration": "measured peaks of tones above Nyquist match alias_frequency within 0.5 Hz",
+      "clarifying_questions": ["Hann formula", "equally loud tones"]
+    },
+    {
+      "part": 4,
+      "test": "test_stream_downsample",
+      "kind": "streaming",
+      "lesson_anchor": "Build It Step 5 and code/main.py Step 6: low-pass before decimating; Use It: real-time streaming into a 16 kHz model",
+      "wire_format": "little-endian int16 bytes, decided by the test's b''.join and struct.unpack; no empty messages",
+      "traps": ["a read can end halfway through a sample", "FIR history across reads", "keep-every-third counted in stream indices", "emit each block as soon as it is ready", "no empty blocks", "bytes, not float lists", "samples rounded like float_to_pcm16, within half a step of decimate()"],
+      "clarifying_questions": ["non-integer ratios", "stream ending mid-sample", "filter tail at the end"]
+    },
+    {
+      "part": 5,
+      "test": "test_riff_walk",
+      "kind": "recursive structure",
+      "lesson_anchor": "the RIFF container behind the WAV files of Build It Steps 1-2 (the stdlib wave reader skips chunks it does not know); Use It: inspect a file before use",
+      "traps": ["lists nest to any depth", "a container's payload starts with a 4-byte type, and its offset points at that type", "pad bytes at every level", "JUNK is a leaf even when it holds an old LIST", "a child overrunning its parent raises even when it stays inside the file, a missing final pad byte does not", "duplicate chunk ids kept", "INFO tags only from LIST:INFO, NUL removed, UTF-8", "a blob that does not start with RIFF raises"],
+      "clarifying_questions": ["bytes after the RIFF chunk", "sizes never patched by a streaming recorder", "duplicate tags"]
+    }
+  ],
+  "deviations": [
+    "The WAV header is tested in Part 2, not Part 1: Part 1 stays on the lesson's own sample-level code (scale, rounding, saturation, interleaving), and Part 2 owns the container (header fields, RIFF sizes, pad byte), so header sizes are tested once.",
+    "Part 2 adds 24-bit PCM, which the lesson names as the format for music: sign extension and keeping the sample width are this format's own exactness traps, and the stdlib wave module is the byte-for-byte reference.",
+    "Part 1's saturation bug is a clip placed before the scaling (1.0 becomes 32768 and struct.pack fails one call later) rather than a wrap; wrapping is checked as a wrong fix.",
+    "Part 3 also implements alias_frequency, because the lesson's sr - f only holds between sr / 2 and sr; the test checks the measured peaks against it.",
+    "Part 4 streams 16-bit PCM bytes in and out, so a read that ends halfway through a sample is part of the streaming problem."
+  ]
+}
