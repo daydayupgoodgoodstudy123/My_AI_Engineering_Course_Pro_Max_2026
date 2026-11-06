@@ -206,6 +206,54 @@ def test_app_cache_roundtrip(tmp_path) -> None:
     (root / "blobs" / edited_digest).unlink()
     assert reopened.get(SERVER, page["uri"], edited_digest) is None, "a missing blob is a miss"
 
+    # One HTML blob can back entries whose reviewed policies are all different.
+    metadata_root = tmp_path / "metadata"
+    shared_html = "<main>shared executable HTML: Café</main>\r\n"
+    shared_digest = sha256(shared_html)
+    identities = [
+        (SERVER, "ui://shared/timeline.html", "public", None),
+        (UPGRADED, "ui://shared/timeline.html", "public", None),
+        (NEIGHBOUR, "ui://shared/timeline.html", "public", None),
+        (SERVER, "ui://shared/board.html", "public", None),
+        (SERVER, "ui://shared/private.html", "private", "alice"),
+        (SERVER, "ui://shared/private.html", "private", "bob"),
+    ]
+    entries = []
+    for number, (owner, uri, scope, principal) in enumerate(identities):
+        entry = app_entry(shared_html, uri=uri, connect=[f"https://policy-{number}.example"],
+                          permissions={"camera" if number % 2 else "microphone": {}})
+        entry["_meta"]["ui"]["csp"]["resourceDomains"] = [f"https://assets-{number}.example"]
+        entry["_meta"]["com.example/build"] = {"number": number, "flags": [False, number, None]}
+        entry["_meta"]["com.example/retired"] = f"policy-{number}"
+        entries.append(json.loads(json.dumps(entry)))
+        assert AppCache(metadata_root).put(owner, entry, scope=scope, principal=principal) == shared_digest, (
+            "security metadata does not change the HTML blob digest"
+        )
+    assert [path.name for path in (metadata_root / "blobs").iterdir()] == [shared_digest], (
+        "all policy variants share exactly one HTML blob"
+    )
+    for identity, expected in zip(identities, entries):
+        owner, uri, scope, principal = identity
+        assert AppCache(metadata_root).get(owner, uri, shared_digest, principal=principal or "visitor") == expected, (
+            "same HTML keeps each server, version, URI and principal's complete security metadata"
+        )
+    for principal in (None, "visitor"):
+        assert AppCache(metadata_root).get(SERVER, "ui://shared/private.html", shared_digest,
+                                           principal=principal) is None, (
+            "a shared public blob never makes a private entry public"
+        )
+    narrowed = app_entry(shared_html, uri=identities[1][1])
+    narrowed["_meta"]["com.example/build"] = {"number": 99, "flags": []}
+    assert AppCache(metadata_root).put(UPGRADED, narrowed, scope="public") == shared_digest, (
+        "a metadata-only replacement keeps the same HTML blob"
+    )
+    entries[1] = narrowed
+    for identity, expected in zip(identities, entries):
+        owner, uri, scope, principal = identity
+        assert AppCache(metadata_root).get(owner, uri, shared_digest, principal=principal or "visitor") == expected, (
+            "replacing one entry replaces its whole metadata and leaves every other entry unchanged"
+        )
+
     _, reply = call(McpAppServer(), "resources/read", {"uri": "ui://notes/timeline.html"})
     result = reply["result"]
     live = result["contents"][0]

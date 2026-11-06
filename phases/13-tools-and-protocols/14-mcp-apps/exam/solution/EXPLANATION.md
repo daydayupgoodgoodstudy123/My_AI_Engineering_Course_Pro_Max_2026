@@ -31,7 +31,9 @@
 
 布局就是 docstring 里写的：`blobs/<digest>` 是 HTML 的 UTF-8 字节，摘要是这些字节的 sha256 十六进制；`index.json` 是索引。参考实现的键是 `json.dumps([uri, name, version, digest, principal])`，public 条目的 principal 一律写 null，值是去掉 `text` 以后的整个 content 条目。
 
-- **按字节读写**：`content["text"].encode("utf-8")` 写进 blob，`read_bytes()` 读回，再 `decode("utf-8")`。`read_text()` 按 universal newlines 读，会把 `\r\n` 和单独的 `\r` 都变成 `\n`，读回来的摘要就对不上了。
+给定 `put/get` 先验证 App 输入并调用 `blob_io.store_html/load_html`，候选人实现 `_put_entry`、`_get_entry` 和 `_key`。六个 identity 同用一份 HTML，但 CSP、permissions、额外 _meta 各不相同；重开后逐个取回。只改一个 identity 的 metadata 时完整替换它，清掉的权限和删掉的字段都不能从旧记录合并回来，其他 identity 不变。
+
+- **给定的按字节读写**：`content["text"].encode("utf-8")` 写进 blob，`read_bytes()` 读回，再 `decode("utf-8")`。`read_text()` 按 universal newlines 读，会把 `\r\n` 和单独的 `\r` 都变成 `\n`，读回来的摘要就对不上了。
 - **读的时候校验摘要**：每次 `get` 都重新算一遍 blob 的 sha256，不等于键里的摘要就当没命中。缓存里放的是会在 iframe 里执行的代码，磁盘上被换掉的 blob 不能交给 View。
 - **写的时候也要校验**：`put` 先读出已有的 blob，字节不同才重写。只看文件在不在，坏掉的 blob 就永远修不好。写文件用临时文件加 `os.replace`，进程中途退出不会留下半个 blob。
 - **键里四样都要有**：URI、服务器名字、版本、摘要。同一份 HTML 在 2.0.0 和 2.1.0 下是两个条目，它们共用一个 blob；同一个 URI 的两个版本靠摘要分开。

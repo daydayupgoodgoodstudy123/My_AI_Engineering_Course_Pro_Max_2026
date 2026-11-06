@@ -1,13 +1,13 @@
 """App resources cached as executable content: one blob per HTML body, named by its digest, plus an index."""
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import tempfile
 from pathlib import Path
 from typing import Any
 
+from .blob_io import load_html, store_html
 from .wire import RESOURCE_MIME
 
 SCOPES = ("public", "private")
@@ -21,7 +21,9 @@ class AppCache:
     directory keys every entry by its ui:// URI (exactly as the server lists it), the server's
     name and version, and the digest, plus the principal when the entry is private. The rest of
     the content entry (uri, mimeType, _meta) is kept in the index exactly as given.
-    A new AppCache on the same directory sees every entry stored before.
+    A new AppCache on the same directory sees every entry stored before. Public put/get use the
+    given blob_io helpers for raw HTML; implement _put_entry, _get_entry and _key for the index.
+    Sharing HTML never merges entries or their security metadata.
     """
 
     def __init__(self, root: str | os.PathLike) -> None:
@@ -54,14 +56,8 @@ class AppCache:
             raise ValueError(f"cacheScope must be public or private, got {scope!r}")
         if scope == "private" and not principal:
             raise ValueError("a private entry needs the principal it was read for")
-        data = content["text"].encode("utf-8")
-        digest = hashlib.sha256(data).hexdigest()
-        if self._blob(digest) != data:
-            _write(self.blobs / digest, data)
-        index = self._load()
-        key = _key(server, uri, digest, principal if scope == "private" else None)
-        index[key] = {name: value for name, value in content.items() if name != "text"}
-        _write(self.index_path, json.dumps(index, sort_keys=True).encode("utf-8"))
+        digest = store_html(self.blobs, content["text"])
+        self._put_entry(server, content, digest, scope=scope, principal=principal)
         return digest
 
     def get(
@@ -77,22 +73,44 @@ class AppCache:
         A public entry is found for anyone, a private one only for its own principal. The blob
         is checked against the digest on every read: a missing or damaged blob is a miss.
         """
+        record = self._get_entry(server, uri, digest, principal=principal)
+        if record is None:
+            return None
+        text = load_html(self.blobs, digest)
+        if text is None:
+            return None
+        return {**record, "text": text}
+
+    def _put_entry(
+        self, server: dict[str, str], content: dict[str, Any], digest: str, *,
+        scope: str, principal: str | None,
+    ) -> None:
+        """Persist this entry's complete non-text fields under its identity key.
+
+        HTML sharing never shares CSP, permissions or other _meta. Storing the same identity
+        again replaces its whole record, including removed metadata. Other entries stay as they
+        were, and every record survives a new AppCache on the same folder.
+        """
+        uri = content["uri"]
+        index = self._load()
+        key = _key(server, uri, digest, principal if scope == "private" else None)
+        index[key] = {name: value for name, value in content.items() if name != "text"}
+        _write(self.index_path, json.dumps(index, sort_keys=True).encode("utf-8"))
+
+    def _get_entry(
+        self, server: dict[str, str], uri: str, digest: str, *, principal: str | None,
+    ) -> dict[str, Any] | None:
+        """Find this identity's non-text record, checking public before this principal's private key.
+
+        Metadata is never borrowed from another record that happens to reference the same blob.
+        """
         index = self._load()
         record = index.get(_key(server, uri, digest, None))
         if record is None and principal:
             record = index.get(_key(server, uri, digest, principal))
         if record is None:
             return None
-        data = self._blob(digest)
-        if data is None or hashlib.sha256(data).hexdigest() != digest:
-            return None
-        return {**record, "text": data.decode("utf-8")}
-
-    def _blob(self, digest: str) -> bytes | None:
-        try:
-            return (self.blobs / digest).read_bytes()
-        except FileNotFoundError:
-            return None
+        return record
 
     def _load(self) -> dict[str, Any]:
         try:
@@ -102,6 +120,10 @@ class AppCache:
 
 
 def _key(server: dict[str, str], uri: str, digest: str, principal: str | None) -> str:
+    """An index key that distinguishes URI, server name, server version, HTML digest and principal.
+
+    principal is None for a public record and the authenticated principal for a private record.
+    """
     return json.dumps([uri, server["name"], server["version"], digest, principal])
 
 

@@ -18,6 +18,9 @@
 | 1 | tools/list 的内容随能力变化，还能标 public 吗？ | "Yes. It varies by declared capability, not by user. A shared cache has to key on the declared extensions, but that cache isn't in this server." |
 | 1 | 扩展声明是一个带设置的对象，算声明吗？ | "Yes. Any object under extensions is a declaration." |
 | 1 | 可以在 replace 的时候就审查吗？ | "Yes, as long as replace and withdraw never raise and the next review reflects the change." |
+| 2 | HTML 相同，CSP 和权限不同？ | "Share the HTML blob only. Keep each identity’s complete metadata separately." |
+| 2 | 同一个条目只改 metadata？ | "Replace its whole record, including removed metadata. Leave other identities unchanged." |
+| 2 | 同一身份既有 public 又有自己的 private？ | "get checks public first, then the caller’s private key. The tests do not create that conflict." |
 | 2 | 索引用什么格式？ | "Your call, as long as a fresh AppCache on the same folder sees everything." |
 | 2 | 摘要对不上的 blob 要删掉吗？ | "Treat it as a miss. Storing the resource again has to repair it." |
 | 2 | public 的条目存的时候带了 principal？ | "Ignore the principal. A public entry is for anyone." |
@@ -71,7 +74,9 @@
 
 坑：
 
-- blob 要按字节读写。`read_text()` 默认按 universal newlines 读，会把 `\r\n` 和单独的 `\r` 都变成 `\n`，读回来摘要对不上，表现为没命中。`print()` 多写的换行、`strip()`、`utf-8-sig` 的 BOM 都会改字节。测试的 HTML 里有 `\r\n`、单独的 `\r`、U+2028 和非 ASCII 字符。
+- 同一个 HTML digest 只共享 blob，不共享 entry。六个条目覆盖服务器名字、版本、URI 和 alice/bob 的 private 身份，各自的 CSP、permissions 和额外 _meta 必须在重开后完整还原。按摘要保存一份 metadata、只借用其中的 CSP 或 permissions，都会把别的身份的权限带过来。
+- 同一个 identity 再存同一 HTML，也要完整替换 metadata。测试把一个版本的域列表和权限清空，并移除额外 metadata；setdefault、看到 blob 已存在就跳过、把新旧 metadata 合并，都会留下旧权限或旧字段。其他身份的条目必须原样保留。
+- 原始 HTML 存储已经由 `blob_io.store_html/load_html` 给出，公开 put/get 直接调用；候选人的缺口是 entry 索引和复合 key。UTF-8、CRLF、摘要校验、损坏修复和缺失 blob 的断言与错误修法都保留，保护 helper 的合同。
 - 摘要是 HTML 的 UTF-8 字节的 sha256 十六进制，不是整个 content 的 JSON。
 - 读 blob 时校验摘要。测试把 blob 换成一段偷 cookie 的脚本，必须当作没命中。缓存里放的是会执行的代码，这一步是安全边界。
 - 去重不能只看文件在不在。blob 坏了以后再存一次，要能把它修好。

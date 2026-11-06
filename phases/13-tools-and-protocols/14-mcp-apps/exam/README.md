@@ -14,7 +14,7 @@ Comment out `@pytest.mark.skip("Part 1")`, run pytest, and work out why hosts do
 
 ## Pt 2 `test_app_cache_roundtrip`
 
-Build the App resource cache.
+Keep each App entry’s security metadata separate while identical HTML shares one blob.
 
 ## Pt 3 `test_host_policy`
 

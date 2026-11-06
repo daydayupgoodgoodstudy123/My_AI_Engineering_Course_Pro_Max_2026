@@ -306,9 +306,9 @@
       "name": "blob read back as text, with universal newlines",
       "edits": [
         {
-          "file": "cache.py",
-          "old": "            return (self.blobs / digest).read_bytes()\n",
-          "new": "            return (self.blobs / digest).read_text(encoding=\"utf-8\").encode(\"utf-8\")\n"
+          "file": "blob_io.py",
+          "old": "        return (blobs / digest).read_bytes()\n",
+          "new": "        return (blobs / digest).read_text(encoding=\"utf-8\").encode(\"utf-8\")\n"
         }
       ],
       "expect": "an App resource round-trips exactly"
@@ -318,9 +318,9 @@
       "name": "blob written the way print() writes, with a trailing newline",
       "edits": [
         {
-          "file": "cache.py",
-          "old": "            _write(self.blobs / digest, data)\n",
-          "new": "            _write(self.blobs / digest, data + b\"\\n\")\n"
+          "file": "blob_io.py",
+          "old": "        _write(blobs / digest, data)\n",
+          "new": "        _write(blobs / digest, data + b\"\\n\")\n"
         }
       ],
       "expect": "blobs/<digest> holds the HTML bytes exactly"
@@ -330,9 +330,9 @@
       "name": "HTML stripped before it is stored",
       "edits": [
         {
-          "file": "cache.py",
-          "old": "        data = content[\"text\"].encode(\"utf-8\")\n",
-          "new": "        data = content[\"text\"].strip().encode(\"utf-8\")\n"
+          "file": "blob_io.py",
+          "old": "    data = text.encode(\"utf-8\")\n",
+          "new": "    data = text.strip().encode(\"utf-8\")\n"
         }
       ],
       "expect": "the digest is the sha256 hex of the HTML's UTF-8 bytes"
@@ -342,9 +342,9 @@
       "name": "HTML encoded with a byte order mark (utf-8-sig)",
       "edits": [
         {
-          "file": "cache.py",
-          "old": "        data = content[\"text\"].encode(\"utf-8\")\n",
-          "new": "        data = content[\"text\"].encode(\"utf-8-sig\")\n"
+          "file": "blob_io.py",
+          "old": "    data = text.encode(\"utf-8\")\n",
+          "new": "    data = text.encode(\"utf-8-sig\")\n"
         }
       ],
       "expect": "the digest is the sha256 hex of the HTML's UTF-8 bytes"
@@ -355,7 +355,12 @@
       "edits": [
         {
           "file": "cache.py",
-          "old": "        digest = hashlib.sha256(data).hexdigest()\n",
+          "old": "import json\n",
+          "new": "import hashlib\nimport json\n"
+        },
+        {
+          "file": "cache.py",
+          "old": "        digest = store_html(self.blobs, content[\"text\"])\n",
           "new": "        digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode(\"utf-8\")).hexdigest()\n"
         }
       ],
@@ -366,9 +371,9 @@
       "name": "blob served without checking its digest",
       "edits": [
         {
-          "file": "cache.py",
-          "old": "        if data is None or hashlib.sha256(data).hexdigest() != digest:\n",
-          "new": "        if data is None:\n"
+          "file": "blob_io.py",
+          "old": "    if data is None or hashlib.sha256(data).hexdigest() != digest:\n",
+          "new": "    if data is None:\n"
         }
       ],
       "expect": "a blob that does not match its digest is a miss"
@@ -378,9 +383,9 @@
       "name": "a missing blob raises FileNotFoundError",
       "edits": [
         {
-          "file": "cache.py",
-          "old": "        data = self._blob(digest)\n",
-          "new": "        data = (self.blobs / digest).read_bytes()\n"
+          "file": "blob_io.py",
+          "old": "    data = _blob(blobs, digest)\n",
+          "new": "    data = (blobs / digest).read_bytes()\n"
         }
       ],
       "expect": "FileNotFoundError"
@@ -390,9 +395,9 @@
       "name": "blobs deduplicated by existence, so a damaged one is never rewritten",
       "edits": [
         {
-          "file": "cache.py",
-          "old": "        if self._blob(digest) != data:\n",
-          "new": "        if not (self.blobs / digest).exists():\n"
+          "file": "blob_io.py",
+          "old": "    if _blob(blobs, digest) != data:\n",
+          "new": "    if not (blobs / digest).exists():\n"
         }
       ],
       "expect": "storing the resource again repairs a damaged blob"
@@ -1297,6 +1302,66 @@
         }
       ],
       "expect": "a tool bound for the first time has no old resource"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "the first record for an HTML digest reused for every identity",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        index[key] = {name: value for name, value in content.items() if name != \"text\"}\n",
+          "new": "        record = {name: value for name, value in content.items() if name != \"text\"}\n        index[key] = next((entry for stored, entry in index.items() if json.loads(stored)[3] == digest), record)\n"
+        }
+      ],
+      "expect": "the same HTML read for two principals is two entries"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "only the CSP shared by HTML digest, though entry keys remain distinct",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        index[key] = {name: value for name, value in content.items() if name != \"text\"}\n",
+          "new": "        index[key] = {name: value for name, value in content.items() if name != \"text\"}\n        previous = next((entry for stored, entry in index.items() if stored != key and json.loads(stored)[3] == digest), None)\n        if previous is not None:\n            index[key][\"_meta\"][\"ui\"][\"csp\"] = previous[\"_meta\"][\"ui\"][\"csp\"]\n"
+        }
+      ],
+      "expect": "same HTML keeps each server, version, URI and principal's complete security metadata"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "permissions shared by HTML digest instead of by entry identity",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        index[key] = {name: value for name, value in content.items() if name != \"text\"}\n",
+          "new": "        index[key] = {name: value for name, value in content.items() if name != \"text\"}\n        previous = next((entry for stored, entry in index.items() if stored != key and json.loads(stored)[3] == digest), None)\n        if previous is not None:\n            index[key][\"_meta\"][\"ui\"][\"permissions\"] = previous[\"_meta\"][\"ui\"][\"permissions\"]\n"
+        }
+      ],
+      "expect": "same HTML keeps each server, version, URI and principal's complete security metadata"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "existing entry metadata never replaced when the HTML digest is unchanged",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        index[key] = {name: value for name, value in content.items() if name != \"text\"}\n",
+          "new": "        index.setdefault(key, {name: value for name, value in content.items() if name != \"text\"})\n"
+        }
+      ],
+      "expect": "replacing one entry replaces its whole metadata and leaves every other entry unchanged"
+    },
+    {
+      "test": "test_app_cache_roundtrip",
+      "name": "metadata-only replacement merges and retains removed metadata",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        index[key] = {name: value for name, value in content.items() if name != \"text\"}\n",
+          "new": "        before = index.get(key, {}).get(\"_meta\", {})\n        index[key] = {name: value for name, value in content.items() if name != \"text\"}\n        index[key][\"_meta\"] = {**before, **index[key].get(\"_meta\", {})}\n"
+        }
+      ],
+      "expect": "replacing one entry replaces its whole metadata and leaves every other entry unchanged"
     }
   ]
 }
