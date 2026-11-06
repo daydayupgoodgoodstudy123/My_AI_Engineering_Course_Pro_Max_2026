@@ -1,0 +1,657 @@
+{
+  "package": "lalmkit",
+  "tests": [
+    "test_decoder_inputs",
+    "test_result_store",
+    "test_score_multiple_choice",
+    "test_live_context",
+    "test_flatten_messages"
+  ],
+  "layers": [
+    {
+      "test": "test_decoder_inputs",
+      "steps": [
+        {"name": "as shipped", "edits": [], "expect": "4 audio vectors for 3 AUDIO_PAD positions"},
+        {
+          "name": "fix audio_tokens: a partial run of frames is one more token",
+          "edits": [{"file": "inputs.py",
+                     "old": "    return num_frames // stack\n",
+                     "new": "    return -(-num_frames // stack)\n"}],
+          "expect": "each AUDIO slot widens where it stands"
+        },
+        {
+          "name": "+ expand each slot where it stands",
+          "edits": [{"file": "inputs.py",
+                     "old": "    audio = [token for n in counts for token in [AUDIO_BOS] + [AUDIO_PAD] * n + [AUDIO_EOS]]\n    return audio + [token for token in prompt if token != AUDIO]\n",
+                     "new": "    ids: list[int] = []\n    pending = iter(counts)\n    for token in prompt:\n        if token == AUDIO:\n            ids += [AUDIO_BOS] + [AUDIO_PAD] * next(pending) + [AUDIO_EOS]\n        else:\n            ids.append(token)\n    return ids\n"}],
+          "expect": "the mask hides the padding and nothing else"
+        },
+        {
+          "name": "+ mask from the row lengths, not from PAD",
+          "edits": [{"file": "inputs.py",
+                     "old": "    mask = [[int(token != PAD) for token in row] for row in ids]\n",
+                     "new": "    mask = [[0] * (width - len(row)) + [1] * len(row) for row in rows]\n"}],
+          "expect": "pad_batch should be fast on a ten-minute clip"
+        },
+        {
+          "name": "+ positions without the per-token recount",
+          "edits": [{"file": "inputs.py",
+                     "old": "    positions = [[max(0, sum(m[: j + 1]) - 1) for j in range(width)] for m in mask]\n",
+                     "new": "    positions = [[0] * (width - len(row)) + list(range(len(row))) for row in rows]\n"}],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_decoder_inputs",
+      "name": "merge cuts the audio to fit the slots, audio_tokens still floors",
+      "edits": [{"file": "inputs.py",
+                 "old": "    return -(-num_frames // stack)\n",
+                 "new": "    return num_frames // stack\n"},
+                {"file": "inputs.py",
+                 "old": "    if slots != len(audio):\n        raise ValueError(f\"{len(audio)} audio vectors for {slots} AUDIO_PAD positions\")\n",
+                 "new": "    audio = audio[:slots]\n"}],
+      "expect": "each AUDIO slot widens where it stands"
+    },
+    {
+      "test": "test_decoder_inputs",
+      "name": "stack_frames drops the trailing partial run to match the floored count",
+      "edits": [{"file": "inputs.py",
+                 "old": "    return -(-num_frames // stack)\n",
+                 "new": "    return num_frames // stack\n"},
+                {"file": "inputs.py",
+                 "old": "    for start in range(0, len(frames), stack):\n",
+                 "new": "    for start in range(0, len(frames) - stack + 1, stack):\n"}],
+      "expect": "each AUDIO slot widens where it stands"
+    },
+    {
+      "test": "test_decoder_inputs",
+      "name": "(num_frames + 1) // stack, right only for pairs",
+      "edits": [{"file": "inputs.py",
+                 "old": "    return -(-num_frames // stack)\n",
+                 "new": "    return (num_frames + 1) // stack\n"}],
+      "expect": "a trailing partial run of frames is one more token"
+    },
+    {
+      "test": "test_decoder_inputs",
+      "name": "positions as a cumulative sum recomputed for every token",
+      "edits": [{"file": "inputs.py",
+                 "old": "    positions = [[0] * (width - len(row)) + list(range(len(row))) for row in rows]\n",
+                 "new": "    positions = [[max(0, sum(m[: j + 1]) - 1) for j in range(width)] for m in mask]\n"}],
+      "expect": "pad_batch should be fast on a ten-minute clip"
+    },
+    {
+      "test": "test_decoder_inputs",
+      "name": "pads on the right so the mask lines up",
+      "edits": [{"file": "inputs.py",
+                 "old": "    ids = [[PAD] * (width - len(row)) + row for row in rows]\n    mask = [[0] * (width - len(row)) + [1] * len(row) for row in rows]\n    positions = [[0] * (width - len(row)) + list(range(len(row))) for row in rows]\n",
+                 "new": "    ids = [row + [PAD] * (width - len(row)) for row in rows]\n    mask = [[1] * len(row) + [0] * (width - len(row)) for row in rows]\n    positions = [list(range(len(row))) + [0] * (width - len(row)) for row in rows]\n"}],
+      "expect": "generation pads on the left"
+    },
+    {
+      "test": "test_decoder_inputs",
+      "name": "audio_tokens rounds half to even",
+      "edits": [{"file": "inputs.py",
+                 "old": "    return -(-num_frames // stack)\n",
+                 "new": "    return round(num_frames / stack)\n"}],
+      "expect": "4 audio vectors for 3 AUDIO_PAD positions"
+    },
+    {
+      "test": "test_result_store",
+      "name": "never commits a record",
+      "edits": [{"file": "results.py",
+                 "old": "        with self._db:\n            self._db.execute(\n                \"INSERT INTO predictions",
+                 "new": "        if True:\n            self._db.execute(\n                \"INSERT INTO predictions"}],
+      "expect": "raw outputs round-trip exactly, in the order they were first recorded"
+    },
+    {
+      "test": "test_result_store",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [{"file": "results.py",
+                 "old": "CREATE TABLE IF NOT EXISTS",
+                 "new": "CREATE TABLE"}],
+      "expect": "table predictions already exists"
+    },
+    {
+      "test": "test_result_store",
+      "name": "INSERT OR REPLACE: the rerun row moves to the end",
+      "edits": [{"file": "results.py",
+                 "old": "\"INSERT INTO predictions (model, item_id, output) VALUES (?, ?, ?)\"\n                \" ON CONFLICT (model, item_id) DO UPDATE SET output = excluded.output\",",
+                 "new": "\"INSERT OR REPLACE INTO predictions (model, item_id, output) VALUES (?, ?, ?)\","}],
+      "expect": "a rerun replaces the output and keeps the item's place"
+    },
+    {
+      "test": "test_result_store",
+      "name": "INSERT OR IGNORE: the first output wins",
+      "edits": [{"file": "results.py",
+                 "old": "\"INSERT INTO predictions (model, item_id, output) VALUES (?, ?, ?)\"\n                \" ON CONFLICT (model, item_id) DO UPDATE SET output = excluded.output\",",
+                 "new": "\"INSERT OR IGNORE INTO predictions (model, item_id, output) VALUES (?, ?, ?)\","}],
+      "expect": "a rerun replaces the output and keeps the item's place"
+    },
+    {
+      "test": "test_result_store",
+      "name": "unique on item_id alone, so models overwrite each other",
+      "edits": [{"file": "results.py",
+                 "old": "    UNIQUE (model, item_id)\n",
+                 "new": "    UNIQUE (item_id)\n"},
+                {"file": "results.py",
+                 "old": "ON CONFLICT (model, item_id)",
+                 "new": "ON CONFLICT (item_id)"}],
+      "expect": "raw outputs round-trip exactly, in the order they were first recorded"
+    },
+    {
+      "test": "test_result_store",
+      "name": "strips the output before storing it",
+      "edits": [{"file": "results.py",
+                 "old": "                (model, item_id, output),\n",
+                 "new": "                (model, item_id, output.strip() if output else output),\n"}],
+      "expect": "raw outputs round-trip exactly"
+    },
+    {
+      "test": "test_result_store",
+      "name": "stores a failed call as an empty answer",
+      "edits": [{"file": "results.py",
+                 "old": "                (model, item_id, output),\n",
+                 "new": "                (model, item_id, output or \"\"),\n"}],
+      "expect": "raw outputs round-trip exactly"
+    },
+    {
+      "test": "test_result_store",
+      "name": "an empty answer counts as pending",
+      "edits": [{"file": "results.py",
+                 "old": "AND output IS NOT NULL",
+                 "new": "AND output <> ''"}],
+      "expect": "failed and missing calls are pending; an empty answer is an answer"
+    },
+    {
+      "test": "test_result_store",
+      "name": "predictions without ORDER BY (the unique index returns item_id order)",
+      "edits": [{"file": "results.py",
+                 "old": "\"SELECT model, item_id, output FROM predictions WHERE model = ? ORDER BY seq\", (model,)",
+                 "new": "\"SELECT model, item_id, output FROM predictions WHERE model = ?\", (model,)"}],
+      "expect": "raw outputs round-trip exactly, in the order they were first recorded"
+    },
+    {
+      "test": "test_result_store",
+      "name": "predictions ordered by item_id",
+      "edits": [{"file": "results.py",
+                 "old": "\"SELECT model, item_id, output FROM predictions WHERE model = ? ORDER BY seq\", (model,)",
+                 "new": "\"SELECT model, item_id, output FROM predictions WHERE model = ? ORDER BY item_id\", (model,)"}],
+      "expect": "raw outputs round-trip exactly, in the order they were first recorded"
+    },
+    {
+      "test": "test_result_store",
+      "name": "INSERT OR REPLACE with no ORDER BY",
+      "edits": [{"file": "results.py",
+                 "old": "\"INSERT INTO predictions (model, item_id, output) VALUES (?, ?, ?)\"\n                \" ON CONFLICT (model, item_id) DO UPDATE SET output = excluded.output\",",
+                 "new": "\"INSERT OR REPLACE INTO predictions (model, item_id, output) VALUES (?, ?, ?)\","},
+                {"file": "results.py",
+                 "old": "\"SELECT model, item_id, output FROM predictions WHERE model = ? ORDER BY seq\", (model,)",
+                 "new": "\"SELECT model, item_id, output FROM predictions WHERE model = ?\", (model,)"}],
+      "expect": "raw outputs round-trip exactly, in the order they were first recorded"
+    },
+    {
+      "test": "test_result_store",
+      "name": "pending returns the ids sorted",
+      "edits": [{"file": "results.py",
+                 "old": "        return [item_id for item_id in item_ids if item_id not in answered]\n",
+                 "new": "        return sorted(set(item_ids) - answered)\n"}],
+      "expect": "failed and missing calls are pending; an empty answer is an answer"
+    },
+    {
+      "test": "test_result_store",
+      "name": "an empty answer stored as a failure (output or None)",
+      "edits": [{"file": "results.py",
+                 "old": "                (model, item_id, output),\n",
+                 "new": "                (model, item_id, output or None),\n"}],
+      "expect": "raw outputs round-trip exactly"
+    },
+    {
+      "test": "test_result_store",
+      "name": "output stored with str(), so a failure becomes 'None'",
+      "edits": [{"file": "results.py",
+                 "old": "                (model, item_id, output),\n",
+                 "new": "                (model, item_id, str(output)),\n"}],
+      "expect": "raw outputs round-trip exactly"
+    },
+    {
+      "test": "test_result_store",
+      "name": "the trailing newline stripped",
+      "edits": [{"file": "results.py",
+                 "old": "                (model, item_id, output),\n",
+                 "new": "                (model, item_id, output.rstrip('\\n') if output else output),\n"}],
+      "expect": "raw outputs round-trip exactly"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "any capital letter standing alone is an answer letter",
+      "edits": [{"file": "mcq.py",
+                 "old": "LETTER = re.compile(r\"\\b([A-Z])(?=[).:]|\\s*$)\")",
+                 "new": "LETTER = re.compile(r\"\\b([A-Z])\\b\")"}],
+      "expect": "a word like 'A' is not an answer letter"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "a choice's text found anywhere in the answer",
+      "edits": [{"file": "mcq.py",
+                 "old": "choice.strip().lower() == text)",
+                 "new": "choice.strip().lower() in text)"}],
+      "expect": "an answer can be the full text of one choice"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "the first letter wins",
+      "edits": [{"file": "mcq.py",
+                 "old": "    return picked.pop() if len(picked) == 1 else None\n",
+                 "new": "    return min(picked) if picked else None\n"}],
+      "expect": "an answer that names two choices picks neither"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "counts mentions instead of distinct choices",
+      "edits": [{"file": "mcq.py",
+                 "old": "    picked = set()\n",
+                 "new": "    picked = []\n"},
+                {"file": "mcq.py",
+                 "old": "            picked.add(index)\n",
+                 "new": "            picked.append(index)\n"},
+                {"file": "mcq.py",
+                 "old": "    picked.update(i for i",
+                 "new": "    picked.extend(i for i"}],
+      "expect": "naming one choice twice still picks it"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "accuracy over the readable answers only",
+      "edits": [{"file": "mcq.py",
+                 "old": "    guess: dict[str, float] = {}\n",
+                 "new": "    guess: dict[str, float] = {}\n    readable: dict[str, int] = {}\n"},
+                {"file": "mcq.py",
+                 "old": "        guess[c] = guess.get(c, 0.0) + 1 / len(item.choices)\n",
+                 "new": "        guess[c] = guess.get(c, 0.0) + 1 / len(item.choices)\n        readable[c] = readable.get(c, 0) + (picked is not None)\n"},
+                {"file": "mcq.py",
+                 "old": "    accuracy = {c: correct[c] / count[c] for c in count}\n",
+                 "new": "    accuracy = {c: correct[c] / readable[c] for c in count}\n"}],
+      "expect": "missing, failed and unreadable answers count as wrong"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "single-choice items are scored",
+      "edits": [{"file": "mcq.py",
+                 "old": "        if len(item.choices or []) < 2:\n",
+                 "new": "        if not item.choices:\n"}],
+      "expect": "only items with at least two choices are scored"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "the lesson's MCQ filter without `or []`",
+      "edits": [{"file": "mcq.py",
+                 "old": "        if len(item.choices or []) < 2:\n",
+                 "new": "        if len(item.choices) < 2:\n"}],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "chance as a flat 25%",
+      "edits": [{"file": "mcq.py",
+                 "old": "        guess[c] = guess.get(c, 0.0) + 1 / len(item.choices)\n",
+                 "new": "        guess[c] = guess.get(c, 0.0) + 0.25\n"}],
+      "expect": "chance depends on how many choices each item has"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "macro averaged over items",
+      "edits": [{"file": "mcq.py",
+                 "old": "        \"macro\": sum(accuracy.values()) / len(accuracy),\n",
+                 "new": "        \"macro\": sum(correct.values()) / sum(count.values()),\n"}],
+      "expect": "macro averages the categories, not the items"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "the last letter wins",
+      "edits": [{"file": "mcq.py",
+                 "old": "    return picked.pop() if len(picked) == 1 else None\n",
+                 "new": "    return max(picked) if picked else None\n"}],
+      "expect": "an answer that names two choices picks neither"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "letters A-D only, without a range check",
+      "edits": [{"file": "mcq.py",
+                 "old": "LETTER = re.compile(r\"\\b([A-Z])(?=[).:]|\\s*$)\")",
+                 "new": "LETTER = re.compile(r\"\\b([A-D])(?=[).:]|\\s*$)\")"},
+                {"file": "mcq.py",
+                 "old": "        if index < len(choices):\n            picked.add(index)\n",
+                 "new": "        if True:\n            picked.add(index)\n"}],
+      "expect": "a letter past the last choice picks nothing"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "chance as 1 / the mean number of choices",
+      "edits": [{"file": "mcq.py",
+                 "old": "        guess[c] = guess.get(c, 0.0) + 1 / len(item.choices)\n",
+                 "new": "        guess[c] = guess.get(c, 0.0) + len(item.choices)\n"},
+                {"file": "mcq.py",
+                 "old": "\"chance\": {c: guess[c] / count[c] for c in count},",
+                 "new": "\"chance\": {c: count[c] / guess[c] for c in count},"}],
+      "expect": "chance depends on how many choices each item has"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "items with no output left out of the count",
+      "edits": [{"file": "mcq.py",
+                 "old": "        if len(item.choices or []) < 2:\n",
+                 "new": "        if len(item.choices or []) < 2 or item.item_id not in outputs:\n"}],
+      "expect": "only items with at least two choices are scored"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "overall over every item, open-ended ones included",
+      "edits": [{"file": "mcq.py",
+                 "old": "\"overall\": sum(correct.values()) / sum(count.values()),",
+                 "new": "\"overall\": sum(correct.values()) / len(items),"}],
+      "expect": "overall averages the scored items"
+    },
+    {
+      "test": "test_score_multiple_choice",
+      "name": "a missing output read with outputs[item_id]",
+      "edits": [{"file": "mcq.py",
+                 "old": "parse_choice(outputs.get(item.item_id), item.choices)",
+                 "new": "parse_choice(outputs[item.item_id], item.choices)"}],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_live_context",
+      "name": "every chunk starts a new clip",
+      "edits": [{"file": "context.py",
+                 "old": "            if clip is None:\n",
+                 "new": "            if True:\n"}],
+      "expect": "consecutive chunks are one clip, whatever the chunking"
+    },
+    {
+      "test": "test_live_context",
+      "name": "audio tokens counted chunk by chunk and added up",
+      "edits": [{"file": "context.py",
+                 "old": "            clip.samples += event.num_samples\n",
+                 "new": "            clip.samples += clip_tokens(event.num_samples) * 640\n"}],
+      "expect": "consecutive chunks are one clip, whatever the chunking"
+    },
+    {
+      "test": "test_live_context",
+      "name": "AUDIO_BOS and AUDIO_EOS left out of the budget",
+      "edits": [{"file": "context.py",
+                 "old": "    return tokens + 2 if tokens else 0\n",
+                 "new": "    return tokens\n"},
+                {"file": "context.py",
+                 "old": "            over -= take + (2 if emptied else 0)\n",
+                 "new": "            over -= take\n"}],
+      "expect": "a context never exceeds the budget"
+    },
+    {
+      "test": "test_live_context",
+      "name": "drops the oldest clip whole",
+      "edits": [{"file": "context.py",
+                 "old": "            take = min(over, segment.tokens())\n",
+                 "new": "            take = segment.tokens()\n"}],
+      "expect": "the oldest audio goes first, token by token from the front of the oldest clip"
+    },
+    {
+      "test": "test_live_context",
+      "name": "trims the newest clip first",
+      "edits": [{"file": "context.py",
+                 "old": "    for segment in segments:  # audio first, oldest clip first, from the front of the clip\n",
+                 "new": "    for segment in reversed(segments):\n"}],
+      "expect": "the oldest audio goes first, token by token from the front of the oldest clip"
+    },
+    {
+      "test": "test_live_context",
+      "name": "an emptied clip keeps its two markers",
+      "edits": [{"file": "context.py",
+                 "old": "    return tokens + 2 if tokens else 0\n",
+                 "new": "    return tokens + 2\n"},
+                {"file": "context.py",
+                 "old": "            over -= take + (2 if emptied else 0)\n",
+                 "new": "            over -= take\n"},
+                {"file": "context.py",
+                 "old": "        elif segment.tokens():\n",
+                 "new": "        else:\n"}],
+      "expect": "a clip that loses all its tokens goes with its markers"
+    },
+    {
+      "test": "test_live_context",
+      "name": "the system turn can be dropped",
+      "edits": [{"file": "context.py",
+                 "old": "        if isinstance(segment, Turn) and segment.role != \"system\" and segment is not newest:\n",
+                 "new": "        if isinstance(segment, Turn) and segment is not newest:\n"}],
+      "expect": "turns go only once no audio is left: oldest first, never the system turn"
+    },
+    {
+      "test": "test_live_context",
+      "name": "the turn that just arrived can be dropped",
+      "edits": [{"file": "context.py",
+                 "old": "        if isinstance(segment, Turn) and segment.role != \"system\" and segment is not newest:\n",
+                 "new": "        if isinstance(segment, Turn) and segment.role != \"system\":\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_live_context",
+      "name": "yields one list and keeps changing it",
+      "edits": [{"file": "context.py",
+                 "old": "    clip: _Clip | None = None  # the clip that the next audio chunk extends\n",
+                 "new": "    clip: _Clip | None = None  # the clip that the next audio chunk extends\n    shown: list[int] = []\n"},
+                {"file": "context.py",
+                 "old": "        yield _render(segments)\n",
+                 "new": "        shown[:] = _render(segments)\n        yield shown\n"}],
+      "expect": "each context is the state when its event arrived"
+    },
+    {
+      "test": "test_live_context",
+      "name": "reads the whole stream before the first context",
+      "edits": [{"file": "context.py",
+                 "old": "    async for event in events:\n",
+                 "new": "    for event in [event async for event in events]:\n"}],
+      "expect": "a context is ready as soon as its event arrives"
+    },
+    {
+      "test": "test_live_context",
+      "name": "every context recomputed from the whole history",
+      "edits": [{"file": "context.py",
+                 "old": "        _fit(segments, budget, event)\n        yield _render(segments)\n",
+                 "new": "        view = []\n        for s in segments:\n            if isinstance(s, _Clip):\n                c = _Clip()\n                c.samples = s.samples\n                view.append(c)\n            else:\n                view.append(s)\n        _fit(view, budget, event)\n        yield _render(view)\n"}],
+      "expect": "a dropped turn stays dropped, and new audio can use its room"
+    },
+    {
+      "test": "test_live_context",
+      "name": "the clip still being recorded is never trimmed",
+      "edits": [{"file": "context.py",
+                 "old": "        if isinstance(segment, _Clip) and segment.tokens():\n",
+                 "new": "        if isinstance(segment, _Clip) and segment.tokens() and not (segment is segments[-1] and isinstance(newest, AudioChunk)):\n"}],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_live_context",
+      "name": "the budget treated as exclusive",
+      "edits": [{"file": "context.py",
+                 "old": "    over = sum(_cost(segment) for segment in segments) - budget\n",
+                 "new": "    over = sum(_cost(segment) for segment in segments) - budget + 1\n"}],
+      "expect": "the oldest audio goes first, token by token from the front of the oldest clip"
+    },
+    {
+      "test": "test_live_context",
+      "name": "an empty chunk starts a new clip",
+      "edits": [{"file": "context.py",
+                 "old": "            if clip is None:\n",
+                 "new": "            if clip is None or not event.num_samples:\n"}],
+      "expect": "consecutive chunks are one clip, whatever the chunking"
+    },
+    {
+      "test": "test_live_context",
+      "name": "no context when nothing changed",
+      "edits": [{"file": "context.py",
+                 "old": "    clip: _Clip | None = None  # the clip that the next audio chunk extends\n",
+                 "new": "    clip: _Clip | None = None  # the clip that the next audio chunk extends\n    last = None\n"},
+                {"file": "context.py",
+                 "old": "        yield _render(segments)\n",
+                 "new": "        now = _render(segments)\n        if now != last:\n            last = now\n            yield now\n"}],
+      "expect": "one context per event"
+    },
+    {
+      "test": "test_live_context",
+      "name": "turns dropped newest first",
+      "edits": [{"file": "context.py",
+                 "old": "    i = 0\n    while over > 0 and i < len(segments):  # then turns, oldest first\n        segment = segments[i]\n        if isinstance(segment, Turn) and segment.role != \"system\" and segment is not newest:\n            del segments[i]\n            over -= len(segment.ids)\n        else:\n            i += 1\n",
+                 "new": "    i = len(segments) - 1\n    while over > 0 and i >= 0:\n        segment = segments[i]\n        if isinstance(segment, Turn) and segment.role != \"system\" and segment is not newest:\n            del segments[i]\n            over -= len(segment.ids)\n        i -= 1\n"}],
+      "expect": "turns go only once no audio is left: oldest first, never the system turn"
+    },
+    {
+      "test": "test_live_context",
+      "name": "clip tokens as samples // 640",
+      "edits": [{"file": "context.py",
+                 "old": "        return clip_tokens(self.samples) - self.dropped\n",
+                 "new": "        return self.samples // 640 - self.dropped\n"}],
+      "expect": "the oldest audio goes first"
+    },
+    {
+      "test": "test_live_context",
+      "name": "audio after a turn extends the earlier clip",
+      "edits": [{"file": "context.py",
+                 "old": "        else:\n            clip = None\n            segments.append(event)\n",
+                 "new": "        else:\n            segments.append(event)\n"}],
+      "expect": "the oldest audio goes first"
+    },
+    {
+      "test": "test_live_context",
+      "name": "an emptied clip's markers not counted as freed",
+      "edits": [{"file": "context.py",
+                 "old": "            over -= take + (2 if emptied else 0)\n",
+                 "new": "            over -= take\n"}],
+      "expect": "a clip that loses all its tokens goes with its markers"
+    },
+    {
+      "test": "test_live_context",
+      "name": "the budget enforced only when a turn arrives",
+      "edits": [{"file": "context.py",
+                 "old": "        _fit(segments, budget, event)\n",
+                 "new": "        if isinstance(event, Turn):\n            _fit(segments, budget, event)\n"}],
+      "expect": "a context never exceeds the budget"
+    },
+    {
+      "test": "test_flatten_messages",
+      "name": "clips numbered per message",
+      "edits": [{"file": "messages.py",
+                 "old": "    for i, message in enumerate(messages):\n        role = message.get(\"role\")\n",
+                 "new": "    for i, message in enumerate(messages):\n        clips = 0\n        role = message.get(\"role\")\n"}],
+      "expect": "clips are numbered across the call"
+    },
+    {
+      "test": "test_flatten_messages",
+      "name": "a level's own parts first, nested tool results after",
+      "edits": [{"file": "messages.py",
+                 "old": "        for i, part in enumerate(content):\n",
+                 "new": "        nested = []\n        for i, part in enumerate(content):\n"},
+                {"file": "messages.py",
+                 "old": "                walk(part.get(\"content\"), role, f\"{here}.content\")\n",
+                 "new": "                nested.append((part.get(\"content\"), f\"{here}.content\"))\n"},
+                {"file": "messages.py",
+                 "old": "                raise ValueError(f\"{here}: unknown part type {kind!r}\")\n",
+                 "new": "                raise ValueError(f\"{here}: unknown part type {kind!r}\")\n        for sub, sub_where in nested:\n            walk(sub, role, sub_where)\n"}],
+      "expect": "pieces come out in reading order"
+    },
+    {
+      "test": "test_flatten_messages",
+      "name": "a module-level clip counter",
+      "edits": [{"file": "messages.py",
+                 "old": "ROLES = (\"system\", \"user\", \"assistant\", \"tool\")\n",
+                 "new": "ROLES = (\"system\", \"user\", \"assistant\", \"tool\")\n_NUMBERS = __import__(\"itertools\").count(1)\n"},
+                {"file": "messages.py",
+                 "old": "                clips += 1\n",
+                 "new": "                clips = next(_NUMBERS)\n"}],
+      "expect": "flattening twice gives the same pieces"
+    },
+    {
+      "test": "test_flatten_messages",
+      "name": "string content walked as a list of parts",
+      "edits": [{"file": "messages.py",
+                 "old": "        if isinstance(content, str):\n",
+                 "new": "        if False:\n"},
+                {"file": "messages.py",
+                 "old": "        if not isinstance(content, list):\n",
+                 "new": "        if False:\n"}],
+      "expect": "unknown part type None"
+    },
+    {
+      "test": "test_flatten_messages",
+      "name": "nested parts reported at their parent's path",
+      "edits": [{"file": "messages.py",
+                 "old": "                walk(part.get(\"content\"), role, f\"{here}.content\")\n",
+                 "new": "                walk(part.get(\"content\"), role, where)\n"}],
+      "expect": "Regex pattern did not match"
+    },
+    {
+      "test": "test_flatten_messages",
+      "name": "sampling rate not checked",
+      "edits": [{"file": "messages.py",
+                 "old": "                if rate != SAMPLE_RATE:\n",
+                 "new": "                if False:\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_flatten_messages",
+      "name": "audio tokens from float seconds, as in the lesson's fake encoder",
+      "edits": [{"file": "messages.py",
+                 "old": "clip_tokens(len(part[\"audio\"]))",
+                 "new": "int(len(part[\"audio\"]) / SAMPLE_RATE * 50) // 2"}],
+      "expect": "a text piece counts its words, a clip its audio tokens"
+    },
+    {
+      "test": "test_flatten_messages",
+      "name": "an empty clip accepted",
+      "edits": [{"file": "messages.py",
+                 "old": "                if not part.get(\"audio\"):\n                    raise ValueError(f\"{here}: audio has no samples\")\n",
+                 "new": ""}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_flatten_messages",
+      "name": "pieces inside a tool result take the role tool",
+      "edits": [{"file": "messages.py",
+                 "old": "walk(part.get(\"content\"), role, f\"{here}.content\")",
+                 "new": "walk(part.get(\"content\"), \"tool\", f\"{here}.content\")"}],
+      "expect": "pieces come out in reading order"
+    },
+    {
+      "test": "test_flatten_messages",
+      "name": "audio tokens as len(audio) // 640",
+      "edits": [{"file": "messages.py",
+                 "old": "clip_tokens(len(part[\"audio\"]))",
+                 "new": "len(part[\"audio\"]) // 640"}],
+      "expect": "a text piece counts its words, a clip its audio tokens"
+    },
+    {
+      "test": "test_flatten_messages",
+      "name": "usage counts clips, not audio tokens",
+      "edits": [{"file": "messages.py",
+                 "old": "        totals[piece.kind] += piece.tokens\n",
+                 "new": "        totals[piece.kind] += piece.tokens if piece.kind == 'text' else 1\n"}],
+      "expect": "tokens are counted per modality"
+    },
+    {
+      "test": "test_flatten_messages",
+      "name": "string content understood only at the top level",
+      "edits": [{"file": "messages.py",
+                 "old": "                walk(part.get(\"content\"), role, f\"{here}.content\")\n",
+                 "new": "                sub = part.get(\"content\")\n                walk(sub if isinstance(sub, list) else [sub], role, f\"{here}.content\")\n"}],
+      "expect": "unknown part type None"
+    },
+    {
+      "test": "test_flatten_messages",
+      "name": "tool_call_id emitted as a text piece",
+      "edits": [{"file": "messages.py",
+                 "old": "            elif kind == \"tool_result\":\n",
+                 "new": "            elif kind == \"tool_result\":\n                pieces.append(Piece(role, \"text\", part.get(\"tool_call_id\", \"\"), 1))\n"}],
+      "expect": "pieces come out in reading order"
+    }
+  ]
+}

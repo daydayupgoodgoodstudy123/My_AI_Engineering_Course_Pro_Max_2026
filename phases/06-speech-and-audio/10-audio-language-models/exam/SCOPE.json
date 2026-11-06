@@ -1,0 +1,116 @@
+{
+  "lesson": "phases/06-speech-and-audio/10-audio-language-models",
+  "title": "Audio-Language Models — Qwen2.5-Omni, Audio Flamingo, GPT-4o Audio",
+  "format": "staged-brownfield",
+  "service": "LALMKit: decoder inputs with audio slots, a SQLite store of raw benchmark outputs, MMAU-style multiple-choice scoring, a budgeted live audio + text context, and nested multimodal message flattening",
+  "sources": {
+    "docs/en.md": "a32837dad7c1099f98828124d16ed2bc97576711bfbaea7f503127db3f6d4c84",
+    "code/main.py": "b486ddc9c2331df4b295090514d9d94819942f0911c107abb3723092b4d4a8d6"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_decoder_inputs",
+      "kind": "debug",
+      "lesson_anchor": "The three-component template (encoder -> projector -> LLM taking interleaved text + audio tokens); Step 1 apply_chat_template; Step 2 projector; code/main.py interleave_with_text; quiz Q9 (frames and downsampling) and Q11 (expanding an AUDIO slot between start/end markers)",
+      "planted_bugs": [
+        "audio_tokens floors num_frames / stack while stack_frames zero-pads the last run; the ValueError surfaces two calls later in merge (4 audio vectors for 3 AUDIO_PAD positions), whose check is correct",
+        "expand puts every clip in front of the text, as the lesson's interleave_with_text does, instead of widening each AUDIO slot where it stands",
+        "pad_batch builds the attention mask from token != PAD, but PAD = EOS, so a real EOS inside a row is masked and the positions derived from the mask go wrong too",
+        "pad_batch recomputes the mask's prefix sum for every position, O(L^2)"
+      ],
+      "timing_assert": "pad_batch on a ten-minute clip (15,004 ids) plus a short row under 0.02 s; the per-token prefix sum takes about 0.5 s, the length-based version about 0.2 ms (an explicit-loop fix about 1.1 ms)",
+      "overfix_guard": "the merged ids and vectors must include every clip's zero-padded last token, which rules out cutting the audio to the slots in merge or dropping the partial run in stack_frames; a stack=3 check rules out (n + 1) // stack"
+    },
+    {
+      "part": 2,
+      "test": "test_result_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "Step 3: write predictions to a model_output column for the official MMAU-Pro evaluator; Benchmark reality check; quiz Q16 (independent re-verification, control variables)",
+      "exactness": "raw model outputs round-trip byte for byte across close and reopen (leading spaces, CRLF, trailing space and newline), and a failed call (None) stays distinct from an empty answer ('')",
+      "traps": [
+        "missing commit",
+        "CREATE TABLE without IF NOT EXISTS",
+        "INSERT OR REPLACE moves the rerun item to the end",
+        "INSERT OR IGNORE keeps the first output",
+        "no ORDER BY, so the (model, item_id) index returns item_id order, or ORDER BY item_id; the test records ids out of alphabetical order",
+        "pending sorted instead of in the given order",
+        "uniqueness on item_id alone lets one model overwrite another",
+        "stripping the output, or only its trailing newline",
+        "storing a failed call as '' or as the string 'None'",
+        "storing an empty answer as None",
+        "treating an empty answer as pending"
+      ],
+      "clarifying_questions": ["normalizing outputs", "which output a rerun keeps", "what a failed call stores"]
+    },
+    {
+      "part": 3,
+      "test": "test_score_multiple_choice",
+      "kind": "core algorithm",
+      "lesson_anchor": "Benchmark reality check (random chance on 4-option multiple choice = 25%, multi-audio near random); Step 3 (MCQ filter len(choices or []) > 1, exact match is only a sanity check, report each category separately); skill guardrails (< 30% refuse, > 40% to ship multi-audio)",
+      "traps": [
+        "any standalone capital letter, so the article 'A' becomes choice A",
+        "letters A-D without a range check (IndexError on a two-choice item)",
+        "choice text matched by containment",
+        "first or last letter wins when two different choices are named",
+        "counting mentions instead of distinct choices",
+        "accuracy over the readable answers only",
+        "items with no output left out of the count",
+        "single-choice items scored",
+        "the MCQ filter without `or []` (TypeError on open-ended items)",
+        "chance fixed at 25%, or 1 / the mean number of choices",
+        "macro averaged over items"
+      ],
+      "integration": "the given BenchmarkRun stores outputs through the Part 2 store, retries only the timed-out call, and its report scores the stored raw outputs the same as the direct ones",
+      "clarifying_questions": ["lowercase letters", "two different letters", "open-ended items", "items with no output"]
+    },
+    {
+      "part": 4,
+      "test": "test_live_context",
+      "kind": "streaming",
+      "lesson_anchor": "Where LALMs are not useful yet: real-time streaming reasoning; long-audio degradation; 50 encoder frames per second eats the context (quiz Q9)",
+      "wire_format": "after every event, a fresh list of the ids the decoder would see: turn ids as given, each clip as AUDIO_BOS + one AUDIO_PAD per audio token + AUDIO_EOS (Part 1's expand layout); the test compares them by event index",
+      "traps": [
+        "each chunk counted or rendered as its own clip",
+        "AUDIO_BOS / AUDIO_EOS left out of the budget",
+        "dropping the oldest clip whole",
+        "trimming the newest clip first",
+        "the clip still being recorded never trimmed",
+        "an emptied clip keeping its markers",
+        "FIFO eviction that drops the system turn",
+        "dropping the turn that just arrived instead of raising",
+        "every context recomputed from the whole history, so a dropped turn keeps squeezing out new audio",
+        "the budget enforced only when a turn arrives",
+        "yielding one list and mutating it",
+        "reading the whole stream first"
+      ],
+      "clarifying_questions": ["system turn over budget", "dropped turns coming back", "waiting for the end of a clip", "trimming the clip still being recorded"]
+    },
+    {
+      "part": 5,
+      "test": "test_flatten_messages",
+      "kind": "recursive structure",
+      "lesson_anchor": "Step 1 messages with content parts ({type: audio}, {type: text}) for apply_chat_template; multi-audio questions; Pitfalls: diarize first (a diarization tool result nests clips); quiz Q13 (separate markers and numbers per clip)",
+      "traps": [
+        "string content walked as a list of parts",
+        "nested tool results expanded after their siblings",
+        "clips numbered per message",
+        "a module-level clip counter",
+        "audio tokens from float seconds, as in the lesson's int(audio_seconds * 50)",
+        "error paths that lose the nesting",
+        "sampling rate not checked",
+        "an empty clip accepted",
+        "pieces inside a tool result given the role tool"
+      ],
+      "clarifying_questions": ["tool results inside tool results", "resampling", "numbering per message", "audio without a sampling_rate"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the encoder frame count from samples is correct in the starter, because the encoder frame count belongs to 06/05's Part 1. The off-by-one sits between the processor's token count and the projector's zero-padded stacking, the mismatch the real merge step checks.",
+    "Part 1: the lesson's own interleave_with_text (all audio in front of the text) is added as the second planted bug, since the exam spec prefers bugs from the lesson's code.",
+    "Part 1: position ids are covered by the mask-derived positions and the timing assert (the per-token prefix sum), not by a separate position-id off-by-one, which kept the part at four bugs.",
+    "Part 3: per-category chance (the mean of 1 / len(choices)) is reported next to accuracy, from the lesson's 25%-on-4-options point; the lesson's MCQ filter decides which items are scored.",
+    "Part 4: the output is the decoder's id sequence, one fresh list per event, instead of a text wire format; 06/03 already uses NDJSON and 06/06 RTTM, and the id layout is the one Part 1 builds."
+  ]
+}
