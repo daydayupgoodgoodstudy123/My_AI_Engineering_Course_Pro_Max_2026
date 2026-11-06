@@ -1,0 +1,480 @@
+{
+  "package": "delegate",
+  "tests": [
+    "test_isolated_ownership_plan",
+    "test_evidence_isolation_roundtrip",
+    "test_material_handoff_integration",
+    "test_online_handoff_verdicts",
+    "test_nested_ownership_and_parallelism"
+  ],
+  "layers": [
+    {
+      "test": "test_isolated_ownership_plan",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "overlap reports must use normalized path components"
+        },
+        {
+          "name": "normalize claim components",
+          "edits": [
+            {
+              "file": "plan.py",
+              "old": "return tuple(path.split(\"/\"))",
+              "new": "return PurePosixPath(path).parts"
+            }
+          ],
+          "expect": "read-only inspection does not claim write ownership"
+        },
+        {
+          "name": "+ exclude read-only inspection claims",
+          "edits": [
+            {
+              "file": "plan.py",
+              "old": "    for unit in units:\n        for path in unit.paths:\n",
+              "new": "    for unit in units:\n        if unit.read_only:\n            continue\n        for path in unit.paths:\n"
+            }
+          ],
+          "expect": "duplicate ids do not duplicate an overlap finding"
+        },
+        {
+          "name": "+ report each overlap once",
+          "edits": [
+            {
+              "file": "plan.py",
+              "old": "return sorted(found)",
+              "new": "return sorted(set(found))"
+            }
+          ],
+          "expect": "every work unit needs a nonblank accountable owner"
+        },
+        {
+          "name": "+ reject blank accountable owners",
+          "edits": [
+            {
+              "file": "plan.py",
+              "old": "if not unit.owner}",
+              "new": "if not unit.owner.strip()}"
+            }
+          ],
+          "expect": "ownership checks must index unrelated path branches"
+        },
+        {
+          "name": "+ index only related prefix branches",
+          "edits": [
+            {
+              "file": "plan.py",
+              "old": "def conflicts(units: list[WorkUnit]) -> list[tuple[str, str, str, str]]:\n    \"\"\"Return sorted distinct normalized overlaps between different write-unit ids.\"\"\"\n    claims = _claims(units)\n    found = []\n    for index, left in enumerate(claims):\n        for right in claims[index+1:]:\n            if left.unit == right.unit:\n                continue\n            if left.parts[:len(right.parts)] == right.parts or right.parts[:len(left.parts)] == left.parts:\n                found.append(_pair(left, right))\n    return sorted(set(found))",
+              "new": "def conflicts(units: list[WorkUnit]) -> list[tuple[str, str, str, str]]:\n    \"\"\"Return sorted distinct (left id, right id, left path, right path) overlaps.\n\n    Ignore read-only workers and comparisons within one unit id. Report canonical\n    paths. Shared parent directories do not imply overlapping sibling claims.\n    Duplicate input ids still block delegation_plan, but do not duplicate rows.\n    \"\"\"\n    root = {\"claims\": [], \"children\": {}}\n    found = set()\n    for claim in _claims(units):\n        node = root\n        related = []\n        for part in claim.parts:\n            related.extend(node[\"claims\"])\n            node = node[\"children\"].setdefault(part, {\"claims\": [], \"children\": {}})\n        stack = [node]\n        while stack:\n            below = stack.pop()\n            related.extend(below[\"claims\"])\n            stack.extend(below[\"children\"].values())\n        for other in related:\n            if other.unit != claim.unit:\n                found.add(_pair(other, claim))\n        node[\"claims\"].append(claim)\n    return sorted(found)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_isolated_ownership_plan",
+      "name": "collapse sibling claims to a common parent for speed",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "for part in claim.parts:",
+          "new": "for part in claim.parts[:-1]:"
+        }
+      ],
+      "expect": "sibling claims are not overlapping writes"
+    },
+    {
+      "test": "test_evidence_isolation_roundtrip",
+      "name": "overwrite existing evidence instead of exclusive create",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "os.O_WRONLY | os.O_CREAT | os.O_EXCL",
+          "new": "os.O_WRONLY | os.O_CREAT | os.O_TRUNC"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_evidence_isolation_roundtrip",
+      "name": "decode binary evidence with replacement characters",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "fh.write(data)",
+          "new": "fh.write(data.decode(\"utf-8\", errors=\"replace\").encode(\"utf-8\"))"
+        }
+      ],
+      "expect": "evidence bytes round-trip exactly per isolated unit"
+    },
+    {
+      "test": "test_evidence_isolation_roundtrip",
+      "name": "sort encoded directory names rather than decoded ids",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "return sorted(_decode(path.name) for path in self.root.iterdir() if path.is_dir())",
+          "new": "return [_decode(path.name) for path in sorted(self.root.iterdir()) if path.is_dir()]"
+        }
+      ],
+      "expect": "decode unit names before sorting their ids"
+    },
+    {
+      "test": "test_evidence_isolation_roundtrip",
+      "name": "allow an existing empty evidence file to be replaced",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "        fd = os.open(directory / _encode(name),",
+          "new": "        if (directory / _encode(name)).exists() and (directory / _encode(name)).stat().st_size == 0:\n            (directory / _encode(name)).unlink()\n        fd = os.open(directory / _encode(name),"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_material_handoff_integration",
+      "name": "trust worker summary instead of the material proof exit",
+      "edits": [
+        {
+          "file": "integrate.py",
+          "old": "handoff.proof.exit_code != 0",
+          "new": "not handoff.claimed_passed"
+        }
+      ],
+      "expect": "worker success summaries do not override proof failures or unblock dependants"
+    },
+    {
+      "test": "test_material_handoff_integration",
+      "name": "match textual path prefix instead of whole components",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "return right[:len(left)] == left",
+          "new": "return changed.startswith(claim)"
+        }
+      ],
+      "expect": "changed files must remain under the assigned component prefix"
+    },
+    {
+      "test": "test_material_handoff_integration",
+      "name": "merge dependants after a rejected prerequisite",
+      "edits": [
+        {
+          "file": "integrate.py",
+          "old": "if not set(by_id[name].depends_on) <= set(order):",
+          "new": "if False:"
+        }
+      ],
+      "expect": "worker success summaries do not override proof failures or unblock dependants"
+    },
+    {
+      "test": "test_material_handoff_integration",
+      "name": "silently choose one writer for a conflicting shared interface",
+      "edits": [
+        {
+          "file": "integrate.py",
+          "old": "rejected.update({name: \"decision\" for name in names})",
+          "new": "rejected.update({name: \"decision\" for name in sorted(names)[1:]})"
+        }
+      ],
+      "expect": "conflicting shared interfaces require an explicit decision naming every unit"
+    },
+    {
+      "test": "test_material_handoff_integration",
+      "name": "check only extra final files, not missing planned files",
+      "edits": [
+        {
+          "file": "integrate.py",
+          "old": "set(final_changed) ^ expected",
+          "new": "set(final_changed) - expected"
+        }
+      ],
+      "expect": "missing proposed files also fail the final diff gate"
+    },
+    {
+      "test": "test_material_handoff_integration",
+      "name": "accept a different full-gate command",
+      "edits": [
+        {
+          "file": "integrate.py",
+          "old": "gate.command == expected_gate and ",
+          "new": ""
+        }
+      ],
+      "expect": "a different full-gate command is insufficient"
+    },
+    {
+      "test": "test_material_handoff_integration",
+      "name": "accept empty proof output",
+      "edits": [
+        {
+          "file": "integrate.py",
+          "old": " or not handoff.proof.output.strip()",
+          "new": ""
+        }
+      ],
+      "expect": "read actual nonblank proof output"
+    },
+    {
+      "test": "test_online_handoff_verdicts",
+      "name": "read every worker receipt before producing output",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for handoff in incoming:\n",
+          "new": "    everything = [handoff async for handoff in incoming]\n    for handoff in everything:\n"
+        }
+      ],
+      "expect": "emit as soon as the dependency barrier opens"
+    },
+    {
+      "test": "test_online_handoff_verdicts",
+      "name": "forget held child receipts on every arrival",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "pending[handoff.unit] = handoff",
+          "new": "pending = {handoff.unit: handoff}"
+        }
+      ],
+      "expect": "resolve the current receipt wave before pulling future work"
+    },
+    {
+      "test": "test_online_handoff_verdicts",
+      "name": "emit verdicts before prerequisite verdicts exist",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "ready = sorted(name for name in pending if set(by_id[name].depends_on) <= verdicts.keys())",
+          "new": "ready = sorted(pending)"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_online_handoff_verdicts",
+      "name": "ignore workers without a final handoff",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "for name in sorted(by_id.keys() - verdicts.keys() - pending.keys()):",
+          "new": "for name in []:"
+        }
+      ],
+      "expect": "stream closure reports missing receipts before dependent rejection"
+    },
+    {
+      "test": "test_nested_ownership_and_parallelism",
+      "name": "use only the longest prefix owner",
+      "edits": [
+        {
+          "file": "ownership.py",
+          "old": "names.update(node[\"owners\"])",
+          "new": "names = set(node[\"owners\"]) or names"
+        }
+      ],
+      "expect": "a repository-root claim participates in every nested owner query"
+    },
+    {
+      "test": "test_nested_ownership_and_parallelism",
+      "name": "treat only direct prerequisite edges as serial order",
+      "edits": [
+        {
+          "file": "ownership.py",
+          "old": "prerequisites = prerequisite_sets(units)",
+          "new": "prerequisites = {unit.id: set(unit.depends_on) for unit in units}"
+        }
+      ],
+      "expect": "only transitive dependency order permits shared write claims"
+    },
+    {
+      "test": "test_nested_ownership_and_parallelism",
+      "name": "give read-only inspection write ownership",
+      "edits": [
+        {
+          "file": "ownership.py",
+          "old": "if unit.read_only:",
+          "new": "if False:"
+        }
+      ],
+      "expect": "retain every ancestor and exact claimant without duplicating one unit"
+    },
+    {
+      "test": "test_nested_ownership_and_parallelism",
+      "name": "forget repository-root claim when descending",
+      "edits": [
+        {
+          "file": "ownership.py",
+          "old": "names = set(node[\"owners\"])",
+          "new": "names = set()"
+        }
+      ],
+      "expect": "a repository-root claim participates in every nested owner query"
+    },
+    {
+      "test": "test_evidence_isolation_roundtrip",
+      "name": "independent reviewer: p2_sort_encoded_evidence_names",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "        return sorted(_decode(path.name) for path in directory.iterdir() if path.is_file())",
+          "new": "        return [_decode(path.name) for path in sorted(directory.iterdir(), key=lambda path: path.name) if path.is_file()]"
+        }
+      ],
+      "expect": "evidence names are reversible and sorted"
+    },
+    {
+      "test": "test_material_handoff_integration",
+      "name": "independent reviewer: p3_ignore_handoff_identity",
+      "edits": [
+        {
+          "file": "integrate.py",
+          "old": "    if handoff.unit != unit.id:",
+          "new": "    if False:"
+        }
+      ],
+      "expect": "handoff identity is checked before scope and proof"
+    },
+    {
+      "test": "test_material_handoff_integration",
+      "name": "independent reviewer: p3_ignore_blank_full_gate_output",
+      "edits": [
+        {
+          "file": "integrate.py",
+          "old": "gate.command == expected_gate and gate.exit_code == 0 and bool(gate.output.strip())",
+          "new": "gate.command == expected_gate and gate.exit_code == 0"
+        }
+      ],
+      "expect": "the full gate needs captured nonblank output"
+    },
+    {
+      "test": "test_material_handoff_integration",
+      "name": "independent reviewer: p3_collide_invalid_handoffs",
+      "edits": [
+        {
+          "file": "integrate.py",
+          "old": "    for name, handoff in valid.items():",
+          "new": "    for name, handoff in receipts.items():"
+        }
+      ],
+      "expect": "rejected proof material does not create a shared-interface decision"
+    },
+    {
+      "test": "test_online_handoff_verdicts",
+      "name": "independent reviewer: p4_any_prerequisite_releases_receipt",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            ready = sorted(name for name in pending if set(by_id[name].depends_on) <= verdicts.keys())",
+          "new": "            ready = sorted(name for name in pending if not by_id[name].depends_on or set(by_id[name].depends_on) & verdicts.keys())"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_nested_ownership_and_parallelism",
+      "name": "independent reviewer: p5_one_way_seriality_check",
+      "edits": [
+        {
+          "file": "ownership.py",
+          "old": "                if left not in prerequisites[right] and right not in prerequisites[left]:",
+          "new": "                if left not in prerequisites[right]:"
+        }
+      ],
+      "expect": "serial dependency works in either lexical owner direction"
+    },
+    {
+      "test": "test_evidence_isolation_roundtrip",
+      "name": "independent: trim newline bytes while reading evidence",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "return (self.root / _encode(unit) / _encode(name)).read_bytes()",
+          "new": "return (self.root / _encode(unit) / _encode(name)).read_bytes().rstrip(b\"\\n\")"
+        }
+      ],
+      "expect": "trailing newline bytes remain evidence"
+    },
+    {
+      "test": "test_material_handoff_integration",
+      "name": "independent: a missing exit code defaults to success",
+      "edits": [
+        {
+          "file": "integrate.py",
+          "old": "handoff.proof.exit_code != 0",
+          "new": "(handoff.proof.exit_code or 0) != 0"
+        }
+      ],
+      "expect": "missing proof exit status is not success"
+    },
+    {
+      "test": "test_material_handoff_integration",
+      "name": "independent: negative worker summary vetoes valid material proof",
+      "edits": [
+        {
+          "file": "integrate.py",
+          "old": "or not handoff.proof.output.strip():",
+          "new": "or not handoff.proof.output.strip() or not handoff.claimed_passed:"
+        }
+      ],
+      "expect": "material proof remains authoritative when the worker summary is negative"
+    },
+    {
+      "test": "test_online_handoff_verdicts",
+      "name": "independent: online verdict checks exit but skips scope review",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "else review_handoff(by_id[name], handoff)",
+          "new": "else (None if handoff.proof.exit_code == 0 else \"proof\")"
+        }
+      ],
+      "expect": "online integration reviews scope as well as proof exit"
+    },
+    {
+      "test": "test_nested_ownership_and_parallelism",
+      "name": "independent: collect prefix owners before descent but omit exact terminal",
+      "edits": [
+        {
+          "file": "ownership.py",
+          "old": "        for part in claim_parts(path):\n            node = node[\"children\"].get(part)\n            if node is None:\n                break\n            names.update(node[\"owners\"])",
+          "new": "        for part in claim_parts(path):\n            names.update(node[\"owners\"])\n            node = node[\"children\"].get(part)\n            if node is None:\n                break"
+        }
+      ],
+      "expect": "an exact file claim is an owner too"
+    },
+    {
+      "test": "test_nested_ownership_and_parallelism",
+      "name": "independent: keep only the first parallel partner per owner",
+      "edits": [
+        {
+          "file": "ownership.py",
+          "old": "                    conflicts.add((path, left, right))",
+          "new": "                    conflicts.add((path, left, right))\n                    break"
+        }
+      ],
+      "expect": "report every simultaneous owner pair on the same file"
+    },
+    {
+      "test": "test_evidence_isolation_roundtrip",
+      "name": "provided codec guard: case-sensitive Base64 aliases opaque names on case-insensitive filesystems",
+      "edits": [
+        {
+          "file": "evidence.py",
+          "old": "return base64.b32encode(value.encode(\"utf-8\")).decode(\"ascii\").rstrip(\"=\")",
+          "new": "return base64.urlsafe_b64encode(value.encode(\"utf-8\")).decode(\"ascii\").rstrip(\"=\")"
+        },
+        {
+          "file": "evidence.py",
+          "old": "return base64.b32decode(value + \"=\" * (-len(value) % 8)).decode(\"utf-8\")",
+          "new": "return base64.urlsafe_b64decode(value + \"=\" * (-len(value) % 4)).decode(\"utf-8\")"
+        }
+      ],
+      "expect": "opaque name encodings stay distinct after case folding"
+    }
+  ]
+}
