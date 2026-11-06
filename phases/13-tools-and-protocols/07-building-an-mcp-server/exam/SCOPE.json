@@ -14,17 +14,18 @@
       "part": 1,
       "test": "test_dispatch_contract",
       "kind": "debug",
-      "lesson_anchor": "Request validation; Resources; Prompts; Every successful result is typed; code/main.py dispatch and complete, code/main.ts isValidRequestId",
+      "lesson_anchor": "Request validation; Resources; Prompts; Every successful result is typed; code/main.py dispatch and complete, code/main.ts isValidRequestId; The modern dispatch loop: identify notifications before request validation and never respond",
       "planted_bugs": [
         "note_id_from_uri uses str.lstrip('notes://'), which strips a set of characters; it surfaces two calls up as -32602 Resource not found for a note that exists",
         "complete() defaults cache_scope to public, against its docstring, so resources/read marks a user's note public",
         "handle_prompts_get adds ttlMs and cacheScope, although only discovery, list and read results are cacheable",
-        "valid_request_id uses isinstance(value, (int, str)): True passes and is echoed, and integers beyond ±(2**53 - 1) pass although the TypeScript port rejects them",
+        "handle answers an id-less notification with a missing-id JSON-RPC error instead of returning no response before request validation",
         "MemoryNotes.create scans every id for the maximum, O(n) per create, and reuses the newest id after it is deleted"
       ],
       "timing_assert": "7000 creates under 0.12 s (the scanning version takes about 1.5 s, the counter about 3 ms)",
-      "overfix_guard": "after deleting a middle note and the newest note, two new notes get ids never issued before, which rules out len(notes) + 1 and recomputing the maximum on delete; tools/list stays public, which rules out making every cacheable result private; an error for a request with a valid id carries that id, which rules out sending every error with a null id",
-      "deviation": "The suggested design put id generation in exec_notes_create; it sits in MemoryNotes.create because tools/call is Part 3's work and stays unimplemented in the starter. A fifth defect (lstrip) was added so that one failure surfaces away from its root cause. The timing uses 7000 creates instead of 20000, because the quadratic scan at 20000 would take over 10 seconds."
+      "overfix_guard": "after deleting a middle note and the newest note, two new notes get ids never issued before, which rules out len(notes) + 1 and recomputing the maximum on delete; tools/list stays public, which rules out making every cacheable result private; an error for a request with a valid id carries that id, which rules out sending every error with a null id; supplied id checks preserve bool rejection, safe-integer endpoints and error-id correlation. Notifications remain unanswered for a known method, unknown method and malformed params; present id 0 or an empty string is still a request.",
+      "deviation": "Id generation belongs to MemoryNotes.create because tools/call is Part 3 work. URI extraction gives a failure two calls from its root cause; the five debugging defects include notification dispatch. The timing uses 7000 ordinary creates so the quadratic scan stays within roughly three seconds.",
+      "implementation_boundary": "valid_request_id is fully supplied: bool is not an integer and integer ids obey the JavaScript safe range. Candidate repairs URI extraction, cache scope, prompt cache hints, notification dispatch and monotonic note identities."
     },
     {
       "part": 2,
@@ -32,17 +33,55 @@
       "kind": "model and persistence",
       "lesson_anchor": "The Problem: the application keeps durable notes; Resources: notes:// URIs that clients cache",
       "exactness": "each body file holds exactly the body's UTF-8 bytes (CRLF, lone CR, trailing spaces, no final newline, empty body, emoji); titles, tags and a None owner come back unchanged after a reopen",
-      "traps": ["text-mode read turns CRLF and CR into LF", "strip() on the body or title", "a newline or BOM added to the body file", "no file for an empty body", "owner None stored as a string", "counter kept in memory or rebuilt from the surviving files", "file-name order puts note-10 before note-2", "FileNotFoundError instead of KeyError", "delete that leaves the metadata or the body behind"],
-      "clarifying_questions": ["body encoding", "caching notes in memory", "counter file format", "gaps in the numbering"]
+      "traps": [
+        "text-mode read turns CRLF and CR into LF",
+        "strip() on the body or title",
+        "a newline or BOM added to the body file",
+        "no file for an empty body",
+        "owner None stored as a string",
+        "counter kept in memory or rebuilt from the surviving files",
+        "file-name order puts note-10 before note-2",
+        "FileNotFoundError instead of KeyError",
+        "delete that leaves the metadata or the body behind"
+      ],
+      "clarifying_questions": [
+        "body encoding",
+        "caching notes in memory",
+        "counter file format",
+        "gaps in the numbering"
+      ]
     },
     {
       "part": 3,
       "test": "test_tool_call_errors",
       "kind": "core algorithm",
       "lesson_anchor": "Tools: JSON-RPC error versus isError, annotations are hints; Exercise 3: notes_delete with authorization inside the executor",
-      "traps": ["non-object arguments answered as a tool error", "arguments: null taken as omitted", "missing arguments rejected", "schema violations answered as -32602", "no type check, so the executor raises", "exclusive minimum or maximum", "unlisted arguments rejected", "unknown tool answered as a protocol error", "principal taken from clientInfo", "anonymous caller matches a note nobody owns", "only anonymous callers refused, so a signed-in caller deletes a note nobody owns", "delete before the owner check", "KeyError for a missing note escapes as -32603", "except Exception turns an outage into a tool result", "exception text in the -32603 data", "-32603 raised without a log entry"],
+      "traps": [
+        "non-object arguments answered as a tool error",
+        "arguments: null taken as omitted",
+        "missing arguments rejected",
+        "schema violations answered as -32602",
+        "no type check, so the executor raises",
+        "exclusive minimum or maximum",
+        "unlisted arguments rejected",
+        "unknown tool answered as a protocol error",
+        "principal taken from clientInfo",
+        "anonymous caller matches a note nobody owns",
+        "only anonymous callers refused, so a signed-in caller deletes a note nobody owns",
+        "delete before the owner check",
+        "KeyError for a missing note escapes as -32603",
+        "except Exception turns an outage into a tool result",
+        "exception text in the -32603 data",
+        "-32603 raised without a log entry"
+      ],
       "integration": "an OSError from the store reaches the client as -32603 with no internal path, and the path reaches the server log",
-      "clarifying_questions": ["missing arguments", "unknown tool", "boolean limit", "who the principal is", "who may delete the sample notes"]
+      "clarifying_questions": [
+        "missing arguments",
+        "unknown tool",
+        "boolean limit",
+        "who the principal is",
+        "who may delete the sample notes"
+      ]
     },
     {
       "part": 4,
@@ -50,17 +89,58 @@
       "kind": "streaming",
       "lesson_anchor": "The modern dispatch loop: stdio rules (only JSON-RPC on stdout, diagnostics on stderr, one line per message, flush, exit at EOF)",
       "wire_format": "newline-delimited compact JSON-RPC on stdout, decided by the test's split(b'\\n') and json.loads per line; diagnostics on stderr",
-      "traps": ["chunks decoded one at a time", "str.splitlines() framing breaks on U+2028", "one line per chunk", "empty chunk taken as end of input", "unterminated last line dropped", "blank lines tested without strip()", "only JSONDecodeError caught for invalid UTF-8", "undecodable bytes replaced", "non-object JSON handed to the server", "pretty-printed responses", "diagnostics on stdout", "nothing on stderr", "flushed only at the end or once per chunk", "a chunk's lines all handled before their responses are written", "whole input read before answering", "principal dropped", "waiting after the input ends"],
-      "clarifying_questions": ["unterminated last line", "batches", "stderr format", "a lone CR"],
-      "deviation": "Notifications are left out of the stream, so 'no reply to a notification' is not a trap here (lessons 06 and 31 cover it)."
+      "traps": [
+        "chunks decoded one at a time",
+        "str.splitlines() framing breaks on U+2028",
+        "one line per chunk",
+        "empty chunk taken as end of input",
+        "unterminated last line dropped",
+        "blank lines tested without strip()",
+        "only JSONDecodeError caught for invalid UTF-8",
+        "undecodable bytes replaced",
+        "non-object JSON handed to the server",
+        "pretty-printed responses",
+        "diagnostics on stdout",
+        "nothing on stderr",
+        "flushed only at the end or once per chunk",
+        "a chunk's lines all handled before their responses are written",
+        "whole input read before answering",
+        "principal dropped",
+        "waiting after the input ends"
+      ],
+      "clarifying_questions": [
+        "unterminated last line",
+        "batches",
+        "stderr format",
+        "a lone CR"
+      ],
+      "deviation": "The stream reuses Part 1 handle for the notification/request distinction; transport framing is its own candidate task. Its input fixtures focus on requests rather than repeating the notification rule."
     },
     {
       "part": 5,
       "test": "test_dual_era_connections",
       "kind": "per-connection state machine",
       "lesson_anchor": "Explicit legacy compatibility; Exercise 5: a separate 2025-11-25 adapter that modern requests never enter",
-      "traps": ["initialize checked before modern metadata", "connection state checked before modern metadata", "modern only when version and capabilities are both present", "modern only when the version key is present", "any _meta taken as modern, so a legacy progressToken breaks the request", "missing capabilities filled from the handshake", "legacy results keep resultType, ttlMs, cacheScope or the serverInfo stamp", "server/discover served on the legacy door", "one handshake flag for the whole server", "initialize echoes the requested version", "state recorded before the handshake is validated", "close() keeps the handshake, forgets every connection, or raises for a connection that never shook hands"],
-      "clarifying_questions": ["waiting for notifications/initialized", "unsupported requested version", "a second initialize", "close() on a connection without a handshake"],
+      "traps": [
+        "initialize checked before modern metadata",
+        "connection state checked before modern metadata",
+        "modern only when version and capabilities are both present",
+        "modern only when the version key is present",
+        "any _meta taken as modern, so a legacy progressToken breaks the request",
+        "missing capabilities filled from the handshake",
+        "legacy results keep resultType, ttlMs, cacheScope or the serverInfo stamp",
+        "server/discover served on the legacy door",
+        "one handshake flag for the whole server",
+        "initialize echoes the requested version",
+        "state recorded before the handshake is validated",
+        "close() keeps the handshake, forgets every connection, or raises for a connection that never shook hands"
+      ],
+      "clarifying_questions": [
+        "waiting for notifications/initialized",
+        "unsupported requested version",
+        "a second initialize",
+        "close() on a connection without a handshake"
+      ],
       "deviation": "The lesson has no natural tree or DAG, so Part 5 is the state machine of a dual-era server: one handshake state per connection, beside a stateless modern core. notifications/initialized is sent but its reply is not asserted."
     }
   ]

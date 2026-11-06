@@ -31,7 +31,7 @@ def rpc_error(request_id: int | str | None, code: int, message: str, data: Any =
 
 
 def valid_request_id(value: Any) -> bool:
-    """A request id is a string or an integer, and a bool does not count as an integer.
+    """Supplied id boundary: strings or integers, with bool excluded.
 
     Integers must lie within ±(2**53 - 1): the TypeScript port keeps ids in JavaScript
     numbers, and both servers have to accept exactly the same ids.

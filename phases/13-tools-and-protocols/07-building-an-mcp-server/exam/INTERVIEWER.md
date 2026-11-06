@@ -43,11 +43,11 @@
 1. `note_id_from_uri` 用了 `str.lstrip("notes://")`。lstrip 去掉的是一组字符，不是前缀，`notes://note-4` 会变成 `-4`。错误在两层调用之外报出来：测试看到 resources/read 返回 -32602 Resource not found，而那条笔记刚刚建好。
 2. `complete()` 的 `cache_scope` 默认值写成了 "public"，和 docstring 写的 "private" 不一致。resources/read 没传 scope，用户的笔记就成了 public。只在 resources/read 里补一个 `cache_scope="private"` 也能过，但默认值仍然和 docstring 矛盾，下一个忘了传 scope 的 handler 又会公开缓存，算凑测试。
 3. `handle_prompts_get` 照抄了 prompts/list 的写法，带上了 ttlMs 和 cacheScope。课里说 prompts/get 的结果是 complete，但它不是要带缓存提示的结果。
-4. `valid_request_id` 用 `isinstance(value, (int, str))`：bool 是 int 的子类，True 会被当成合法 id 照样回显；Python 的 int 没有上限，2**53 也会被接受，而 TS 版用 `Number.isSafeInteger` 拒绝它。这个 helper 同时决定校验结果和错误响应里回显的 id，只在 validate_request 里内联修一处的话，错误响应仍然回显 True。
+4. `handle` 把缺少 id 的通知回答成 -32600。课里的分派顺序先识别通知，再校验请求；通知不产生响应，已知方法、未知方法和参数不合法都一样。不能用 id 的真假判断通知：空字符串和 0 都是合法请求 id。`valid_request_id` 已完整给定，bool 与安全整数范围由其护栏检查。
 5. `MemoryNotes.create` 每次扫一遍所有 id 求最大值，7000 次创建要 1.5 秒左右。它还有第二个问题：删掉最新的一条以后，下一条会复用它的 id，和 docstring 不一致。
 6. 护栏一：改成 `len(notes) + 1` 很快，但删过一条以后，新 id 会撞上一条还在的笔记并把它覆盖；删除时重新计算最大值也会复用 id。测试删掉中间一条和最新一条，再建两条，新 id 不能是发过的任何一个。
 7. 护栏二：tools/list 的 cacheScope 必须仍然是 public。“把所有可缓存结果都改成 private” 这种一刀切的修法过不了。
-8. 护栏三：合法 id 的错误响应要带回这个 id。只在 validate_request 里内联修 id 校验，再把 `handle` 里的错误 id 一律改成 null，True 那条断言能过，但正常请求的错误也丢了 id，客户端没法把错误对回请求。测试读一条不存在的笔记，要求 -32602 的响应带着原来的 id。
+8. 护栏三：合法 id 的错误响应仍带回请求 id，只有拒绝 id 本身时才用 null。类型化 id helper 已给对；id=0 和空字符串的请求必须回答，不能与缺少 id 的通知混淆。
 
 看什么：是不是先打印错误响应、顺着 handler 往下找；会不会在 REPL 里试一下 `"notes://note-4".lstrip("notes://")`；每改一处就重跑。
 

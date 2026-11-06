@@ -65,7 +65,7 @@ class NotesServer:
         is sent with a null id: the server never echoes an id it rejected.
         """
         if "id" not in message:
-            return None
+            return rpc_error(None, -32600, "Request id required")
         request_id = message["id"]
         error_id = request_id if valid_request_id(request_id) else None
         try:

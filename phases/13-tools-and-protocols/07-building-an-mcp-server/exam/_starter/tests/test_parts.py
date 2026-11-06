@@ -51,11 +51,13 @@ def test_dispatch_contract() -> None:
         message = req(4, "tools/list")
         message["id"] = bad
         response = server.handle(message)
+        assert isinstance(response, dict), "explicit id fields receive responses even when invalid"
         assert response.get("error", {}).get("code") == -32600 and response["id"] is None, (
             f"id {bad!r} is not a string or a safe integer: -32600 with a null id"
         )
     for good in ("", "req-7", 0, 2**53 - 1, -(2**53 - 1)):
         response = server.handle(req(good, "tools/list"))
+        assert isinstance(response, dict), "present request ids receive responses"
         assert "result" in response and response["id"] == good and type(response["id"]) is type(good), (
             f"id {good!r} is valid and comes back unchanged"
         )
@@ -63,6 +65,14 @@ def test_dispatch_contract() -> None:
     assert missing.get("error", {}).get("code") == -32602 and missing["id"] == "req-8", (
         "an error answers a request with a valid id, so it carries that id"
     )
+
+    notifications = [
+        {"jsonrpc": "2.0", "method": "tools/list", "params": {"_meta": META}},
+        {"jsonrpc": "2.0", "method": "not/a/method", "params": {"_meta": META}},
+        {"jsonrpc": "2.0", "method": "tools/list", "params": ["not an object"]},
+    ]
+    for notice in notifications:
+        assert server.handle(notice) is None, "notifications receive no response before request validation"
 
     notes = MemoryNotes()
     start = time.perf_counter()

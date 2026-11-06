@@ -10,7 +10,7 @@ You need Python 3.10+ and pytest (`python -m pip install pytest`). Run `python -
 
 ## Pt 1 `test_dispatch_contract`
 
-Comment out `@pytest.mark.skip("Part 1")`, run pytest, and work out why the server fails.
+Comment out `@pytest.mark.skip("Part 1")`, run pytest, and trace request dispatch, result cache hints and note identities.
 
 ## Pt 2 `test_note_dir_roundtrip`
 

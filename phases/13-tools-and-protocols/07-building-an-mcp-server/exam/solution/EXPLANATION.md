@@ -12,7 +12,7 @@
 
 1. `complete()` 的 `cache_scope` 默认值改回 "private"，和 docstring 一致。resources/read 只传了 ttl_ms，靠的就是这个默认值；用户的笔记不能让共享缓存跨授权上下文复用。
 2. `handle_prompts_get` 去掉 `ttl_ms` 和 `cache_scope`。课里说只有 discovery、list 和 read 是可缓存结果，prompts/get 的结果是 complete，但不带缓存提示。
-3. `valid_request_id` 改成：字符串都合法；整数要满足 `type(value) is int`，并且在 ±(2**53 − 1) 之内。bool 是 int 的子类，`isinstance(True, int)` 为真；上限来自 TS 版的 `Number.isSafeInteger`，两个实现要接受同一组 id。校验和错误响应里回显哪个 id，用的是同一个 helper，所以修 helper 一处就够了；只在 `validate_request` 里内联一个新判断，错误响应仍然会把 True 原样发回去。
+3. `handle` 先用 `"id" not in message` 判断通知并返回 None，再读取 id、校验和分派请求。已知方法、未知方法或不合法参数都不让通知获得响应。不要用 `not message.get("id")`：0 和空字符串是真实请求。`valid_request_id` 已给定并严格排除 bool、限制安全整数范围，错误响应继续使用同一 helper 决定回显 id。
 4. `MemoryNotes.create` 用一个计数器 `self._next`，不再每次扫描所有 id 求最大值。扫描是每次 O(n)，7000 次创建要 1.5 秒左右；它还会在删掉最新一条以后把那个 id 再发一次，和 docstring 不一致。
 
 **护栏**：提速最省事的写法是 `len(notes) + 1`。删掉一条以后，它算出的 id 是一条还在的笔记的 id，新笔记会把那条覆盖掉。删除时重新算一遍最大值也不行，删掉最新的一条就会复用它的 id。测试删掉中间一条和最新一条再建两条，两种写法都过不了。另一个护栏是 tools/list 的 cacheScope 仍然是 public：把所有可缓存结果一律改成 private 能让 resources/read 过关，但工具定义本来就该公开缓存。第三个护栏读一条不存在的笔记，-32602 的响应必须带着请求自己的 id。把 `handle` 里所有错误的 id 都改成 null，也能让 True 那条断言通过，但 JSON-RPC 要求错误响应带回请求的 id，只有 id 本身不合法时才用 null。
