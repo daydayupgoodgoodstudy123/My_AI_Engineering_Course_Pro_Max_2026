@@ -428,7 +428,7 @@
       "name": "the log opened for writing, which truncates it",
       "edits": [
         {
-          "file": "audit.py",
+          "file": "audit_io.py",
           "old": "        self._file = self.path.open(\"a\", encoding=\"utf-8\")\n",
           "new": "        self._file = self.path.open(\"w\", encoding=\"utf-8\")\n"
         }
@@ -440,7 +440,7 @@
       "name": "no flush after each event",
       "edits": [
         {
-          "file": "audit.py",
+          "file": "audit_io.py",
           "old": "        self._file.flush()\n",
           "new": ""
         }
@@ -452,7 +452,7 @@
       "name": "events pretty-printed over several lines",
       "edits": [
         {
-          "file": "audit.py",
+          "file": "audit_io.py",
           "old": "        self._file.write(json.dumps(stored) + \"\\n\")\n",
           "new": "        self._file.write(json.dumps(stored, indent=1) + \"\\n\")\n"
         }
@@ -465,8 +465,8 @@
       "edits": [
         {
           "file": "audit.py",
-          "old": "        self._file.write(json.dumps(stored) + \"\\n\")\n",
-          "new": "        self._file.write(json.dumps({**event, \"seq\": stored[\"seq\"]}) + \"\\n\")\n"
+          "old": "        return self.append(redact(event))\n",
+          "new": "        stored = self.append(event)\n        return {**redact(event), \"seq\": stored[\"seq\"]}\n"
         }
       ],
       "expect": "no secret reaches the disk"
@@ -613,7 +613,7 @@
       "name": "lines split on every Unicode line break",
       "edits": [
         {
-          "file": "audit.py",
+          "file": "audit_io.py",
           "old": "        return [line for line in text.split(\"\\n\") if line]\n",
           "new": "        return [line for line in text.splitlines() if line]\n"
         }
@@ -625,7 +625,7 @@
       "name": "numbering starts again at every open",
       "edits": [
         {
-          "file": "audit.py",
+          "file": "audit_io.py",
           "old": "        self._count = len(self.events())\n",
           "new": "        self._count = 0\n"
         }
@@ -637,7 +637,7 @@
       "name": "events read back in time order",
       "edits": [
         {
-          "file": "audit.py",
+          "file": "audit_io.py",
           "old": "        return [json.loads(line) for line in self._lines()]\n",
           "new": "        return sorted((json.loads(line) for line in self._lines()), key=lambda event: event[\"ts\"])\n"
         }
@@ -649,9 +649,9 @@
       "name": "request ids stored as strings",
       "edits": [
         {
-          "file": "audit.py",
-          "old": "        stored = {**redact(event), \"seq\": self._count + 1}\n",
-          "new": "        stored = {**redact(event), \"seq\": self._count + 1}\n        if \"request_id\" in stored:\n            stored[\"request_id\"] = str(stored[\"request_id\"])\n"
+          "file": "audit_io.py",
+          "old": "        stored = {**copy.deepcopy(event), \"seq\": self._count + 1}\n",
+          "new": "        stored = {**copy.deepcopy(event), \"seq\": self._count + 1}\n        if \"request_id\" in stored:\n            stored[\"request_id\"] = str(stored[\"request_id\"])\n"
         }
       ],
       "expect": "an event is stored as given"
@@ -661,9 +661,9 @@
       "name": "latency rounded to the microsecond",
       "edits": [
         {
-          "file": "audit.py",
-          "old": "        stored = {**redact(event), \"seq\": self._count + 1}\n",
-          "new": "        stored = {**redact(event), \"seq\": self._count + 1}\n        if isinstance(stored.get(\"latency_ms\"), float):\n            stored[\"latency_ms\"] = round(stored[\"latency_ms\"], 3)\n"
+          "file": "audit_io.py",
+          "old": "        stored = {**copy.deepcopy(event), \"seq\": self._count + 1}\n",
+          "new": "        stored = {**copy.deepcopy(event), \"seq\": self._count + 1}\n        if isinstance(stored.get(\"latency_ms\"), float):\n            stored[\"latency_ms\"] = round(stored[\"latency_ms\"], 3)\n"
         }
       ],
       "expect": "reads back every event exactly"
@@ -673,17 +673,17 @@
       "name": "events served from memory instead of the file",
       "edits": [
         {
-          "file": "audit.py",
+          "file": "audit_io.py",
           "old": "        self._file = self.path.open(\"a\", encoding=\"utf-8\")\n",
           "new": "        self._file = self.path.open(\"a\", encoding=\"utf-8\")\n        self._seen: list = []\n"
         },
         {
-          "file": "audit.py",
+          "file": "audit_io.py",
           "old": "        self._count += 1\n",
           "new": "        self._count += 1\n        self._seen.append(stored)\n"
         },
         {
-          "file": "audit.py",
+          "file": "audit_io.py",
           "old": "        return [json.loads(line) for line in self._lines()]\n",
           "new": "        if hasattr(self, '_seen'):\n            return list(self._seen)\n        return [json.loads(line) for line in self._lines()]\n"
         }
@@ -719,7 +719,7 @@
       "name": "existing events counted with str.splitlines()",
       "edits": [
         {
-          "file": "audit.py",
+          "file": "audit_io.py",
           "old": "        self._count = len(self.events())\n",
           "new": "        self._count = len(self.path.read_text(encoding=\"utf-8\").splitlines())\n"
         }
@@ -1824,6 +1824,54 @@
         }
       ],
       "expect": "one tree per call"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "an old audit-field allowlist drops MRTR and descriptor/source evidence",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    stored = copy.deepcopy(event)\n",
+          "new": "    stored = {key: copy.deepcopy(value) for key, value in event.items() if key in ('kind', 'ts', 'principal', 'issuer', 'trace_id', 'request_id', 'method', 'tool', 'task_id', 'state_in', 'state_out', 'decision', 'reason', 'policy_version', 'path', 'headers', 'arguments', 'inputResponses', 'backend', 'backend_request_id', 'result', 'error', 'latency_ms')}\n"
+        }
+      ],
+      "expect": "one audit projection preserves MRTR, task, error, denial and source metadata while redacting only secrets"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "a task result loses its opaque task identifier",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    stored = copy.deepcopy(event)\n",
+          "new": "    stored = copy.deepcopy(event)\n    if stored.get(\"task_id\") is not None:\n        stored.pop(\"task_id\")\n"
+        }
+      ],
+      "expect": "one audit projection preserves MRTR, task, error, denial and source metadata while redacting only secrets"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "outer protocol errors lose their structured refusal data",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    stored = copy.deepcopy(event)\n",
+          "new": "    stored = copy.deepcopy(event)\n    if isinstance(stored.get(\"error\"), dict):\n        stored[\"error\"] = {key: value for key, value in stored[\"error\"].items() if key in (\"code\", \"message\")}\n"
+        }
+      ],
+      "expect": "one audit projection preserves MRTR, task, error, denial and source metadata while redacting only secrets"
+    },
+    {
+      "test": "test_audit_log",
+      "name": "source server metadata reduced to a display name without its version",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    stored = copy.deepcopy(event)\n",
+          "new": "    stored = copy.deepcopy(event)\n    if isinstance(stored.get(\"result_meta\"), dict):\n        for value in stored[\"result_meta\"].values():\n            if isinstance(value, dict):\n                value.pop(\"version\", None)\n"
+        }
+      ],
+      "expect": "one audit projection preserves MRTR, task, error, denial and source metadata while redacting only secrets"
     }
   ]
 }

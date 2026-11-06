@@ -33,21 +33,21 @@ while calls and calls[0] <= now - self.window_s:
 
 **护栏**：窗口按 (principal, issuer, resource, 工具, 成本类别) 分开，为了提速合成一个全局窗口、或者像本课代码那样只按 principal，都会挂；另一个 issuer 下的同名 alice 是另一个人。语义是滑动窗口：一次放行的调用在 t + window_s 时不再计数，被拒绝的调用不计数，时间来自网关的时钟。换成本课 `TokenBucket` 那样的令牌桶（容量 3，每 60 秒补满），30 秒后已经补出 1.5 个令牌，会放进一次调用，和这里的窗口语义不同。
 
-## Part 2 审计日志
+## Part 2 单条审计证据与脱敏
 
-参考实现是一个追加写的 JSONL 文件，打开时数一下已有的事件，之后每条 `record` 都是：脱敏、编号、写一行、flush。
+`AuditLog.record` 已给出，先调用候选人的 `redact(event)`，再把结果交给正确的 `JsonlAuditSink`。sink 负责编号、追加、flush、读取和关闭；它接收的只能是已经投影脱敏的事件。
 
 ```python
-stored = {**redact(event), "seq": self._count + 1}
-self._file.write(json.dumps(stored) + "\n")
-self._file.flush()
+return self.append(redact(event))
 ```
+
+这里的投影只看一条已经组装好的应用审计事件，不查其他行。MRTR、task、outer error、authorization deny 四类夹具分别要求留下 round、状态摘要、task_id、结构化拒绝信息和 decision/reason；每条还保留 descriptor pin 版本以及原样的 request/result metadata。`mrtr_round`、`descriptor_pin`、`request_meta`、`result_meta` 是应用审计字段；metadata 的值来自协议里的 protocolVersion/clientInfo/serverInfo，没有定义新的 MCP 属性。Part 5 才负责跨事件连接。
 
 `redact` 先 deepcopy，所以调用方的 dict 不受影响；`headers` 变成排好序的头名列表；`arguments` 和 `inputResponses` 递归穿过 dict 和 list，键名小写以后在 SECRET_KEYS 里的，值整个换成 `"[redacted]"`，值是 dict 或 list 也一样，不再往里走。别的字段原样保留，网关自己记的 `error.code` 不能被当成 OAuth 授权码抹掉。
 
 容易漏的几点：
 
-- **追加和 flush**：`"w"` 会清掉别的副本写的行；不 flush 的话，`record` 返回以后磁盘上还没有这一行。
+- **给定 sink 的追加和 flush 护栏**：`"w"` 会清掉别的副本写的行；不 flush 的话，`record` 返回以后磁盘上还没有这一行。
 - **先脱敏再写**：秘密只要写到磁盘上一次就算泄漏了，事后删不干净。
 - **只按 `\n` 切行**：`json.dumps` 默认把 U+2028 转义，所以自己写的行没问题；但别的副本可能用 `ensure_ascii=False` 写，原样的 U+2028 会被 `splitlines()` 当成换行。
 - **seq**：是事件在文件里的位置，打开时接着已有的事件往下编。Part 5 靠它在时间相同时定顺序。

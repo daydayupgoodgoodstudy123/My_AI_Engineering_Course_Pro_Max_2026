@@ -18,6 +18,9 @@
 | 1 | 被拒绝的请求算不算进限流？ | "Not against this quota. Only calls the policy allows spend a unit. An abuse limit on refused calls would be a separate limiter, and it isn't in scope." |
 | 1 | 窗口在正好 window_s 的时候还算吗？ | "No. A call allowed at t stops counting at t + window_s, as the docstring says." |
 | 1 | 网关没有某个后端的凭证怎么办？ | "That backend is never called. `_credential` already says so." |
+| 2 | mrtr_round 和 request_meta 是新的 MCP 字段吗？ | "No. They are this exercise’s audit fields. Preserve the captured values; do not add wire fields." |
+| 2 | error.code 也算授权码吗？ | "No. It is protocol evidence. Redact code only under arguments and inputResponses." |
+| 2 | 要查其他事件把调用拼起来吗？ | "No. Project one event. Part 5 reconstructs calls across events." |
 | 2 | 头名要规范成小写吗？ | "No. Keep the names as they arrived, sorted." |
 | 2 | 自由文本里出现的 Bearer token 也要脱敏吗？ | "Not here. Header values, and the SECRET_KEYS keys under arguments and inputResponses." |
 | 2 | 每条都要 fsync 吗？ | "Flush is enough for the tests. Tell me what fsync would add." |
@@ -76,12 +79,15 @@
 - "Should refused calls count against something?"（业务额度不该被拒绝的调用花掉；另设一个滥用限额，把被拒绝和畸形的请求都算进去，防止有人无限试探工具名）
 - "Three gateway replicas behind a load balancer. Where does the window live?"（共享存储，原子的“检查并追加”，比如 Redis 的有序集合加脚本；或者按 key 一致性哈希到同一个副本。会话 id 不能当键：现在没有会话，有也可以随便换）
 
-### Part 2 审计日志（目标 12 分钟）
+### Part 2 单条审计证据与脱敏（目标 12 分钟）
 
 坑：
 
-- 打开文件要用追加模式。`"w"` 会把别的副本已经写进去的那一行清掉。
-- 每条事件写完就 flush。测试在 `record` 返回后、`close` 之前直接读磁盘上的字节。
+- 一条事件要留下完整协议和策略证据。MRTR round、状态摘要、任务 id、descriptor pin 版本、调用方/后端 request id、trace、principal/issuer、route、decision/reason、latency/result 以及捕获的 request/result metadata 都不能被“只保留少数固定字段”的重建丢掉。
+- task_id 是任务关联证据；outer error 的 code 和 data.requiredCapabilities 是协议拒绝证据，不是 arguments.code 那种授权码。只留 error 的 code/message，会丢掉拒绝要求；对整条事件递归脱敏，会误擦协议码。
+- `mrtr_round`、`descriptor_pin`、`request_meta`、`result_meta` 是本练习的应用审计字段，不是新 MCP 属性。metadata 的值来自真实 protocolVersion/clientInfo/serverInfo；保存完整结构，不能只留 server 的显示名。
+- JSONL sink 和 AuditLog 调用 wrapper 已正确给出：先做 redact 投影，再 append/flush。候选人不再实现文件缓冲；追加、flush、编号和读回的断言与错误修法保护给定 sink。
+- 给定 sink 用追加模式，不能换成清空文件的 `"w"`；每条事件写完 flush，`record` 返回后、`close` 前直接读磁盘可见。
 - 先脱敏再写。只在返回值里脱敏、磁盘上写原始事件，会被逐个查找的秘密字符串抓住：`tok-alice-7f3a`、Cookie、`PW-5e1`、`RT-88a`、`AK-41c`、`AUTHCODE-17`。
 - 不能改调用方的事件。网关下一步还要用这些头和参数。直接在 event 上改、或者浅拷贝以后原地脱敏，都会把调用方的 dict 改掉。
 - `headers` 只留头名，用默认的 `sorted`（区分大小写）。把值换成 `[redacted]` 但保留 dict、按到达顺序列出、按小写排序，都和测试要的不一样。

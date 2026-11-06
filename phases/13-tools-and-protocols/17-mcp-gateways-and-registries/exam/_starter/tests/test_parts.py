@@ -481,6 +481,68 @@ def test_audit_log(tmp_path) -> None:
     assert [event["seq"] for event in again.events()] == [1, 2, 3, 4]
     again.close()
 
+    # Each already assembled event keeps enough evidence to understand this one hop.
+    evidence_path = tmp_path / "single-events.jsonl"
+    evidence_log = AuditLog(evidence_path)
+    common = {
+        "kind": "exchange", "ts": 1_793_525_401_000,
+        "principal": "alice", "issuer": IDP,
+        "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736", "request_id": 0,
+        "backend_request_id": "gw-mrtr-2", "method": "tools/call",
+        "tool": "notes.summarize", "backend": "notes",
+        "descriptor_pin": {"version": "2.3.0", "digest": "a" * 64},
+        "decision": "allow", "reason": "allowed", "policy_version": "v17", "path": "live",
+        "latency_ms": 0.1 + 0.2,
+        "request_meta": {PROTOCOL_META: PROTOCOL_VERSION, CLIENT_INFO_META: AGENT},
+        "result_meta": {SERVER_INFO_META: {"name": "notes-backend", "version": "2.3.0"}},
+        "headers": {"Mcp-Method": "tools/call", "Authorization": "Bearer SECRET-AUDIT17"},
+        "arguments": {"code": "SECRET-CODE17", "count": 0,
+                      "options": {"refresh_token": "SECRET-REFRESH17", "note": "keep"}},
+        "inputResponses": {"summary": {"action": "accept", "content": {
+            "code": "SECRET-ANSWER17", "items": [{"token": "SECRET-TOKEN17", "request_id": "payload-id"}]}}},
+    }
+    samples = [
+        {**copy.deepcopy(common), "result": "input_required", "mrtr_round": 2,
+         "state_in": "1" * 64, "state_out": "2" * 64, "task_id": None, "error": None},
+        {**copy.deepcopy(common), "request_id": "0", "backend_request_id": "gw-task-3",
+         "result": "task", "mrtr_round": None, "state_in": None, "state_out": None,
+         "task_id": "task-audit-17", "error": None},
+        {**copy.deepcopy(common), "request_id": 8, "backend_request_id": "gw-error-4",
+         "result": "error", "result_meta": None, "mrtr_round": None, "task_id": None,
+         "error": {"code": -32021, "message": "Missing required client capability",
+                   "data": {"requiredCapabilities": {"extensions": {TASKS_EXTENSION: {}}}}}},
+        {**copy.deepcopy(common), "kind": "decision", "request_id": 9,
+         "backend_request_id": None, "result_meta": None, "result": "refused", "latency_ms": 0.0,
+         "decision": "deny", "reason": "role", "mrtr_round": 0, "task_id": None,
+         "error": {"code": -32003, "message": "Forbidden", "data": {"tool": "notes.summarize"}}},
+    ]
+    expected_events = []
+    for number, event in enumerate(samples, start=1):
+        before = copy.deepcopy(event)
+        expected = {
+            **copy.deepcopy(event), "seq": number, "headers": ["Authorization", "Mcp-Method"],
+            "arguments": {"code": "[redacted]", "count": 0,
+                          "options": {"refresh_token": "[redacted]", "note": "keep"}},
+            "inputResponses": {"summary": {"action": "accept", "content": {
+                "code": "[redacted]", "items": [{"token": "[redacted]", "request_id": "payload-id"}]}}},
+        }
+        expected_events.append(expected)
+        assert evidence_log.record(event) == expected, (
+            "one audit projection preserves MRTR, task, error, denial and source metadata while redacting only secrets"
+        )
+        assert event == before, "projecting protocol evidence leaves the source event unchanged"
+        raw = evidence_path.read_bytes()
+        assert b"SECRET-" not in raw, "no secret in a protocol audit event reaches the given sink"
+        assert json.loads(raw.split(b"\n")[-2]) == expected, (
+            "each single-event evidence projection is readable before close"
+        )
+    evidence_log.close()
+    evidence_reopened = AuditLog(evidence_path)
+    assert evidence_reopened.events() == expected_events, (
+        "single-event protocol and policy evidence survives a reopen without type or metadata loss"
+    )
+    evidence_reopened.close()
+
     gateway_log = tmp_path / "gateway.jsonl"
     gateway, _ = build_gateway(Clock(), audit=AuditLog(gateway_log))
     status, _ = call(

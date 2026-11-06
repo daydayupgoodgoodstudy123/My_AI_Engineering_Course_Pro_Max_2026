@@ -14,7 +14,7 @@ Comment out `@pytest.mark.skip("Part 1")`, run pytest, and work out why allowed 
 
 ## Pt 2 `test_audit_log`
 
-Build the audit log.
+Project each audit event without secrets while keeping its protocol and policy evidence; the JSONL sink is provided.
 
 ## Pt 3 `test_runtime_policy`
 

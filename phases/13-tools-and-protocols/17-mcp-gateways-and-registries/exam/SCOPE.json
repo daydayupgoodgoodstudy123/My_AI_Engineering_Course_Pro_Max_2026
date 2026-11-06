@@ -28,10 +28,14 @@
       "part": 2,
       "test": "test_audit_log",
       "kind": "model and persistence",
-      "lesson_anchor": "Audit the decision chain: request and trace ids, principal and issuer, public tool and backend route, decision and reason, latency and result class, MRTR round or task id; redact bearer tokens, authorization codes, refresh tokens, raw secrets and unnecessary sensitive arguments",
+      "lesson_anchor": "Audit the decision chain: request and trace ids, principal and issuer, public tool and backend route, descriptor pin version, decision and reason, latency and result class, MRTR round or task id; redact bearer tokens, authorization codes, refresh tokens, raw secrets and unnecessary sensitive arguments; MRTR through a gateway; Tasks extension routing",
       "storage": "an append-only JSONL file, one redacted event per line, flushed per event, with a seq that continues across reopens and counts lines other replicas wrote",
       "exactness": "events read back after a reopen equal the redacted events exactly, in write order: JSON-RPC ids 7 and \"7\" stay distinct, a latency of 0.1 + 0.2 survives, None stays null, non-ASCII text survives, and another replica's line with a raw U+2028 reads back whole",
       "traps": [
+        "rebuilding an event from old known fields drops MRTR round, descriptor pin and request/result source metadata",
+        "task_id dropped from a task result, so the single event cannot identify its durable work",
+        "outer error.data.requiredCapabilities lost, or error.code mistaken for an authorization code",
+        "a source serverInfo reduced to its name so the recorded version disappears",
         "the file opened with \"w\"",
         "no flush per event",
         "pretty-printed events over several lines",
@@ -47,13 +51,16 @@
         "seq restarting at every open",
         "events sorted by ts, ids turned into strings, latency rounded, events served from memory"
       ],
-      "integration": "the Part 1 gateway writes into an AuditLog; the file holds no caller token, backend credential or api_key, and reads back as one decision and one result",
+      "integration": "the Part 1 gateway writes into an AuditLog; the file holds no caller token, backend credential or api_key, and reads back as one decision and one result; four already assembled application audit events independently retain MRTR, task, structured protocol error and authorization-denial evidence while arguments and inputResponses secrets are removed",
       "clarifying_questions": [
         "header name normalization",
         "secrets in free text",
         "fsync",
         "seq and other replicas",
-        "a torn last line"
+        "a torn last line",
+        "MRTR and source metadata field names",
+        "outer error.code versus an authorization code",
+        "joining other events during projection"
       ]
     },
     {
@@ -145,7 +152,7 @@
     "Part 1: the suggested defect order was _meta, token, rate limit, timing. The fake backend checks its credential before it reads the request, so the token defect surfaces first (a 502 carrying the backend's -32001) and the _meta defect second (the backend returns a task because it saw the caller's Tasks declaration, and the gateway's result check refuses it). The token defect is the caller's headers merged over the gateway's; handle receives the HTTP headers, Authorization included, instead of a separate bearer argument, so the outer token can actually leak.",
     "Part 1: the suggested limiter was a TokenBucket keeping a timestamp list. The lesson's sentence is 'Key limits by ... and time window', and a timestamp list is a sliding-window log, so the exam's RateLimiter is a sliding window with the lesson's key; the lesson's TokenBucket semantics are one of the wrong fixes. The suggested 50,000 calls take about 4 s quadratic on this machine, over the 3 s cap, so the timing case is 12,001 calls on one key with a 12,000-call window (about 1 s against 2 ms).",
     "Part 1: the early spend is keyed off the Mcp-Name routing header, the shortcut the lesson's header routing invites. Besides the suggested global-bucket guard, the test checks that policy-refused calls are 403 every time and that a rate-limited call is not forwarded, which fixes the place of the spend between the policy and the forward.",
-    "Part 2: the log numbers events with seq (continuing across reopens and counting other replicas' lines) so Part 5 has a tie-breaker. Redaction is by key name under arguments and inputResponses, plus header names only; the gateway never puts requestState itself into an event, only a digest.",
+    "Part 2: the log numbers events with seq (continuing across reopens and counting other replicas' lines) so Part 5 has a tie-breaker. Redaction is by key name under arguments and inputResponses, plus header names only; the gateway never puts requestState itself into an event, only a digest. The JSONL sink (audit_io.JsonlAuditSink) and AuditLog wrapper are given correctly, including append, flush, sequence numbering, exact reads and close; I/O mutation guards exercise that helper. The candidate implements the one-event redact projection, not another file sink. mrtr_round, descriptor_pin, request_meta and result_meta are application audit fields in this exercise, not added MCP wire properties. request_meta/result_meta hold captured protocolVersion/clientInfo/serverInfo values. Four standalone event fixtures retain those values plus round/task/error/denial evidence and use only the existing SECRET_KEYS lowercased exact match under arguments/inputResponses; there is no secret-key canonicalization or cross-event reconstruction.",
     "Part 3: roles come from the policy document keyed by (issuer, principal); CallContext.token_roles is a distractor, because a token outlives a revocation. 'Do not cache an allow decision per session' is tested as 'a revocation applies to the next decision'. The descriptor pin, admission and health are boolean inputs, since pins and registry admission belong to lessons 15 and 30.",
     "Part 4: backends hand the relay parsed JSON-RPC messages (SSE decoding is lesson 09's Part 5) and the relay writes client-side SSE. The gateway gives the backend its own progress token, the backend request id, so 'id rewriting must not touch progressToken' becomes two separate mappings (token to the client's token, id to the client's id). requestState is an opaque string, so 'not re-serialized' is tested as the result passing through untouched apart from _meta, plus the backend's HMAC check on the retry. 'Task routes kept until the terminal state' is tested as routes surviving the stream's close; the route table has no expiry here.",
     "Part 5: two event kinds, decision and result, with the identity (issuer, principal, trace_id, request_id). MRTR rounds link through state digests (state_in to an earlier state_out) because the retry has a new id and the gateway cannot read requestState; task requests link through (issuer, principal, taskId) to the result that returned the task.",

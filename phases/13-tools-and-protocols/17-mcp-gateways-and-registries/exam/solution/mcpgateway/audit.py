@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 import copy
-import json
-from pathlib import Path
 from typing import Any
+
+from .audit_io import JsonlAuditSink
 
 SECRET_KEYS = frozenset(
     {
@@ -42,7 +42,15 @@ def redact(event: dict[str, Any]) -> dict[str, Any]:
     - "headers" keeps only the header names, sorted; no header value is stored.
     - In "arguments" and "inputResponses", at any depth through dicts and lists, the
       value of every key whose lowercased name is in SECRET_KEYS becomes "[redacted]".
-    Every other field is stored as it is.
+    Every other field is stored as it is, including all protocol and policy evidence:
+    request/trace/backend ids, principal/issuer, route, descriptor_pin, decision/reason,
+    policy_version/path, latency/result/error, state digests, MRTR round and task id.
+    error.code and error.data are protocol evidence, not authorization codes.
+
+    mrtr_round, descriptor_pin, request_meta and result_meta are this exercise's application
+    audit fields, not new MCP wire properties. request_meta/result_meta carry the metadata
+    already captured from the wire; preserve their keys and values without interpretation.
+    Project just this event: do not look up or join any other event.
     """
     stored = copy.deepcopy(event)
     if isinstance(stored.get("headers"), dict):
@@ -64,37 +72,14 @@ def _scrub(value: Any) -> Any:
     return value
 
 
-class AuditLog:
-    """An append-only JSONL audit log: one JSON object per line, in the order recorded.
+class AuditLog(JsonlAuditSink):
+    """Project each event before the given sink numbers, appends and flushes it.
 
-    Opening a log keeps every line already in the file, including lines other gateway
-    replicas wrote. Each recorded event is redacted first (see redact), so no secret
-    ever reaches the disk, and gets the next `seq`: the number of events in the file,
-    counting the ones already there when it was opened. An event is on disk, readable
-    by any other reader, by the time record returns.
+    The file API (construction, events and close) is provided by JsonlAuditSink. The candidate
+    implements redact: preserving useful single-event evidence while removing the specified
+    secrets. No raw event reaches the sink.
     """
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self.path.touch()
-        self._count = len(self.events())
-        self._file = self.path.open("a", encoding="utf-8")
-
     def record(self, event: dict[str, Any]) -> dict[str, Any]:
-        """Redact, number and append one event; return it as stored."""
-        stored = {**redact(event), "seq": self._count + 1}
-        self._file.write(json.dumps(stored) + "\n")
-        self._file.flush()
-        self._count += 1
-        return stored
-
-    def events(self) -> list[dict[str, Any]]:
-        """Every event in the file, in the order written, exactly as stored."""
-        return [json.loads(line) for line in self._lines()]
-
-    def close(self) -> None:
-        self._file.close()
-
-    def _lines(self) -> list[str]:
-        text = self.path.read_text(encoding="utf-8")
-        return [line for line in text.split("\n") if line]
+        """Store one projected event through the provided append-and-flush sink."""
+        return self.append(redact(event))
