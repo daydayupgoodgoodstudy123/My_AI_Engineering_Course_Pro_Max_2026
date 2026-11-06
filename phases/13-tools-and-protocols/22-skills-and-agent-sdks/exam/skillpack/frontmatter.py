@@ -67,7 +67,8 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     ---. Lines end with "\\n" or "\\r\\n". Blank lines and # comment lines are skipped. A field
     is `key: scalar`; `key: |` or `key: >` takes the indented lines below it, joined with line
     breaks or with spaces; `metadata:` with no value takes the indented `key: scalar` lines
-    below it as a one-level map. The body is everything after the closing line.
+    below it as a one-level map. A field may appear only once within its mapping, even
+    when repeated values agree. The body is everything after the closing line.
     """
     raw = split_lines(text)
     if not raw or line_content(raw[0]) != "---":
@@ -92,8 +93,6 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
         key = key.strip()
         if not FIELD_NAME.fullmatch(key):
             raise FrontmatterSyntaxError(f"invalid field name {key!r}")
-        if key in fields:
-            raise FrontmatterSyntaxError(f"duplicate field {key!r}")
         value = raw_value.strip()
         if value in {">", "|"}:
             block: list[str] = []

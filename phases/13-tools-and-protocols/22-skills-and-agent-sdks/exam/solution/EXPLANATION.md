@@ -22,7 +22,7 @@
 
 2. `decode_scalar` 的单引号分支改成 `value[1:-1].replace("''", "'")`。YAML 的单引号标量里，`''` 代表一个 `'`，本课 `code/main.py` 也是这么写的。
 3. `NAME_PATTERN` 改成 `[a-z0-9]+(?:-[a-z0-9]+)*`，配合 `fullmatch`：小写字母和数字成组，组与组之间只能有一个连字符，不能出现在两头。
-4. `name_issue` 里的目录比较去掉 `lower()`，改成 `name != directory_name`。
+4. `parse_frontmatter` 在写入任何顶层字段前检查 `key in fields`，出现过就抛 `FrontmatterSyntaxError`，不能让第二次赋值盖掉第一次。两个值相同也不行，first-wins 和 last-wins 都不是合法解析。这个检查放在标量、块标量和 metadata 分支之前；metadata 内部的重复检查本来正确，不同映射可以各有同一个键。目录的 exact 比较已经给定，不能改成 lower 或 casefold。
 5. `split_lines` 改成按位置切，不再每行复制一次剩下的文本：
 
    ```python
@@ -127,4 +127,4 @@ GUARD = re.compile(r"\b[Ii]f\s+that\s+skill\s+is\s+unavailable\b")
 
 ## 这套题证明了什么，没证明什么
 
-通过了说明你能在一个小的 frontmatter 解析器里顺着报错找到下一层的根因、按规格写出能被真实 YAML 读对的写回逻辑、按固定顺序做包校验、写一个按会话实时出结论的流式检查器，以及从正文里抽出依赖图并按轮次排序。它没有用真实的 YAML 库对拍，也没有在真正的宿主里安装、发现和调用技能。讲义开头的 Ten-Minute First Success（用 `npx skills add` 安装、显式调用、清理）需要另外动手做，而技能发现、路由、权限和评测分别是第 24 到 27 课的内容。
+通过了说明你能在一个小的 frontmatter 解析器里顺着报错找到下一层的根因、拒绝会覆盖配置的重复字段、按规格写出能被真实 YAML 读对的写回逻辑、按固定顺序做包校验、写一个按会话实时出结论的流式检查器，以及从正文里抽出依赖图并按轮次排序。它没有用真实的 YAML 库对拍，也没有在真正的宿主里安装、发现和调用技能。讲义开头的 Ten-Minute First Success（用 `npx skills add` 安装、显式调用、清理）需要另外动手做，而技能发现、路由、权限和评测分别是第 24 到 27 课的内容。

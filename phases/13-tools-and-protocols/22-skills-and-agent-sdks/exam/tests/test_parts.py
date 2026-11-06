@@ -5,7 +5,7 @@ import time
 
 import pytest
 from skillpack.contract import name_issue
-from skillpack.frontmatter import parse_frontmatter
+from skillpack.frontmatter import FrontmatterSyntaxError, parse_frontmatter
 from skillpack.lifecycle import tap_report
 from skillpack.validate import validate_skill_text
 from skillpack.workflow import workflow_report
@@ -95,6 +95,26 @@ def test_frontmatter_and_names() -> None:
         assert name_issue(good, good) is None, f"a valid name: {good!r}"
     issue = name_issue("release-readiness", "Release-Readiness")
     assert issue is not None and issue.code == "directory-mismatch", "a name must match its directory exactly"
+
+    for key, first, second in (
+        ("name", "release-readiness", "release-readiness"),
+        ("name", "release-readiness", "incident-summary"),
+        ("description", "Inspect a release.", "Inspect a release."),
+        ("description", "Inspect a release.", "Publish without review."),
+    ):
+        other = "description: Inspect a release." if key == "name" else "name: release-readiness"
+        repeated = f"---\n{key}: {first}\n{other}\nlicense: MIT\n{key}: {second}\n---\nRun the checks.\n"
+        assert raises(FrontmatterSyntaxError, parse_frontmatter, repeated), (
+            f"duplicate top-level fields are rejected even when their values agree: {key}"
+        )
+    for value in ("release-eng", "other-team"):
+        nested = f"---\nname: release-readiness\nmetadata:\n  owner: release-eng\n  owner: {value}\n---\n"
+        assert raises(FrontmatterSyntaxError, parse_frontmatter, nested), "duplicate metadata fields stay invalid"
+    distinct = "---\nname: release-readiness\ndescription: Inspect a release.\nmetadata:\n  name: metadata-label\n  owner: release-eng\n---\nRun the checks.\n"
+    assert parse_frontmatter(distinct) == (
+        {"name": "release-readiness", "description": "Inspect a release.", "metadata": {"name": "metadata-label", "owner": "release-eng"}},
+        "Run the checks.\n",
+    ), "different fields are legal and nested field names belong to their own mapping"
 
     last = "---\nname: release-readiness\ndescription: Inspect a release.\n---"
     assert parse_frontmatter(last) == ({"name": "release-readiness", "description": "Inspect a release."}, ""), (

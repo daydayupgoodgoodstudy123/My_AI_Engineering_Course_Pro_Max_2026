@@ -44,6 +44,6 @@ def name_issue(name: str | None, directory_name: str) -> ValidationIssue | None:
         return ValidationIssue("name-too-long", f"name must be at most {MAX_NAME} characters")
     if not NAME_PATTERN.fullmatch(name):
         return ValidationIssue("name-format", "name must use lowercase letters, digits and single hyphens")
-    if name.lower() != directory_name.lower():
+    if name != directory_name:
         return ValidationIssue("directory-mismatch", f"name {name!r} must match directory {directory_name!r}")
     return None

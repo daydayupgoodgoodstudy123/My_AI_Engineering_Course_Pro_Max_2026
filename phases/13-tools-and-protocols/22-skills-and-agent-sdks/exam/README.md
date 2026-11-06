@@ -10,7 +10,7 @@ You need Python 3.10+ and pytest (`python -m pip install pytest`). Run `python -
 
 ## Pt 1 `test_frontmatter_and_names`
 
-Comment out `@pytest.mark.skip("Part 1")`, run pytest, and work out why some SKILL.md files and skill names are read wrong.
+Comment out `@pytest.mark.skip("Part 1")`, run pytest, and work out why some SKILL.md files and skill names are read wrong. A frontmatter field appears once within its mapping.
 
 ## Pt 2 `test_skill_file_roundtrip`
 

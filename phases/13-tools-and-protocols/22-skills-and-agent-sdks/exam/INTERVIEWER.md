@@ -17,6 +17,7 @@
 | 1 | U+2028、换页符算换行吗？ | "Only \n ends a line, with an optional \r before it. The tests don't send the others." |
 | 1 | 文件开头带 BOM 呢？ | "Reject it, as the lesson does: the first line must be exactly ---. The tests don't send one." |
 | 1 | 数字开头的名字合法吗？ | "Yes. 2fa-helper is a valid name." |
+| 1 | 两次 description 的值相同，可以合并吗？ | "No. A field may occur only once within its mapping, even when both values agree." |
 | 1 | macOS 的目录不区分大小写，目录名还要精确比较吗？ | "Yes. Compare exactly. The name is the skill's identity." |
 | 2 | 写之前要不要先校验名字和描述？ | "No. The writer writes what it's given. Validation is Part 3." |
 | 2 | 用单引号还是双引号？ | "Double quotes, written by json.dumps with ensure_ascii=False." |
@@ -50,7 +51,7 @@
 1. `line_content` 只去掉 `\n`，`\r\n` 里的 `\r` 留在了行里。错误不在这里报出来：测试看到的是 `parse_frontmatter` 抛出 `SKILL.md must begin with an exact --- line`，可文件第一行明明就是 `---`。打印 `repr` 才看得到 `'---\r'`。
 2. `decode_scalar` 处理单引号时只去掉两头的引号，没有把 `''` 还原成 `'`。docstring 写了 `''` 代表一个 `'`，这是 YAML 单引号标量的转义规则，本课 `code/main.py` 的 `_decode_scalar` 也是这么做的。
 3. `NAME_PATTERN` 写成了 `[a-z0-9-]+`，连字符开头、结尾、连续两个都放过。本课的规则是小写字母和数字，组与组之间用单个连字符：`[a-z0-9]+(?:-[a-z0-9]+)*`。
-4. `name_issue` 用 `lower()` 比较名字和目录，`Release-Readiness` 目录也算匹配。docstring 写的是 exactly。
+4. `parse_frontmatter` 没有在写入字段前检查顶层键是否已经存在，第二个 name 或 description 覆盖第一个。值相同也必须拒绝，不能 first-wins、last-wins 或只检查 name。重复检查属于每一个映射，metadata 内部重复的拒绝已给定，顶层和 metadata 各有 name 则合法。目录的 exact 比较已给定，原目录大小写断言继续保护它。
 5. `split_lines` 每切出一行，就把剩下的文本整个复制一遍（`rest = rest[cut:]`），是 O(n²)。2.6 MB、5 万行的 SKILL.md，本机实测 1.0 到 1.9 秒，限值 0.1 秒；改成按位置切以后，中位数 5 到 9 毫秒。
 
 护栏：
