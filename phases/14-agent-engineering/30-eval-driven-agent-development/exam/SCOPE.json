@@ -1,0 +1,138 @@
+{
+  "lesson": "phases/14-agent-engineering/30-eval-driven-agent-development",
+  "title": "Eval-Driven Agent Development",
+  "format": "staged-brownfield",
+  "service": "EvalGate: the lesson's eval harness (evaluator-optimizer over benchmark, custom and online cases, production sessions replayed as cases), one JSON snapshot per commit with main's last-known-good found through git history, a per-layer merge gate on same-id comparable cases with flaky cases set aside, the run as GitHub Actions workflow commands, and a coverage map from guardrails and learned rules to passing cases",
+  "sources": {
+    "docs/en.md": "7f1772928ead5688466ea0b7178d2cbd7bd10f0fa2e3568656e76dc4e8fcf891",
+    "code/main.py": "4e3ffea08f53111c5a8f8f63dd4986e6926322166956ddb6a4d79ee5779892a9"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "design_notes": [
+    "No call to a model or a network: agents are deterministic functions in the test, the lesson's closure-counter case, or Replay objects that play back a recorded production session (the online layer's session replays).",
+    "Part 1 does not plant the lesson's float boundary in ci_gate (0.95 - 0.90 = 0.04999999999999993): chapter 14 already uses a float-compared gate boundary in 24, 26 and 38, and the README caps a trap kind at two per chapter. Part 1 uses the lesson's other harness pitfalls instead (a guardrail refined after it acted, rounds on the failure path, the proposer receiving its rejected output instead of the judge reason); the float problem is an interviewer follow-up in Part 3, whose gate compares whole-number counts.",
+    "The same-id comparison with new and removed cases moved from Part 1 to Part 3, where the gate needs it anyway, so the two parts do not test the same rule twice.",
+    "Flakiness comes from Part 1's FlakyTracker over main's runs and is stored in each snapshot, so Parts 3-5 read one flaky flag per case instead of re-running each case k times; only main's runs feed the tracker (EvalPipeline.run), so a pull request that breaks a case shows up as a regression.",
+    "Atomic replacement (temporary file in the same directory, then os.replace) is required by the SnapshotStore docstring and done by the reference, but not tested: in-place writes are already a trap in 01, 26, 28 and 34. Part 2's traps are the domain's own: re-runs replace, the baseline is found through main's history, suite order, duplicate ids, typo'd categories, full shas.",
+    "Case-to-requirement links are passed to coverage() as a dict instead of being stored in snapshots, which keeps CaseRecord scalar (tuple-versus-list round trips are already common in this chapter).",
+    "Nonzero thresholds avoid exact boundaries in the test data; '>' versus '>=' at a limit is already a trap in 24, 26 and 38. The 0% online limit and a layer with no comparable cases still sit exactly at their limit when nothing regressed, so '>=' blocks a clean run there; that follows from the gate's rule, it is not a planted boundary.",
+    "Every run already builds a fresh case in the starter. Counter closures and replay positions remain isolation guards; the planted refinement defect passes the rejected candidate instead of the immediately preceding judge reason. The exact feedback contract includes whitespace and Unicode and distinguishes the first failure reason from the latest one.",
+    "Part 2 also refuses a sha with a trailing newline (raw git rev-parse output). That is one entry in the list of bad shas, not the part's main trap: 34 plants '$ matches before a trailing newline' as its Part 1 bug, and here a candidate who uses re.fullmatch or checks the characters never meets it."
+  ],
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_harness",
+      "kind": "debug",
+      "lesson_anchor": "Build It (code/main.py: evaluator_optimizer and its four cases); Where eval-driven development fails: flaky evals (pin seeds, snapshot state); code/main.讲解.md 3.2, 3.6, 3.7; quiz Q9, Q10",
+      "planted_bugs": [
+        "evaluator_optimizer loops range(case.max_rounds) and ignores refine=False, so the PII guardrail is refined after its first output already forwarded the SSN; the error surfaces one call away, as LookupError from the guardrail's Replay, which recorded one turn",
+        "evaluator_optimizer sends candidate as the next feedback instead of the failed judge reason; feedback-driven benchmark and citation proposers repeat their rejected outputs and the harness reports them as failed",
+        "the failure branch returns case.max_rounds (the lesson's code), so a one-round case reports 3 rounds",
+        "FlakyTracker.record re-collects the case's runs from the whole history on every record, O(N^2)"
+      ],
+      "timing_assert": "15000 runs over 300 cases recorded under 0.1 s. Measured on this machine (Python 3.12, other agents running, load average 4 to 30): the rescanning version 1.03-2.82 s, once 4.5 s while the checker ran at load average 20 (at least 10x the limit); the reference 1.8-7.6 ms, and the other bounded per-case windows a candidate is likely to write (a list trimmed with del, deque(maxlen), a growing list sliced to the window) 0.9-5.6 ms over the same 15000 runs (at least 13x under)",
+      "overfix_guard": "refine=True cases still pass after the judge's feedback (one round for everyone fails); the one-round rule follows refine, not the category (custom_c002 is a custom case with refine=False and its own one-turn Replay); catching LookupError to end the rounds is caught by Replay.requests; copy.deepcopy of a case keeps the closure (functions copy by reference); a single window shared by all cases, a window that never drops old runs, and flagging only full windows each fail the tracker assertions; the whole suite runs before any case runs again (each case run repeats times in a row fails the order assertion); the window is exactly window runs: after pass, fail, pass, one more pass keeps bench_t007 flaky and a second one clears it, so a window one run short or long, or flaky taken as 'the last two runs differ', fails; a pass count that is not lowered when the oldest run leaves the window fails the second tracker assertion; ending a refine=False case with break still has to report one round; each refinement receives the immediately preceding failed reason verbatim, not a stripped reason or a diagnosis retained from an earlier round"
+    },
+    {
+      "part": 2,
+      "test": "test_snapshot_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "Where eval-driven development fails: No baseline (store baselines, last-known-good); 2026 best practice: evals live next to code; Key Terms: Baseline; quiz Q15",
+      "storage": "one JSON file per commit, <root>/<sha>.json, written to a temporary file in the same directory and moved into place with os.replace; a save for the same sha replaces the whole snapshot",
+      "exactness": "a four-case snapshot read back by a second store instance equals what was saved, cases in suite order (not grouped by layer, not sorted), judge reasons byte for byte (a newline, CRLF, double quotes, non-ASCII text and trailing spaces, an empty reason), booleans and integer rounds; the re-run of c1 reads back as exactly the re-run",
+      "traps": [
+        "a re-run merged into the commit's old snapshot instead of replacing it",
+        "the baseline taken by file age, save order or oldest commit first instead of main's history newest first (the re-run makes c1's file the newest)",
+        "a pull request's snapshot taken as the baseline; commits without results not skipped; the baseline taken as main's newest all-green snapshot (c3 has a failing case and is still the baseline, not c2)",
+        "cases grouped by layer or sorted when saved",
+        "duplicate case ids silently collapsed by a dict keyed on id",
+        "a typo'd category ('Online') accepted",
+        "'HEAD' or a 7-character sha accepted",
+        "a commit without a snapshot loading as None instead of raising KeyError",
+        "a sha checked by its length only, or against string.hexdigits, or lowercased: an uppercase sha accepted (on macOS's default file system it lands on the lowercase sha's file, on Linux next to it); a sha matched with re.match and $: a trailing newline, as git rev-parse prints it, accepted",
+        "json.dumps(sort_keys=True) sorting cases stored as an object keyed by id"
+      ],
+      "clarifying_questions": [
+        "CI re-run of a commit",
+        "short shas",
+        "commits without results",
+        "file layout",
+        "whether last-known-good means the last all-green run"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_merge_gate",
+      "kind": "core algorithm",
+      "lesson_anchor": "2026 best practice: run in CI on every PR, gate merge on eval scores (no regression > 5% vs main); Three evaluation layers; Flaky evals; No baseline; code/main.py ci_gate and quiz Q11 (per-case comparison instead of pooled pass rates)",
+      "traps": [
+        "a fixed case cancelling a regression in the same layer (net count)",
+        "new cases in the denominator (benchmark 1/12 diluted to 1/22); only cases that passed on main in it (b07 failed on main and is still comparable)",
+        "flaky cases counted, either flaky in this run or flaky on main; flakiness looked at only for would-be regressions, so b14 (flaky on main, passing on both sides) is left out of flaky or kept in the denominator",
+        "a new failing case counted as a regression",
+        "removed cases dropped silently or counted as regressions",
+        "one limit for the whole suite, as in the lesson's ci_gate: a guardrail regression of 1/44 slips through a 0% online limit",
+        "dividing by a layer's comparable count (a layer with none raises ZeroDivisionError)",
+        "no baseline allowed through; an empty snapshot allowed through",
+        "per-layer limits ignored, so any regression blocks (drift: benchmark 1 of 40 is within 5% and merges, b17 still reported)",
+        "'>=' at the limit: a 0% layer with no regressions, or a layer with no comparable cases, blocks",
+        "regressed, flaky, new or removed built from set differences and sorted instead of kept in snapshot order (this commit lists c20-c22 before b20-b29 and b14 last; main lists b99 last)"
+      ],
+      "integration": "the test's version of code/main.py's suite runs on two main commits through EvalPipeline (Part 1's run_suite and FlakyTracker, Part 2's store); a pull request whose citation case no longer cites is blocked with 'custom: 1 of 2 comparable cases regressed (limit 10%)', while the guardrail that already failed on main is not a regression",
+      "clarifying_questions": [
+        "no snapshot on main yet",
+        "a new case that fails",
+        "a share exactly at the limit",
+        "a case that changed category"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_workflow_log",
+      "kind": "streaming",
+      "lesson_anchor": "2026 best practice: run in CI on every PR; Use It: fail the build on regression; the per-layer view of the three evaluation layers",
+      "wire_format": "GitHub Actions workflow commands, one per line: ::group::<category> and ::endgroup:: around each layer that has cases, in benchmark, custom, online order; inside, cases in suite order as ::warning title=<id>::<reason> (flaky), ::error title=<id>::<reason> (other failures) or a plain 'ok <id> rounds=<n>' line; the last line ::notice title=eval gate::ALLOW or ::error title=eval gate::BLOCK followed by one reason per line. Messages escape % as %25, CR as %0D and LF as %0A; property values also escape : as %3A and , as %2C. Decided by the test's parser, which reads the log the way the Actions runner does: a CR, an LF or a CRLF ends a line",
+      "traps": [
+        "titles escaped like messages (the comma in custom_c001[en,de] splits the properties, the colon in online:pii-ssn breaks the command)",
+        "messages escaped like titles (missing sticks: recipe becomes missing sticks%3A recipe)",
+        "line breaks left in a message, so one command spans two lines",
+        "lines emitted as records arrive, so groups interleave; cases in finishing order or sorted by id inside a group (the suite lists custom_c002 before custom_c001[en,de])",
+        "groups in the order the layers finish instead of the fixed order",
+        "every record read before the first group (the probe records the pull count at each ::endgroup::: [4, 4, 5])",
+        "at most one group per arriving record ([4, 5, 5])",
+        "decide given records in finishing order",
+        "a stream that ends early or repeats a case not refused",
+        "a plain coroutine instead of an async generator",
+        "a flaky case that failed written as an error (failure checked before flakiness), or a flaky case that passed written as ok (only failing flaky cases warned)",
+        "CR left raw in a message (the runner ends a line at a lone CR too); % escaped after CR and LF, or not at all (bench_t002's reason carries an already-encoded link, ?min=90%25, that the runner would read back as 90%)"
+      ],
+      "clarifying_questions": [
+        "a layer with no cases",
+        "a stream that ends early",
+        "group order"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_coverage_map",
+      "kind": "graph",
+      "lesson_anchor": "2026 best practice: every guardrail maps to an eval case, every learned rule (Reflexion, pro-workflow learn-rule) maps to a failure case; Tying Phase 14 together; Exercise 5 (missing mappings are gaps to close)",
+      "traps": [
+        "flaky or failing cases backing a requirement; a case that did not run backing one",
+        "a derived rule's parents not checked",
+        "only the parents' own cases checked, not their parents (the chain skips rule:tests-first)",
+        "the chain through the last, the shortest or the longest uncovered parent, or stopping at the parent (rule:tests-first has three uncovered parents; the chain goes through rule:cite, the first)",
+        "a requirement that derives from ones declared after it: rule:verified-cites comes before rule:scope (covered) and rule:cite (not), so a single pass in the given order gets it wrong whether a parent not reached yet counts as covered or as a gap",
+        "a shared parent taken for a cycle by a global visited set (diamond: rule:small-diffs reaches rule:cite twice)",
+        "no cycle check (RecursionError), or parents skipped when a requirement has no case, so a cycle among uncovered rules goes unnoticed",
+        "a typo in covers ignored; unknown parents; results sorted by name",
+        "backing cases listed in covers order (covers lists online_o003 before online_o001) or sorted, instead of snapshot order"
+      ],
+      "clarifying_questions": [
+        "a derived rule with its own passing case but an uncovered parent",
+        "a case covering an unknown guardrail"
+      ]
+    }
+  ]
+}

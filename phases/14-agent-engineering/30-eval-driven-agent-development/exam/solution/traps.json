@@ -1,0 +1,1190 @@
+{
+  "package": "evalgate",
+  "tests": [
+    "test_harness",
+    "test_snapshot_store",
+    "test_merge_gate",
+    "test_workflow_log",
+    "test_coverage_map"
+  ],
+  "layers": [
+    {
+      "test": "test_harness",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "LookupError"
+        },
+        {
+          "name": "one round when refine is False",
+          "edits": [
+            {
+              "file": "harness.py",
+              "old": "    for r in range(case.max_rounds):\n",
+              "new": "    for r in range(case.max_rounds if case.refine else 1):\n"
+            }
+          ],
+          "expect": "cases that may refine pass once the judge's feedback lands"
+        },
+        {
+          "name": "+ pass the judge reason to the next refinement",
+          "edits": [
+            {
+              "file": "harness.py",
+              "old": "        feedback = candidate\n",
+              "new": "        feedback = reason\n"
+            }
+          ],
+          "expect": "rounds counts the rounds that ran"
+        },
+        {
+          "name": "+ rounds that actually ran",
+          "edits": [
+            {
+              "file": "harness.py",
+              "old": "    return CaseResult(case.cid, case.category, False, case.max_rounds,\n",
+              "new": "    return CaseResult(case.cid, case.category, False, r + 1,\n"
+            }
+          ],
+          "expect": "recording a run should stay fast on a long history"
+        },
+        {
+          "name": "+ a bounded window per case",
+          "edits": [
+            {
+              "file": "harness.py",
+              "old": "        self._runs: list[CaseResult] = []\n        self._flaky: set[str] = set()\n\n    def record(self, result: CaseResult) -> None:\n        \"\"\"Add one run of a case.\"\"\"\n        self._runs.append(result)\n        recent = [r.passed for r in self._runs if r.cid == result.cid][-self.window:]\n        if True in recent and False in recent:\n            self._flaky.add(result.cid)\n        else:\n            self._flaky.discard(result.cid)\n\n    def flaky(self) -> set[str]:\n        \"\"\"Ids of the cases that are flaky now.\"\"\"\n        return set(self._flaky)\n",
+              "new": "        self._recent: dict[str, list[bool]] = {}\n\n    def record(self, result: CaseResult) -> None:\n        \"\"\"Add one run of a case.\"\"\"\n        recent = self._recent.setdefault(result.cid, [])\n        recent.append(result.passed)\n        del recent[:-self.window]\n\n    def flaky(self) -> set[str]:\n        \"\"\"Ids of the cases that are flaky now.\"\"\"\n        return {cid for cid, recent in self._recent.items() if True in recent and False in recent}\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_harness",
+      "name": "no case refines any more",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    limit = case.max_rounds if case.refine else 1\n",
+          "new": "    limit = 1\n"
+        }
+      ],
+      "expect": "cases that may refine pass once the judge's feedback lands"
+    },
+    {
+      "test": "test_harness",
+      "name": "one round for the online layer instead of for refine=False",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    limit = case.max_rounds if case.refine else 1\n",
+          "new": "    limit = 1 if case.category == \"online\" else case.max_rounds\n"
+        }
+      ],
+      "expect": "LookupError"
+    },
+    {
+      "test": "test_harness",
+      "name": "the replay's LookupError caught to end the rounds",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    limit = case.max_rounds if case.refine else 1\n",
+          "new": "    limit = case.max_rounds\n"
+        },
+        {
+          "file": "harness.py",
+          "old": "        candidate = case.proposer(feedback)\n",
+          "new": "        try:\n            candidate = case.proposer(feedback)\n        except LookupError:\n            limit = round_no - 1\n            break\n"
+        }
+      ],
+      "expect": "a refine=False case asks its agent once"
+    },
+    {
+      "test": "test_harness",
+      "name": "one case built per suite and deep-copied for every run",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    results = []\n    for _ in range(repeats):\n        for make in factories:\n            results.append(evaluator_optimizer(make()))\n",
+          "new": "    import copy\n    built = [make() for make in factories]\n    results = []\n    for _ in range(repeats):\n        for case in built:\n            results.append(evaluator_optimizer(copy.deepcopy(case)))\n"
+        }
+      ],
+      "expect": "every run starts from a fresh case"
+    },
+    {
+      "test": "test_harness",
+      "name": "one window shared by every case",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    def record(self, result: CaseResult) -> None:\n        \"\"\"Add one run of a case.\"\"\"\n        recent = self._recent.get(result.cid)\n        if recent is None:\n            recent = self._recent[result.cid] = deque()\n            self._passes[result.cid] = 0\n        if len(recent) == self.window:\n            self._passes[result.cid] -= recent.popleft()\n        recent.append(result.passed)\n        self._passes[result.cid] += result.passed\n\n    def flaky(self) -> set[str]:\n        \"\"\"Ids of the cases that are flaky now.\"\"\"\n        return {cid for cid, recent in self._recent.items() if 0 < self._passes[cid] < len(recent)}\n",
+          "new": "    def record(self, result: CaseResult) -> None:\n        \"\"\"Add one run of a case.\"\"\"\n        if not hasattr(self, \"_last\"):\n            self._last = deque(maxlen=self.window)\n        self._last.append((result.cid, result.passed))\n\n    def flaky(self) -> set[str]:\n        \"\"\"Ids of the cases that are flaky now.\"\"\"\n        seen: dict[str, set[bool]] = {}\n        for cid, passed in getattr(self, \"_last\", ()):\n            seen.setdefault(cid, set()).add(passed)\n        return {cid for cid, outcomes in seen.items() if len(outcomes) == 2}\n"
+        }
+      ],
+      "expect": "flaky is judged on each case's own last runs"
+    },
+    {
+      "test": "test_harness",
+      "name": "old runs never leave the window",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        if len(recent) == self.window:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "a case leaves the list once its last runs agree"
+    },
+    {
+      "test": "test_harness",
+      "name": "only a full window can be flaky",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "if 0 < self._passes[cid] < len(recent)}",
+          "new": "if 0 < self._passes[cid] < len(recent) == self.window}"
+        }
+      ],
+      "expect": "flaky is judged on each case's own last runs"
+    },
+    {
+      "test": "test_harness",
+      "name": "the window one run short (append, then drop the oldest once len >= window)",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        if len(recent) == self.window:\n            self._passes[result.cid] -= recent.popleft()\n        recent.append(result.passed)\n        self._passes[result.cid] += result.passed\n",
+          "new": "        recent.append(result.passed)\n        self._passes[result.cid] += result.passed\n        if len(recent) >= self.window:\n            self._passes[result.cid] -= recent.popleft()\n"
+        }
+      ],
+      "expect": "a case stays on the list while its last runs disagree"
+    },
+    {
+      "test": "test_harness",
+      "name": "the window one run too long",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        if len(recent) == self.window:\n",
+          "new": "        if len(recent) == self.window + 1:\n"
+        }
+      ],
+      "expect": "a case leaves the list once its last runs agree"
+    },
+    {
+      "test": "test_harness",
+      "name": "flaky when the last two runs differ",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "return {cid for cid, recent in self._recent.items() if 0 < self._passes[cid] < len(recent)}",
+          "new": "return {cid for cid, recent in self._recent.items() if len(recent) > 1 and recent[-1] != recent[-2]}"
+        }
+      ],
+      "expect": "a case stays on the list while its last runs disagree"
+    },
+    {
+      "test": "test_harness",
+      "name": "each case run `repeats` times before the next case",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    results = []\n    for _ in range(repeats):\n        for make in factories:\n            results.append(evaluator_optimizer(make()))\n    return results\n",
+          "new": "    return [evaluator_optimizer(make()) for make in factories for _ in range(repeats)]\n"
+        }
+      ],
+      "expect": "the whole suite runs in order before any case runs again"
+    },
+    {
+      "test": "test_harness",
+      "name": "the replay repeats its last turn instead of raising, refine ignored",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    limit = case.max_rounds if case.refine else 1\n",
+          "new": "    limit = case.max_rounds\n"
+        },
+        {
+          "file": "replay.py",
+          "old": "        if turn > len(self.outputs):\n            raise LookupError(\n                f\"session {self.session!r} recorded {len(self.outputs)} turn(s); \"\n                f\"the eval asked for turn {turn}\"\n            )\n        return self.outputs[turn - 1]\n",
+          "new": "        return self.outputs[min(turn, len(self.outputs)) - 1]\n"
+        }
+      ],
+      "expect": "rounds counts the rounds that ran"
+    },
+    {
+      "test": "test_harness",
+      "name": "the pass count not lowered when the oldest run leaves the window",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "            self._passes[result.cid] -= recent.popleft()\n",
+          "new": "            recent.popleft()\n"
+        }
+      ],
+      "expect": "a case stays on the list while its last runs disagree"
+    },
+    {
+      "test": "test_harness",
+      "name": "refine=False ends the loop with break, the failure path still reports max_rounds",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    limit = case.max_rounds if case.refine else 1\n",
+          "new": "    limit = case.max_rounds\n"
+        },
+        {
+          "file": "harness.py",
+          "old": "        feedback = reason\n    return CaseResult(",
+          "new": "        feedback = reason\n        if not case.refine:\n            break\n    return CaseResult("
+        }
+      ],
+      "expect": "rounds counts the rounds that ran"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "cases grouped by layer when saved",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        for case in snapshot.cases:\n",
+          "new": "        for case in sorted(snapshot.cases, key=lambda c: c.category):\n"
+        }
+      ],
+      "expect": "a snapshot must round-trip exactly, in suite order"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "a re-run merged into the commit's old snapshot",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        text = json.dumps(",
+          "new": "        if path.exists():\n            cases = {**json.loads(path.read_text(encoding=\"utf-8\"))[\"cases\"], **cases}\n        text = json.dumps("
+        }
+      ],
+      "expect": "saving a commit again replaces its snapshot"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "baseline = the newest snapshot file among main's commits",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        for sha in history:\n            if self._path(sha).exists():\n                return self.load(sha)\n        return None\n",
+          "new": "        found = [self._path(sha) for sha in history if self._path(sha).exists()]\n        if not found:\n            return None\n        return self.load(max(found, key=lambda p: p.stat().st_mtime_ns).stem)\n"
+        }
+      ],
+      "expect": "the baseline is main's newest commit with results"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "history read oldest first",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        for sha in history:\n",
+          "new": "        for sha in reversed(history):\n"
+        }
+      ],
+      "expect": "the baseline is main's newest commit with results"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "a case id used twice silently collapses",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            if case.cid in cases:\n                raise ValueError(f\"case id {case.cid!r} appears twice\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "categories not checked",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            if case.category not in CATEGORIES:\n                raise ValueError(f\"case {case.cid!r} has unknown category {case.category!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "short shas accepted",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "_SHA = re.compile(r\"[0-9a-f]{40}\")",
+          "new": "_SHA = re.compile(r\"[0-9a-f]{7,40}\")"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "a commit without a snapshot loads as None",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            raise KeyError(sha) from None\n",
+          "new": "            return None\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "a sha checked by its length only",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if not isinstance(sha, str) or not _SHA.fullmatch(sha):\n",
+          "new": "        if len(sha) != 40:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "a sha checked against string.hexdigits (uppercase accepted)",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if not isinstance(sha, str) or not _SHA.fullmatch(sha):\n",
+          "new": "        if len(sha) != 40 or not set(sha) <= set(\"0123456789abcdefABCDEF\"):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "an uppercase sha lowercased instead of refused",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if not isinstance(sha, str) or not _SHA.fullmatch(sha):\n",
+          "new": "        sha = sha.lower()\n        if not isinstance(sha, str) or not _SHA.fullmatch(sha):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "sort_keys in the snapshot (cases keyed by id come back sorted)",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "json.dumps({\"sha\": snapshot.sha, \"cases\": cases}, ensure_ascii=False, indent=2)",
+          "new": "json.dumps({\"sha\": snapshot.sha, \"cases\": cases}, ensure_ascii=False, indent=2, sort_keys=True)"
+        }
+      ],
+      "expect": "a snapshot must round-trip exactly, in suite order"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "reasons stripped when read back",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "c[\"flaky\"], c[\"reason\"])",
+          "new": "c[\"flaky\"], c[\"reason\"].strip())"
+        }
+      ],
+      "expect": "a snapshot must round-trip exactly, in suite order"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "only main's newest commit tried as the baseline",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        for sha in history:\n            if self._path(sha).exists():\n                return self.load(sha)\n        return None\n",
+          "new": "        if history and self._path(history[0]).exists():\n            return self.load(history[0])\n        return None\n"
+        }
+      ],
+      "expect": "the baseline is main's newest commit with results"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "a sha checked with re.match and $ (a trailing newline, as git rev-parse prints it, accepted)",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if not isinstance(sha, str) or not _SHA.fullmatch(sha):\n",
+          "new": "        if not isinstance(sha, str) or not re.match(r\"^[0-9a-f]{40}$\", sha):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "the baseline taken as main's newest all-green snapshot",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            if self._path(sha).exists():\n                return self.load(sha)\n",
+          "new": "            if self._path(sha).exists() and all(c.passed for c in self.load(sha).cases):\n                return self.load(sha)\n"
+        }
+      ],
+      "expect": "the baseline is main's newest commit with results"
+    },
+    {
+      "test": "test_snapshot_store",
+      "name": "cases read back as a list",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            tuple(\n                CaseRecord(cid,",
+          "new": "            list(\n                CaseRecord(cid,"
+        }
+      ],
+      "expect": "a snapshot must round-trip exactly, in suite order"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "new cases in the denominator",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            new.append(case.cid)\n            continue\n",
+          "new": "            new.append(case.cid)\n            comparable[case.category] += 1\n            continue\n"
+        }
+      ],
+      "expect": "each layer is gated on its own comparable cases"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "a fixed case cancels a regression",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            regressed.append(case.cid)\n",
+          "new": "            regressed.append(case.cid)\n        if not old.passed and case.passed:\n            broken[case.category] -= 1\n"
+        }
+      ],
+      "expect": "each layer is gated on its own comparable cases"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "flakiness on main ignored",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if case.flaky or (old is not None and old.flaky):\n",
+          "new": "        if case.flaky:\n"
+        },
+        {
+          "file": "gate.py",
+          "old": "        if case.flaky or old.flaky:\n            continue\n",
+          "new": "        if case.flaky:\n            continue\n"
+        }
+      ],
+      "expect": "a regression is a case that passed on main and fails now"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "flaky cases counted",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if case.flaky or old.flaky:\n            continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "a regression is a case that passed on main and fails now"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "a new case that fails counted as a regression",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            new.append(case.cid)\n            continue\n",
+          "new": "            new.append(case.cid)\n            if not case.passed:\n                regressed.append(case.cid)\n                broken[case.category] += 1\n            continue\n"
+        }
+      ],
+      "expect": "a regression is a case that passed on main and fails now"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "removed cases forgotten",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    removed = tuple(case.cid for case in baseline.cases if case.cid not in here)\n",
+          "new": "    removed: tuple[str, ...] = ()\n"
+        }
+      ],
+      "expect": "cases the pull request dropped are reported"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "one limit for the whole suite, as in the lesson's ci_gate",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    reasons = tuple(\n        f\"{category}: {broken[category]} of {comparable[category]} comparable cases\"\n        f\" regressed (limit {limits[category]}%)\"\n        for category in CATEGORIES\n        if broken[category] * 100 > limits[category] * comparable[category]\n    )\n",
+          "new": "    total, worst = sum(comparable.values()), sum(broken.values())\n    reasons = ((f\"{worst} of {total} comparable cases regressed\",)\n               if worst * 100 > limits[\"benchmark\"] * total else ())\n"
+        }
+      ],
+      "expect": "each layer is gated on its own comparable cases"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "regression share computed by division",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if broken[category] * 100 > limits[category] * comparable[category]\n",
+          "new": "        if broken[category] / comparable[category] * 100 > limits[category]\n"
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "no baseline lets the commit through",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        return GateReport(False, (\"no baseline on main\",), (), tuple(flaky), tuple(new), ())\n",
+          "new": "        return GateReport(True, (), (), tuple(flaky), tuple(new), ())\n"
+        }
+      ],
+      "expect": "without a baseline nothing merges"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "a share exactly at the limit blocks (>=)",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if broken[category] * 100 > limits[category] * comparable[category]\n",
+          "new": "        if broken[category] * 100 >= limits[category] * comparable[category]\n"
+        }
+      ],
+      "expect": "one guardrail regression blocks, however many other cases still pass"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "removed cases counted as regressions",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    removed = tuple(case.cid for case in baseline.cases if case.cid not in here)\n",
+          "new": "    removed = tuple(case.cid for case in baseline.cases if case.cid not in here)\n    for case in baseline.cases:\n        if case.cid not in here:\n            regressed.append(case.cid)\n            broken[case.category] += 1\n            comparable[case.category] += 1\n"
+        }
+      ],
+      "expect": "a regression is a case that passed on main and fails now"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "regressions listed in main's order",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    return GateReport(not reasons, reasons, tuple(regressed), tuple(flaky), tuple(new), removed)\n",
+          "new": "    order = [case.cid for case in baseline.cases]\n    regressed.sort(key=order.index)\n    return GateReport(not reasons, reasons, tuple(regressed), tuple(flaky), tuple(new), removed)\n"
+        }
+      ],
+      "expect": "a regression is a case that passed on main and fails now"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "limits ignored: any regression blocks its layer",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if broken[category] * 100 > limits[category] * comparable[category]\n",
+          "new": "        if broken[category] > 0\n"
+        }
+      ],
+      "expect": "a layer may regress up to its limit"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "the limit taken against every case of the layer, flaky and new included",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if broken[category] * 100 > limits[category] * comparable[category]\n",
+          "new": "        if broken[category] * 100 > limits[category] * sum(1 for c in current.cases if c.category == category)\n"
+        }
+      ],
+      "expect": "each layer is gated on its own comparable cases"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "only cases that passed on main in the denominator",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        comparable[case.category] += 1\n",
+          "new": "        comparable[case.category] += old.passed\n"
+        }
+      ],
+      "expect": "each layer is gated on its own comparable cases"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "flakiness looked at only for would-be regressions",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if case.flaky or (old is not None and old.flaky):\n            flaky.append(case.cid)\n",
+          "new": "        if (case.flaky or (old is not None and old.flaky)) and old is not None and old.passed and not case.passed:\n            flaky.append(case.cid)\n"
+        }
+      ],
+      "expect": "a case flaky here or on main is reported, not counted"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "a flaky case whose outcome did not change kept in the denominator",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if case.flaky or old.flaky:\n            continue\n",
+          "new": "        if (case.flaky or old.flaky) and old.passed != case.passed:\n            continue\n"
+        }
+      ],
+      "expect": "each layer is gated on its own comparable cases"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "new cases from a set difference, sorted",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    removed = tuple(case.cid for case in baseline.cases if case.cid not in here)\n",
+          "new": "    removed = tuple(case.cid for case in baseline.cases if case.cid not in here)\n    new = sorted(here - set(before))\n"
+        }
+      ],
+      "expect": "cases main does not have are new"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "removed cases from a set difference, sorted",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    removed = tuple(case.cid for case in baseline.cases if case.cid not in here)\n",
+          "new": "    removed = tuple(sorted({case.cid for case in baseline.cases} - here))\n"
+        }
+      ],
+      "expect": "cases the pull request dropped are reported"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "flaky cases sorted by id",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    return GateReport(not reasons, reasons, tuple(regressed), tuple(flaky), tuple(new), removed)\n",
+          "new": "    return GateReport(not reasons, reasons, tuple(regressed), tuple(sorted(flaky)), tuple(new), removed)\n"
+        }
+      ],
+      "expect": "a case flaky here or on main is reported, not counted"
+    },
+    {
+      "test": "test_merge_gate",
+      "name": "the allowed number of regressions rounded up",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if broken[category] * 100 > limits[category] * comparable[category]\n",
+          "new": "        if broken[category] > -(-limits[category] * comparable[category] // 100)\n"
+        }
+      ],
+      "expect": "each layer is gated on its own comparable cases"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "titles escaped like messages",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "    return _message(text).replace(\":\", \"%3A\").replace(\",\", \"%2C\")\n",
+          "new": "    return _message(text)\n"
+        }
+      ],
+      "expect": "a property without a value"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "messages escaped like titles",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "    return text.replace(\"%\", \"%25\").replace(\"\\r\", \"%0D\").replace(\"\\n\", \"%0A\")\n",
+          "new": "    return (text.replace(\"%\", \"%25\").replace(\"\\r\", \"%0D\").replace(\"\\n\", \"%0A\")\n            .replace(\":\", \"%3A\").replace(\",\", \"%2C\"))\n"
+        }
+      ],
+      "expect": "one group per layer, cases in suite order, the verdict last"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "line breaks left in messages",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "    return text.replace(\"%\", \"%25\").replace(\"\\r\", \"%0D\").replace(\"\\n\", \"%0A\")\n",
+          "new": "    return text.replace(\"%\", \"%25\")\n"
+        }
+      ],
+      "expect": "one group per layer, cases in suite order, the verdict last"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "every record read before the first group",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "    async for record in records:\n",
+          "new": "    everything = [record async for record in records]\n    for record in everything:\n"
+        }
+      ],
+      "expect": "a group goes out as soon as its cases are in"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "at most one group per arriving record, the rest flushed at the end",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "        while queue and waiting[queue[0]] == 0:\n            for line in group(queue.pop(0)):\n                yield line\n",
+          "new": "        if queue and waiting[queue[0]] == 0:\n            for line in group(queue.pop(0)):\n                yield line\n"
+        },
+        {
+          "file": "ci.py",
+          "old": "    missing = [cid for cid, _ in suite if cid not in done]\n",
+          "new": "    for category in [c for c in queue if waiting[c] == 0]:\n        for line in group(category):\n            yield line\n    missing = [cid for cid, _ in suite if cid not in done]\n"
+        }
+      ],
+      "expect": "a group goes out as soon as its cases are in"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "groups in the order the layers finish",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "        while queue and waiting[queue[0]] == 0:\n            for line in group(queue.pop(0)):\n                yield line\n",
+          "new": "        for category in [c for c in queue if waiting[c] == 0]:\n            queue.remove(category)\n            for line in group(category):\n                yield line\n"
+        }
+      ],
+      "expect": "one group per layer, cases in suite order, the verdict last"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "cases listed in finishing order",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "        for cid in members[category]:\n",
+          "new": "        for cid in [c for c in done if c in members[category]]:\n"
+        }
+      ],
+      "expect": "one group per layer, cases in suite order, the verdict last"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "the verdict given records in finishing order",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "    report = decide(tuple(done[cid] for cid, _ in suite))\n",
+          "new": "    report = decide(tuple(done.values()))\n"
+        }
+      ],
+      "expect": "the verdict sees every case, in suite order"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "a run that ends early still gets a verdict",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "    if missing:\n        raise ValueError(f\"no result for {missing}\")\n",
+          "new": ""
+        },
+        {
+          "file": "ci.py",
+          "old": "    report = decide(tuple(done[cid] for cid, _ in suite))\n",
+          "new": "    report = decide(tuple(done[cid] for cid, _ in suite if cid in done))\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "% escaped after CR and LF",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "    return text.replace(\"%\", \"%25\").replace(\"\\r\", \"%0D\").replace(\"\\n\", \"%0A\")\n",
+          "new": "    return text.replace(\"\\r\", \"%0D\").replace(\"\\n\", \"%0A\").replace(\"%\", \"%25\")\n"
+        }
+      ],
+      "expect": "one group per layer, cases in suite order, the verdict last"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "CR left raw in messages",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "    return text.replace(\"%\", \"%25\").replace(\"\\r\", \"%0D\").replace(\"\\n\", \"%0A\")\n",
+          "new": "    return text.replace(\"%\", \"%25\").replace(\"\\n\", \"%0A\")\n"
+        }
+      ],
+      "expect": "one group per layer, cases in suite order, the verdict last"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "a failure checked before flakiness (a flaky failure as an error)",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "            if case.flaky:\n                lines.append(f\"::warning title={_property(cid)}::{_message(case.reason)}\\n\")\n            elif not case.passed:\n                lines.append(f\"::error title={_property(cid)}::{_message(case.reason)}\\n\")\n",
+          "new": "            if not case.passed:\n                lines.append(f\"::error title={_property(cid)}::{_message(case.reason)}\\n\")\n            elif case.flaky:\n                lines.append(f\"::warning title={_property(cid)}::{_message(case.reason)}\\n\")\n"
+        }
+      ],
+      "expect": "one group per layer, cases in suite order, the verdict last"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "only a failing flaky case is a warning",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "            if case.flaky:\n",
+          "new": "            if case.flaky and not case.passed:\n"
+        }
+      ],
+      "expect": "one group per layer, cases in suite order, the verdict last"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "% left as it is in messages",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "    return text.replace(\"%\", \"%25\").replace(\"\\r\", \"%0D\").replace(\"\\n\", \"%0A\")\n",
+          "new": "    return text.replace(\"\\r\", \"%0D\").replace(\"\\n\", \"%0A\")\n"
+        }
+      ],
+      "expect": "one group per layer, cases in suite order, the verdict last"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "cases sorted by id inside a group",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "        for cid in members[category]:\n",
+          "new": "        for cid in sorted(members[category]):\n"
+        }
+      ],
+      "expect": "one group per layer, cases in suite order, the verdict last"
+    },
+    {
+      "test": "test_workflow_log",
+      "name": "a second record for a case accepted",
+      "edits": [
+        {
+          "file": "ci.py",
+          "old": "        if record.cid in done:\n            raise ValueError(f\"case {record.cid!r} finished twice\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "flaky cases back requirements",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "        if case.passed and not case.flaky:\n",
+          "new": "        if case.passed:\n"
+        }
+      ],
+      "expect": "covered requirements, in the order given, with the passing non-flaky cases behind them"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "failing cases back requirements",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "        if case.passed and not case.flaky:\n",
+          "new": "        if not case.flaky:\n"
+        }
+      ],
+      "expect": "covered requirements, in the order given, with the passing non-flaky cases behind them"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "parents not checked",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "            found = next(((name,) + chain for chain in parents if chain), ())\n",
+          "new": "            found = ()\n"
+        }
+      ],
+      "expect": "covered requirements, in the order given, with the passing non-flaky cases behind them"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "only the parents' own cases checked",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "            found = next(((name,) + chain for chain in parents if chain), ())\n",
+          "new": "            found = next(((name, p) for p in by_name[name].derived_from if not backers[p]), ())\n"
+        }
+      ],
+      "expect": "each uncovered requirement, in the order given, with its chain down to the first gap"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "chain through the last uncovered parent",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "            found = next(((name,) + chain for chain in parents if chain), ())\n",
+          "new": "            found = next(((name,) + chain for chain in reversed(parents) if chain), ())\n"
+        }
+      ],
+      "expect": "each uncovered requirement, in the order given, with its chain down to the first gap"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "chain stops at the parent",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "            found = next(((name,) + chain for chain in parents if chain), ())\n",
+          "new": "            found = next(((name, chain[0]) for chain in parents if chain), ())\n"
+        }
+      ],
+      "expect": "each uncovered requirement, in the order given, with its chain down to the first gap"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "uncovered requirements sorted by name",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "        {r.name: gaps[r.name] for r in requirements if gaps[r.name]},\n",
+          "new": "        {r.name: gaps[r.name] for r in sorted(requirements, key=lambda r: r.name) if gaps[r.name]},\n"
+        }
+      ],
+      "expect": "each uncovered requirement, in the order given, with its chain down to the first gap"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "a shared parent taken for a cycle",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "        if name in gaps:\n            return gaps[name]\n        if name in active:\n            raise ValueError(f\"{name!r} derives from itself\")\n        active.add(name)\n        parents = [gap(parent) for parent in by_name[name].derived_from]\n        active.discard(name)\n",
+          "new": "        if name in active:\n            raise ValueError(f\"{name!r} derives from itself\")\n        active.add(name)\n        if name in gaps:\n            return gaps[name]\n        parents = [gap(parent) for parent in by_name[name].derived_from]\n"
+        }
+      ],
+      "expect": "derives from itself"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "no cycle check",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "        if name in active:\n            raise ValueError(f\"{name!r} derives from itself\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "parents skipped once a requirement has no case",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "        if name in gaps:\n            return gaps[name]\n        if name in active:\n            raise ValueError(f\"{name!r} derives from itself\")\n        active.add(name)\n        parents = [gap(parent) for parent in by_name[name].derived_from]\n        active.discard(name)\n",
+          "new": "        if name in gaps:\n            return gaps[name]\n        if name in active:\n            raise ValueError(f\"{name!r} derives from itself\")\n        if not backers[name]:\n            gaps[name] = (name,)\n            return gaps[name]\n        active.add(name)\n        parents = [gap(parent) for parent in by_name[name].derived_from]\n        active.discard(name)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "unknown names in covers ignored",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "    for cid, names in covers.items():\n        unknown = [name for name in names if name not in by_name]\n        if unknown:\n            raise ValueError(f\"case {cid!r} covers unknown {unknown}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "backing cases listed in covers order",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "    for case in snapshot.cases:\n        if case.passed and not case.flaky:\n            for name in covers.get(case.cid, ()):\n                if case.cid not in backers[name]:\n                    backers[name].append(case.cid)\n",
+          "new": "    passing = {case.cid for case in snapshot.cases if case.passed and not case.flaky}\n    for cid, names in covers.items():\n        if cid in passing:\n            for name in names:\n                backers[name].append(cid)\n"
+        }
+      ],
+      "expect": "covered requirements, in the order given, with the passing non-flaky cases behind them"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "the chain of the parent with the shortest gap",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "            found = next(((name,) + chain for chain in parents if chain), ())\n",
+          "new": "            gaps_ = [chain for chain in parents if chain]\n            found = (name,) + min(gaps_, key=len) if gaps_ else ()\n"
+        }
+      ],
+      "expect": "each uncovered requirement, in the order given, with its chain down to the first gap"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "only a direct self-reference taken for a cycle",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "        if name in active:\n            raise ValueError(f\"{name!r} derives from itself\")\n",
+          "new": "        if name in by_name[name].derived_from:\n            raise ValueError(f\"{name!r} derives from itself\")\n        if name in active:\n            return (name,)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "backing cases sorted by id",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "        {r.name: tuple(backers[r.name]) for r in requirements if not gaps[r.name]},\n",
+          "new": "        {r.name: tuple(sorted(backers[r.name])) for r in requirements if not gaps[r.name]},\n"
+        }
+      ],
+      "expect": "covered requirements, in the order given, with the passing non-flaky cases behind them"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "the chain of the parent with the longest gap",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "            found = next(((name,) + chain for chain in parents if chain), ())\n",
+          "new": "            gaps_ = [chain for chain in parents if chain]\n            found = (name,) + max(gaps_, key=len) if gaps_ else ()\n"
+        }
+      ],
+      "expect": "each uncovered requirement, in the order given, with its chain down to the first gap"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "one pass in the given order, a parent not reached yet taken as a gap (cycles still found by DFS)",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "    for req in requirements:\n        gap(req.name)\n",
+          "new": "    for req in requirements:\n        gap(req.name)\n    gaps.clear()\n    for req in requirements:\n        if not backers[req.name]:\n            gaps[req.name] = (req.name,)\n            continue\n        gaps[req.name] = next(((req.name,) + gaps.get(p, (p,))\n                               for p in req.derived_from if gaps.get(p, (p,))), ())\n"
+        }
+      ],
+      "expect": "each uncovered requirement, in the order given, with its chain down to the first gap"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "one pass in the given order, a parent not reached yet taken as covered (cycles still found by DFS)",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "    for req in requirements:\n        gap(req.name)\n",
+          "new": "    for req in requirements:\n        gap(req.name)\n    gaps.clear()\n    for req in requirements:\n        if not backers[req.name]:\n            gaps[req.name] = (req.name,)\n            continue\n        gaps[req.name] = next(((req.name,) + gaps[p] for p in req.derived_from if gaps.get(p)), ())\n"
+        }
+      ],
+      "expect": "covered requirements, in the order given, with the passing non-flaky cases behind them"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "covers checked only for the cases in the snapshot",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "    for cid, names in covers.items():\n        unknown",
+          "new": "    ran = {case.cid for case in snapshot.cases}\n    for cid, names in covers.items():\n        if cid not in ran:\n            continue\n        unknown"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_coverage_map",
+      "name": "one covered parent is enough",
+      "edits": [
+        {
+          "file": "coverage.py",
+          "old": "            found = next(((name,) + chain for chain in parents if chain), ())\n",
+          "new": "            found = next(((name,) + chain for chain in parents if chain), ()) if all(parents) else ()\n"
+        }
+      ],
+      "expect": "covered requirements, in the order given, with the passing non-flaky cases behind them"
+    },
+    {
+      "test": "test_harness",
+      "name": "refine using the rejected candidate instead of the judge reason",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        feedback = reason\n",
+          "new": "        feedback = candidate\n"
+        }
+      ],
+      "expect": "cases that may refine pass once the judge's feedback lands"
+    },
+    {
+      "test": "test_harness",
+      "name": "strip the judge feedback before the next proposal",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        feedback = reason\n",
+          "new": "        feedback = reason.strip()\n"
+        }
+      ],
+      "expect": "each refinement receives the exact latest failed judge reason"
+    },
+    {
+      "test": "test_harness",
+      "name": "keep the first diagnosis instead of the immediately previous one",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        feedback = reason\n",
+          "new": "        feedback = feedback or reason\n"
+        }
+      ],
+      "expect": "each refinement receives the exact latest failed judge reason"
+    }
+  ]
+}
