@@ -1,0 +1,113 @@
+{
+  "lesson": "phases/14-agent-engineering/09-hybrid-memory-mem0",
+  "title": "Hybrid Memory: Vector + Graph + KV",
+  "format": "staged-brownfield",
+  "service": "HybridMem: a Mem0-shaped memory service with a vector store, a KV store keyed on (user_id, fact_type, entity) and a Mem0g-style graph of edges with validity intervals; user / session / agent scopes, a SQLite snapshot of the three stores, fused recall (relevance, importance, recency, per-scope weights), a streamed write path that caps and gates graph writes and re-embeds hot records with a CSV audit, and point-in-time multi-hop graph queries",
+  "sources": {
+    "docs/en.md": "f7e13f26fd141cdf48067ab7f09c16bc63d35f6eb65063d4378dc29c7d3a2ebb",
+    "code/main.py": "a5d646ae6a5fed0dc980cd3085042ba3c65351f64eb0978d8ef3c438d684e1da",
+    "quiz/quiz.md": "0e8a346f75b6020dc904567056fc7c7a705186883a8338604ac6b7174cfde3a1"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network: the fact extractor and the embedding model are async fakes defined in the tests, and every clock is injected",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_scoped_search",
+      "kind": "debug",
+      "lesson_anchor": "Scope taxonomy (user / session / agent; 'the assistant told Alice about Bob's project'); Mem0g and temporal reasoning (the existing edge is marked invalid but not deleted); Where this pattern goes wrong: Graph explosion; code/main.py Mem0.search (its scope filter and its KV fallback, every KV record of the user at relevance 0.4) and GraphStore.add_edge; quiz Q6, Q8, Q10 and Q11.1",
+      "planted_bugs": [
+        "Mem0.search hands the vector store a visibility predicate (where=visible) that only drops another user's user-scope memories, so bob's session and agent memories and ava's own memories from another session or agent come back; the error surfaces one call away, as ScopeLeak in context.memory_block's guard",
+        "after the vector hits, Mem0.search adds every KV record of the viewer's user at a fixed relevance of 0.4 (code/main.py's KV fallback, quiz Q8), although the docstring keeps search to the vector path: ava's login code, a session memory from s1 with a KV key, reaches her s2 prompt and surfaces one call away as ScopeLeak again; with can_see added to the fallback, a query that matches no memory still brings back ava's m001",
+        "GraphStore.add_edge closes the current edge and appends a duplicate even when the object that already holds is asserted again, which also moves the fact's start to the restatement",
+        "GraphStore.current scans every edge, and add_edge calls it on every write: quadratic as the graph grows",
+        "once current() is indexed, restore() must keep the index too, or edges put back from a snapshot are never closed by a contradicting write"
+      ],
+      "timing_assert": "4,000 contradicting writes against a 24,000-edge snapshot put back with restore(), under 0.05 s. On this machine at load average 5-6, inside pytest: the scan takes 1.16-2.2 s (1.18-1.70 s in the checker), the indexed version 1.3-2.1 ms; at least 23x on the slow side and 24x on the fixed side",
+      "overfix_guard": "the KV fallback kept behind can_see, for user memories only, only when the vector store finds nothing, topping the results up to top_k, or at relevance 0 fails 'a query that matches no memory finds nothing' (or ScopeLeak without can_see); the pre-filter stays before the cut: a bigger candidate pool, a filter after the cut to top_k, or the starter's predicate kept with can_see checked after the vector search fails 'a caller's own memories are found however many others match better' (30 other users' refunds, session memories that the starter's predicate lets through), and skipping leaked memories in memory_block instead of fixing search fails on search's own results; a contradicted edge is closed and kept: deleting it, or keeping only a dict of current edges, fails; 'never write a fact seen before' fails when ava moves back to berlin; an index keyed on the subject alone fails 'each relation has its own current edge'; a restatement that moves valid_from, hands the edge to the newer rid, takes the newer weight or returns None fails"
+    },
+    {
+      "part": 2,
+      "test": "test_sqlite_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Three stores in parallel (vector, KV keyed on (user_id, fact_type, entity), graph); Mem0g (invalid, never deleted); Use It (self-host the three backends); outputs/skill-hybrid-memory.md (invalidate and time-stamp, never delete)",
+      "exactness": "dump() compares every record, KV key and edge with exact(), which tells 1 from 1.0 and a tuple from a list and compares floats by hex: importance 0.1 + 0.2, a whole-second ts, a ts 2**-22 s past the second, a record whose ts is earlier than the one before it, last_read None or a float, tags as ordered tuples (empty, out of order, one tag with a comma), edges with valid_to None or a float, a backdated edge, and a 0.95 weight; across a save, a reload, a second save after more writes, and a memory past m999",
+      "traps": [
+        "edges keyed or unique on (subject, relation, obj): ava moves back to lisbon, so a unique key raises IntegrityError and INSERT OR REPLACE deletes the closed edge",
+        "records loaded by ts or edges by valid_from instead of insertion order (a record from a clock that runs behind, a backdated edge)",
+        "ts written as ISO 8601 or rounded to the microsecond",
+        "tags joined with commas (empty tuple and 'refund, approved'), read back as a list, or sorted",
+        "a KV entry rebuilt as its own copy of the record",
+        "a second save that appends (IntegrityError) or skips rows it wrote before (stale valid_to and last_read)",
+        "the rid counter not restored, or taken from MAX(rid) as a string; records loaded ORDER BY rid",
+        "restore() leaving Part 1's index alone; load() dropping the clock it is given",
+        "a column declared against the docstring's types: INTEGER or NUMERIC reads a whole-second ts or a weight of 1.0 back as int, TEXT reads it back as str",
+        "an open edge exported with valid_to 0, kv columns renamed, a missing commit, CREATE TABLE without IF NOT EXISTS"
+      ],
+      "clarifying_questions": ["append or replace", "last_read", "schema", "concurrent writers and crashes"]
+    },
+    {
+      "part": 3,
+      "test": "test_fused_recall",
+      "kind": "core algorithm",
+      "lesson_anchor": "Fusion scoring (score = w_relevance * relevance + w_importance * importance + w_recency * recency; relevance from vector cosine, KV exact match or graph path weight; recency as exponential decay since last write or read; weights tuned per product); Scope taxonomy (per-scope weights); On search (the KV store returns direct hits keyed on query-derived keys, the graph the subgraph reachable from query entities); quiz Q10 (KV only for the keys the query names)",
+      "traps": [
+        "Jaccard as in the lesson's VectorStore, or cosine of token sets, instead of cosine of token counts; str.split instead of memory.tokens",
+        "a record found by several stores summed, or first or last store wins, instead of the max",
+        "graph: closed edges, subject-only matches, 1.0 instead of the edge weight, a record's edge weights summed, no visibility check (bob's edge to acme)",
+        "KV: no visibility check (a session memory from s1), keys looked up across users",
+        "a scope missing from scope_weights weighted 1.0, or scored 0 instead of left out; the scope weight on relevance only",
+        "weights normalized; Mem0Config's weights or half-life used",
+        "recency from ts only, from last_read whenever there is one, e-folding instead of a half-life, whole half-lives only, a future record above 1.0, halflife 0 dividing by zero or read as instant decay",
+        "last_read refreshed before scoring, for every candidate, or ts rewritten instead",
+        "an empty query dividing by zero",
+        "ties to the higher rid or left in discovery order; cut to top_k before sorting",
+        "secondary, since Part 1 removes the same KV fallback from search: every visible record a candidate"
+      ],
+      "integration": "the first recall returns every candidate, the second (top_k=4) shows the refreshed last_read and that only the returned records were read",
+      "clarifying_questions": ["empty query text", "a record found twice", "weights that do not sum to 1", "halflife 0", "which records count as read", "scopes missing from scope_weights"]
+    },
+    {
+      "part": 4,
+      "test": "test_write_audit",
+      "kind": "streaming",
+      "lesson_anchor": "Where this pattern goes wrong: Graph explosion (cap graph writes per add call; drop low-confidence edges) and Embedding drift (periodic re-embedding of the top-N-used records); On add (extract candidate facts, an LLM-driven step); Exercise 3 (invalidate the old edge and log both)",
+      "wire_format": "CSV rows seq, kind, subject, relation, object, decision, reason; one row per yielded string, line break included, no header; decided by the test's csv.reader over the joined output and a row count",
+      "traps": [
+        "fields with commas, double quotes or a line break joined by hand or quoted with json.dumps; a header row; rows without a line break; one csv buffer that is never cleared",
+        "a confidence equal to min_confidence dropped; low_confidence labelled over_cap when the cap is counted first",
+        "the cap as the first max_edges candidates listed (owns dog is listed before role); restated candidates left out of the cap",
+        "ties at the cap: the tail of an ascending sort, or (confidence, index) reversed",
+        "rows reordered kept-first; a restated fact written again or logged as a drop; every write a conflict; the invalidate row before the write or naming the new edge",
+        "a message with no candidates not stored (rids shift)",
+        "every event counted toward re-embedding; uses never reset, reset before the row, counted from vector.search or before the round's own lookup is counted; policy.top_k ignored; Counter.most_common ties; zero-use records; reembed_top ignored; rows in rid order",
+        "edges weighted 1.0; dropped candidates written anyway; the embedder not called; the extractor run on lookups",
+        "the whole stream read before the first row (probe counts pulled events)"
+      ],
+      "clarifying_questions": ["header", "confidence at the threshold", "restated candidates and the cap", "messages whose edges are all dropped", "lookups vs messages", "uses after re-embedding"]
+    },
+    {
+      "part": 5,
+      "test": "test_graph_as_of",
+      "kind": "recursive structure",
+      "lesson_anchor": "Mem0g and temporal reasoning ('what was the user's city in March?' traverses the valid-at-time subgraph); The Problem (relationship reasoning); Exercise 2 (search as of a timestamp); quiz Q11 and Q16",
+      "traps": [
+        "the interval closed at valid_to, or open at valid_from",
+        "edge.valid (now) used for the past; valid_from or valid_to ignored",
+        "the time slice taken on the first hop only",
+        "one visited set for the whole search; paths deduplicated by their nodes; no cycle check",
+        "only the best path, or the search stopping at the first way into the target",
+        "max_hops off by one",
+        "ordering by weight only, alphabetical without hop count, or by node names",
+        "edges followed both ways; weights added instead of multiplied"
+      ],
+      "clarifying_questions": ["valid_to inclusive", "revisiting a node", "following edges backwards", "source equal to target"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the three suggested defects are kept, with two additions that fit the lesson: code/main.py's KV fallback and restore() keeping the index. Visibility is one rule, Viewer.can_see (same user always; a session memory also needs the same session, an agent memory the same agent), so Record gains agent_id, which the lesson's code does not have; the leak surfaces one call away in context.memory_block's guard. Mem0.search is the vector path only, and KV and graph fusion is Part 3: the starter carries the lesson's KV fallback (every KV record of the user at relevance 0.4, the flaw quiz Q8 names) as a planted defect that the docstring rules out, so it is removed, not reworked into KV lookups. The visibility predicate reaches the vector store as where=, before the cut to top_k * 3 (quiz Q10), already in the starter; 30 other users' refunds, session memories that the starter's predicate lets through, check that a fix puts the right predicate there and keeps it before the cut. Edges carry valid_from and valid_to (valid is derived), so a conflict records when the old edge closed; Part 5 reads these intervals. The timing check puts back a 24,000-edge snapshot with restore() and times 4,000 contradicting writes instead of 30,000 edges added one by one: inside pytest the garbage collector made the fixed version too slow for an 8x margin at a slow version under 3 s. This adds a fifth layer, restore() keeping the index.",
+    "Part 2: SQLite as suggested, with the edges' intervals (valid_to None or a float) in place of a valid flag. The module docstring gives the columns the export job reads and their types; keys, constraints and the rest of the schema are the candidate's, so the main traps are the edges' missing natural key and insertion order, and whole-second floats are a side check. Added: KV entries must point at the same Record object, the rid counter must survive past m999, a backdated edge and a record from a clock that runs behind pin insertion order, a loaded memory runs on the clock it is given, and the export job's SQL pins the documented columns.",
+    "Part 3: as suggested. The query-derived KV keys and graph entities come in a Query object, because query understanding is not this lesson's subject. Graph relevance is one hop (the weight of a current edge touching a query entity); multi-hop paths are Part 5. halflife 0 follows Mem0Config (recency off) rather than instant decay, and a record from a clock that runs ahead has age 0.",
+    "Part 4: CSV as suggested. The embedding model is an injected async fake; uses come from Mem0.search results and reset for the records re-embedded. A conflicting write is followed by an invalidate row for the closed edge (Exercise 3: log both), and a restated fact is skipped.",
+    "Part 5: as suggested, except that 'a restatement does not split the interval' is checked in Part 1, because a point-in-time query cannot see a split interval; Part 5's traps are the time slice at every hop, interval ends, simple paths over a multigraph, max_hops and the ordering. value_at answers the single-hop March question."
+  ]
+}

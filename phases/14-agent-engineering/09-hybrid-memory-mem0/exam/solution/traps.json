@@ -1,0 +1,2085 @@
+{
+  "package": "hybridmem",
+  "tests": [
+    "test_scoped_search",
+    "test_sqlite_roundtrip",
+    "test_fused_recall",
+    "test_write_audit",
+    "test_graph_as_of"
+  ],
+  "layers": [
+    {
+      "test": "test_scoped_search",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "ScopeLeak: m004 (agent memory of bob) reached ava's prompt"
+        },
+        {
+          "name": "search hands Viewer.can_see to the vector store",
+          "edits": [
+            {
+              "file": "memory.py",
+              "old": "        c = self.config\n\n        def visible(record: Record) -> bool:\n            return record.scope != \"user\" or record.user_id == viewer.user_id\n\n        fused",
+              "new": "        c = self.config\n        fused"
+            },
+            {
+              "file": "memory.py",
+              "old": "where=visible)",
+              "new": "where=viewer.can_see)"
+            }
+          ],
+          "expect": "ScopeLeak: m002 (session memory of ava) reached ava's prompt"
+        },
+        {
+          "name": "+ candidates from the vector store only (no KV fallback)",
+          "edits": [
+            {
+              "file": "memory.py",
+              "old": "        seen = {record.rid for _, record in fused}\n        for record in self.kv.by_user(viewer.user_id):\n            if record.rid in seen:\n                continue\n            seen.add(record.rid)\n            score = c.w_relevance * 0.4 + c.w_importance * record.importance + c.w_recency * self._recency(record, now)\n            fused.append((score, record))\n",
+              "new": ""
+            }
+          ],
+          "expect": "restating the current fact changes nothing"
+        },
+        {
+          "name": "+ restating the current object is a no-op",
+          "edits": [
+            {
+              "file": "graph.py",
+              "old": "        if old is not None:\n            old.valid_to = float(at)\n",
+              "new": "        if old is not None:\n            if old.obj == obj:\n                return old\n            old.valid_to = float(at)\n"
+            }
+          ],
+          "expect": "writes must not slow down as the graph grows"
+        },
+        {
+          "name": "+ current edge indexed on (subject, relation)",
+          "edits": [
+            {
+              "file": "graph.py",
+              "old": "        self._edges: list[Edge] = []\n",
+              "new": "        self._edges: list[Edge] = []\n        self._current: dict[tuple[str, str], Edge] = {}\n"
+            },
+            {
+              "file": "graph.py",
+              "old": "        for edge in self._edges:\n            if edge.valid and edge.subject == subject and edge.relation == relation:\n                return edge\n        return None\n",
+              "new": "        return self._current.get((subject, relation))\n"
+            },
+            {
+              "file": "graph.py",
+              "old": "        self._edges.append(edge)\n        return edge\n",
+              "new": "        self._edges.append(edge)\n        self._current[(subject, relation)] = edge\n        return edge\n"
+            }
+          ],
+          "expect": "every write closes the edge it contradicts, restored ones too"
+        },
+        {
+          "name": "+ restore keeps the index too",
+          "edits": [
+            {
+              "file": "graph.py",
+              "old": "        self._edges.append(edge)\n\n    def history",
+              "new": "        self._edges.append(edge)\n        if edge.valid:\n            self._current[(edge.subject, edge.relation)] = edge\n\n    def history"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_scoped_search",
+      "name": "only another user's memories filtered out",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "where=viewer.can_see)",
+          "new": "where=lambda r: r.user_id == viewer.user_id)"
+        }
+      ],
+      "expect": "ScopeLeak: m005 (agent memory of ava) reached ava's prompt"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "session and agent checks without the owner check",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "where=viewer.can_see)",
+          "new": "where=lambda r: (r.scope != \"session\" or r.session_id == viewer.session_id) and (r.scope != \"agent\" or r.agent_id == viewer.agent_id))"
+        }
+      ],
+      "expect": "ScopeLeak: m004 (agent memory of bob) reached ava's prompt"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "can_see lets every session memory through",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "            return record.session_id == self.session_id\n",
+          "new": "            return True\n"
+        }
+      ],
+      "expect": "a session memory stays in its session"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "can_see lets every agent memory through",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "            return record.agent_id == self.agent_id\n",
+          "new": "            return True\n"
+        }
+      ],
+      "expect": "a caller sees their own memories and nobody else's"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "the prompt guard drops leaked memories and search filters after the cut, other users' user memories only",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "self.vector.search(query, top_k=top_k * 3, where=viewer.can_see):\n",
+          "new": "self.vector.search(query, top_k=top_k * 3):\n            if record.user_id != viewer.user_id and record.scope == \"user\":\n                continue\n"
+        },
+        {
+          "file": "context.py",
+          "old": "            raise ScopeLeak(\n",
+          "new": "            continue\n            raise ScopeLeak(\n"
+        }
+      ],
+      "expect": "bob sees his own session and agent memories"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "a bigger candidate pool instead of filtering first",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "self.vector.search(query, top_k=top_k * 3, where=viewer.can_see):\n",
+          "new": "self.vector.search(query, top_k=top_k * 10):\n            if not viewer.can_see(record):\n                continue\n"
+        }
+      ],
+      "expect": "a caller's own memories are found however many others match better"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "the filter applied after the cut to top_k",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n",
+          "new": "        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return [pair for pair in fused[:top_k] if viewer.can_see(pair[1])]\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "where=viewer.can_see)",
+          "new": "where=None)"
+        }
+      ],
+      "expect": "a caller's own memories are found however many others match better"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "the starter's predicate kept, Viewer.can_see checked after the vector search",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "top_k=top_k * 3, where=viewer.can_see):\n",
+          "new": "top_k=top_k * 3, where=lambda r: r.scope != \"user\" or r.user_id == viewer.user_id):\n            if not viewer.can_see(record):\n                continue\n"
+        }
+      ],
+      "expect": "a caller's own memories are found however many others match better"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "the KV fallback kept, behind Viewer.can_see",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n",
+          "new": "        seen = {record.rid for _, record in fused}\n        for record in self.kv.by_user(viewer.user_id):\n            if record.rid in seen or not viewer.can_see(record):\n                continue\n            seen.add(record.rid)\n            score = c.w_relevance * 0.4 + c.w_importance * record.importance + c.w_recency * self._recency(record, now)\n            fused.append((score, record))\n        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n"
+        }
+      ],
+      "expect": "a query that matches no memory finds nothing"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "the KV fallback kept for user memories only",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n",
+          "new": "        seen = {record.rid for _, record in fused}\n        for record in self.kv.by_user(viewer.user_id):\n            if record.rid in seen or record.scope != \"user\":\n                continue\n            seen.add(record.rid)\n            score = c.w_relevance * 0.4 + c.w_importance * record.importance + c.w_recency * self._recency(record, now)\n            fused.append((score, record))\n        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n"
+        }
+      ],
+      "expect": "a query that matches no memory finds nothing"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "the KV fallback only when the vector store finds nothing",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n",
+          "new": "        if not fused:\n            for record in self.kv.by_user(viewer.user_id):\n                if viewer.can_see(record):\n                    fused.append((c.w_relevance * 0.4 + c.w_importance * record.importance + c.w_recency * self._recency(record, now), record))\n        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n"
+        }
+      ],
+      "expect": "a query that matches no memory finds nothing"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "the KV fallback tops the results up to top_k",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n",
+          "new": "        seen = {record.rid for _, record in fused}\n        for record in self.kv.by_user(viewer.user_id):\n            if len(fused) >= top_k:\n                break\n            if record.rid in seen or not viewer.can_see(record):\n                continue\n            seen.add(record.rid)\n            score = c.w_relevance * 0.4 + c.w_importance * record.importance + c.w_recency * self._recency(record, now)\n            fused.append((score, record))\n        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n"
+        }
+      ],
+      "expect": "a query that matches no memory finds nothing"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "the KV fallback kept at relevance 0",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n",
+          "new": "        seen = {record.rid for _, record in fused}\n        for record in self.kv.by_user(viewer.user_id):\n            if record.rid in seen:\n                continue\n            seen.add(record.rid)\n            score = c.w_importance * record.importance + c.w_recency * self._recency(record, now)\n            fused.append((score, record))\n        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n"
+        }
+      ],
+      "expect": "ScopeLeak: m002 (session memory of ava) reached ava's prompt"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "the KV fallback kept at relevance 0, behind Viewer.can_see",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n",
+          "new": "        seen = {record.rid for _, record in fused}\n        for record in self.kv.by_user(viewer.user_id):\n            if record.rid in seen or not viewer.can_see(record):\n                continue\n            seen.add(record.rid)\n            score = c.w_importance * record.importance + c.w_recency * self._recency(record, now)\n            fused.append((score, record))\n        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n"
+        }
+      ],
+      "expect": "a query that matches no memory finds nothing"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "the prompt guard drops leaked memories and search is left as it was",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        c = self.config\n        fused",
+          "new": "        c = self.config\n\n        def visible(record: Record) -> bool:\n            return record.scope != \"user\" or record.user_id == viewer.user_id\n\n        fused"
+        },
+        {
+          "file": "memory.py",
+          "old": "where=viewer.can_see)",
+          "new": "where=visible)"
+        },
+        {
+          "file": "memory.py",
+          "old": "        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n",
+          "new": "        seen = {record.rid for _, record in fused}\n        for record in self.kv.by_user(viewer.user_id):\n            if record.rid in seen:\n                continue\n            seen.add(record.rid)\n            score = c.w_relevance * 0.4 + c.w_importance * record.importance + c.w_recency * self._recency(record, now)\n            fused.append((score, record))\n        fused.sort(key=lambda pair: (-pair[0], pair[1].rid))\n        return fused[:top_k]\n"
+        },
+        {
+          "file": "context.py",
+          "old": "            raise ScopeLeak(\n",
+          "new": "            continue\n            raise ScopeLeak(\n"
+        }
+      ],
+      "expect": "a query that matches no memory finds nothing"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "contradicted edges deleted to keep the list short",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "            old.valid_to = float(at)\n",
+          "new": "            self._edges.remove(old)\n"
+        }
+      ],
+      "expect": "a contradicted edge is closed, not deleted"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "an object asserted once is never asserted again",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        old = self.current(subject, relation)\n",
+          "new": "        for seen in self._edges:\n            if (seen.subject, seen.relation, seen.obj) == (subject, relation, obj):\n                return seen\n        old = self.current(subject, relation)\n"
+        }
+      ],
+      "expect": "an old fact can come back"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "the current edge indexed on the subject alone",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        return self._current.get((subject, relation))\n",
+          "new": "        return self._current.get(subject)\n"
+        },
+        {
+          "file": "graph.py",
+          "old": "        self._current[(subject, relation)] = edge\n",
+          "new": "        self._current[subject] = edge\n"
+        }
+      ],
+      "expect": "each relation has its own current edge"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "a restated fact appended as a second open edge",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "            if old.obj == obj:\n                return old\n            old.valid_to = float(at)\n",
+          "new": "            if old.obj != obj:\n                old.valid_to = float(at)\n"
+        }
+      ],
+      "expect": "restating the current fact changes nothing"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "a restated fact moves valid_from to now",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "            if old.obj == obj:\n                return old\n",
+          "new": "            if old.obj == obj:\n                old.valid_from = float(at)\n                return old\n"
+        }
+      ],
+      "expect": "restating the current fact changes nothing"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "a restated fact hands the edge to the newer record",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "            if old.obj == obj:\n                return old\n",
+          "new": "            if old.obj == obj:\n                old.rid = rid\n                return old\n"
+        }
+      ],
+      "expect": "the current edge is still the one that first said it"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "the scan for the current edge run from the newest edge back",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        return self._current.get((subject, relation))\n",
+          "new": "        for edge in reversed(self._edges):\n            if edge.valid and edge.subject == subject and edge.relation == relation:\n                return edge\n        return None\n"
+        }
+      ],
+      "expect": "writes must not slow down as the graph grows"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "every memory kept to the viewer's session",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "where=viewer.can_see)",
+          "new": "where=lambda r: viewer.can_see(r) and r.session_id == viewer.session_id)"
+        }
+      ],
+      "expect": "a caller sees their own memories and nobody else's"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "the index set only for a key it has not seen",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        self._current[(subject, relation)] = edge\n        return edge\n",
+          "new": "        self._current.setdefault((subject, relation), edge)\n        return edge\n"
+        }
+      ],
+      "expect": "restating the current fact changes nothing"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "restore leaves the index alone",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        self._edges.append(edge)\n        if edge.valid:\n            self._current[(edge.subject, edge.relation)] = edge\n",
+          "new": "        self._edges.append(edge)\n"
+        }
+      ],
+      "expect": "every write closes the edge it contradicts, restored ones too"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "restating returns nothing",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "            if old.obj == obj:\n                return old\n",
+          "new": "            if old.obj == obj:\n                return None\n"
+        }
+      ],
+      "expect": "restating returns the edge that already holds"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "an agent memory also kept to its session",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "            return record.agent_id == self.agent_id\n",
+          "new": "            return record.agent_id == self.agent_id and record.session_id == self.session_id\n"
+        }
+      ],
+      "expect": "an agent memory stays with its agent"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "every memory kept to the viewer's agent",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        if record.scope == \"agent\":\n            return record.agent_id == self.agent_id\n        return True\n",
+          "new": "        return record.agent_id == self.agent_id\n"
+        }
+      ],
+      "expect": "an agent memory stays with its agent"
+    },
+    {
+      "test": "test_scoped_search",
+      "name": "a restated fact takes the newer weight",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "            if old.obj == obj:\n                return old\n",
+          "new": "            if old.obj == obj:\n                old.weight = float(weight)\n                return old\n"
+        }
+      ],
+      "expect": "restating the current fact changes nothing"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "no commit",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "        with db:\n            for table in (\"records\", \"kv\", \"edges\"):",
+          "new": "        if True:\n            for table in (\"records\", \"kv\", \"edges\"):"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "ts declared INTEGER",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    ts REAL NOT NULL,",
+          "new": "    ts INTEGER NOT NULL,"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "ts declared TEXT and read back as it comes",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    ts REAL NOT NULL,",
+          "new": "    ts TEXT NOT NULL,"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "weight declared NUMERIC",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    weight REAL NOT NULL,",
+          "new": "    weight NUMERIC NOT NULL,"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "ts written as ISO 8601 text",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "import json\n",
+          "new": "import datetime\nimport json\n"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "r.importance, r.ts, json.dumps",
+          "new": "r.importance, datetime.datetime.fromtimestamp(r.ts, datetime.timezone.utc).isoformat(), json.dumps"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "            *head, tags, last_read = row\n",
+          "new": "            *head, tags, last_read = row\n            head[7] = datetime.datetime.fromisoformat(head[7]).timestamp()\n"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "ts rounded to the microsecond",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "r.importance, r.ts, json.dumps",
+          "new": "r.importance, round(r.ts, 6), json.dumps"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "importance rounded to six places",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "r.importance, r.ts, json.dumps",
+          "new": "round(r.importance, 6), r.ts, json.dumps"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "tags joined with commas",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "json.dumps(list(r.tags))",
+          "new": "\",\".join(r.tags)"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "tuple(json.loads(tags))",
+          "new": "tuple(tags.split(\",\"))"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "tags read back as a list",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "tuple(json.loads(tags))",
+          "new": "json.loads(tags)"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "tags stored sorted",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "json.dumps(list(r.tags))",
+          "new": "json.dumps(sorted(r.tags))"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "last_read left out",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "json.dumps(list(r.tags)), r.last_read)",
+          "new": "json.dumps(list(r.tags)), None)"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "agent_id left out",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "r.session_id, r.agent_id,",
+          "new": "r.session_id, \"assistant\","
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "closed edges left out",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "for seq, e in enumerate(mem.graph.all_edges())",
+          "new": "for seq, e in enumerate(x for x in mem.graph.all_edges() if x.valid)"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "a loaded memory rebuilt by calling add again",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "            mem.vector.add(Record(*head, tuple(json.loads(tags)), last_read))\n",
+          "new": "            rid, text, scope, user_id, session_id, agent_id, importance, ts = head\n            mem.add(text, user_id=user_id, session_id=session_id, scope=scope, agent_id=agent_id, importance=importance, tags=tuple(json.loads(tags)))\n"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "each KV entry gets its own copy of the record",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "import json\n",
+          "new": "import dataclasses\nimport json\n"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "mem.kv.put(KVKey(user_id, fact_type, entity), mem.record(rid))",
+          "new": "mem.kv.put(KVKey(user_id, fact_type, entity), dataclasses.replace(mem.record(rid)))"
+        }
+      ],
+      "expect": "a KV entry points at the stored record, not a copy"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "the rid counter not restored",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    mem._counter = max((int(r.rid[1:]) for r in mem.vector.records()), default=0)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a loaded memory keeps counting rids"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "the rid counter taken from the largest rid string",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    mem._counter = max((int(r.rid[1:]) for r in mem.vector.records()), default=0)\n",
+          "new": "    mem._counter = int(max((r.rid for r in mem.vector.records()), default=\"m0\")[1:])\n"
+        }
+      ],
+      "expect": "rids keep counting past m999"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "records loaded in rid order",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "FROM records ORDER BY seq",
+          "new": "FROM records ORDER BY rid"
+        }
+      ],
+      "expect": "a memory past m999 reads back in order"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "restore leaves the current-edge index alone",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        self._edges.append(edge)\n        if edge.valid:\n            self._current[(edge.subject, edge.relation)] = edge\n",
+          "new": "        self._edges.append(edge)\n"
+        }
+      ],
+      "expect": "a loaded graph still knows which edge holds now"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "edges keyed on their triple, written with INSERT OR REPLACE",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    seq INTEGER PRIMARY KEY,\n    subject TEXT NOT NULL,",
+          "new": "    seq INTEGER,\n    subject TEXT NOT NULL,"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "    valid_to REAL\n);",
+          "new": "    valid_to REAL,\n    PRIMARY KEY (subject, relation, obj)\n);"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "\"INSERT INTO edges",
+          "new": "\"INSERT OR REPLACE INTO edges"
+        }
+      ],
+      "expect": "a second save replaces what the first one wrote"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "edges unique on their triple",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    valid_to REAL\n);",
+          "new": "    valid_to REAL,\n    UNIQUE (subject, relation, obj)\n);"
+        }
+      ],
+      "expect": "UNIQUE constraint failed: edges"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "a save appends to what is already there",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "            for table in (\"records\", \"kv\", \"edges\"):\n                db.execute(f\"DELETE FROM {table}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "UNIQUE constraint failed: records"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "a save skips rows it wrote before",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "            for table in (\"records\", \"kv\", \"edges\"):\n                db.execute(f\"DELETE FROM {table}\")\n",
+          "new": ""
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "\"INSERT INTO records",
+          "new": "\"INSERT OR IGNORE INTO records"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "\"INSERT INTO kv",
+          "new": "\"INSERT OR IGNORE INTO kv"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "\"INSERT INTO edges",
+          "new": "\"INSERT OR IGNORE INTO edges"
+        }
+      ],
+      "expect": "a second save replaces what the first one wrote"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "an open edge written with valid_to 0",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "e.valid_from, e.valid_to)\n",
+          "new": "e.valid_from, e.valid_to if e.valid_to is not None else 0.0)\n"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "valid_from, weight, valid_to))",
+          "new": "valid_from, weight, valid_to or None))"
+        }
+      ],
+      "expect": "the export job sees closed edges too"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "kv columns named type and key",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    fact_type TEXT NOT NULL,\n    entity TEXT NOT NULL,\n",
+          "new": "    type TEXT NOT NULL,\n    key TEXT NOT NULL,\n"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "PRIMARY KEY (user_id, fact_type, entity)",
+          "new": "PRIMARY KEY (user_id, type, key)"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "INSERT INTO kv (user_id, fact_type, entity, rid)",
+          "new": "INSERT INTO kv (user_id, type, key, rid)"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "SELECT user_id, fact_type, entity, rid FROM kv",
+          "new": "SELECT user_id, type, key, rid FROM kv"
+        }
+      ],
+      "expect": "no such column: fact_type"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "edges loaded in valid_from order",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "FROM edges ORDER BY seq",
+          "new": "FROM edges ORDER BY valid_from"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "last_read declared NUMERIC",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    last_read REAL\n",
+          "new": "    last_read NUMERIC\n"
+        }
+      ],
+      "expect": "a second save replaces what the first one wrote"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "valid_from declared INTEGER",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    valid_from REAL NOT NULL,",
+          "new": "    valid_from INTEGER NOT NULL,"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "load ignores the clock it is given",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "    mem = Mem0(config, clock=clock)\n",
+          "new": "    mem = Mem0(config)\n"
+        }
+      ],
+      "expect": "a loaded memory runs on the clock it was given"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "records loaded in ts order",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "FROM records ORDER BY seq",
+          "new": "FROM records ORDER BY ts"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "CREATE TABLE IF NOT EXISTS",
+          "new": "CREATE TABLE"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "CREATE TABLE IF NOT EXISTS",
+          "new": "CREATE TABLE"
+        },
+        {
+          "file": "sqlite_store.py",
+          "old": "CREATE TABLE IF NOT EXISTS",
+          "new": "CREATE TABLE"
+        }
+      ],
+      "expect": "table records already exists"
+    },
+    {
+      "test": "test_sqlite_roundtrip",
+      "name": "edge weights not stored",
+      "edits": [
+        {
+          "file": "sqlite_store.py",
+          "old": "Edge(subject, relation, obj, rid, valid_from, weight, valid_to)",
+          "new": "Edge(subject, relation, obj, rid, valid_from, 1.0, valid_to)"
+        }
+      ],
+      "expect": "every store reads back exactly"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "Jaccard from the vector store, as in the lesson",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "    for record in mem.vector.records():\n        offer(record, _cosine(q, Counter(tokens(record.text))))\n",
+          "new": "    for value, record in mem.vector.search(query.text, top_k=None):\n        offer(record, value)\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "cosine of token sets",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "_cosine(q, Counter(tokens(record.text)))",
+          "new": "_cosine(Counter(set(q)), Counter(set(tokens(record.text))))"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "relevance summed across stores",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "            relevance[record.rid] = max(value, relevance.get(record.rid, 0.0))\n",
+          "new": "            relevance[record.rid] = value + relevance.get(record.rid, 0.0)\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "the first store to find a record decides",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "            relevance[record.rid] = max(value, relevance.get(record.rid, 0.0))\n",
+          "new": "            relevance.setdefault(record.rid, value)\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "the last store to find a record decides",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "            relevance[record.rid] = max(value, relevance.get(record.rid, 0.0))\n",
+          "new": "            relevance[record.rid] = value\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "graph hits on the subject only",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "(edge.subject in entities or edge.obj in entities)",
+          "new": "edge.subject in entities"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "closed edges still count",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        if edge.valid and (edge.subject",
+          "new": "        if (edge.subject"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "every graph hit counts as 1.0",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "offer(mem.record(edge.rid), edge.weight)",
+          "new": "offer(mem.record(edge.rid), 1.0)"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "graph hits skip the visibility check",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "            offer(mem.record(edge.rid), edge.weight)\n",
+          "new": "            relevance[edge.rid] = max(edge.weight, relevance.get(edge.rid, 0.0))\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "KV hits skip the visibility check",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "            offer(record, KV_HIT)\n",
+          "new": "            relevance[record.rid] = max(KV_HIT, relevance.get(record.rid, 0.0))\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "a scope missing from scope_weights weighs 1.0",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": " and record.scope in config.scope_weights:",
+          "new": ":"
+        },
+        {
+          "file": "fusion.py",
+          "old": "config.scope_weights[record.scope] * fused",
+          "new": "config.scope_weights.get(record.scope, 1.0) * fused"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "the scope weight scales relevance only",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        fused = config.w_relevance * rel + ",
+          "new": "        fused = config.scope_weights[record.scope] * config.w_relevance * rel + "
+        },
+        {
+          "file": "fusion.py",
+          "old": "Hit(rid, config.scope_weights[record.scope] * fused, rel)",
+          "new": "Hit(rid, fused, rel)"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "weights normalized to sum to 1",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "Hit(rid, config.scope_weights[record.scope] * fused, rel)",
+          "new": "Hit(rid, config.scope_weights[record.scope] * fused / (config.w_relevance + config.w_importance + config.w_recency), rel)"
+        }
+      ],
+      "expect": "score is the scope-weighted sum of relevance, importance and recency"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "scored with Mem0Config's weights",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        fused = config.w_relevance * rel + config.w_importance * record.importance + config.w_recency * recency\n",
+          "new": "        c = mem.config\n        fused = c.w_relevance * rel + c.w_importance * record.importance + c.w_recency * recency\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "recency from the write time only",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        age = max(0.0, now - record.touched)\n",
+          "new": "        age = max(0.0, now - record.ts)\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "recency as e-folding instead of a half-life",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        recency = 0.5 ** (age / config.halflife_s) if config.halflife_s > 0 else 1.0\n",
+          "new": "        recency = math.exp(-age / config.halflife_s) if config.halflife_s > 0 else 1.0\n"
+        }
+      ],
+      "expect": "score is the scope-weighted sum of relevance, importance and recency"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "recency from Mem0's own half-life",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        recency = 0.5 ** (age / config.halflife_s) if config.halflife_s > 0 else 1.0\n",
+          "new": "        recency = mem._recency(record, now)\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "a record from the future counts as more than recent",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        age = max(0.0, now - record.touched)\n",
+          "new": "        age = now - record.touched\n"
+        }
+      ],
+      "expect": "score is the scope-weighted sum of relevance, importance and recency"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "halflife 0 divides by zero",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        recency = 0.5 ** (age / config.halflife_s) if config.halflife_s > 0 else 1.0\n",
+          "new": "        recency = 0.5 ** (age / config.halflife_s)\n"
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "halflife 0 read as instant decay",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        recency = 0.5 ** (age / config.halflife_s) if config.halflife_s > 0 else 1.0\n",
+          "new": "        recency = 0.5 ** (age / config.halflife_s) if config.halflife_s > 0 else float(age == 0)\n"
+        }
+      ],
+      "expect": "a key lookup needs no text; halflife 0 turns recency off"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "an empty query text divides by zero",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "    if not dot:\n        return 0.0\n",
+          "new": ""
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "every visible record is a candidate",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        if value > 0 and viewer.can_see(record)",
+          "new": "        if viewer.can_see(record)"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "last_read refreshed for every candidate",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        hits.append(Hit(rid, config.scope_weights[record.scope] * fused, rel))\n",
+          "new": "        hits.append(Hit(rid, config.scope_weights[record.scope] * fused, rel))\n        record.last_read = now\n"
+        }
+      ],
+      "expect": "only the records returned are read"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "last_read refreshed before scoring",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "    hits = []\n    for rid, rel in relevance.items():\n",
+          "new": "    for rid in relevance:\n        mem.record(rid).last_read = now\n    hits = []\n    for rid, rel in relevance.items():\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "reading a record moves its ts",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        mem.record(hit.rid).last_read = now\n",
+          "new": "        mem.record(hit.rid).ts = now\n"
+        }
+      ],
+      "expect": "the records returned are read now"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "ties to the higher rid",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "    hits.sort(key=lambda hit: (-hit.score, hit.rid))\n",
+          "new": "    hits.sort(key=lambda hit: (hit.score, hit.rid), reverse=True)\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "ties left in the order the stores found them",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "    hits.sort(key=lambda hit: (-hit.score, hit.rid))\n",
+          "new": "    hits.sort(key=lambda hit: -hit.score)\n"
+        }
+      ],
+      "expect": "a key lookup needs no text; halflife 0 turns recency off"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "cut to top_k before sorting",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "    hits.sort(key=lambda hit: (-hit.score, hit.rid))\n    hits = hits[:top_k]\n",
+          "new": "    hits = hits[:top_k]\n    hits.sort(key=lambda hit: (-hit.score, hit.rid))\n"
+        }
+      ],
+      "expect": "a memory read at the last recall counts as recent"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "KV looked up under every user's key",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        record = mem.kv.get(KVKey(viewer.user_id, fact_type, entity))\n        if record is not None:\n            offer(record, KV_HIT)\n",
+          "new": "        for key, record in mem.kv.items():\n            if (key.fact_type, key.entity) == (fact_type, entity):\n                relevance[record.rid] = max(KV_HIT, relevance.get(record.rid, 0.0))\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "vector relevance taken from Mem0.search scores",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "    for record in mem.vector.records():\n        offer(record, _cosine(q, Counter(tokens(record.text))))\n",
+          "new": "    for value, record in mem.search(query.text, viewer=viewer, top_k=len(mem.vector.records())):\n        offer(record, value)\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "touched taken as last_read whenever there is one",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        age = max(0.0, now - record.touched)\n",
+          "new": "        age = max(0.0, now - (record.last_read or record.ts))\n"
+        }
+      ],
+      "expect": "a memory read at the last recall counts as recent"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "a KV hit counted as the lesson's 0.4",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "            offer(record, KV_HIT)\n",
+          "new": "            offer(record, 0.4)\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "tokens from str.split instead of memory.tokens",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "    q = Counter(tokens(query.text))\n    for record in mem.vector.records():\n        offer(record, _cosine(q, Counter(tokens(record.text))))\n",
+          "new": "    q = Counter(query.text.lower().split())\n    for record in mem.vector.records():\n        offer(record, _cosine(q, Counter(record.text.lower().split())))\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "a record's graph edge weights summed",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "    for edge in mem.graph.all_edges():\n        if edge.valid and (edge.subject in entities or edge.obj in entities):\n            offer(mem.record(edge.rid), edge.weight)\n",
+          "new": "    graph_rel: dict[str, float] = {}\n    for edge in mem.graph.all_edges():\n        if edge.valid and (edge.subject in entities or edge.obj in entities):\n            graph_rel[edge.rid] = graph_rel.get(edge.rid, 0.0) + edge.weight\n    for rid, value in graph_rel.items():\n        offer(mem.record(rid), value)\n"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "a scope missing from scope_weights scored 0 instead of left out",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "        if value > 0 and viewer.can_see(record) and record.scope in config.scope_weights:\n",
+          "new": "        if value > 0 and viewer.can_see(record):\n"
+        },
+        {
+          "file": "fusion.py",
+          "old": "config.scope_weights[record.scope] * fused",
+          "new": "config.scope_weights.get(record.scope, 0.0) * fused"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_fused_recall",
+      "name": "recency counts whole half-lives only",
+      "edits": [
+        {
+          "file": "fusion.py",
+          "old": "0.5 ** (age / config.halflife_s)",
+          "new": "0.5 ** (age // config.halflife_s)"
+        }
+      ],
+      "expect": "the memories some store finds, best first, ties to the lower rid"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "fields joined with commas",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    buf = io.StringIO()\n    csv.writer(buf).writerow(fields)\n    return buf.getvalue()\n",
+          "new": "    return \",\".join(str(f) for f in fields) + \"\\r\\n\"\n"
+        }
+      ],
+      "expect": "each yielded string is exactly one CSV row"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "fields quoted with json.dumps",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    buf = io.StringIO()\n    csv.writer(buf).writerow(fields)\n    return buf.getvalue()\n",
+          "new": "    return \",\".join(__import__(\"json\").dumps(str(f)) for f in fields) + \"\\n\"\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "a header row first",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    uses: Counter[str] = Counter()\n",
+          "new": "    yield _row(\"seq\", \"kind\", \"subject\", \"relation\", \"object\", \"decision\", \"reason\")\n    uses: Counter[str] = Counter()\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "rows without a line break",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    return buf.getvalue()\n",
+          "new": "    return buf.getvalue().rstrip(\"\\r\\n\")\n"
+        }
+      ],
+      "expect": "each yielded string is exactly one CSV row"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "the threshold excludes its own value",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "if c.confidence >= policy.min_confidence]",
+          "new": "if c.confidence > policy.min_confidence]"
+        },
+        {
+          "file": "pipeline.py",
+          "old": "                if c.confidence < policy.min_confidence:\n",
+          "new": "                if c.confidence <= policy.min_confidence:\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "the cap keeps the tail of an ascending sort",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "kept = set(sorted(passing, key=lambda i: -candidates[i].confidence)[: policy.max_edges])",
+          "new": "kept = set(sorted(passing, key=lambda i: candidates[i].confidence)[-policy.max_edges :])"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "ties at the cap go to the later candidate",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "kept = set(sorted(passing, key=lambda i: -candidates[i].confidence)[: policy.max_edges])",
+          "new": "kept = set(sorted(passing, key=lambda i: (candidates[i].confidence, i), reverse=True)[: policy.max_edges])"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "the cap counted over every candidate",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "            passing = [i for i, c in enumerate(candidates) if c.confidence >= policy.min_confidence]\n",
+          "new": "            passing = list(range(len(candidates)))\n"
+        },
+        {
+          "file": "pipeline.py",
+          "old": "                if c.confidence < policy.min_confidence:\n",
+          "new": "                if c.confidence < policy.min_confidence and i in kept:\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "kept candidates written before the dropped ones",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "            for i, c in enumerate(candidates):\n",
+          "new": "            for i, c in sorted(enumerate(candidates), key=lambda ic: ic[0] not in kept):\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "a restated fact written again",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "                    if old is not None and old.obj == c.obj:\n                        yield _row(event.seq, \"edge\", c.subject, c.relation, c.obj, \"skip\", \"restated\")\n                        continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "a restated fact logged as a drop",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "\"skip\", \"restated\"",
+          "new": "\"drop\", \"restated\""
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "every write logged as a conflict",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "\"new\" if old is None else \"conflict\"",
+          "new": "\"conflict\""
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "the invalidated edge logged before the write",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "                    yield _row(event.seq, \"edge\", c.subject, c.relation, c.obj, \"write\", \"new\" if old is None else \"conflict\")\n                    if old is not None:\n                        yield _row(event.seq, \"edge\", old.subject, old.relation, old.obj, \"invalidate\", \"superseded\")\n",
+          "new": "                    if old is not None:\n                        yield _row(event.seq, \"edge\", old.subject, old.relation, old.obj, \"invalidate\", \"superseded\")\n                    yield _row(event.seq, \"edge\", c.subject, c.relation, c.obj, \"write\", \"new\" if old is None else \"conflict\")\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "the invalidate row names the new edge",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "_row(event.seq, \"edge\", old.subject, old.relation, old.obj, \"invalidate\", \"superseded\")",
+          "new": "_row(event.seq, \"edge\", c.subject, c.relation, c.obj, \"invalidate\", \"superseded\")"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "edges weighted 1.0",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "rid=rid, at=at, weight=c.confidence)",
+          "new": "rid=rid, at=at)"
+        }
+      ],
+      "expect": "a written edge is asserted by its message's record, weighted by its confidence"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "dropped candidates written to the graph anyway",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "                    yield _row(event.seq, \"edge\", c.subject, c.relation, c.obj, \"drop\", \"low_confidence\")\n",
+          "new": "                    mem.graph.add_edge(c.subject, c.relation, c.obj, rid=rid, at=at, weight=c.confidence)\n                    yield _row(event.seq, \"edge\", c.subject, c.relation, c.obj, \"drop\", \"low_confidence\")\n"
+        }
+      ],
+      "expect": "dropped candidates never reach the graph"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "a message with no candidates is not stored",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "            candidates = await extract(event.text)\n",
+          "new": "            candidates = await extract(event.text)\n            if not candidates:\n                continue\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "every event counts toward re-embedding",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "        if isinstance(event, Message):\n",
+          "new": "        lookups += 1\n        if isinstance(event, Message):\n"
+        },
+        {
+          "file": "pipeline.py",
+          "old": "            lookups += 1\n",
+          "new": ""
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "uses never reset",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "                    uses[rid] = 0\n",
+          "new": ""
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "Counter.most_common picks the hot records",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "                hot = sorted((rid for rid, n in uses.items() if n > 0), key=lambda rid: (-uses[rid], rid))\n                for rid in hot[: policy.reembed_top]:\n",
+          "new": "                for rid, _ in uses.most_common(policy.reembed_top):\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "records with no uses re-embedded too",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "(rid for rid, n in uses.items() if n > 0)",
+          "new": "(rid for rid in uses)"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "reembed_top ignored",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "                for rid in hot[: policy.reembed_top]:\n",
+          "new": "                for rid in hot:\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "uses counted from the raw vector search",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "mem.search(event.text, viewer=viewer, top_k=policy.top_k)",
+          "new": "mem.vector.search(event.text, top_k=policy.top_k)"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "re-embed rows written without calling the embedder",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "                    await reembed(mem.record(rid))\n",
+          "new": ""
+        }
+      ],
+      "expect": "re-embedding goes through the embedder"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "re-embed rows carry the round number",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "_row(event.seq, \"record\", rid,",
+          "new": "_row(lookups // policy.reembed_every, \"record\", rid,"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "the extractor also runs on lookups",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "            viewer = Viewer(event.user_id, event.session_id)\n",
+          "new": "            await extract(event.text)\n            viewer = Viewer(event.user_id, event.session_id)\n"
+        }
+      ],
+      "expect": "the extractor runs once per message"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "the whole stream read before the first row",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    async for event in events:\n",
+          "new": "    for event in [event async for event in events]:\n"
+        }
+      ],
+      "expect": "each row goes out as soon as it is decided"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "hot records re-embedded in rid order",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "                hot = sorted((rid for rid, n in uses.items() if n > 0), key=lambda rid: (-uses[rid], rid))\n                for rid in hot[: policy.reembed_top]:\n",
+          "new": "                hot = sorted(sorted((rid for rid, n in uses.items() if n > 0), key=lambda rid: (-uses[rid], rid))[: policy.reembed_top])\n                for rid in hot:\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "the count reset before its row is written",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "                    yield _row(event.seq, \"record\", rid, \"\", \"\", \"reembed\", f\"uses={uses[rid]}\")\n                    uses[rid] = 0\n",
+          "new": "                    uses[rid] = 0\n                    yield _row(event.seq, \"record\", rid, \"\", \"\", \"reembed\", f\"uses={uses[rid]}\")\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "the embedder called with the rid",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "await reembed(mem.record(rid))",
+          "new": "await reembed(rid)"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "a round after every lookup once reembed_every is reached",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "            if lookups % policy.reembed_every == 0:\n",
+          "new": "            if lookups >= policy.reembed_every:\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "one csv buffer for every row, never cleared",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "def _row(*fields: object) -> str:\n    buf = io.StringIO()\n    csv.writer(buf).writerow(fields)\n    return buf.getvalue()\n",
+          "new": "_BUF = io.StringIO()\n_WRITER = csv.writer(_BUF)\n\n\ndef _row(*fields: object) -> str:\n    _WRITER.writerow(fields)\n    return _BUF.getvalue()\n"
+        }
+      ],
+      "expect": "each yielded string is exactly one CSV row"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "one csv buffer rewound but not truncated",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "def _row(*fields: object) -> str:\n    buf = io.StringIO()\n    csv.writer(buf).writerow(fields)\n    return buf.getvalue()\n",
+          "new": "_BUF = io.StringIO()\n_WRITER = csv.writer(_BUF)\n\n\ndef _row(*fields: object) -> str:\n    _BUF.seek(0)\n    _WRITER.writerow(fields)\n    return _BUF.getvalue()\n"
+        }
+      ],
+      "expect": "each yielded string is exactly one CSV row"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "the round runs before the lookup's own uses are counted",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "            for _, record in mem.search(event.text, viewer=viewer, top_k=policy.top_k):\n                uses[record.rid] += 1\n            lookups += 1\n",
+          "new": "            hits = mem.search(event.text, viewer=viewer, top_k=policy.top_k)\n            lookups += 1\n"
+        },
+        {
+          "file": "pipeline.py",
+          "old": "                    uses[rid] = 0\n        else:\n",
+          "new": "                    uses[rid] = 0\n            for _, record in hits:\n                uses[record.rid] += 1\n        else:\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "the cap keeps the first max_edges candidates listed",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "            kept = set(sorted(passing, key=lambda i: -candidates[i].confidence)[: policy.max_edges])\n",
+          "new": "            kept = set(passing[: policy.max_edges])\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "restated candidates left out of the cap",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "            passing = [i for i, c in enumerate(candidates) if c.confidence >= policy.min_confidence]\n",
+          "new": "            def held(c):\n                cur = mem.graph.current(c.subject, c.relation)\n                return cur is not None and cur.obj == c.obj\n\n            passing = [i for i, c in enumerate(candidates) if c.confidence >= policy.min_confidence and not held(c)]\n"
+        },
+        {
+          "file": "pipeline.py",
+          "old": "                elif i not in kept:\n",
+          "new": "                elif held(c):\n                    yield _row(event.seq, \"edge\", c.subject, c.relation, c.obj, \"skip\", \"restated\")\n                elif i not in kept:\n"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_write_audit",
+      "name": "lookups ignore policy.top_k",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "mem.search(event.text, viewer=viewer, top_k=policy.top_k)",
+          "new": "mem.search(event.text, viewer=viewer)"
+        }
+      ],
+      "expect": "one audit row per decision, in order"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "an edge still holds at its valid_to",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "    return edge.valid_from <= at and (edge.valid_to is None or at < edge.valid_to)\n",
+          "new": "    return edge.valid_from <= at and (edge.valid_to is None or at <= edge.valid_to)\n"
+        }
+      ],
+      "expect": "an edge holds from valid_from up to, not including, valid_to"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "an edge holds only after its valid_from",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "    return edge.valid_from <= at and (edge.valid_to is None or at < edge.valid_to)\n",
+          "new": "    return edge.valid_from < at and (edge.valid_to is None or at < edge.valid_to)\n"
+        }
+      ],
+      "expect": "an edge holds from valid_from up to, not including, valid_to"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "only edges that hold now",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "    return edge.valid_from <= at and (edge.valid_to is None or at < edge.valid_to)\n",
+          "new": "    return edge.valid\n"
+        }
+      ],
+      "expect": "a closed edge still answers for its own time"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "valid_from ignored",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "    return edge.valid_from <= at and (edge.valid_to is None or at < edge.valid_to)\n",
+          "new": "    return edge.valid_to is None or at < edge.valid_to\n"
+        }
+      ],
+      "expect": "nothing held before the first assertion"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "valid_to ignored",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "    return edge.valid_from <= at and (edge.valid_to is None or at < edge.valid_to)\n",
+          "new": "    return edge.valid_from <= at\n"
+        }
+      ],
+      "expect": "an edge holds from valid_from up to, not including, valid_to"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "one visited set for the whole search",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "                walk(edge.obj, step, seen | {edge.obj}, w)\n",
+          "new": "                seen.add(edge.obj)\n                walk(edge.obj, step, seen, w)\n"
+        },
+        {
+          "file": "temporal.py",
+          "old": "    walk(source, (), frozenset({source}), 1.0)\n",
+          "new": "    walk(source, (), {source}, 1.0)\n"
+        }
+      ],
+      "expect": "every path that held in March, best first"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "paths through the same nodes counted once",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "    found.sort(key=lambda p: (-p.weight, len(p.edges), [(e.relation, e.obj) for e in p.edges]))\n",
+          "new": "    unique = {}\n    for p in found:\n        unique.setdefault((p.edges[0].subject,) + tuple(e.obj for e in p.edges), p)\n    found = list(unique.values())\n    found.sort(key=lambda p: (-p.weight, len(p.edges), [(e.relation, e.obj) for e in p.edges]))\n"
+        }
+      ],
+      "expect": "every path that held in March, best first"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "max_hops off by one",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "            elif len(step) < max_hops:\n",
+          "new": "            elif len(step) <= max_hops:\n"
+        }
+      ],
+      "expect": "every path that held in March, best first"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "sorted by weight only",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "    found.sort(key=lambda p: (-p.weight, len(p.edges), [(e.relation, e.obj) for e in p.edges]))\n",
+          "new": "    found.sort(key=lambda p: -p.weight)\n"
+        }
+      ],
+      "expect": "every path that held in March, best first"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "ties broken alphabetically, hops not counted",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "    found.sort(key=lambda p: (-p.weight, len(p.edges), [(e.relation, e.obj) for e in p.edges]))\n",
+          "new": "    found.sort(key=lambda p: (-p.weight, [(e.relation, e.obj) for e in p.edges]))\n"
+        }
+      ],
+      "expect": "every path that held in March, best first"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "ties broken by node names",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "    found.sort(key=lambda p: (-p.weight, len(p.edges), [(e.relation, e.obj) for e in p.edges]))\n",
+          "new": "    found.sort(key=lambda p: (-p.weight, len(p.edges), [e.obj for e in p.edges]))\n"
+        }
+      ],
+      "expect": "every path that held in March, best first"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "only the best path",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "    return found\n",
+          "new": "    return found[:1]\n"
+        }
+      ],
+      "expect": "every path that held in March, best first"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "the search stops at the first way into the target",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "                found.append(Path(w, step))\n",
+          "new": "                found.append(Path(w, step))\n                return\n"
+        }
+      ],
+      "expect": "every path that held in March, best first"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "edges followed both ways",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "            out.setdefault(edge.subject, []).append(edge)\n",
+          "new": "            out.setdefault(edge.subject, []).append(edge)\n            out.setdefault(edge.obj, []).append(Edge(edge.obj, edge.relation, edge.subject, edge.rid, edge.valid_from, edge.weight, edge.valid_to))\n"
+        }
+      ],
+      "expect": "every path that held in March, best first"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "no cycle check",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "            if edge.obj in seen:\n                continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "every path that held in March, best first"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "weights added along a path",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "            w = weight * edge.weight\n",
+          "new": "            w = weight + edge.weight\n"
+        }
+      ],
+      "expect": "every path that held in March, best first"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "the time slice taken on the first hop only",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "        if _holds(edge, at):\n            out.setdefault(edge.subject, []).append(edge)\n",
+          "new": "        out.setdefault(edge.subject, []).append(edge)\n"
+        },
+        {
+          "file": "temporal.py",
+          "old": "            if edge.obj in seen:\n",
+          "new": "            if edge.obj in seen or (not trail and not _holds(edge, at)):\n"
+        }
+      ],
+      "expect": "every path that held in March, best first"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "the source not marked as visited",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "    walk(source, (), frozenset({source}), 1.0)\n",
+          "new": "    walk(source, (), frozenset(), 1.0)\n"
+        }
+      ],
+      "expect": "every path that held in March, best first"
+    },
+    {
+      "test": "test_graph_as_of",
+      "name": "paths keep only the edges that hold now, then check the time",
+      "edits": [
+        {
+          "file": "temporal.py",
+          "old": "        if _holds(edge, at):\n            out.setdefault(edge.subject, []).append(edge)\n",
+          "new": "        if edge.valid and _holds(edge, at):\n            out.setdefault(edge.subject, []).append(edge)\n"
+        }
+      ],
+      "expect": "every path that held in March, best first"
+    }
+  ]
+}
