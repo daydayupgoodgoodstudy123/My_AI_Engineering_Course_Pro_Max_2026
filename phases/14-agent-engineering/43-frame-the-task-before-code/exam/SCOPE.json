@@ -1,0 +1,135 @@
+{
+  "lesson": "phases/14-agent-engineering/43-frame-the-task-before-code",
+  "title": "Frame the Task Before the Agent Writes Code",
+  "format": "staged-brownfield",
+  "service": "TaskFrame: a task-frame gate for coding agents. A frame's six fields are validated against a read-only repository snapshot (receipts are path:line or '$ command -> result'), the lines a frame cites are pinned in a content-addressed store and rechecked against a later commit as fresh, moved or stale, every planned decision is classified as evidence, delegated, ask, investigate, deferred or open with an overall READY / INVESTIGATE / ASK, reconnaissance reads code-search hits in grep -n form only until every decision has a constraint, and a broad allowed path is narrowed to the fewest safe entries",
+  "sources": {
+    "docs/en.md": "b5ebe37b63dd21d1abba0472c8abf6b07c070b321b17d3cda1c4e216e1a7e32d",
+    "code/main.py": "094754143547577da826e5f0b8b8d83de4b49ff425c2bc9813b80f1f8e4cd75c",
+    "quiz/quiz.md": "e288d9f2aa06be6dae43aa0621d6974726723c63e5dd39755c6dce7f91b127a4"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no model and no network: repository snapshots, search hits and the task contract's delegations are data the tests hand in",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_validate_frame",
+      "kind": "debug",
+      "lesson_anchor": "The Task Frame (six fields; Facts need receipts: a file path and line is enough, a command result is better when behavior matters); Build It (break the example four ways, each refused for a different reason); Use It 2 (record two or three facts with exact evidence; the empty-facts rule is in the docstring and the starter, checked as a fifth broken frame); code/main.py validate, which only checks that evidence is non-empty; quiz Q12 (receipts are path:line or '$ cmd -> result', at least one fact)",
+      "planted_bugs": [
+        "parse_receipt tries the path:line form first, splitting at the last colon, so the example's command receipt '$ git grep -c ... -> app/accounts.py:1' (git grep -c prints path:count) is read as line 1 of a file named '$ git grep -c ... -> app/accounts.py'; the failure surfaces two calls up, as 'unsupported fact: Only AccountStore.save raises DUPLICATE_EMAIL' from validate (validate -> receipt_problem -> parse_receipt); the curl receipt, with localhost:8000 inside, survives only because the text after its last colon is not a number",
+        "parse_receipt checks only that the line number is digits and receipt_problem checks only the upper bound, so app/accounts.py:0 resolves, although lines are counted from 1 the way grep -n and editors count them (a line 0 usually means a receipt copied from a 0-based tool such as an LSP position)",
+        "a command receipt is split at ' -> ' but neither side is checked, so '$ python3 -m unittest tests.test_accounts' (no result) and '$ make test -> ' (a blank result) pass, against the docstring",
+        "Repo.lines splits the whole file again on every call, and receipt_problem asks for the line count of every receipt"
+      ],
+      "timing_assert": "500 queued frames with 1,500 receipts into two generated 20,000-line clients validated under 0.05 s. Measured in temporary copies with /Users/aaronlu/.cache/edison-pair-prep-venv/bin/python (Python 3.12.14), three fresh processes each: the starter with the three logic bugs fixed 0.689113750, 0.706135000 and 0.691835375 s (at least 13.78 times the limit, each below 3 s); reference 0.002138583, 0.002143625 and 0.002532500 s (at most 1/19.74 of the limit). A line count from str.count on every call, which no longer splits but still reads the whole file, takes about 0.25 s and fails.",
+      "overfix_guard": "command receipts stay receipts (refusing everything that is not path:line loses the example's curl receipt); each snapshot answers for its own files (a module-level line cache keyed by path fails); lines are numbered like grep -n: str.splitlines() splits again at the form feed between the two test classes, so tests/test_accounts.py:45 resolves; split('\\n') without dropping the piece after the final newline lets app/accounts.py:34 resolve; counting newlines loses the last line of app/settings.py, which has no final newline"
+    },
+    {
+      "part": 2,
+      "test": "test_receipt_pins",
+      "kind": "model and persistence",
+      "lesson_anchor": "Facts need receipts ('The API uses 409 for duplicates' is not a fact until you can point to the test or handler); quiz Q12's next step (open the cited file and check the line); What You Keep (the frame is the input to the next lesson, written before the code changes under it)",
+      "storage": "content-addressed files: objects/<2 hex>/<62 hex> holding exactly the bytes whose sha256 is the name; each cited line is one object, and each frame's pin list is one JSON object whose digest the frame keeps",
+      "exactness": "every pinned line comes back byte for byte and its digest is the sha256 of the line's UTF-8 bytes without the newline, checked against the line the test cuts from the file text itself: a tab and two trailing spaces in the Makefile recipe, é, à and an em dash in the French message; the pin list reads back equal after a reopen (claims with non-ASCII text, paths, int line numbers, digests)",
+      "traps": [
+        "a line still in place reported moved or stale because it also appears further down",
+        "a moved line taken at its first occurrence when it now appears twice, or looked for in other files",
+        "command receipts pinned",
+        "trailing whitespace ignored when rechecking (the Makefile recipe lost its trailing spaces)",
+        "line stripped, stored with its newline, or encoded with replacement characters",
+        "objects not named by the sha256 of their bytes, or stored without the two-digit directory",
+        "the same line stored twice, or the pin list stamped with a time so pinning again stores a new object",
+        "pin lists kept in memory, so a reopened store cannot read them",
+        "an unknown digest leaking FileNotFoundError"
+      ],
+      "clarifying_questions": [
+        "a line that moved to another file",
+        "trailing whitespace",
+        "a line that now appears twice",
+        "the newline",
+        "where the pin list lives"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_decision_coverage",
+      "kind": "core algorithm",
+      "lesson_anchor": "Reconnaissance Is a Search for Constraints (stop when every planned decision is supported by evidence, explicitly delegated, or listed as an unknown); Unknowns Are Not Failures (discoverable, decidable, human, deferred; continue through discoverable and delegated unknowns, pause at human unknowns before the choice is buried in code; deferred belongs in non-goals); The Expensive Failure (the questions behind 'add duplicate email protection'); the flowchart's 'Unknown blocks design? Ask or investigate'",
+      "algorithm": "each planned decision takes the first that applies: ask (a human unknown, or a decidable unknown the contract does not delegate), evidence (a supporting fact whose receipt resolves in the snapshot), delegated, investigate (a discoverable unknown that names where to look), deferred (a deferred unknown listed in non_goals), open; status ASK, then INVESTIGATE (investigate or open), then READY; questions and places to read in plan order, each once",
+      "traps": [
+        "a decidable unknown treated as the agent's call although the contract does not delegate it",
+        "evidence of today's behavior answering a human question",
+        "a fact counted whose receipt does not resolve (tests/test_signup.py:12)",
+        "delegation checked before evidence",
+        "a deferred unknown accepted without the non-goals, a discoverable one without a place to look",
+        "an open decision left out of the status",
+        "questions in frame order, places to read repeated",
+        "unknown kinds and unplanned decisions not rejected",
+        "only the first blocking question for one decision retained, or a discoverable lead allowed to displace an already delegated decision"
+      ],
+      "integration": "evidence uses Part 1's receipt_problem against the same snapshot",
+      "clarifying_questions": [
+        "evidence and delegation together",
+        "an unknown for an unplanned decision",
+        "what open means",
+        "a repeated look_at"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_recon_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Reconnaissance Is a Search for Constraints (do not read the entire repository; the six surfaces: current behavior and its caller, closest test, public contract, project instructions, build and verification commands, similar completed changes; more reading after the stop point is often avoidance)",
+      "wire_format": "grep -n lines: each yielded string is one hit 'path:line:text' ending in one newline, text unchanged; decided by the test's join, endswith('\\n'), split('\\n') and split(':', 2) per line",
+      "traps": [
+        "a hit split at every colon (the text keeps its colons)",
+        "lines that are not hits unpacked as hits ('Binary file ... matches', '--')",
+        "the pattern searched in the whole grep line (tests/http-409/... settles error_shape through its path)",
+        "a probe's surfaces ignored (a 409 in an ADR is history, not a test or a contract)",
+        "a hit that settles two decisions sent twice, or a settled decision firing again",
+        "reading on after the last decision is settled, or checking for the end only after pulling the next hit",
+        "every hit read before the first line goes out",
+        "a search with no probes read anyway",
+        "text stripped, or no newline after a hit"
+      ],
+      "clarifying_questions": [
+        "colons in paths",
+        "closing the search",
+        "a hit that settles two decisions",
+        "a search that ends early"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_narrow_allowed",
+      "kind": "recursive structure",
+      "lesson_anchor": "Exercise 4 (split one broad allowed path into the smallest safe set); Use It 3 and 4 (name the smallest allowed path set, name negative space explicitly); the frame should fit on one screen",
+      "traps": [
+        "planned files that do not exist yet left out",
+        "an empty directory keeping its parent from collapsing",
+        "collapsing stopped below the highest directory the tree allows",
+        "a forbidden path that does not exist yet ignored (app/.env)",
+        "a forbidden entry deep below checked one level down only",
+        "a directory with one entry collapsed, or the root collapsed",
+        "entries in tree order instead of sorted",
+        "a forbidden planned file accepted",
+        "a later complete child overwriting an earlier incomplete sibling while propagating directory completeness"
+      ],
+      "clarifying_questions": [
+        "new files",
+        "globs",
+        "one planned file in a directory"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the planned overlap defect (allowed and forbidden compared as literal strings) is not planted. Lesson 36's exam already plants glob lists intersected as strings in its Part 1, so a candidate would meet the same bug twice. validate keeps a correct overlap check over files and dir/** entries, and the lesson's literal break (app/accounts.py in both lists) is one of the five broken frames. The defect that surfaces away from its cause is now the receipt parser's order: a command receipt whose output ends in path:count is read as a line receipt, and validate reports it two calls up.",
+    "Part 1: the planned human-unknown defect moved to Part 3, where unknowns are classified per planned decision; Part 1 stays on receipts and boundaries, so the same rule is not graded twice. The planned 'tests pass' defect is replaced by the command-result check and the lower bound on line numbers: deciding whether an acceptance entry names the authoritative test would mean parsing runner commands into test ids, which lesson 41's exam already grades; the lesson's 'Which test proves the behavior?' is graded in Part 3 as the proof decision, which needs a receipt that resolves. The empty-facts rule (Use It 2, quiz Q12) is in validate's docstring and already right in the starter, checked as a fifth broken frame: planting it would repeat lesson 32's all() over an empty list (Part 1) and lesson 41's guard against it.",
+    "Part 1 timing: the suggestion (2,000 facts on a 100,000-line file) is replaced by 1,500 receipts into two 20,000-line generated clients, so the slow layer stays near 0.65 s while the reference stays under 2 ms. The limit of 0.05 s also fails a line count taken with str.count on every call (about 0.22 s), which no longer splits but still reads the whole file per receipt.",
+    "Part 2: the receipts are pinned as suggested (path, line, sha256 of the line content, lines stored by hash), and recheck adds 'moved' for a line found exactly once elsewhere in the same file, so a commit that inserts two imports does not turn every receipt below them stale; a line that now appears twice stays stale. The pin list is itself a content-addressed object, and recheck compares against the stored bytes, so the stored lines are what the verdicts read.",
+    "Part 3: the suggested 'discoverable needs an investigation path', 'decidable only inside the contract', 'human before investigate' and 'deferred needs non-goals' are all kept; 'human before evidence' is added, from the lesson's distinction between today's behavior and a change to public compatibility.",
+    "Part 4: the suggested trap 'colons in file names' is ruled out by the docstring (the path ends at the first colon), so the colon trap is in the text. 'The same line hits two surfaces' cannot happen, since a path has one surface; it became one hit settling two decisions, sent once. Hits are test data; recon does not check them against the snapshot. Stopping early does not close the upstream search: the tests do not check it and the interviewer asks about it.",
+    "Part 4 format: grep -n lines as assigned. They are not a line-JSON format, so the chapter's NDJSON-like group (13 of 18 across 54 lessons) is unchanged; no other exam in chapters 13 and 14 uses this format.",
+    "Part 5: as suggested, plus 'collapse only when it replaces two or more entries' (dir/** for a single file is no shorter and allows new files) and forbidden entries that need not exist; the root is never collapsed. Globs other than dir/** are out of scope, as the plan asks, so lesson 36's glob dialect and lesson 45's ownership trie are not touched."
+  ]
+}

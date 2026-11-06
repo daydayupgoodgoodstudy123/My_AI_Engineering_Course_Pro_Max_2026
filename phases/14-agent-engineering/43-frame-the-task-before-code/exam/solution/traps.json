@@ -1,0 +1,792 @@
+{
+  "package": "taskframe",
+  "tests": [
+    "test_validate_frame",
+    "test_receipt_pins",
+    "test_decision_coverage",
+    "test_recon_stream",
+    "test_narrow_allowed"
+  ],
+  "layers": [
+    {
+      "test": "test_validate_frame",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "the lesson's example frame is ready"
+        },
+        {
+          "name": "recognize the command form before the line form",
+          "edits": [
+            {
+              "file": "frame.py",
+              "old": "    path, sep, line = text.rpartition(\":\")\n    if sep and path and line.isascii() and line.isdigit():\n        return LineReceipt(path, int(line))\n    if text.startswith(\"$ \"):\n        command, _, result = text[2:].partition(\" -> \")\n        return CommandReceipt(command.strip(), result.strip())\n",
+              "new": "    if text.startswith(\"$ \"):\n        command, _, result = text[2:].partition(\" -> \")\n        return CommandReceipt(command.strip(), result.strip())\n    path, sep, line = text.rpartition(\":\")\n    if sep and path and line.isascii() and line.isdigit():\n        return LineReceipt(path, int(line))\n"
+            }
+          ],
+          "expect": "'app/accounts.py:0' does not resolve"
+        },
+        {
+          "name": "+ line numbers start at 1",
+          "edits": [
+            {
+              "file": "frame.py",
+              "old": "    if sep and path and line.isascii() and line.isdigit():\n",
+              "new": "    if sep and path and line.isascii() and line.isdigit() and int(line) >= 1:\n"
+            }
+          ],
+          "expect": "a command receipt records what the command returned"
+        },
+        {
+          "name": "+ a command receipt needs its result",
+          "edits": [
+            {
+              "file": "frame.py",
+              "old": "        command, _, result = text[2:].partition(\" -> \")\n        return CommandReceipt(command.strip(), result.strip())\n",
+              "new": "        command, sep, result = text[2:].partition(\" -> \")\n        if not sep or not command.strip() or not result.strip():\n            raise ValueError(f\"a command receipt needs the command and what it returned: {evidence!r}\")\n        return CommandReceipt(command.strip(), result.strip())\n"
+            }
+          ],
+          "expect": "checking many frames against one snapshot should be fast"
+        },
+        {
+          "name": "+ each file split once per snapshot",
+          "edits": [
+            {
+              "file": "repo.py",
+              "old": "        self._files = dict(files)\n",
+              "new": "        self._files = dict(files)\n        self._lines: dict[str, tuple[str, ...]] = {}\n"
+            },
+            {
+              "file": "repo.py",
+              "old": "        parts = self._files[path].split(\"\\n\")\n        if parts[-1] == \"\":\n            parts.pop()\n        return tuple(parts)\n",
+              "new": "        cached = self._lines.get(path)\n        if cached is None:\n            parts = self._files[path].split(\"\\n\")\n            if parts[-1] == \"\":\n                parts.pop()\n            cached = self._lines[path] = tuple(parts)\n        return cached\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_validate_frame",
+      "name": "line cache kept at module level, keyed by path",
+      "edits": [
+        {
+          "file": "repo.py",
+          "old": "class Repo:\n",
+          "new": "_LINES: dict[str, tuple[str, ...]] = {}\n\n\nclass Repo:\n"
+        },
+        {
+          "file": "repo.py",
+          "old": "        cached = self._lines.get(path)\n",
+          "new": "        cached = _LINES.get(path)\n"
+        },
+        {
+          "file": "repo.py",
+          "old": "            cached = self._lines[path] = tuple(parts)\n",
+          "new": "            cached = _LINES[path] = tuple(parts)\n"
+        }
+      ],
+      "expect": "each snapshot answers for its own files"
+    },
+    {
+      "test": "test_validate_frame",
+      "name": "only path:line counts as a receipt",
+      "edits": [
+        {
+          "file": "frame.py",
+          "old": "    if text.startswith(\"$ \"):\n        command, sep, result",
+          "new": "    if False:\n        command, sep, result"
+        }
+      ],
+      "expect": "the lesson's example frame is ready"
+    },
+    {
+      "test": "test_validate_frame",
+      "name": "lines from str.splitlines()",
+      "edits": [
+        {
+          "file": "repo.py",
+          "old": "            parts = self._files[path].split(\"\\n\")\n            if parts[-1] == \"\":\n                parts.pop()\n",
+          "new": "            parts = self._files[path].splitlines()\n"
+        }
+      ],
+      "expect": "'tests/test_accounts.py:45' does not resolve"
+    },
+    {
+      "test": "test_validate_frame",
+      "name": "the empty string after the final newline kept as a line",
+      "edits": [
+        {
+          "file": "repo.py",
+          "old": "            if parts[-1] == \"\":\n                parts.pop()\n",
+          "new": ""
+        }
+      ],
+      "expect": "'app/accounts.py:34' does not resolve"
+    },
+    {
+      "test": "test_validate_frame",
+      "name": "line count as the number of newlines",
+      "edits": [
+        {
+          "file": "repo.py",
+          "old": "    def line_count(self, path: str) -> int:\n        return len(self.lines(path))\n",
+          "new": "    def line_count(self, path: str) -> int:\n        return self._files[path].count(\"\\n\")\n"
+        }
+      ],
+      "expect": "'app/settings.py:2' is a receipt"
+    },
+    {
+      "test": "test_validate_frame",
+      "name": "line count from str.count on every call (no split, still a pass over the file)",
+      "edits": [
+        {
+          "file": "repo.py",
+          "old": "    def line_count(self, path: str) -> int:\n        return len(self.lines(path))\n",
+          "new": "    def line_count(self, path: str) -> int:\n        text = self._files[path]\n        return text.count(\"\\n\") + (1 if text and not text.endswith(\"\\n\") else 0)\n"
+        }
+      ],
+      "expect": "checking many frames against one snapshot should be fast"
+    },
+    {
+      "test": "test_validate_frame",
+      "name": "line 0 accepted",
+      "edits": [
+        {
+          "file": "frame.py",
+          "old": " or int(line) < 1:\n",
+          "new": ":\n"
+        }
+      ],
+      "expect": "'app/accounts.py:0' does not resolve"
+    },
+    {
+      "test": "test_receipt_pins",
+      "name": "line stripped before it is hashed and stored",
+      "edits": [
+        {
+          "file": "pins.py",
+          "old": "self.put(repo.line(r.path, r.line).encode(\"utf-8\"))",
+          "new": "self.put(repo.line(r.path, r.line).strip().encode(\"utf-8\"))"
+        }
+      ],
+      "expect": "a pin holds the sha256 of the cited line's UTF-8 bytes, without the newline"
+    },
+    {
+      "test": "test_receipt_pins",
+      "name": "line stored with its newline",
+      "edits": [
+        {
+          "file": "pins.py",
+          "old": "self.put(repo.line(r.path, r.line).encode(\"utf-8\"))",
+          "new": "self.put((repo.line(r.path, r.line) + \"\\n\").encode(\"utf-8\"))"
+        }
+      ],
+      "expect": "a pin holds the sha256 of the cited line's UTF-8 bytes, without the newline"
+    },
+    {
+      "test": "test_receipt_pins",
+      "name": "line encoded as ASCII with replacement characters",
+      "edits": [
+        {
+          "file": "pins.py",
+          "old": "self.put(repo.line(r.path, r.line).encode(\"utf-8\"))",
+          "new": "self.put(repo.line(r.path, r.line).encode(\"ascii\", \"replace\"))"
+        }
+      ],
+      "expect": "a pin holds the sha256 of the cited line's UTF-8 bytes, without the newline"
+    },
+    {
+      "test": "test_receipt_pins",
+      "name": "objects stored flat, without the two-digit directory",
+      "edits": [
+        {
+          "file": "pins.py",
+          "old": "os.path.join(self.root, \"objects\", digest[:2], digest[2:])",
+          "new": "os.path.join(self.root, \"objects\", digest)"
+        }
+      ],
+      "expect": "every object is a file objects/ab/cdef... named by the sha256 of its bytes"
+    },
+    {
+      "test": "test_receipt_pins",
+      "name": "pin lists kept in memory only",
+      "edits": [
+        {
+          "file": "pins.py",
+          "old": "        return self.put(json.dumps(listing, ensure_ascii=False, sort_keys=True).encode(\"utf-8\"))\n",
+          "new": "        digest = hashlib.sha256(json.dumps(listing, sort_keys=True).encode(\"utf-8\")).hexdigest()\n        self.__dict__.setdefault(\"_memory\", {})[digest] = pins\n        return digest\n"
+        },
+        {
+          "file": "pins.py",
+          "old": "        listing = json.loads(self.get(digest).decode(\"utf-8\"))\n        return [Pin(item[\"claim\"], item[\"path\"], item[\"line\"], item[\"digest\"]) for item in listing]\n",
+          "new": "        return list(self.__dict__.get(\"_memory\", {})[digest])\n"
+        }
+      ],
+      "expect": "each distinct line is stored once, plus the pin list"
+    },
+    {
+      "test": "test_receipt_pins",
+      "name": "pin list stamped with the time it was made",
+      "edits": [
+        {
+          "file": "pins.py",
+          "old": "        return self.put(json.dumps(listing, ensure_ascii=False, sort_keys=True).encode(\"utf-8\"))\n",
+          "new": "        record = {\"pinned_at\": __import__(\"time\").time(), \"pins\": listing}\n        return self.put(json.dumps(record, ensure_ascii=False, sort_keys=True).encode(\"utf-8\"))\n"
+        },
+        {
+          "file": "pins.py",
+          "old": "        listing = json.loads(self.get(digest).decode(\"utf-8\"))\n",
+          "new": "        listing = json.loads(self.get(digest).decode(\"utf-8\"))[\"pins\"]\n"
+        }
+      ],
+      "expect": "pinning again stores nothing new"
+    },
+    {
+      "test": "test_receipt_pins",
+      "name": "an unknown digest leaks FileNotFoundError",
+      "edits": [
+        {
+          "file": "pins.py",
+          "old": "        try:\n            with open(self._path(digest), \"rb\") as stored:\n                return stored.read()\n        except FileNotFoundError:\n            raise KeyError(digest) from None\n",
+          "new": "        with open(self._path(digest), \"rb\") as stored:\n            return stored.read()\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_receipt_pins",
+      "name": "a moved line looked for in every file",
+      "edits": [
+        {
+          "file": "pins.py",
+          "old": "        if pin.path not in repo:\n            return Verdict(pin.claim, \"stale\", None)\n        pinned = self.get(pin.digest).decode(\"utf-8\")\n        lines = repo.lines(pin.path)\n",
+          "new": "        pinned = self.get(pin.digest).decode(\"utf-8\")\n        lines = repo.lines(pin.path) if pin.path in repo else ()\n"
+        },
+        {
+          "file": "pins.py",
+          "old": "        found = [number for number, text in enumerate(lines, 1) if text == pinned]\n        if len(found) == 1:\n            return Verdict(pin.claim, \"moved\", f\"{pin.path}:{found[0]}\")\n",
+          "new": "        found = [f\"{p}:{n}\" for p in repo.paths() for n, text in enumerate(repo.lines(p), 1) if text == pinned]\n        if len(found) == 1:\n            return Verdict(pin.claim, \"moved\", found[0])\n"
+        }
+      ],
+      "expect": "a receipt never moves to another file"
+    },
+    {
+      "test": "test_receipt_pins",
+      "name": "a repeated line taken at its first occurrence",
+      "edits": [
+        {
+          "file": "pins.py",
+          "old": "        if len(found) == 1:\n",
+          "new": "        if found:\n"
+        }
+      ],
+      "expect": "a line that now sits on two lines is stale"
+    },
+    {
+      "test": "test_receipt_pins",
+      "name": "occurrences counted before the cited line is checked",
+      "edits": [
+        {
+          "file": "pins.py",
+          "old": "        if pin.line <= len(lines) and lines[pin.line - 1] == pinned:\n            return Verdict(pin.claim, \"fresh\", f\"{pin.path}:{pin.line}\")\n        found = [number for number, text in enumerate(lines, 1) if text == pinned]\n        if len(found) == 1:\n            return Verdict(pin.claim, \"moved\", f\"{pin.path}:{found[0]}\")\n",
+          "new": "        found = [number for number, text in enumerate(lines, 1) if text == pinned]\n        if len(found) == 1:\n            status = \"fresh\" if found[0] == pin.line else \"moved\"\n            return Verdict(pin.claim, status, f\"{pin.path}:{found[0]}\")\n"
+        }
+      ],
+      "expect": "a line still in place is fresh, even when it appears again below"
+    },
+    {
+      "test": "test_receipt_pins",
+      "name": "trailing whitespace ignored when rechecking",
+      "edits": [
+        {
+          "file": "pins.py",
+          "old": "lines[pin.line - 1] == pinned:",
+          "new": "lines[pin.line - 1].rstrip() == pinned.rstrip():"
+        },
+        {
+          "file": "pins.py",
+          "old": "if text == pinned]",
+          "new": "if text.rstrip() == pinned.rstrip()]"
+        }
+      ],
+      "expect": "a byte that changed makes a receipt stale, trailing spaces included"
+    },
+    {
+      "test": "test_decision_coverage",
+      "name": "a decidable unknown treated as the agent's call",
+      "edits": [
+        {
+          "file": "decisions.py",
+          "old": "u.kind == \"human\" or (u.kind == \"decidable\" and key not in delegated)",
+          "new": "u.kind == \"human\""
+        }
+      ],
+      "expect": "a human question outranks anything left to read; questions follow the plan"
+    },
+    {
+      "test": "test_decision_coverage",
+      "name": "evidence checked before the unknowns",
+      "edits": [
+        {
+          "file": "decisions.py",
+          "old": "        if asks:\n            decisions[key] = \"ask\"\n            _extend_once(questions, [u.question for u in asks])\n        elif any(key in f.supports and receipt_problem(f.evidence, repo) is None for f in frame.facts):\n            decisions[key] = \"evidence\"\n",
+          "new": "        if any(key in f.supports and receipt_problem(f.evidence, repo) is None for f in frame.facts):\n            decisions[key] = \"evidence\"\n        elif asks:\n            decisions[key] = \"ask\"\n            _extend_once(questions, [u.question for u in asks])\n"
+        }
+      ],
+      "expect": "evidence of today's behavior does not answer a human question"
+    },
+    {
+      "test": "test_decision_coverage",
+      "name": "a fact counts without a receipt that resolves",
+      "edits": [
+        {
+          "file": "decisions.py",
+          "old": "key in f.supports and receipt_problem(f.evidence, repo) is None",
+          "new": "key in f.supports"
+        }
+      ],
+      "expect": "a human question outranks anything left to read; questions follow the plan"
+    },
+    {
+      "test": "test_decision_coverage",
+      "name": "delegation checked before evidence",
+      "edits": [
+        {
+          "file": "decisions.py",
+          "old": "        elif any(key in f.supports and receipt_problem(f.evidence, repo) is None for f in frame.facts):\n            decisions[key] = \"evidence\"\n        elif key in delegated:\n            decisions[key] = \"delegated\"\n",
+          "new": "        elif key in delegated:\n            decisions[key] = \"delegated\"\n        elif any(key in f.supports and receipt_problem(f.evidence, repo) is None for f in frame.facts):\n            decisions[key] = \"evidence\"\n"
+        }
+      ],
+      "expect": "a human question outranks anything left to read; questions follow the plan"
+    },
+    {
+      "test": "test_decision_coverage",
+      "name": "deferred without the non-goals",
+      "edits": [
+        {
+          "file": "decisions.py",
+          "old": "        elif key in frame.non_goals and any(u.kind == \"deferred\" for u in mine):\n",
+          "new": "        elif any(u.kind == \"deferred\" for u in mine):\n"
+        }
+      ],
+      "expect": "a deferred decision has to appear among the non-goals"
+    },
+    {
+      "test": "test_decision_coverage",
+      "name": "a discoverable unknown with nowhere to look still investigates",
+      "edits": [
+        {
+          "file": "decisions.py",
+          "old": "u.kind == \"discoverable\" and u.look_at.strip()",
+          "new": "u.kind == \"discoverable\""
+        }
+      ],
+      "expect": "a discoverable unknown has to say where to look"
+    },
+    {
+      "test": "test_decision_coverage",
+      "name": "an open decision does not hold the frame back",
+      "edits": [
+        {
+          "file": "decisions.py",
+          "old": "    elif covered & {\"investigate\", \"open\"}:\n",
+          "new": "    elif \"investigate\" in covered:\n"
+        }
+      ],
+      "expect": "a discoverable unknown has to say where to look"
+    },
+    {
+      "test": "test_decision_coverage",
+      "name": "questions in frame order",
+      "edits": [
+        {
+          "file": "decisions.py",
+          "old": "    covered = set(decisions.values())\n",
+          "new": "    questions.sort(key=[u.question for u in frame.unknowns].index)\n    covered = set(decisions.values())\n"
+        }
+      ],
+      "expect": "a human question outranks anything left to read; questions follow the plan"
+    },
+    {
+      "test": "test_decision_coverage",
+      "name": "places to look repeated per unknown",
+      "edits": [
+        {
+          "file": "decisions.py",
+          "old": "            _extend_once(reads, [u.look_at for u in looks])\n",
+          "new": "            reads.extend(u.look_at for u in looks)\n"
+        }
+      ],
+      "expect": "each place to look once, in plan order"
+    },
+    {
+      "test": "test_decision_coverage",
+      "name": "unknown kinds not checked",
+      "edits": [
+        {
+          "file": "decisions.py",
+          "old": "        if unknown.kind not in UNKNOWN_KINDS:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_decision_coverage",
+      "name": "an unknown for an unplanned decision ignored",
+      "edits": [
+        {
+          "file": "decisions.py",
+          "old": "        if unknown.decision not in keys:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_recon_stream",
+      "name": "hit split at every colon",
+      "edits": [
+        {
+          "file": "recon.py",
+          "old": "        path, sep, rest = line.partition(\":\")\n        number, sep2, text = rest.partition(\":\")\n        if not (sep and sep2 and path and number.isdigit()):\n            continue\n",
+          "new": "        fields = line.split(\":\")\n        if len(fields) < 3 or not fields[1].isdigit():\n            continue\n        path, number, text = fields[0], fields[1], fields[2]\n"
+        }
+      ],
+      "expect": "each hit that settles an open decision, once, as path:line:text"
+    },
+    {
+      "test": "test_recon_stream",
+      "name": "pattern searched in the whole grep line",
+      "edits": [
+        {
+          "file": "recon.py",
+          "old": "rx.search(text)",
+          "new": "rx.search(line)"
+        }
+      ],
+      "expect": "each hit that settles an open decision, once, as path:line:text"
+    },
+    {
+      "test": "test_recon_stream",
+      "name": "a probe's surfaces ignored",
+      "edits": [
+        {
+          "file": "recon.py",
+          "old": "surface in probe.surfaces and rx.search(text)",
+          "new": "rx.search(text)"
+        }
+      ],
+      "expect": "each hit that settles an open decision, once, as path:line:text"
+    },
+    {
+      "test": "test_recon_stream",
+      "name": "one line per decision a hit settles",
+      "edits": [
+        {
+          "file": "recon.py",
+          "old": "        yield f\"{path}:{number}:{text}\\n\"\n",
+          "new": "        for key in settled:\n            yield f\"{path}:{number}:{text}\\n\"\n"
+        }
+      ],
+      "expect": "each hit that settles an open decision, once, as path:line:text"
+    },
+    {
+      "test": "test_recon_stream",
+      "name": "a settled decision left pending",
+      "edits": [
+        {
+          "file": "recon.py",
+          "old": "        for key in settled:\n            del pending[key]\n",
+          "new": ""
+        }
+      ],
+      "expect": "each hit that settles an open decision, once, as path:line:text"
+    },
+    {
+      "test": "test_recon_stream",
+      "name": "no newline after a hit",
+      "edits": [
+        {
+          "file": "recon.py",
+          "old": "        yield f\"{path}:{number}:{text}\\n\"\n",
+          "new": "        yield f\"{path}:{number}:{text}\"\n"
+        }
+      ],
+      "expect": "each hit that settles an open decision, once, as path:line:text"
+    },
+    {
+      "test": "test_recon_stream",
+      "name": "hit text stripped on the way out",
+      "edits": [
+        {
+          "file": "recon.py",
+          "old": "        yield f\"{path}:{number}:{text}\\n\"\n",
+          "new": "        yield f\"{path}:{number}:{text.strip()}\\n\"\n"
+        }
+      ],
+      "expect": "each hit that settles an open decision, once, as path:line:text"
+    },
+    {
+      "test": "test_recon_stream",
+      "name": "every hit unpacked as path, line and text",
+      "edits": [
+        {
+          "file": "recon.py",
+          "old": "        path, sep, rest = line.partition(\":\")\n        number, sep2, text = rest.partition(\":\")\n        if not (sep and sep2 and path and number.isdigit()):\n            continue\n",
+          "new": "        path, number, text = line.split(\":\", 2)\n"
+        }
+      ],
+      "expect": "not enough values to unpack"
+    },
+    {
+      "test": "test_recon_stream",
+      "name": "reading on after the last decision is settled",
+      "edits": [
+        {
+          "file": "recon.py",
+          "old": "        yield f\"{path}:{number}:{text}\\n\"\n        if not pending:\n            return\n",
+          "new": "        yield f\"{path}:{number}:{text}\\n\"\n"
+        }
+      ],
+      "expect": "stop reading the moment every decision is settled"
+    },
+    {
+      "test": "test_recon_stream",
+      "name": "the stop checked after pulling the next hit",
+      "edits": [
+        {
+          "file": "recon.py",
+          "old": "    async for line in hits:\n",
+          "new": "    async for line in hits:\n        if not pending:\n            return\n"
+        },
+        {
+          "file": "recon.py",
+          "old": "        yield f\"{path}:{number}:{text}\\n\"\n        if not pending:\n            return\n",
+          "new": "        yield f\"{path}:{number}:{text}\\n\"\n"
+        }
+      ],
+      "expect": "stop reading the moment every decision is settled"
+    },
+    {
+      "test": "test_recon_stream",
+      "name": "all hits read before the first line goes out",
+      "edits": [
+        {
+          "file": "recon.py",
+          "old": "    async for line in hits:\n",
+          "new": "    for line in [hit async for hit in hits]:\n"
+        }
+      ],
+      "expect": "stop reading the moment every decision is settled"
+    },
+    {
+      "test": "test_recon_stream",
+      "name": "a search with nothing to settle is read anyway",
+      "edits": [
+        {
+          "file": "recon.py",
+          "old": "    if not pending:\n        return\n    async for line in hits:\n",
+          "new": "    async for line in hits:\n"
+        }
+      ],
+      "expect": "nothing to settle, nothing to read"
+    },
+    {
+      "test": "test_narrow_allowed",
+      "name": "a directory with one entry collapsed",
+      "edits": [
+        {
+          "file": "narrow.py",
+          "old": "and len(entries) >= 2",
+          "new": "and len(entries) >= 1"
+        }
+      ],
+      "expect": "collapse only when it replaces two or more entries; never collapse the root"
+    },
+    {
+      "test": "test_narrow_allowed",
+      "name": "the root collapsed too",
+      "edits": [
+        {
+          "file": "narrow.py",
+          "old": "            path\n            and complete\n",
+          "new": "            complete\n"
+        }
+      ],
+      "expect": "collapse only when it replaces two or more entries; never collapse the root"
+    },
+    {
+      "test": "test_narrow_allowed",
+      "name": "an empty directory keeps its parent from collapsing",
+      "edits": [
+        {
+          "file": "narrow.py",
+          "old": "        complete = True\n",
+          "new": "        complete = bool(node)\n"
+        }
+      ],
+      "expect": "collapse as high as the tree allows"
+    },
+    {
+      "test": "test_narrow_allowed",
+      "name": "new files left out of the tree",
+      "edits": [
+        {
+          "file": "narrow.py",
+          "old": "    root = _with_new_files(tree, wanted)\n",
+          "new": "    root = tree\n"
+        }
+      ],
+      "expect": "collapse the directories the change fills; new files count, empty directories do not"
+    },
+    {
+      "test": "test_narrow_allowed",
+      "name": "forbidden entries checked against the planned files only",
+      "edits": [
+        {
+          "file": "narrow.py",
+          "old": "and not any(covers(path + \"/**\", entry) for entry in forbidden)",
+          "new": "and not any(covers(entry, e) for entry in forbidden for e in entries)"
+        }
+      ],
+      "expect": "a forbidden path that does not exist yet still keeps its directory from collapsing"
+    },
+    {
+      "test": "test_narrow_allowed",
+      "name": "forbidden entries looked for one level down only",
+      "edits": [
+        {
+          "file": "narrow.py",
+          "old": "and not any(covers(path + \"/**\", entry) for entry in forbidden)",
+          "new": "and not any(entry.rsplit(\"/\", 1)[0] == path for entry in forbidden)"
+        }
+      ],
+      "expect": "a forbidden entry deep below stops every directory above it"
+    },
+    {
+      "test": "test_narrow_allowed",
+      "name": "entries in tree order",
+      "edits": [
+        {
+          "file": "narrow.py",
+          "old": "    return sorted(visit(root, \"\")[1])\n",
+          "new": "    return visit(root, \"\")[1]\n"
+        }
+      ],
+      "expect": "collapse the directories the change fills; new files count, empty directories do not"
+    },
+    {
+      "test": "test_narrow_allowed",
+      "name": "a forbidden planned file accepted",
+      "edits": [
+        {
+          "file": "narrow.py",
+          "old": "        if blocked:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_receipt_pins",
+      "name": "pin records deduplicated with their shared line objects",
+      "edits": [
+        {
+          "file": "pins.py",
+          "old": "        listing = [{\"claim\": p.claim, \"path\": p.path, \"line\": p.line, \"digest\": p.digest} for p in pins]\n",
+          "new": "        pins = list({p.digest: p for p in pins}.values())\n        listing = [{\"claim\": p.claim, \"path\": p.path, \"line\": p.line, \"digest\": p.digest} for p in pins]\n"
+        }
+      ],
+      "expect": "one pin per line receipt, in fact order"
+    },
+    {
+      "test": "test_receipt_pins",
+      "name": "moved receipt reports a zero-based line",
+      "edits": [
+        {
+          "file": "pins.py",
+          "old": "enumerate(lines, 1) if text == pinned",
+          "new": "enumerate(lines) if text == pinned"
+        }
+      ],
+      "expect": "a line found once more in its own file has moved there"
+    },
+    {
+      "test": "test_decision_coverage",
+      "name": "only the first human question for each decision is retained",
+      "edits": [
+        {
+          "file": "decisions.py",
+          "old": "_extend_once(questions, [u.question for u in asks])",
+          "new": "_extend_once(questions, [u.question for u in asks[:1]])"
+        }
+      ],
+      "expect": "every blocking question is kept once, in plan then frame order"
+    },
+    {
+      "test": "test_decision_coverage",
+      "name": "investigation allowed to displace a delegated decision",
+      "edits": [
+        {
+          "file": "decisions.py",
+          "old": "        elif key in delegated:\n            decisions[key] = \"delegated\"\n        elif looks:\n            decisions[key] = \"investigate\"\n            _extend_once(reads, [u.look_at for u in looks])\n",
+          "new": "        elif looks:\n            decisions[key] = \"investigate\"\n            _extend_once(reads, [u.look_at for u in looks])\n        elif key in delegated:\n            decisions[key] = \"delegated\"\n"
+        }
+      ],
+      "expect": "delegation settles a decision before a discoverable lead"
+    },
+    {
+      "test": "test_recon_stream",
+      "name": "regular expressions must match at the beginning of the hit",
+      "edits": [
+        {
+          "file": "recon.py",
+          "old": "rx.search(text)",
+          "new": "rx.match(text)"
+        }
+      ],
+      "expect": "each hit that settles an open decision, once, as path:line:text"
+    },
+    {
+      "test": "test_recon_stream",
+      "name": "all alternative probes must match the same hit",
+      "edits": [
+        {
+          "file": "recon.py",
+          "old": "if any(surface in probe.surfaces and rx.search(text) for probe, rx in checks)",
+          "new": "if all(surface in probe.surfaces and rx.search(text) for probe, rx in checks)"
+        }
+      ],
+      "expect": "stop reading the moment every decision is settled"
+    },
+    {
+      "test": "test_narrow_allowed",
+      "name": "a later child overwrites an incomplete earlier sibling",
+      "edits": [
+        {
+          "file": "narrow.py",
+          "old": "                complete = complete and child_complete\n",
+          "new": "                complete = child_complete\n"
+        }
+      ],
+      "expect": "an unplanned sibling prevents the parent from collapsing"
+    },
+    {
+      "test": "test_narrow_allowed",
+      "name": "any planned child marks its whole directory complete",
+      "edits": [
+        {
+          "file": "narrow.py",
+          "old": "            else:\n                complete = False\n",
+          "new": "            else:\n                pass\n"
+        }
+      ],
+      "expect": "collapse the directories the change fills; new files count, empty directories do not"
+    }
+  ]
+}
