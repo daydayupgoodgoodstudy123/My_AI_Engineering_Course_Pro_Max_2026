@@ -1,0 +1,439 @@
+{
+  "package": "quotaflow",
+  "tests": [
+    "test_legacy_quota",
+    "test_ledger_roundtrip",
+    "test_atomic_admission",
+    "test_prometheus_batches",
+    "test_usage_hierarchy"
+  ],
+  "layers": [
+    {
+      "test": "test_legacy_quota",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "TypeError"
+        },
+        {
+          "name": "tier mapping",
+          "edits": [
+            {
+              "file": "bucket.py",
+              "old": "return tier\n",
+              "new": "return policies.get(tier,policies[\"free\"])\n"
+            }
+          ],
+          "expect": "short refill intervals retain their combined credit"
+        },
+        {
+          "name": "fractional credit",
+          "edits": [
+            {
+              "file": "bucket.py",
+              "old": "last_refill_us=end,remainder=0)",
+              "new": "last_refill_us=end,remainder=remainder)"
+            }
+          ],
+          "expect": "a rejected request leaves admission usage unchanged"
+        },
+        {
+          "name": "conditional bookkeeping",
+          "edits": [
+            {
+              "file": "bucket.py",
+              "old": "    return replace(state,tokens=state.tokens-demand",
+              "new": "    if not allowed:return state\n    return replace(state,tokens=state.tokens-demand"
+            }
+          ],
+          "expect": "long-idle quota requests should stay responsive"
+        },
+        {
+          "name": "elapsed refill",
+          "edits": [
+            {
+              "file": "bucket.py",
+              "old": "    capacity=policy[\"capacity\"]\n    validate_policy(policy);validate_state(state,policy);integer(now_us)\n    end=max(now_us,state.last_refill_us)\n    elapsed=end-state.last_refill_us\n    tokens=state.tokens;remainder=state.remainder\n    for tick in range(elapsed):\n        added,remainder=divmod(remainder+policy[\"refill_rate\"],US)\n        tokens=min(capacity,tokens+added)\n        if tokens==capacity:remainder=0\n    if tokens==capacity:remainder=0\n    return replace(state,tokens=tokens,last_refill_us=end,remainder=remainder)\n",
+              "new": "    capacity=policy[\"capacity\"]\n    validate_policy(policy);validate_state(state,policy);integer(now_us)\n    end=max(now_us,state.last_refill_us)\n    elapsed=end-state.last_refill_us\n    added,remainder=divmod(elapsed*policy[\"refill_rate\"]+state.remainder,US)\n    tokens=min(capacity,state.tokens+added)\n    if tokens==capacity:remainder=0\n    return replace(state,tokens=tokens,last_refill_us=end,remainder=remainder)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_legacy_quota",
+      "name": "grant capacity for every refill",
+      "edits": [
+        {
+          "file": "bucket.py",
+          "old": "tokens=min(capacity,state.tokens+added)",
+          "new": "tokens=capacity"
+        }
+      ],
+      "expect": "the selected tier supplies the expected token policy"
+    },
+    {
+      "test": "test_legacy_quota",
+      "name": "discard fractional remainder",
+      "edits": [
+        {
+          "file": "bucket.py",
+          "old": "last_refill_us=end,remainder=remainder)",
+          "new": "last_refill_us=end,remainder=0)"
+        }
+      ],
+      "expect": "short refill intervals retain their combined credit"
+    },
+    {
+      "test": "test_ledger_roundtrip",
+      "name": "reload a full bucket",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "return BucketState(row[0],row[1],row[2],tuple(json.loads(row[3])),row[4])",
+          "new": "return BucketState(50_000,row[1],row[2],tuple(json.loads(row[3])),row[4])"
+        }
+      ],
+      "expect": "a reopened quota ledger retains the entire spent bucket exactly"
+    },
+    {
+      "test": "test_ledger_roundtrip",
+      "name": "discard saved refill remainder",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "return BucketState(row[0],row[1],row[2],tuple(json.loads(row[3])),row[4])",
+          "new": "return BucketState(row[0],row[1],0,tuple(json.loads(row[3])),row[4])"
+        }
+      ],
+      "expect": "a reopened quota ledger retains the entire spent bucket exactly"
+    },
+    {
+      "test": "test_ledger_roundtrip",
+      "name": "commit state before usage append",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            self.journal.append(usage)",
+          "new": "            self.db.commit()\n            self.journal.append(usage)"
+        }
+      ],
+      "expect": "a failed ledger append preserves the associated prior bucket"
+    },
+    {
+      "test": "test_ledger_roundtrip",
+      "name": "narrow cost spelling through float",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "usage.output_tokens,usage.cost_text)",
+          "new": "usage.output_tokens,str(float(usage.cost_text)))"
+        }
+      ],
+      "expect": "ledger records retain order, identity and original decimal spelling",
+      "validation_only_given_guard": true,
+      "given_dependency": "UsageJournal encode_usage supplied complete field codec"
+    },
+    {
+      "test": "test_atomic_admission",
+      "name": "use first binding retry",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "retry=max(token_wait,rpm_wait)",
+          "new": "retry=min(token_wait,rpm_wait)"
+        }
+      ],
+      "expect": "retry satisfies both limits at the earliest whole microsecond"
+    },
+    {
+      "test": "test_atomic_admission",
+      "name": "truncate token wait",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "token_wait=(numerator+policy[\"refill_rate\"]-1)//policy[\"refill_rate\"]",
+          "new": "token_wait=numerator//policy[\"refill_rate\"]"
+        }
+      ],
+      "expect": "retry satisfies both limits at the earliest whole microsecond"
+    },
+    {
+      "test": "test_atomic_admission",
+      "name": "retry permanently oversized demand",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "return Admission(False,None,\"capacity\",state.tokens)",
+          "new": "return Admission(False,1,\"capacity\",state.tokens)"
+        }
+      ],
+      "expect": "demand above capacity has no finite retry"
+    },
+    {
+      "test": "test_atomic_admission",
+      "name": "wait only for first historical expiry",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "position=len(state.rpm)-policy[\"max_requests_per_min\"]",
+          "new": "position=0"
+        }
+      ],
+      "expect": "retry waits until a slot exists in the entire admitted history"
+    },
+    {
+      "test": "test_atomic_admission",
+      "name": "omit complete decision critical section",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "with self.store.atomic(user):",
+          "new": "if True:"
+        }
+      ],
+      "expect": "concurrent requests cannot both consume the final token"
+    },
+    {
+      "test": "test_prometheus_batches",
+      "name": "bill denied proposed work",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "        if row.admitted:\n",
+          "new": "        if True:\n"
+        }
+      ],
+      "expect": "rejected proposed work adds no model call, billed tokens or cost"
+    },
+    {
+      "test": "test_prometheus_batches",
+      "name": "reset counters at every batch",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "def accumulate_batch(totals,batch):\n",
+          "new": "def accumulate_batch(totals,batch):\n    totals.clear()\n"
+        }
+      ],
+      "expect": "an empty later batch preserves cumulative counters"
+    },
+    {
+      "test": "test_prometheus_batches",
+      "name": "leave backslashes unescaped",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "return value.replace(\"\\\\\",\"\\\\\\\\\").replace(\"\\n\",\"\\\\n\").replace('\"','\\\\\"')",
+          "new": "return value.replace(\"\\n\",\"\\\\n\").replace('\"','\\\\\"')"
+        }
+      ],
+      "expect": "metric labels retain quoted values"
+    },
+    {
+      "test": "test_prometheus_batches",
+      "name": "consume all batches before publication",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "    async for batch in batches:\n",
+          "new": "    completed=[batch async for batch in batches]\n    for batch in completed:\n"
+        }
+      ],
+      "expect": "an empty completed batch publishes its own snapshot immediately",
+      "validation_only_given_guard": true
+    },
+    {
+      "test": "test_usage_hierarchy",
+      "name": "charge cached input twice",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "counts=(row.input_tokens-row.cached_input_tokens,row.cached_input_tokens,row.output_tokens)",
+          "new": "counts=(row.input_tokens,row.cached_input_tokens,row.output_tokens)"
+        }
+      ],
+      "expect": "ledger cost disagrees with price card"
+    },
+    {
+      "test": "test_usage_hierarchy",
+      "name": "round each billed subtotal",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "target[key]+=source[key]",
+          "new": "target[key]+=source[key].quantize(Decimal(\"0.000001\")) if key in (\"billed\",\"cache_saved\",\"baseline\") else source[key]"
+        }
+      ],
+      "expect": "cache savings stay separate from the actual model bill"
+    },
+    {
+      "test": "test_usage_hierarchy",
+      "name": "silently drop unknown model records",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "if row.model not in prices:raise ValueError(\"unknown model\")",
+          "new": "if row.model not in prices:return {\"users\":{},\"totals\":{}}"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_usage_hierarchy",
+      "name": "subtract savings again from bill",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "item[\"baseline\"]=item[\"billed\"]+item[\"cache_saved\"]",
+          "new": "item[\"billed\"]-=item[\"cache_saved\"]\n                item[\"baseline\"]=item[\"billed\"]+item[\"cache_saved\"]"
+        }
+      ],
+      "expect": "cache savings stay separate from the actual model bill"
+    },
+    {
+      "test": "test_ledger_roundtrip",
+      "name": "fresh F01-ledger-model-order",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "FROM usage ORDER BY seq",
+          "new": "FROM usage ORDER BY model,seq"
+        }
+      ],
+      "expect": "later successful admission state and exact zero cost survive reopen",
+      "fresh_review_id": "F01-ledger-model-order",
+      "source_only_candidate_ids": [
+        "P2-05"
+      ],
+      "validation_only_given_guard": true,
+      "given_dependency": "UsageJournal.read supplied complete record order"
+    },
+    {
+      "test": "test_ledger_roundtrip",
+      "name": "fresh F02-load-clock-via-float",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "return BucketState(row[0],row[1],row[2],tuple(json.loads(row[3])),row[4])",
+          "new": "return BucketState(row[0],int(float(row[1])),row[2],tuple(json.loads(row[3])),row[4])"
+        }
+      ],
+      "expect": "a reopened quota ledger retains the entire spent bucket exactly",
+      "fresh_review_id": "F02-load-clock-via-float",
+      "source_only_candidate_ids": [
+        "P2-01"
+      ]
+    },
+    {
+      "test": "test_atomic_admission",
+      "name": "fresh F03-retry-ignores-credit",
+      "edits": [
+        {
+          "file": "admission.py",
+          "old": "numerator=max(0,(demand-state.tokens)*US-state.remainder)",
+          "new": "numerator=max(0,(demand-state.tokens)*US)"
+        }
+      ],
+      "expect": "retry satisfies both limits at the earliest whole microsecond",
+      "fresh_review_id": "F03-retry-ignores-credit",
+      "source_only_candidate_ids": [
+        "P3-05"
+      ]
+    },
+    {
+      "test": "test_prometheus_batches",
+      "name": "fresh F04-omit-denied-only-series",
+      "edits": [
+        {
+          "file": "metrics.py",
+          "old": "    for (user,model),values in sorted(totals.items()):\n",
+          "new": "    for (user,model),values in sorted(totals.items()):\n        if not values[2]:continue\n"
+        }
+      ],
+      "expect": "denied-only identities retain every metric series",
+      "fresh_review_id": "F04-omit-denied-only-series",
+      "source_only_candidate_ids": [
+        "P4-05"
+      ]
+    },
+    {
+      "test": "test_usage_hierarchy",
+      "name": "fresh F05-report-denied-token-leaves",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "            else:item[\"denied\"]=1\n",
+          "new": "            else:\n                item[\"denied\"]=1\n                for key,count in zip(item[\"usage\"],(row.input_tokens-row.cached_input_tokens,row.cached_input_tokens,row.output_tokens)):\n                    item[\"usage\"][key][\"tokens\"]=count\n"
+        }
+      ],
+      "expect": "denied model usage remains zero in every token category",
+      "fresh_review_id": "F05-report-denied-token-leaves",
+      "source_only_candidate_ids": [
+        "P5-01"
+      ]
+    },
+    {
+      "test": "test_usage_hierarchy",
+      "name": "fresh F06-double-count-user-prefix",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "add(model,item);add(user[\"totals\"],item);add(account,item)",
+          "new": "add(model,item);add(user[\"totals\"],item);add(account,user[\"totals\"])"
+        }
+      ],
+      "expect": "account totals retain all exact model component costs",
+      "fresh_review_id": "F06-double-count-user-prefix",
+      "source_only_candidate_ids": [
+        "P5-01"
+      ]
+    },
+    {
+      "test": "test_ledger_roundtrip",
+      "name": "J01-deduplicate-rpm-history",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "tuple(json.loads(row[3]))",
+          "new": "tuple(dict.fromkeys(json.loads(row[3])))"
+        }
+      ],
+      "expect": "persisted RPM history retains coincident admitted requests",
+      "p2_journal_correction_id": "J01-deduplicate-rpm-history",
+      "candidate_owned_state_mutation": true
+    },
+    {
+      "test": "test_ledger_roundtrip",
+      "name": "J02-accumulate-total-used-snapshot",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "total_used=excluded.total_used",
+          "new": "total_used=buckets.total_used+excluded.total_used"
+        }
+      ],
+      "expect": "a reopened quota ledger retains the entire spent bucket exactly",
+      "p2_journal_correction_id": "J02-accumulate-total-used-snapshot",
+      "candidate_owned_state_mutation": true
+    },
+    {
+      "test": "test_ledger_roundtrip",
+      "name": "J03-retain-stale-refill-clock",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "last_us=excluded.last_us,",
+          "new": ""
+        }
+      ],
+      "expect": "later quota snapshots retain the supplied refill clock",
+      "p2_journal_correction_id": "J03-retain-stale-refill-clock",
+      "candidate_owned_state_mutation": true
+    }
+  ]
+}

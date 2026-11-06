@@ -1,0 +1,205 @@
+{
+  "lesson": "phases/11-llm-engineering/11-caching-cost",
+  "title": "Caching and Cost — local quota accounting",
+  "format": "staged-brownfield",
+  "service": "QuotaFlow: token/RPM admission with exact usage evidence",
+  "sources": {
+    "docs/en.md": "bec924754c74950f7a7f6e975846b477cb63cc8aec4e8942cffdb4bbbd076bd3",
+    "code/caching_cost.py": "4f58fc4f070fbe975f8b01550ec04f252a8acb8977a1a047d62c9dfa1365167d",
+    "code/caching_cost.讲解.md": "fa135618ace1551ef92ba2345ff4361aff2dcd87089023f574b9cb572e70ae5e"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; offline injected clocks/price cards",
+  "source_test_inventory": "Full docs912/Python510/lecture435 read; actual code contains no TS or source unit tests. Source demos were not executed. Actual coderpad cache_replay6/token_cost2 read and excluded.",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_legacy_quota",
+      "kind": "debug",
+      "lesson_anchor": "TokenBucketRateLimiter174–214, docs Step4 and source lecture check/consume race",
+      "planted_bugs": [
+        "tier lookup returns name instead of policy mapping",
+        "refill clock advances but fractional credit is discarded",
+        "denied decisions consume tokens and append RPM evidence",
+        "exact refill simulated at every elapsed microsecond"
+      ],
+      "nonlocal_error": "tier_policy returns str; LegacyService.admit passes it to refill_exact; correct policy[capacity] consumer raises TypeError 1–2 calls outside producer.",
+      "given": "deque expiry, primitive validation, simple sequential legacy eligibility; candidate only tier_policy/refill_exact/conditional commit",
+      "timing_assert": "Complete LegacyService.admit for8000123us at317token/s, initial7tokens+123456remainder,demand13; full resulting2530tokens/162447remainder/RPM/total-used consumed; elapsed<0.08s",
+      "overfix_guard": "short intervals combine credit; exact nonfull remainder; full capacity drops excess; backward clock cannot mint; allowed debit and RPM evidence preserved"
+    },
+    {
+      "part": 2,
+      "test": "test_ledger_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "source bucket fields174–187 and cost log230–252",
+      "storage_family": "SQLite",
+      "exactness": "Candidate owns exact tokens/last_us/remainder/full ordered RPM multiplicity/total_used state roundtrip and a shared state-upsert plus unique journal-append transaction. Raw Usage cost text and insertion-order retrieval are preserved by the complete supplied journal.",
+      "traps": [
+        "spent bucket state must not become full on reopen",
+        "all exact bucket fields, duplicate RPM timestamps and cumulative total-used snapshots survive persistence",
+        "state UPSERT and unique request journal append share one transaction; failed append rolls back state",
+        "successful later snapshots update the refill clock instead of retaining an old clock"
+      ],
+      "clarifying_questions": [
+        "reopen",
+        "duplicate request id"
+      ],
+      "given": "Complete actual UsageJournal schema/unique constraint/encode_usage/decode_usage/append/read with original cost_text; LedgerStore connection, initialization and ledger wrapper. The journal uses that same connection and does not begin/commit/rollback or enter a transaction context.",
+      "candidate_functions": [
+        "LedgerStore.load",
+        "LedgerStore.save_and_log"
+      ],
+      "integration_guards": "All original cost-spelling and insertion-order assertions remain. Same-name/test/expect raw-float and model-sort wrong fixes now edit the real correct GIVEN journal, not a candidate SQL codec."
+    },
+    {
+      "part": 3,
+      "test": "test_atomic_admission",
+      "kind": "core algorithm",
+      "lesson_anchor": "check197–208/consume210–214 separation; lecture non-atomic race",
+      "traps": [
+        "whole per-user load-through-save critical section",
+        "joint inverse wait with fractional ceiling",
+        "permanent capacity rejection and enough sliding-window expiries"
+      ],
+      "given": "Repaired P1 refill/conditional writer, correct deque expiry and lock primitive, not a completed atomic admission operation",
+      "clarifying_questions": [
+        "excess history",
+        "backward time",
+        "oversized demand"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_prometheus_batches",
+      "kind": "streaming",
+      "lesson_anchor": "source usage/cost summaries230–308, local instrumentation extension",
+      "wire_format": "Finite Prometheus text HELP/TYPE/quoted labels/numeric counter samples; one cumulative snapshot per completed batch",
+      "format_family": "Prometheus",
+      "traps": [
+        "denials are decisions but not billable completed calls",
+        "Prometheus label identity and escaping",
+        "cumulative user/model outcome/category series retain prior batches",
+        "denied-only identities retain every metric series, with zero completed calls, token categories and cost"
+      ],
+      "given": "Actual correct async export_batches pull-through driver, fixed HELP/TYPE and exact Decimal addition. Candidate owns accumulate_batch, escape_label, render_snapshot; no standard async pull-through task.",
+      "integration_guards": "All original online empty-batch/first-publication assertions and eager collection validation-only mutant retained; these are not a new primary stream mechanism."
+    },
+    {
+      "part": 5,
+      "test": "test_usage_hierarchy",
+      "kind": "nested structure",
+      "lesson_anchor": "CostTracker cost_by_model275–286/cache_savings288–298; source calculate_cost25–46",
+      "structure": "finite user -> model -> uncached input/cached input/output cost evidence",
+      "traps": [
+        "cached input is a subset",
+        "exact subtotals and separate billed/saved/baseline",
+        "unknown model rejects and ledger/price-card evidence must agree",
+        "denied proposed tokens remain zero at model/user/account levels; each completed item contributes once to each subtotal"
+      ],
+      "clarifying_questions": [
+        "unknown model",
+        "rounding",
+        "empty ledger"
+      ]
+    }
+  ],
+  "adaptations": [
+    "Source float seconds become an explicit exact integer-microsecond/remainder teaching model with positive integer token/second rates. Full buckets discard excess fractional credit. Backward time uses max(now,last_refill).",
+    "RPM uses admitted timestamps in a 60-second sliding window, not another token bucket. Legal sorted history may exceed max RPM; retry must wait for enough expiries. Policies are fixed per user and lock scope is in-process only.",
+    "SQLite atomic ledger, finite Prometheus exposition and finite user/model/category report are local engineering extensions; source has no persistence, monitoring server or recursive tree API.",
+    "Prices are illustrative injected fixture cards, not current commercial facts; no true daily quota, cache semantic search, real provider or model calls.",
+    "No source demos/tests or source-directory Python execution. External evidence remains under absolute /tmp paths.",
+    "Complete usage persistence is provided by UsageJournal on the LedgerStore connection without transaction management. Candidate bucket-state persistence and atomic composition remain TODO; no candidate raw decimal storage projection is hidden in a helper."
+  ],
+  "completion_status": "FORMAL_PRESCRIBED_CHECKER_WRITE_PASS",
+  "evidence": {
+    "source_author_prep": "/tmp/exam-11-16-work/source11-11-author-prep.json",
+    "author_self_review": "/tmp/exam-11-16-work/draft11-11/author-self-review.json",
+    "initial_checker": "/tmp/exam-11-16-work/draft11-11/initial-checker.log",
+    "independent_fresh_review": "/tmp/exam-11-16-work/draft11-11/fresh-review.json",
+    "independent_fresh_work": "/tmp/exam11-11-fresh-review",
+    "independent_source_only_candidates": "/tmp/exam11-11-fresh-source-candidates.md",
+    "independent_source_only_checksum": "/tmp/exam11-11-fresh-source-candidates.sha256",
+    "final_checker": "/tmp/exam-11-16-work/draft11-11/final-fresh-checker.log",
+    "coordinator_review": "/tmp/exam-11-16-work/draft11-11/coordinator-review.json",
+    "formal_checker": "/tmp/exam-11-16-work/formal-check11-11.log",
+    "p2_journal_replacement_report": "/tmp/exam-11-16-work/draft11-11/p2-journal-replacement/correction-review.json",
+    "p2_journal_replacement_before_manifest": "/tmp/exam-11-16-work/draft11-11/p2-journal-replacement/before-manifest.json",
+    "p2_journal_replacement_25_mapping": "/tmp/exam-11-16-work/draft11-11/p2-journal-replacement/original-25-mapping.json",
+    "p2_journal_replacement_checker": "/tmp/exam-11-16-work/draft11-11/p2-journal-replacement/temp-checker.log"
+  },
+  "performance": {
+    "status": "REAL_CONTINUOUS_3SLOW_3FAST_PASS",
+    "evidence": "/tmp/exam-11-16-work/draft11-11/author-probes/timing-final1.json",
+    "slow_seconds": [
+      0.7036373750306666,
+      0.6859713750891387,
+      0.6697522080503404
+    ],
+    "fast_seconds": [
+      1.829187385737896e-05,
+      1.6208039596676826e-05,
+      1.6459031030535698e-05
+    ],
+    "limit": 0.08,
+    "slow_min_over_limit": 8.371902600629255,
+    "limit_over_fast_max": 4373.526770617212,
+    "max_slow": 0.7036373750306666,
+    "scope": "Complete one long-idle local legacy request, not throughput or source execution; no eliminated business work/output"
+  },
+  "fresh_review": {
+    "actual_valid": 6,
+    "initial_caught": 4,
+    "initial_survived": 2,
+    "final_killed": 6,
+    "parts_covered": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "original_asserts": 47,
+    "current_asserts": 51,
+    "original_canonical_wrong_fixes": 19,
+    "current_wrong_fixes": 25,
+    "source_only_sha256": "0fbbd9990994e43dddde1911138f2e1ef1beb2d69e562e744d54784dfec08882",
+    "scope": "独立完整包副本运行全部五关；原始断言与实现保留，仅补足 denied-only 指标身份和 denied token 层级用量边界。"
+  },
+  "p2_journal_replacement": {
+    "status": "FORMAL_PRESCRIBED_CHECKER_WRITE_PASS",
+    "candidate_ownership": "Exact BucketState load/save plus shared state/journal transaction",
+    "given_ownership": "Complete UsageJournal schema/full Usage SQL codec/raw cost spelling/append/read, init and ledger wrapper",
+    "original_asserts": 51,
+    "original_wrong_fixes": 25,
+    "historical_fresh_evidence_unchanged": true,
+    "implementation_exception": "store.py is intentionally changed and journal.py is added in candidate/reference/reset; no claim that all implementation bytes are still unchanged. P1/P3/P4/P5 remain unchanged.",
+    "current_asserts": 53,
+    "current_wrong_fixes": 28,
+    "additional_actual_valid": 3,
+    "initial_caught": 1,
+    "initial_missed": 2,
+    "initial_runs": "/tmp/exam-11-16-work/draft11-11/p2-journal-replacement/actual-initial/runs.json",
+    "final_runs": "/tmp/exam-11-16-work/draft11-11/p2-journal-replacement/actual-final/runs.json",
+    "old_25_mapping": "/tmp/exam-11-16-work/draft11-11/p2-journal-replacement/original-25-mapping.json",
+    "new_candidate_state_wrong_ids": [
+      "J01-deduplicate-rpm-history",
+      "J02-accumulate-total-used-snapshot",
+      "J03-retain-stale-refill-clock"
+    ]
+  },
+  "p2_corrective_validation": {
+    "status": "FORMAL_PRESCRIBED_CHECKER_WRITE_PASS",
+    "root_evidence_review": "/tmp/exam-11-16-work/draft11-11/p2-journal-replacement/root-evidence-review.json",
+    "formal_checker": "/tmp/exam-11-16-work/draft11-11/p2-journal-replacement/formal-checker.log",
+    "mapping": "/tmp/exam-11-16-work/draft11-11/p2-journal-replacement/original-25-mapping.json",
+    "current_assertions": 53,
+    "current_wrong_fixes": 28,
+    "new_actual_domain_mutants": 3,
+    "initially_caught": 1,
+    "initial_misses": 2,
+    "all_finally_caught": true,
+    "complete_given_dependency": "quotaflow/journal.py",
+    "old_assertions_and_wrong_semantics_preserved": true,
+    "implementation_exception": "Part 2 store composition intentionally changed; complete correct codec/journal added in candidate/reference/reset. Original fresh validation describes the historical first-acceptance implementation. All other part implementations and complete P1 test remain unchanged."
+  }
+}
