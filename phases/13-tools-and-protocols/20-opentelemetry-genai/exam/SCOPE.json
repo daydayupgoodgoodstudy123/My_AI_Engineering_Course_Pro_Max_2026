@@ -43,7 +43,13 @@
         "the log opened with 'w'; a new log raising FileNotFoundError",
         "an unfinished span written; a root's parentSpanId written as null; the kind written as its name"
       ],
-      "clarifying_questions": ["changing the reader", "NaN", "tuples", "fsync", "a torn last line"],
+      "clarifying_questions": [
+        "changing the reader",
+        "NaN",
+        "tuples",
+        "fsync",
+        "a torn last line"
+      ],
       "deviation": "The candidate writes encode_value, to_otlp and SpanLog; the reader (from_otlp, decode_value) is given and strict. The 64-bit-as-decimal-string rule is stated in the otlp.py docstring with its reason (readers whose numbers are doubles). Torn lines, flush and U+2028 traps are left out: 13/01's session log has them."
     },
     {
@@ -66,29 +72,43 @@
         "durations scaled with * 1e-9: 75 ms becomes 0.07500000000000001 and crosses the 0.075 bound"
       ],
       "integration": "the agent run from Part 1 (with content capture on) must pass check() with no problems and gives the gpt-4o and get_weather samples",
-      "clarifying_questions": ["served model differs", "empty string", "unknown operations", "mcp.call in tool duration", "metrics for spans that failed the checks"],
+      "clarifying_questions": [
+        "served model differs",
+        "empty string",
+        "unknown operations",
+        "mcp.call in tool duration",
+        "metrics for spans that failed the checks"
+      ],
       "deviation": "execute_tool spans may be INTERNAL or CLIENT, because the lesson's own mcp.call span is execute_tool and CLIENT. gen_ai.tool.execution.duration counts only the INTERNAL span of each tool call. The lesson gives no required attributes for text_completion or embeddings, so the checker has rules for the three operations the agent emits and reports any other value as an unknown operation. Dimensions: token usage by token type, operation duration by request model, tool duration by tool name. The bucket rule (a value on a bound belongs to the bucket it closes) is in the Histogram docstring; the duration bounds are quiz Q11's."
     },
     {
       "part": 4,
       "test": "test_propagation_and_export",
       "kind": "streaming",
-      "lesson_anchor": "Propagation across MCP (traceparent header over Streamable HTTP, _meta.traceparent over stdio); Exercise 4; quiz Q3 and Q10 (traceparent layout, all-zero ids invalid, a bad traceparent starts a new trace); Exporters (OTLP); the walkthrough's batch span processor",
+      "lesson_anchor": "Propagation across MCP and Exercise 4 (carry the current caller context in the HTTP header or stdio params._meta.traceparent and continue it at the receiver); Exporters (OTLP); the walkthrough's batch span processor. parse_traceparent is supplied as a correct format validator.",
       "wire_format": "one OTLP/JSON export request per batch, as UTF-8 bytes: resourceSpans -> scopeSpans -> spans, service.name as an OTLP attribute, spans as Part 2's to_otlp, decided by the test's json.loads and unpack()",
       "traps": [
-        "upper-case hex, other versions, wrong lengths, extra fields and all-zero ids accepted",
-        "re.match with ^...$ (the quiz's pattern) accepts a trailing newline; match instead of fullmatch",
-        "int(x, 16) accepts upper case, 0x, + and underscores (flags too: 0A)",
-        "a non-string traceparent raising TypeError; a malformed one raising instead of starting a new trace",
-        "inject dropping other _meta keys, changing the caller's request (shallow copy), writing the body over HTTP, or a header over stdio",
-        "the agent not injecting, or injecting the tool span instead of the mcp.call span",
+        "an existing traceparent kept with setdefault, or independent injections from one request template sharing or overwriting context",
+        "extract reading the other transport's carrier, preferring body metadata over an HTTP header, or falling back to an inactive carrier when the active one is absent or malformed",
+        "inject changing the caller's request, dropping other _meta or header fields, or changing the inactive carrier",
+        "the agent not injecting, or injecting the tool span instead of the mcp.call span; the receiver must use the current call's trace id and span id as parent",
         "a full batch not sent from the on_end that fills it (only on tick, > instead of >=, one request per span)",
         "tick with > instead of >=; the wait counted from the last request, from the newest span, or from the span's own end_ns instead of the on_end call; tick on an empty queue raising",
         "shutdown not flushing; spans that end after shutdown queued, or raising",
         "requests as str; resource attributes as a plain object; one resourceSpans per span; a batch sorted by start time"
       ],
-      "clarifying_questions": ["upper-case hex", "failing the request on a bad traceparent", "keeping _meta keys", "_meta over HTTP", "background thread", "spans after shutdown"],
-      "deviation": "'Unfinished spans are not exported' follows from the on_end design: spans reach the exporter only when they end, and a span still running at shutdown is dropped when it ends; the test checks both. 'In end order within a batch' holds by construction and is checked by decoding every request. The time trigger is an explicit tick() on the exporter's clock instead of a timer thread, so the test needs no real time. Wiring inject into the agent's fake_mcp_call (Exercise 4) is part of this part."
+      "clarifying_questions": [
+        "which carrier is authoritative for the active transport",
+        "replacing a stale context",
+        "keeping other _meta and header keys",
+        "independent injections from one template",
+        "background thread",
+        "spans after shutdown"
+      ],
+      "deviation": "'Unfinished spans are not exported' follows from the on_end design: spans reach the exporter only when they end, and a span still running at shutdown is dropped when it ends; the test checks both. 'In end order within a batch' holds by construction and is checked by decoding every request. The time trigger is an explicit tick() on the exporter's clock instead of a timer thread, so the test needs no real time. Wiring inject into the agent's fake_mcp_call (Exercise 4) is part of this part. The complete correct parse_traceparent helper is supplied. Part 4 implements transport-specific injection and extraction, including replacing a stale active context without changing the other carrier or the caller's template. Two different calls sent from one template must produce independent receiver parents; McpRequest supports http and stdio, and each exporter keeps the given one-service, one-scope batch layout.",
+      "supplied_helpers": {
+        "parse_traceparent": "Complete correct validator for the supported W3C traceparent shape. Format, newline, version, hex, zero-id, non-string and invalid-context tests and wrong_fixes guard the supplied implementation; candidates implement inject, extract, call wiring and batching."
+      }
     },
     {
       "part": 5,
@@ -107,7 +127,11 @@
         "weights memoized by span name",
         "the chain stopping one level down"
       ],
-      "clarifying_questions": ["children longer than the parent", "what the critical path is", "ties"],
+      "clarifying_questions": [
+        "children longer than the parent",
+        "what the critical path is",
+        "ties"
+      ],
       "deviation": "The critical path is defined as the heaviest self-time chain from a root to a leaf, ties to the smaller span id. Part 5 uses Part 1's link, which already makes a span whose parent never arrived a root of its own, so that case is checked here as a chain of its own rather than as a separate tree-building trap."
     }
   ],

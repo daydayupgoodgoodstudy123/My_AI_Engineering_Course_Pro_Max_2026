@@ -439,6 +439,50 @@ def test_propagation_and_export() -> None:
         "over HTTP the message is not touched, and the caller's request is left as it was"
     )
 
+    parents = Tracer(clock, SeededIds(47), env={})
+    first = parents.start_span("mcp.call", "CLIENT", parent=UPSTREAM)
+    second = parents.start_span("mcp.call", "CLIENT", parent=SpanContext("b" * 32, "c" * 16))
+    for transport in ("http", "stdio"):
+        base = McpRequest(
+            transport,
+            {"jsonrpc": "2.0", "id": "shared-template", "method": "tools/call", "params": {
+                "name": "get_weather", "arguments": {"city": "Tokyo"},
+                "_meta": {"progressToken": "keep-me", "traceparent": format_traceparent(call)},
+            }},
+            {"content-type": "application/json", "traceparent": GOOD},
+        )
+        before = dataclasses.asdict(base)
+        one, two = inject(base, first), inject(base, second)
+        assert (extract(one), extract(two)) == (first.context, second.context), (
+            "each injection carries the current span, replacing any context in its active carrier"
+        )
+        assert extract(one) == first.context, "a later injection cannot rewrite an earlier request's context"
+        assert dataclasses.asdict(base) == before, "injecting different spans leaves the shared request template unchanged"
+        if transport == "http":
+            assert one.message == two.message == base.message, "HTTP injection leaves every message field unchanged"
+            assert one.headers == {**base.headers, "traceparent": format_traceparent(first)}
+            assert two.headers == {**base.headers, "traceparent": format_traceparent(second)}
+        else:
+            assert one.headers == two.headers == base.headers, "stdio injection leaves the inactive HTTP headers unchanged"
+            assert one.message["params"]["_meta"] == {"progressToken": "keep-me", "traceparent": format_traceparent(first)}
+            assert two.message["params"]["_meta"] == {"progressToken": "keep-me", "traceparent": format_traceparent(second)}
+        receiver = WeatherServer(clock, transport=transport, tracer=Tracer(clock, SeededIds(48), env={}))
+        for request in (one, two):
+            assert receiver.handle(request)["result"]["content"][0]["text"] == "Tokyo: 12 C"
+        assert [(s.trace_id, s.parent_span_id) for s in receiver.tracer.finished()] == [
+            (first.trace_id, first.span_id), (second.trace_id, second.span_id),
+        ], "each receiver span continues its own call's context and uses that call's span id as parent"
+        for active in (None, "garbage"):
+            message = {"params": {"_meta": {"traceparent": format_traceparent(second)}}}
+            headers = {"traceparent": format_traceparent(first)}
+            if transport == "http":
+                headers = {} if active is None else {"traceparent": active}
+            else:
+                message = {"params": {"_meta": {}}} if active is None else {"params": {"_meta": {"traceparent": active}}}
+            assert extract(McpRequest(transport, message, headers)) is None, (
+                "an absent or unusable active carrier never falls back to the other transport"
+            )
+
     # The lesson's run, with the MCP server as a process of its own that traces and exports too.
     received: list = []
     agent_exporter = BatchExporter(collector(clock, received), service_name="research-agent", clock=clock, max_batch=4)

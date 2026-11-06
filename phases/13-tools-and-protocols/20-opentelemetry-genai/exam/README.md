@@ -22,7 +22,7 @@ Hold spans to the GenAI conventions, and aggregate the GenAI metrics.
 
 ## Pt 4 `test_propagation_and_export`
 
-Carry the trace into the MCP server, and ship spans in batches.
+Carry each call's current context through its transport into the MCP server, and ship spans in batches. The traceparent parser is supplied.
 
 ## Pt 5 `test_where_the_time_went`
 

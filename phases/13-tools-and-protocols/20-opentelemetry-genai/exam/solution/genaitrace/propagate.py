@@ -14,8 +14,9 @@ _TRACEPARENT = re.compile(r"00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}")
 class McpRequest:
     """One JSON-RPC request on its way to an MCP server.
 
-    transport is "stdio" or "http". Over stdio there is only the message. Over Streamable HTTP the
-    message is the POST body and headers are the HTTP headers, names in lowercase.
+    transport is "stdio" or "http". Stdio carries context in the message; Streamable HTTP uses
+    headers (names in lowercase) and sends the message as the POST body. A reusable template may
+    hold both carriers: propagation preserves but ignores the inactive one.
     """
 
     transport: str
@@ -53,9 +54,10 @@ def inject(request: McpRequest, span: Span) -> McpRequest:
     """A copy of request that carries span's trace context to the server.
 
     Over HTTP the traceparent goes in the "traceparent" header and the message is not touched. Over
-    stdio, which has no headers, it goes in the message as params._meta.traceparent, next to whatever
+    stdio it goes in the message as params._meta.traceparent, next to whatever
     else _meta already holds (a request without params gets them). The request passed in is left as
-    it was.
+    it was. An existing traceparent in the active carrier is replaced by this span's context;
+    the other carrier is left unchanged. Each injection is independent.
     """
     traceparent = format_traceparent(span)
     message = copy.deepcopy(request.message)
@@ -72,7 +74,8 @@ def inject(request: McpRequest, span: Span) -> McpRequest:
 
 def extract(request: McpRequest) -> SpanContext | None:
     """The caller's SpanContext: from the traceparent header over HTTP, from params._meta.traceparent
-    over stdio. None when the request carries no usable traceparent."""
+    over stdio. Read only that transport's carrier, with no fallback to the other one.
+    None when the active carrier carries no usable traceparent."""
     if request.transport == "http":
         return parse_traceparent(request.headers.get("traceparent"))
     params = request.message.get("params")

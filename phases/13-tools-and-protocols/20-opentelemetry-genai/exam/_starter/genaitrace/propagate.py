@@ -1,17 +1,21 @@
 """W3C trace context across MCP: the traceparent header over Streamable HTTP, params._meta over stdio."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .tracer import Span, SpanContext
+
+_TRACEPARENT = re.compile(r"00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}")
 
 
 @dataclass
 class McpRequest:
     """One JSON-RPC request on its way to an MCP server.
 
-    transport is "stdio" or "http". Over stdio there is only the message. Over Streamable HTTP the
-    message is the POST body and headers are the HTTP headers, names in lowercase.
+    transport is "stdio" or "http". Stdio carries context in the message; Streamable HTTP uses
+    headers (names in lowercase) and sends the message as the POST body. A reusable template may
+    hold both carriers: propagation preserves but ignores the inactive one.
     """
 
     transport: str
@@ -34,25 +38,31 @@ def parse_traceparent(value: object) -> SpanContext | None:
     a string, upper case, wrong lengths, another version, extra characters), so the receiver starts a
     new trace instead of failing the request.
     """
-    raise NotImplementedError
+    if not isinstance(value, str):
+        return None
+    match = _TRACEPARENT.fullmatch(value)
+    if match is None:
+        return None
+    trace_id, span_id = match.groups()
+    if trace_id == "0" * 32 or span_id == "0" * 16:
+        return None
+    return SpanContext(trace_id, span_id)
 
 
 def inject(request: McpRequest, span: Span) -> McpRequest:
     """A copy of request that carries span's trace context to the server.
 
     Over HTTP the traceparent goes in the "traceparent" header and the message is not touched. Over
-    stdio, which has no headers, it goes in the message as params._meta.traceparent, next to whatever
+    stdio it goes in the message as params._meta.traceparent, next to whatever
     else _meta already holds (a request without params gets them). The request passed in is left as
-    it was.
+    it was. An existing traceparent in the active carrier is replaced by this span's context;
+    the other carrier is left unchanged. Each injection is independent.
     """
     raise NotImplementedError
 
 
 def extract(request: McpRequest) -> SpanContext | None:
     """The caller's SpanContext: from the traceparent header over HTTP, from params._meta.traceparent
-    over stdio. None when the request carries no usable traceparent."""
-    if request.transport == "http":
-        return parse_traceparent(request.headers.get("traceparent"))
-    params = request.message.get("params")
-    meta = params.get("_meta") if isinstance(params, dict) else None
-    return parse_traceparent(meta.get("traceparent") if isinstance(meta, dict) else None)
+    over stdio. Read only that transport's carrier, with no fallback to the other one.
+    None when the active carrier carries no usable traceparent."""
+    raise NotImplementedError

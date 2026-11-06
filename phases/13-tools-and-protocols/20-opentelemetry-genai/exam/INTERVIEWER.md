@@ -30,6 +30,7 @@
 | 3 | 没通过检查的 span 还算指标吗？ | "Yes. Each span adds whatever samples it can." |
 | 4 | traceparent 是大写的十六进制呢？ | "Not usable. Start a new trace." |
 | 4 | traceparent 不合法时要让请求失败吗？ | "Never. Tracing must not break the call. Start a new trace." |
+| 4 | 两种载体都有 traceparent，当前载体坏了能用另一个吗？ | "No. Read only the active transport's carrier. An unusable active context starts a new trace." |
 | 4 | `_meta` 里已有的字段要保留吗？ | "Yes, all of them." |
 | 4 | HTTP 下 body 的 `_meta` 也要写一份吗？ | "No. The header carries it over HTTP." |
 | 4 | 可以起一个后台线程定时导出吗？ | "Not here. Send from inside on_end, tick or shutdown, so the tests can see when." |
@@ -112,15 +113,17 @@
 ### Part 4 传播与分批导出（目标 14 分钟）
 
 坑：
-- traceparent 必须正好是 `00-<32 位十六进制>-<16 位十六进制>-<2 位十六进制>`，全小写，两个 id 都不能全是 0。用 `re.match(r"^...$")` 不够：`$` 能匹配末尾换行之前的位置，带换行的值会被接受，要用 `fullmatch`。用 `int(x, 16)` 验证十六进制会放过大写、`0x` 前缀、`+` 号和下划线；flags 也一样，只用 `int(flags, 16)` 检查会放过 `0A`。`_meta` 里放了个数字的话要返回 None，不能抛 TypeError。
-- 不合法的 traceparent 返回 None，服务端开一个新 trace，调用照常完成。抛异常就是让追踪影响了业务。
-- inject 不改传进来的请求：stdio 下要深拷贝（浅拷贝会改到调用方的 `_meta`），保留 `_meta` 里原有的 progressToken，没有 params 的请求要补上 params。HTTP 下只加 header，不动 body。stdio 没有 header。
-- agent 要真的把 trace 带出去：这一步要改给定的 `fake_mcp_call`，用 mcp.call 这个 span 去 inject。用 tool.execute 的 span 会让服务端 span 挂到错误的父节点上。
+- 每次注入都使用本次传入 span 的 context，替换当前载体里已有的旧值。不能用 setdefault 留住旧 traceparent，也不能让同一个 base request 的两次注入共享可变状态，后一次覆盖前一次。
+- 提取只读当前 transport 的载体：HTTP 读 header，stdio 读 params._meta。另一载体即使有合法 context 也不能优先读取或作为 fallback；当前载体缺失或不合法就返回 None。
+- 原请求、其他字段和非当前载体不变。HTTP 下 body 中原有的 traceparent 保留；stdio 下无关 headers 保留。保留 _meta 的 progressToken，没有 params 的 stdio 请求要补上 params。只复制顶层 dict 会改到调用方的嵌套对象。
+- agent 用本次 mcp.call span 注入；receiver 的 SERVER span 继续这个 trace，并以本次 call 的 span id 为 parent。同一模板发出的两次调用不能沿用第一次的 parent。
 - 第 max_batch 个 span 结束的那次 on_end 里就要发出去，测试比较的是发送时刻和这批最后一个 span 的结束时刻。只在 tick 里发、条件写成 `>`、每个 span 单独发，都会挂。
 - tick 用 `>=`；等待时间从 span 入队时（on_end 被调用时，按导出器的时钟）算起，不是从上一次发送算起，不是从最新入队的 span 算起，也不是从 span 自己的 end_ns 算起：测试里的 a 结束时带了 3 秒前的 end_ns，用 end_ns 计时会让它一入队就超时。队列为空时 tick 什么都不发，也不能因为没有“最早的 span”而报错。
 - shutdown 把剩下的发出去；之后结束的 span（包括一直在跑、shutdown 之后才结束的那个）静静丢掉，不能抛异常，也不能留到下一次 tick 发出去。
 - 请求是 UTF-8 bytes，结构是 resourceSpans → scopeSpans → spans，service.name 写成 OTLP 属性（`{"key": ..., "value": {"stringValue": ...}}`），批内按结束顺序。一个 span 一个 resourceSpans 不对。
 - 端到端那段把 Part 2 的 `to_otlp` 也用上了：导出的每个 span 解码回来，要和 tracer 里的 span 完全一样。
+
+给定 helper 护栏：`parse_traceparent` 已完整正确实现；格式测试和错修保护这个给定实现。它只接受本题声明的 version、长度、小写十六进制、非零 id 和完整字符串，坏值返回 None，不让追踪故障影响工具调用。候选人无需重写这个 parser；用 re.match 加 ^...$、int(x, 16)、扩大字符集或抛异常的退化仍会被测试抓住。
 
 追问：
 - "The collector is down. What happens to the queue?"（队列要有上限，满了按策略丢并计数；重试带退避；绝不能阻塞 agent）

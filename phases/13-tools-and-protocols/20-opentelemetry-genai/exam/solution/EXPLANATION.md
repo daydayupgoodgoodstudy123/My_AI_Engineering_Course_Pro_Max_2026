@@ -76,9 +76,11 @@ self.counts[bisect.bisect_left(self.bounds, value)] += 1
 
 ## Part 4 传播与分批导出
 
-`parse_traceparent` 用 `re.fullmatch(r"00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}", value)`，再排除全零的 id，非字符串直接返回 None。三处容易放宽：`re.match` 加 `$` 会接受末尾的换行（`$` 能匹配换行之前）；`[0-9a-fA-F]` 或 `int(x, 16)` 会接受大写（flags 的 `0A` 也一样）；`int(x, 16)` 还接受 `0x`、`+` 和下划线。
+`parse_traceparent` 是给定的正确 helper：完整匹配本题支持的 W3C 形式、排除全零 id，非字符串和坏格式返回 None。格式断言与错修用来保护此合同，候选人的主任务是跨 transport 传递本次调用的 context。
 
-`inject` 先深拷贝 message、复制 headers：HTTP 加 `traceparent` 头；stdio 用 `params.setdefault("_meta", {})["traceparent"] = ...`，保留原有的 progressToken。然后在 `fake_mcp_call` 里把请求换成 `inject(request, span)`。这里的 span 是 mcp.call，服务端的 SERVER span 挂在发起调用的 CLIENT span 下面。坏的 traceparent 让 `extract` 返回 None，服务端开新 trace，工具照常返回。
+`inject` 深拷贝 message、复制 headers。HTTP 更新 traceparent header，只保留 body 原样；stdio 更新 params._meta.traceparent，保留其他 metadata 和全部 headers。已有旧 context 必须被当前 span 替换，不能用 setdefault 留住它。同一模板分别注入两个 span 时，每份请求都保留自己的 context，模板本身不动。
+
+`extract` 只按 request.transport 选择一个载体：HTTP header 或 stdio params._meta，不跨载体 fallback。当前值缺失或不合法就返回 None，即使另一处有合法值也不能接上错误的 trace。`fake_mcp_call` 使用本次 mcp.call span 调用 inject，WeatherServer 用 extract 得到的 context 开 SERVER span。两次独立调用的 receiver 分别继承各自的 trace id，以各自的 mcp.call span id 为 parent。坏 traceparent 仍只让服务端开新 trace，工具照常返回。
 
 `BatchExporter` 的状态只有三样：队列、最早入队时刻、是否已关闭。
 
