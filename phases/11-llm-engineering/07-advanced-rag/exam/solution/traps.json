@@ -1,0 +1,544 @@
+{
+  "package": "rerankdesk",
+  "tests": [
+    "test_filtered_candidate_batch",
+    "test_dbm_parent_child_catalog",
+    "test_source_lexical_pair_features",
+    "test_csv_query_batch_reports",
+    "test_parent_context_match_tree"
+  ],
+  "layers": [
+    {
+      "test": "test_filtered_candidate_batch",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "ValueError"
+        },
+        {
+          "name": "preserve the two source HyDE return roles",
+          "edits": [
+            {
+              "file": "search.py",
+              "old": "hypothesis,candidates=retriever(question)",
+              "new": "candidates,hypothesis=retriever(question)"
+            }
+          ],
+          "expect": "metadata admission precedes the retrieval-pool boundary and retains original rank"
+        },
+        {
+          "name": "+ admit metadata before the pool limit",
+          "edits": [
+            {
+              "file": "search.py",
+              "old": "pool=projected[:pool_k]\n        pool=allowed_candidates(pool,catalog,metadata)",
+              "new": "allowed=allowed_candidates(projected,catalog,metadata)\n        pool=allowed[:pool_k]"
+            }
+          ],
+          "expect": "the complete admitted retrieval pool competes for the final reranked result"
+        },
+        {
+          "name": "+ preserve the retrieval pool until reranking",
+          "edits": [
+            {
+              "file": "search.py",
+              "old": "        pool=pool[:final_k]\n",
+              "new": ""
+            }
+          ],
+          "expect": "keyword candidate requests over a fitted corpus should stay responsive"
+        },
+        {
+          "name": "+ consume this fitted generation's average length",
+          "edits": [
+            {
+              "file": "keyword.py",
+              "old": "        return sum(self.doc_lengths)/self.n_docs if self.n_docs else 1",
+              "new": "        return self.avg_dl"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_filtered_candidate_batch",
+      "name": "omit the supplied scorer",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "ranked=rank_batch(query,pool,catalog,scorer)",
+          "new": "ranked=rank_batch(query,pool,catalog,lambda query,key,text,initial:initial)"
+        }
+      ],
+      "expect": "reranking consumes original candidate ids, text and supplied scores"
+    },
+    {
+      "test": "test_filtered_candidate_batch",
+      "name": "ignore metadata restrictions",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "allowed_candidates(projected,catalog,metadata)",
+          "new": "allowed_candidates(projected,catalog,{})"
+        }
+      ],
+      "expect": "metadata admission precedes the retrieval-pool boundary and retains original rank"
+    },
+    {
+      "test": "test_dbm_parent_child_catalog",
+      "name": "order child ordinals lexically",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "children.sort(key=lambda row:(source_rank[row.source_key],row.parent,row.ordinal))",
+          "new": "children.sort(key=lambda row:(source_rank[row.source_key],row.parent,str(row.ordinal)))"
+        }
+      ],
+      "expect": "dbm reopening restores the exact typed source, parent and child catalog"
+    },
+    {
+      "test": "test_dbm_parent_child_catalog",
+      "name": "round source microseconds to whole seconds",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "for row in catalog.sources:database[dbkey(\"source\",row.key)]=encode(record(row))",
+          "new": "for row in catalog.sources:database[dbkey(\"source\",row.key)]=encode({**record(row),\"created_us\":row.created_us//1000000*1000000})"
+        }
+      ],
+      "expect": "dbm reopening restores the exact typed source, parent and child catalog"
+    },
+    {
+      "test": "test_dbm_parent_child_catalog",
+      "name": "sort source ids instead of preserving insertion order",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "order=decode(database[b\"source-order\"])",
+          "new": "order=sorted(decode(database[b\"source-order\"]))"
+        }
+      ],
+      "expect": "dbm reopening restores the exact typed source, parent and child catalog"
+    },
+    {
+      "test": "test_dbm_parent_child_catalog",
+      "name": "leave obsolete records on replacement",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            for key in database.keys():del database[key]\n",
+          "new": ""
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_source_lexical_pair_features",
+      "name": "count repeated phrase occurrences",
+      "edits": [
+        {
+          "file": "scorer.py",
+          "old": "sum(phrase in lower for phrase in bigrams)",
+          "new": "sum(lower.count(phrase) for phrase in bigrams)"
+        }
+      ],
+      "expect": "source features distinguish unique whole terms, ordered unique query phrases and first positions"
+    },
+    {
+      "test": "test_source_lexical_pair_features",
+      "name": "form phrases before removing stopwords",
+      "edits": [
+        {
+          "file": "scorer.py",
+          "old": "bigrams={tokens[i]+\" \"+tokens[i+1] for i in range(len(tokens)-1)}",
+          "new": "bigrams={\" \".join(query.lower().split()[i:i+2]) for i in range(len(query.lower().split())-1)}"
+        }
+      ],
+      "expect": "ordered phrase neighbors come from the stopword-filtered query list"
+    },
+    {
+      "test": "test_source_lexical_pair_features",
+      "name": "include the exact first-third boundary",
+      "edits": [
+        {
+          "file": "scorer.py",
+          "old": "0<=lower.find(term)<len(lower)//3",
+          "new": "0<=lower.find(term)<=len(lower)//3"
+        }
+      ],
+      "expect": "an occurrence exactly at the first-third boundary earns no position credit"
+    },
+    {
+      "test": "test_source_lexical_pair_features",
+      "name": "use token positions for source substring boost",
+      "edits": [
+        {
+          "file": "scorer.py",
+          "old": "lower.find(term)",
+          "new": "(lower.split().index(term) if term in lower.split() else -1)"
+        }
+      ],
+      "expect": "whole-token term support and source substring-position support remain distinct"
+    },
+    {
+      "test": "test_source_lexical_pair_features",
+      "name": "normalize away the supplied initial-score weight",
+      "edits": [
+        {
+          "file": "scorer.py",
+          "old": "        total=term_overlap+2*bigram_matches+position_boost+5*initial_score",
+          "new": "        total=term_overlap+2*bigram_matches+position_boost+initial_score"
+        }
+      ],
+      "expect": "the composite retains all four declared source weights"
+    },
+    {
+      "test": "test_csv_query_batch_reports",
+      "name": "report rerank position as original retrieval rank",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "for hit in hits:",
+          "new": "for position,hit in enumerate(hits,1):"
+        },
+        {
+          "file": "stream.py",
+          "old": "\"initial_rank\":hit.initial_rank",
+          "new": "\"initial_rank\":position"
+        }
+      ],
+      "expect": "reported initial ranks remain original retrieval metadata rather than rerank positions or a global counter"
+    },
+    {
+      "test": "test_csv_query_batch_reports",
+      "name": "carry the first query identity across batches",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    header=True",
+          "new": "    header=True\n    first_query=None"
+        },
+        {
+          "file": "stream.py",
+          "old": "        rows=report_rows(query_id,hits,catalog)",
+          "new": "        if first_query is None:first_query=query_id\n        rows=report_rows(first_query,hits,catalog)"
+        }
+      ],
+      "expect": "each CSV result belongs to its own query batch without repeated header records"
+    },
+    {
+      "test": "test_csv_query_batch_reports",
+      "name": "round report scores to four significant digits",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "repr(hit.score)",
+          "new": "format(hit.score,\".4g\")"
+        }
+      ],
+      "expect": "score text preserves binary64 ordering precision across reports"
+    },
+    {
+      "test": "test_csv_query_batch_reports",
+      "name": "collect all query batches before reporting",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for query_id,hits in batches:",
+          "new": "    all_batches=[batch async for batch in batches]\n    for query_id,hits in all_batches:"
+        }
+      ],
+      "expect": "a completed query report is available before the next query batch is pulled"
+    },
+    {
+      "test": "test_parent_context_match_tree",
+      "name": "coalesce parents by ordinal across sources",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "parent=catalog.parent_by_key[key]",
+          "new": "parent=catalog.parent_by_key[(child.source_key,child.parent)]"
+        },
+        {
+          "file": "context.py",
+          "old": "key=(child.source_key,child.parent)",
+          "new": "key=child.parent"
+        }
+      ],
+      "expect": "parent contexts follow first selected child order with source-scoped parent identity"
+    },
+    {
+      "test": "test_parent_context_match_tree",
+      "name": "emit one duplicate parent context per selected child",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "        if key not in blocks:",
+          "new": "        key=(key,hit.child_id)\n        if key not in blocks:"
+        }
+      ],
+      "expect": "parent contexts follow first selected child order with source-scoped parent identity"
+    },
+    {
+      "test": "test_parent_context_match_tree",
+      "name": "sort nested matches into source interval order",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "    return list(blocks.values())",
+          "new": "    for block in blocks.values():block[\"matches\"].sort(key=lambda row:row[\"start\"])\n    return list(blocks.values())"
+        }
+      ],
+      "expect": "nested child matches retain selected-hit order rather than catalog child order"
+    },
+    {
+      "test": "test_parent_context_match_tree",
+      "name": "export a shortened parent preview instead of complete context",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "\"text\":parent.text",
+          "new": "\"text\":parent.text[:5]"
+        }
+      ],
+      "expect": "parent and nested child intervals refer to complete original source slices"
+    },
+    {
+      "test": "test_filtered_candidate_batch",
+      "name": "replace fitted corpus length with a constant",
+      "edits": [
+        {
+          "file": "keyword.py",
+          "old": "        return self.avg_dl",
+          "new": "        return 1.0"
+        }
+      ],
+      "expect": "keyword scores use this fitted corpus's length distribution including empty documents"
+    },
+    {
+      "test": "test_filtered_candidate_batch",
+      "name": "share the first observed average across all indexes",
+      "edits": [
+        {
+          "file": "keyword.py",
+          "old": "        return self.avg_dl",
+          "new": "        if not hasattr(type(self),'first_average'):type(self).first_average=self.avg_dl\n        return type(self).first_average"
+        }
+      ],
+      "expect": "independent fitted indexes keep their own corpus statistics and keyword results"
+    },
+    {
+      "test": "test_filtered_candidate_batch",
+      "name": "cache the first average without generation invalidation",
+      "edits": [
+        {
+          "file": "keyword.py",
+          "old": "        return self.avg_dl",
+          "new": "        if not hasattr(self,'first_average'):self.first_average=self.avg_dl\n        return self.first_average"
+        }
+      ],
+      "expect": "replacement indexing refreshes the length statistic consumed by subsequent scoring"
+    },
+    {
+      "test": "test_filtered_candidate_batch",
+      "name": "reintroduce unnecessary growing-prefix reranking in the given batch path",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "        ranked=rank_batch(query,pool,catalog,scorer)",
+          "new": "        ranked=[]\n        for end in range(1,len(pool)+1):\n            ranked=rank_batch(query,pool[:end],catalog,scorer)"
+        }
+      ],
+      "expect": "large candidate rerank batches should stay responsive"
+    },
+    {
+      "test": "test_dbm_parent_child_catalog",
+      "name": "fresh-p2-rebuild-source-from-parents",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "for row in catalog.sources:database[dbkey(\"source\",row.key)]=encode(record(row))",
+          "new": "for row in catalog.sources:database[dbkey(\"source\",row.key)]=encode({**record(row),\"text\":\" \".join(parent.text for parent in catalog.parents if parent.source_key==row.key)})"
+        }
+      ],
+      "expect": "source text outside indexed intervals remains exact catalog payload"
+    },
+    {
+      "test": "test_dbm_parent_child_catalog",
+      "name": "fresh-p2-drop-no-child-sources",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "encode([row.key for row in catalog.sources])",
+          "new": "encode([row.key for row in catalog.sources if any(child.source_key==row.key for child in catalog.children)])"
+        },
+        {
+          "file": "store.py",
+          "old": "for row in catalog.sources:database[dbkey(\"source\",row.key)]=encode(record(row))",
+          "new": "for row in catalog.sources:\n                if any(child.source_key==row.key for child in catalog.children):database[dbkey(\"source\",row.key)]=encode(record(row))"
+        }
+      ],
+      "expect": "unindexed source records retain their raw payload and provenance"
+    },
+    {
+      "test": "test_source_lexical_pair_features",
+      "name": "fresh-p3-query-term-frequency",
+      "edits": [
+        {
+          "file": "scorer.py",
+          "old": "term_overlap=len(terms & set(lower.split()))",
+          "new": "term_overlap=sum(word in set(lower.split()) for word in tokens)"
+        }
+      ],
+      "expect": "source features distinguish unique whole terms, ordered unique query phrases and first positions"
+    },
+    {
+      "test": "test_source_lexical_pair_features",
+      "name": "fresh-p3-case-sensitive-query",
+      "edits": [
+        {
+          "file": "scorer.py",
+          "old": "tokens=[word for word in query.lower().split() if word not in STOPWORDS]",
+          "new": "tokens=[word for word in query.split() if word not in STOPWORDS]"
+        }
+      ],
+      "expect": "mixed-case queries and texts retain source lowercase feature semantics"
+    },
+    {
+      "test": "test_csv_query_batch_reports",
+      "name": "fresh-p4-resort-completed-report",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    for hit in hits:",
+          "new": "    for hit in sorted(hits,key=lambda hit:hit.initial_rank):"
+        }
+      ],
+      "expect": "reported initial ranks remain original retrieval metadata rather than rerank positions or a global counter"
+    },
+    {
+      "test": "test_csv_query_batch_reports",
+      "name": "fresh-p4-skip-empty-report",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        yield csv_chunk(rows,header=header)",
+          "new": "        if not rows:continue\n        yield csv_chunk(rows,header=header)"
+        }
+      ],
+      "expect": "an empty completed first query emits its header before a later batch is pulled"
+    },
+    {
+      "test": "test_parent_context_match_tree",
+      "name": "fresh-p5-dedup-selected-child",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "    blocks={}\n    for hit in hits:",
+          "new": "    blocks={}\n    seen=set()\n    for hit in hits:\n        if hit.child_id in seen:continue\n        seen.add(hit.child_id)"
+        }
+      ],
+      "expect": "each selected hit occurrence retains its own nested evidence"
+    },
+    {
+      "test": "test_parent_context_match_tree",
+      "name": "fresh-p5-initial-as-match-score",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "\"score\":hit.score",
+          "new": "\"score\":hit.initial_score"
+        }
+      ],
+      "expect": "nested match evidence retains each original score and retrieval rank"
+    },
+    {
+      "test": "test_filtered_candidate_batch",
+      "name": "rerank hypothetical retrieval against the generated text instead of the original question",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "hits=self.query(question,candidates,catalog,metadata,pool_k,final_k,scorer)",
+          "new": "hits=self.query(hypothesis,candidates,catalog,metadata,pool_k,final_k,scorer)"
+        }
+      ],
+      "expect": "pair scoring retains the user's complete original question and retrieved evidence"
+    },
+    {
+      "test": "test_filtered_candidate_batch",
+      "name": "discard the actual hypothetical document from the query report",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "return HyDEQueryResult(hypothesis,tuple(hits))",
+          "new": "return HyDEQueryResult(\"\",tuple(hits))"
+        }
+      ],
+      "expect": "HyDE reports retain the complete hypothesis used by retrieval"
+    },
+    {
+      "test": "test_filtered_candidate_batch",
+      "name": "erase initial retrieval scores at the HyDE adapter boundary",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "hits=self.query(question,candidates,catalog,metadata,pool_k,final_k,scorer)",
+          "new": "hits=self.query(question,[(key,0.0) for key,score in candidates],catalog,metadata,pool_k,final_k,scorer)"
+        }
+      ],
+      "expect": "hypothetical retrieval results retain their scores and ranks through pair scoring"
+    },
+    {
+      "test": "test_filtered_candidate_batch",
+      "name": "validation only restore local rank as original candidate identity",
+      "edits": [
+        {
+          "file": "search.py",
+          "old": "Candidate(child_id,score,rank+1)",
+          "new": "Candidate(rank,score,rank+1)"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_csv_query_batch_reports",
+      "name": "report initial retrieval score instead of the completed rerank score",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "repr(hit.score)",
+          "new": "repr(hit.initial_score)"
+        }
+      ],
+      "expect": "score text preserves binary64 ordering precision across reports"
+    },
+    {
+      "test": "test_csv_query_batch_reports",
+      "name": "project child ordinal into the source-local parent_id field",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "\"parent_id\":child.parent",
+          "new": "\"parent_id\":child.ordinal"
+        }
+      ],
+      "expect": "CSV projection preserves original child identity and source-local parent metadata"
+    },
+    {
+      "test": "test_csv_query_batch_reports",
+      "name": "project source identity key instead of the original raw source label",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "\"source_label\":source.label",
+          "new": "\"source_label\":source.key"
+        }
+      ],
+      "expect": "the given CSV encoder preserves raw multiline source labels and source ownership closes"
+    }
+  ]
+}
