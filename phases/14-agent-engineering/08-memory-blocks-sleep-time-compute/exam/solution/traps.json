@@ -1,0 +1,1198 @@
+{
+  "package": "memblocks",
+  "tests": [
+    "test_block_tools",
+    "test_version_log",
+    "test_sleep_consolidation",
+    "test_sleep_alongside_turns",
+    "test_lineage_invalidation"
+  ],
+  "layers": [
+    {
+      "test": "test_block_tools",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a write that would pass the limit is refused"
+        },
+        {
+          "name": "refuse writes past the limit",
+          "edits": [
+            {
+              "file": "blocks.py",
+              "old": "    def _commit(self, value: str, op: str) -> str:\n        self.history.append(self.value)\n",
+              "new": "    def _commit(self, value: str, op: str) -> str:\n        if len(value) > self.limit:\n            return f\"error: {self.label} would be {len(value)}/{self.limit}\"\n        self.history.append(self.value)\n"
+            }
+          ],
+          "expect": "block_replace needs a non-empty old string"
+        },
+        {
+          "name": "+ refuse an empty old string",
+          "edits": [
+            {
+              "file": "blocks.py",
+              "old": "        if old not in self.value:\n",
+              "new": "        if not old or old not in self.value:\n"
+            }
+          ],
+          "expect": "a sleep pass leaves at least half of a near-limit block free"
+        },
+        {
+          "name": "+ count the newlines in summarize",
+          "edits": [
+            {
+              "file": "blocks.py",
+              "old": "        used += len(line)\n",
+              "new": "        used += len(line) + 1\n"
+            }
+          ],
+          "expect": "a sleep pass must stay fast on a big archive"
+        },
+        {
+          "name": "+ index records by id",
+          "edits": [
+            {
+              "file": "archival.py",
+              "old": "        self._records: list[ArchivalRecord] = []\n",
+              "new": "        self._records: list[ArchivalRecord] = []\n        self._by_rid: dict[str, ArchivalRecord] = {}\n"
+            },
+            {
+              "file": "archival.py",
+              "old": "        self._records.append(ArchivalRecord(rid, text, at))\n",
+              "new": "        self._records.append(ArchivalRecord(rid, text, at))\n        self._by_rid[rid] = self._records[-1]\n"
+            },
+            {
+              "file": "archival.py",
+              "old": "        for record in self._records:\n            if record.rid == rid:\n                return record\n        raise KeyError(rid)\n",
+              "new": "        return self._by_rid[rid]\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_block_tools",
+      "name": "over-limit write cut to fit instead of refused",
+      "edits": [
+        {
+          "file": "blocks.py",
+          "old": "        if len(value) > self.limit:\n            return (\n                f\"error: {op} would make {self.label} {len(value)}/{self.limit} characters;\"\n                \" replace a stale line or write to archival instead\"\n            )\n",
+          "new": "        if len(value) > self.limit:\n            value = value[: self.limit]\n"
+        }
+      ],
+      "expect": "a write that would pass the limit is refused"
+    },
+    {
+      "test": "test_block_tools",
+      "name": "history pushed before the limit check",
+      "edits": [
+        {
+          "file": "blocks.py",
+          "old": "    def _commit(self, value: str, op: str) -> str:\n        if len(value) > self.limit:\n",
+          "new": "    def _commit(self, value: str, op: str) -> str:\n        self.history.append(self.value)\n        if len(value) > self.limit:\n"
+        },
+        {
+          "file": "blocks.py",
+          "old": "        self.history.append(self.value)\n        self.value = value\n",
+          "new": "        self.value = value\n"
+        }
+      ],
+      "expect": "a refused write changes nothing"
+    },
+    {
+      "test": "test_block_tools",
+      "name": "a value exactly at the limit refused",
+      "edits": [
+        {
+          "file": "blocks.py",
+          "old": "        if len(value) > self.limit:\n",
+          "new": "        if len(value) >= self.limit:\n"
+        }
+      ],
+      "expect": "a write that lands exactly on the limit is accepted"
+    },
+    {
+      "test": "test_block_tools",
+      "name": "newlines not counted against the limit",
+      "edits": [
+        {
+          "file": "blocks.py",
+          "old": "        if len(value) > self.limit:\n",
+          "new": "        if len(value.replace(\"\\n\", \"\")) > self.limit:\n"
+        }
+      ],
+      "expect": "a write that would pass the limit is refused"
+    },
+    {
+      "test": "test_block_tools",
+      "name": "summary cut to the last target_len characters",
+      "edits": [
+        {
+          "file": "blocks.py",
+          "old": "    return \"\\n\".join(reversed(kept))\n",
+          "new": "    return text[-target_len:]\n"
+        }
+      ],
+      "expect": "the sleep pass keeps the newest whole lines"
+    },
+    {
+      "test": "test_block_tools",
+      "name": "a line that fits exactly is dropped",
+      "edits": [
+        {
+          "file": "blocks.py",
+          "old": "        if used + 1 + len(line) > target_len:\n",
+          "new": "        if used + 1 + len(line) >= target_len:\n"
+        }
+      ],
+      "expect": "summarize keeps as many of the newest lines as fit, up to target_len"
+    },
+    {
+      "test": "test_block_tools",
+      "name": "summarize skips a line that does not fit and keeps going",
+      "edits": [
+        {
+          "file": "blocks.py",
+          "old": "        if used + 1 + len(line) > target_len:\n            break\n",
+          "new": "        if used + 1 + len(line) > target_len:\n            continue\n"
+        }
+      ],
+      "expect": "summarize keeps as many of the newest lines as fit, up to target_len"
+    },
+    {
+      "test": "test_block_tools",
+      "name": "invalid records dropped from all_records",
+      "edits": [
+        {
+          "file": "archival.py",
+          "old": "        return list(self._records)\n",
+          "new": "        return [r for r in self._records if r.valid]\n"
+        }
+      ],
+      "expect": "contradicted records are invalidated and kept for audit"
+    },
+    {
+      "test": "test_block_tools",
+      "name": "only the first contradicted record invalidated",
+      "edits": [
+        {
+          "file": "agents.py",
+          "old": "                    self.trace.append(f\"  invalidate {record.rid} ({reason})\")\n",
+          "new": "                    self.trace.append(f\"  invalidate {record.rid} ({reason})\")\n                    break\n"
+        }
+      ],
+      "expect": "contradicted records are invalidated and kept for audit"
+    },
+    {
+      "test": "test_block_tools",
+      "name": "limit checked in append only",
+      "edits": [
+        {
+          "file": "blocks.py",
+          "old": "        if len(value) > self.limit:\n            return (\n                f\"error: {op} would make {self.label} {len(value)}/{self.limit} characters;\"\n                \" replace a stale line or write to archival instead\"\n            )\n",
+          "new": ""
+        },
+        {
+          "file": "blocks.py",
+          "old": "        return self._commit(f\"{self.value}\\n{text}\" if self.value else text, \"append\")\n",
+          "new": "        value = f\"{self.value}\\n{text}\" if self.value else text\n        if len(value) > self.limit:\n            return f\"error: {self.label} is full\"\n        return self._commit(value, \"append\")\n"
+        }
+      ],
+      "expect": "block_replace and rewrites keep to the limit too"
+    },
+    {
+      "test": "test_block_tools",
+      "name": "an empty new string refused along with the empty old one",
+      "edits": [
+        {
+          "file": "blocks.py",
+          "old": "        if not old:\n",
+          "new": "        if not old or not new:\n"
+        }
+      ],
+      "expect": "block_replace can delete text"
+    },
+    {
+      "test": "test_block_tools",
+      "name": "summarize counts a newline before the first kept line",
+      "edits": [
+        {
+          "file": "blocks.py",
+          "old": "    used = -1  # n lines are joined by n - 1 newlines\n",
+          "new": "    used = 0\n"
+        }
+      ],
+      "expect": "summarize keeps as many of the newest lines as fit"
+    },
+    {
+      "test": "test_block_tools",
+      "name": "over-limit write cut to fit and reported as an error",
+      "edits": [
+        {
+          "file": "blocks.py",
+          "old": "        if len(value) > self.limit:\n            return (\n",
+          "new": "        if len(value) > self.limit:\n            self.value = value[: self.limit]\n            return (\n"
+        }
+      ],
+      "expect": "a refused write changes nothing"
+    },
+    {
+      "test": "test_block_tools",
+      "name": "refusal observation without the error: prefix",
+      "edits": [
+        {
+          "file": "blocks.py",
+          "old": "f\"error: {op} would make",
+          "new": "f\"refused: {op} would make"
+        }
+      ],
+      "expect": "a write that would pass the limit is refused"
+    },
+    {
+      "test": "test_block_tools",
+      "name": "sleep pass marks records invalid without a reason",
+      "edits": [
+        {
+          "file": "agents.py",
+          "old": "                    self.archival.invalidate(record.rid, reason)\n",
+          "new": "                    record.valid = False\n"
+        }
+      ],
+      "expect": "an invalidated record says why"
+    },
+    {
+      "test": "test_version_log",
+      "name": "log opened in write mode",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": ".open(\"a\", encoding=\"utf-8\")",
+          "new": ".open(\"w\", encoding=\"utf-8\")"
+        }
+      ],
+      "expect": "one line per version"
+    },
+    {
+      "test": "test_version_log",
+      "name": "versions kept in memory only",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        with self._path(label).open(\"a\", encoding=\"utf-8\") as log:\n            log.write(line)\n            log.flush()\n            os.fsync(log.fileno())\n",
+          "new": ""
+        }
+      ],
+      "expect": "one log file per block"
+    },
+    {
+      "test": "test_version_log",
+      "name": "tab-separated lines with the raw value",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        line = json.dumps({\"version\": version, \"op\": op, \"value\": value}) + \"\\n\"\n",
+          "new": "        line = f\"{version}\\t{op}\\t{value}\\n\"\n"
+        },
+        {
+          "file": "history.py",
+          "old": "                    row = json.loads(line)\n                    versions.append(Version(row[\"version\"], row[\"op\"], row[\"value\"]))\n",
+          "new": "                    number, op, value = line.decode(\"utf-8\").split(\"\\t\", 2)\n                    versions.append(Version(int(number), op, value))\n"
+        }
+      ],
+      "expect": "one line per version"
+    },
+    {
+      "test": "test_version_log",
+      "name": "ensure_ascii=False, read back with splitlines()",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "\"value\": value}) + \"\\n\"",
+          "new": "\"value\": value}, ensure_ascii=False) + \"\\n\""
+        },
+        {
+          "file": "history.py",
+          "old": "                for line in data[:end].split(b\"\\n\")[:-1]:\n",
+          "new": "                for line in data[:end].decode(\"utf-8\").splitlines():\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_version_log",
+      "name": "torn line skipped but left in the file",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "                    with path.open(\"r+b\") as log:\n                        log.truncate(end)\n",
+          "new": "                    pass\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_version_log",
+      "name": "unreadable lines skipped, torn line left in the file",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "                    with path.open(\"r+b\") as log:\n                        log.truncate(end)\n",
+          "new": "                    pass\n"
+        },
+        {
+          "file": "history.py",
+          "old": "                    row = json.loads(line)\n",
+          "new": "                    try:\n                        row = json.loads(line)\n                    except ValueError:\n                        continue\n"
+        }
+      ],
+      "expect": "a version written after a crash survives the next reopen"
+    },
+    {
+      "test": "test_version_log",
+      "name": "value_at indexes the list directly",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        if not 1 <= version <= len(versions):\n            raise KeyError(version)\n",
+          "new": ""
+        }
+      ],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_version_log",
+      "name": "version numbers not checked",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        if version != len(versions) + 1:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_version_log",
+      "name": "label used as a path without checking",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        if not LABEL.fullmatch(label):\n",
+          "new": "        if not label:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_version_log",
+      "name": "history restored as the values after each write",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "len(values) - 1, values[:-1])",
+          "new": "len(values) - 1, values[1:])"
+        }
+      ],
+      "expect": "a block comes back exactly after a reopen"
+    },
+    {
+      "test": "test_version_log",
+      "name": "torn line cut by character count, not bytes",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "\"value\": value}) + \"\\n\"",
+          "new": "\"value\": value}, ensure_ascii=False) + \"\\n\""
+        },
+        {
+          "file": "history.py",
+          "old": "                end = data.rfind(b\"\\n\") + 1\n                if end < len(data):",
+          "new": "                end = data.rfind(b\"\\n\") + 1\n                cut = data.decode(\"utf-8\", \"replace\").rfind(\"\\n\") + 1\n                if end < len(data):"
+        },
+        {
+          "file": "history.py",
+          "old": "                        log.truncate(end)\n",
+          "new": "                        log.truncate(cut)\n"
+        }
+      ],
+      "expect": "the next version is written where the torn line began"
+    },
+    {
+      "test": "test_version_log",
+      "name": "torn line sealed with a newline, unreadable lines skipped",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "                if end < len(data):  # a torn last line: cut it off so the next write starts clean\n                    with path.open(\"r+b\") as log:\n                        log.truncate(end)\n                for line in data[:end].split(b\"\\n\")[:-1]:\n                    row = json.loads(line)\n",
+          "new": "                if end < len(data):  # a torn last line: seal it\n                    with path.open(\"ab\") as log:\n                        log.write(b\"\\n\")\n                for line in data.split(b\"\\n\"):\n                    try:\n                        row = json.loads(line)\n                    except ValueError:\n                        continue\n"
+        }
+      ],
+      "expect": "the next version is written where the torn line began"
+    },
+    {
+      "test": "test_version_log",
+      "name": "record trusts the versions already loaded in this instance",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        versions = self._load(label)\n        if op not in OPS:\n",
+          "new": "        versions = self._loaded.setdefault(label, [])\n        if op not in OPS:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_version_log",
+      "name": "label checked with re.match, so only its start must be a name",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        if not LABEL.fullmatch(label):\n",
+          "new": "        if not LABEL.match(label):\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_version_log",
+      "name": "history restored without the empty first value",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "len(values) - 1, values[:-1])",
+          "new": "len(values) - 1, values[1:-1])"
+        }
+      ],
+      "expect": "a block comes back exactly after a reopen"
+    },
+    {
+      "test": "test_version_log",
+      "name": "value_at checks only the upper bound",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        if not 1 <= version <= len(versions):\n",
+          "new": "        if version > len(versions):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE KeyError"
+    },
+    {
+      "test": "test_version_log",
+      "name": "op checked after the line is written",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        if op not in OPS:\n            raise ValueError(f\"unknown op {op!r}, expected one of {OPS}\")\n        if version != len(versions) + 1:\n",
+          "new": "        if version != len(versions) + 1:\n"
+        },
+        {
+          "file": "history.py",
+          "old": "        versions.append(Version(version, op, value))\n",
+          "new": "        versions.append(Version(version, op, value))\n        if op not in OPS:\n            raise ValueError(f\"unknown op {op!r}\")\n"
+        }
+      ],
+      "expect": "a block comes back exactly after a reopen"
+    },
+    {
+      "test": "test_version_log",
+      "name": "one handle per block kept open without flush",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        self._loaded: dict[str, list[Version]] = {}\n",
+          "new": "        self._loaded: dict[str, list[Version]] = {}\n        self._handles = {}\n"
+        },
+        {
+          "file": "history.py",
+          "old": "        with self._path(label).open(\"a\", encoding=\"utf-8\") as log:\n            log.write(line)\n            log.flush()\n            os.fsync(log.fileno())\n",
+          "new": "        if label not in self._handles:\n            self._handles[label] = self._path(label).open(\"a\", encoding=\"utf-8\")\n        self._handles[label].write(line)\n"
+        }
+      ],
+      "expect": "one line per version"
+    },
+    {
+      "test": "test_sleep_consolidation",
+      "name": "invalid records take part",
+      "edits": [
+        {
+          "file": "consolidate.py",
+          "old": "    valid = archival.valid_records()  # insertion order; sorted() is stable\n",
+          "new": "    valid = archival.all_records()  # insertion order; sorted() is stable\n"
+        }
+      ],
+      "expect": "an invalid record takes no part in consolidation"
+    },
+    {
+      "test": "test_sleep_consolidation",
+      "name": "newest by insertion order, ignoring at",
+      "edits": [
+        {
+          "file": "consolidate.py",
+          "old": "    return sorted(valid, key=lambda record: record.at)\n",
+          "new": "    return valid\n"
+        }
+      ],
+      "expect": "the newest fact by time wins, even when an older one is ingested later"
+    },
+    {
+      "test": "test_sleep_consolidation",
+      "name": "records that mention a superseded value invalidated too",
+      "edits": [
+        {
+          "file": "consolidate.py",
+          "old": "    changes = []\n",
+          "new": "    stale = {parse_fact(r.text)[1] for r in ordered if r.rid in reasons and parse_fact(r.text)}\n    for record in ordered:\n        if record.rid not in reasons and any(value in record.text for value in stale):\n            reasons[record.rid] = \"mentions a superseded value\"\n    changes = []\n"
+        }
+      ],
+      "expect": "a fact that mentions an old value is not superseded by it"
+    },
+    {
+      "test": "test_sleep_consolidation",
+      "name": "a later fact must be strictly newer",
+      "edits": [
+        {
+          "file": "consolidate.py",
+          "old": "        if fact is not None:\n            last[fact[0]] = record\n",
+          "new": "        if fact is not None and (fact[0] not in last or record.at > last[fact[0]].at):\n            last[fact[0]] = record\n"
+        }
+      ],
+      "expect": "facts from the same second are ordered by insertion"
+    },
+    {
+      "test": "test_sleep_consolidation",
+      "name": "exact duplicates dropped before keys are resolved",
+      "edits": [
+        {
+          "file": "consolidate.py",
+          "old": "    ordered = _in_time_order(archival)\n    last = _last_facts(ordered)\n    reasons: dict[str, str] = {}\n",
+          "new": "    ordered = _in_time_order(archival)\n    first_copy: dict[str, str] = {}\n    early: dict[str, str] = {}\n    for record in ordered:\n        if record.text in first_copy:\n            early[record.rid] = f\"duplicate of {first_copy[record.text]}\"\n        else:\n            first_copy[record.text] = record.rid\n    ordered = [record for record in ordered if record.rid not in early]\n    last = _last_facts(ordered)\n    reasons: dict[str, str] = dict(early)\n"
+        }
+      ],
+      "expect": "a key can change back to an earlier value"
+    },
+    {
+      "test": "test_sleep_consolidation",
+      "name": "words compared with case and punctuation",
+      "edits": [
+        {
+          "file": "consolidate.py",
+          "old": "        words = set(WORD.findall(record.text.lower()))\n",
+          "new": "        words = set(record.text.split())\n"
+        }
+      ],
+      "expect": "the later copy is the duplicate, whatever its case and punctuation"
+    },
+    {
+      "test": "test_sleep_consolidation",
+      "name": "duplicates at 90% overlap or more",
+      "edits": [
+        {
+          "file": "consolidate.py",
+          "old": "/ len(union) > 0.9:",
+          "new": "/ len(union) >= 0.9:"
+        }
+      ],
+      "expect": "duplicates share more than 90% of their words"
+    },
+    {
+      "test": "test_sleep_consolidation",
+      "name": "changes reported in time order",
+      "edits": [
+        {
+          "file": "consolidate.py",
+          "old": "    for record in archival.all_records():\n        if record.rid in reasons:\n",
+          "new": "    for record in ordered:\n        if record.rid in reasons:\n"
+        }
+      ],
+      "expect": "changes are reported once each, in insertion order"
+    },
+    {
+      "test": "test_sleep_consolidation",
+      "name": "the note kept in the value",
+      "edits": [
+        {
+          "file": "consolidate.py",
+          "old": "FACT = re.compile(r\"([a-z0-9_]+)=(.*?)(?:\\s*\\([^()]*\\))?\")\n",
+          "new": "FACT = re.compile(r\"([a-z0-9_]+)=(.*)\")\n"
+        }
+      ],
+      "expect": "every key has the value of its newest valid fact, without the note"
+    },
+    {
+      "test": "test_sleep_consolidation",
+      "name": "overlap measured against the earlier record's words",
+      "edits": [
+        {
+          "file": "consolidate.py",
+          "old": "            if union and len(words & earlier) / len(union) > 0.9:\n",
+          "new": "            if earlier and len(words & earlier) / len(earlier) > 0.9:\n"
+        }
+      ],
+      "expect": "duplicates share more than 90% of their words"
+    },
+    {
+      "test": "test_sleep_consolidation",
+      "name": "overlap measured against the newer record's words",
+      "edits": [
+        {
+          "file": "consolidate.py",
+          "old": "            if union and len(words & earlier) / len(union) > 0.9:\n",
+          "new": "            if words and len(words & earlier) / len(words) > 0.9:\n"
+        }
+      ],
+      "expect": "duplicates share more than 90% of their words"
+    },
+    {
+      "test": "test_sleep_consolidation",
+      "name": "the later copy kept instead of the first",
+      "edits": [
+        {
+          "file": "consolidate.py",
+          "old": "    for record in ordered:\n        fact = parse_fact(record.text)\n",
+          "new": "    for record in reversed(ordered):\n        fact = parse_fact(record.text)\n"
+        }
+      ],
+      "expect": "the later copy is the duplicate"
+    },
+    {
+      "test": "test_sleep_consolidation",
+      "name": "words split on whitespace after stripping commas and periods",
+      "edits": [
+        {
+          "file": "consolidate.py",
+          "old": "        words = set(WORD.findall(record.text.lower()))\n",
+          "new": "        words = set(record.text.lower().replace(',', ' ').replace('.', ' ').split())\n"
+        }
+      ],
+      "expect": "the later copy is the duplicate, whatever its case and punctuation"
+    },
+    {
+      "test": "test_sleep_consolidation",
+      "name": "superseded by the next fact of the key instead of the last",
+      "edits": [
+        {
+          "file": "consolidate.py",
+          "old": "            winner = last[fact[0]]\n            if winner is not record:\n                reasons[record.rid] = f\"superseded by {winner.rid}\"\n",
+          "new": "            later = [r for r in ordered[ordered.index(record) + 1:] if (parse_fact(r.text) or ('',))[0] == fact[0]]\n            if later:\n                reasons[record.rid] = f\"superseded by {later[0].rid}\"\n"
+        }
+      ],
+      "expect": "a key can change back to an earlier value"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "turn waits for the sleep-time agent",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "                self._enqueue(label)\n        return observations\n",
+          "new": "                self._enqueue(label)\n        await self.idle()\n        return observations\n"
+        }
+      ],
+      "expect": "a primary turn never waits for the sleep-time agent"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "sleep-time agent started only by idle()",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        if self._worker is None or self._worker.done():\n            self._worker = asyncio.create_task(self._work())\n",
+          "new": ""
+        },
+        {
+          "file": "session.py",
+          "old": "        while self._worker is not None and not self._worker.done():\n            await self._worker\n",
+          "new": "        await self._work()\n"
+        }
+      ],
+      "expect": "the sleep-time agent starts on a changed block without waiting for idle()"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "rewrite ignores the expected version",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        if block.version != expected_version or value == block.value:\n",
+          "new": "        if value == block.value:\n"
+        }
+      ],
+      "expect": "a rewrite from a stale read is refused"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "a refused rewrite still goes into the trace",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        if block.version != expected_version or value == block.value:\n            return False\n",
+          "new": "        if block.version != expected_version or value == block.value:\n            self.trace.append(block_diff(label, block.value, value, expected_version, expected_version + 1, writer))\n            return False\n"
+        }
+      ],
+      "expect": "a refused rewrite changes nothing"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "no retry after a refused rewrite",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "                if self.rewrite(label, result, version) or block.version == version:\n                    break  # committed, or nothing worth committing\n",
+          "new": "                self.rewrite(label, result, version)\n                break\n"
+        }
+      ],
+      "expect": "a refused rewrite is retried from a fresh read"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "stale result resubmitted under the new version",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "                if self.rewrite(label, result, version) or block.version == version:\n                    break  # committed, or nothing worth committing\n",
+          "new": "                if not self.rewrite(label, result, version) and block.version != version:\n                    self.rewrite(label, result, block.version)\n                break\n"
+        }
+      ],
+      "expect": "a sleep-time rewrite never drops a write it did not see"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "a block queued again while it is being consolidated",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        if label not in self._queue:\n",
+          "new": "        if label not in list(self._queue)[1:]:\n"
+        }
+      ],
+      "expect": "a block already queued or being consolidated is not queued again"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "idle() returns before the queue is done",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        while self._worker is not None and not self._worker.done():\n            await self._worker\n",
+          "new": "        await asyncio.sleep(0)\n"
+        }
+      ],
+      "expect": "idle() waits until every queued block is consolidated"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "write to an unknown block silently skipped",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "                observations.append(f\"error: no block {label!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a write over the limit or to an unknown block is an error observation"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "diff without a newline after its last line",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "    return \"\".join(line + \"\\n\" for line in lines)\n",
+          "new": "    return \"\\n\".join(lines)\n"
+        }
+      ],
+      "expect": "every line of the trace ends with a newline"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "keepends lines and default lineterm",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        before.split(\"\\n\") if before else [],\n        after.split(\"\\n\") if after else [],\n",
+          "new": "        before.splitlines(keepends=True),\n        after.splitlines(keepends=True),\n"
+        },
+        {
+          "file": "session.py",
+          "old": "        lineterm=\"\",\n    )\n    return \"\".join(line + \"\\n\" for line in lines)\n",
+          "new": "    )\n    return \"\".join(lines)\n"
+        }
+      ],
+      "expect": "every line of the trace ends with a newline"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "writer left out of the header",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        tofile=f\"{label}@v{new_version} ({writer})\",\n",
+          "new": "        tofile=f\"{label}@v{new_version}\",\n"
+        }
+      ],
+      "expect": "a diff starts with ---/+++ headers naming the block, its versions and the writer"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "a new worker started on every write",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        if self._worker is None or self._worker.done():\n            self._worker = asyncio.create_task(self._work())\n",
+          "new": "        self._worker = asyncio.create_task(self._work())\n"
+        },
+        {
+          "file": "session.py",
+          "old": "            label = self._queue[0]\n",
+          "new": "            label = self._queue.popleft()\n"
+        },
+        {
+          "file": "session.py",
+          "old": "                # the primary agent wrote the block while the model was thinking: start over\n            self._queue.popleft()\n",
+          "new": "                # the primary agent wrote the block while the model was thinking: start over\n"
+        }
+      ],
+      "expect": "the sleep-time agent works on one block at a time"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "retry whenever the rewrite commits nothing",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "                if self.rewrite(label, result, version) or block.version == version:\n",
+          "new": "                if self.rewrite(label, result, version):\n"
+        }
+      ],
+      "expect": "idle() returns once the sleep-time agent has nothing left"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "a rewrite that changes nothing still committed",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        if block.version != expected_version or value == block.value:\n",
+          "new": "        if block.version != expected_version:\n"
+        }
+      ],
+      "expect": "each diff goes from the block's last version to the next"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "block taken off the queue before it is consolidated, idle() waits for an empty queue",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            label = self._queue[0]\n",
+          "new": "            label = self._queue.popleft()\n            self._current = label\n"
+        },
+        {
+          "file": "session.py",
+          "old": "                # the primary agent wrote the block while the model was thinking: start over\n            self._queue.popleft()\n",
+          "new": "                # the primary agent wrote the block while the model was thinking: start over\n            self._current = None\n"
+        },
+        {
+          "file": "session.py",
+          "old": "        if label not in self._queue:\n",
+          "new": "        if label not in self._queue and label != getattr(self, '_current', None):\n"
+        },
+        {
+          "file": "session.py",
+          "old": "        while self._worker is not None and not self._worker.done():\n            await self._worker\n",
+          "new": "        while self._queue:\n            await asyncio.sleep(0)\n"
+        }
+      ],
+      "expect": "idle() waits until every queued block is consolidated"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "worker started only once, never again after it finished",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        if self._worker is None or self._worker.done():\n",
+          "new": "        if self._worker is None:\n"
+        }
+      ],
+      "expect": "blocks changed after idle() are consolidated too"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "the empty value diffed as one empty line",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        before.split(\"\\n\") if before else [],\n        after.split(\"\\n\") if after else [],\n",
+          "new": "        before.split(\"\\n\"),\n        after.split(\"\\n\"),\n"
+        }
+      ],
+      "expect": "a diff applies to the version before it"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "newest queued block consolidated first",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            label = self._queue[0]\n",
+          "new": "            label = self._queue[-1]\n"
+        },
+        {
+          "file": "session.py",
+          "old": "            self._queue.popleft()\n",
+          "new": "            self._queue.remove(label)\n"
+        }
+      ],
+      "expect": "blocks go in the order turns changed them"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "sleep-time result written with block.rewrite, outside the trace",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "                if self.rewrite(label, result, version) or block.version == version:\n                    break  # committed, or nothing worth committing\n",
+          "new": "                if block.version == version and result != value:\n                    block.rewrite(result)\n                    break\n                if block.version == version:\n                    break\n"
+        }
+      ],
+      "expect": "each diff goes from the block's last version to the next"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "retry calls the model with the first read again",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            label = self._queue[0]\n            while True:\n                block = self.store.get(label)\n                version, value = block.version, block.value\n",
+          "new": "            label = self._queue[0]\n            block = self.store.get(label)\n            version, value = block.version, block.value\n            while True:\n"
+        }
+      ],
+      "expect": "idle() returns once the sleep-time agent has nothing left"
+    },
+    {
+      "test": "test_sleep_alongside_turns",
+      "name": "queued blocks consolidated in label order",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            label = self._queue[0]\n",
+          "new": "            label = min(self._queue)\n"
+        },
+        {
+          "file": "session.py",
+          "old": "            self._queue.popleft()\n",
+          "new": "            self._queue.remove(label)\n"
+        }
+      ],
+      "expect": "blocks go in the order turns changed them"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "breadth-first order",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "        reached: set[str] = set()\n        stack = [rid]\n        while stack:  # no recursion: a chain of rolling summaries can be thousands deep\n            for child in self._made_from.get(stack.pop(), ()):\n                if child not in reached:\n                    reached.add(child)\n                    stack.append(child)\n",
+          "new": "        reached: dict[str, None] = {}\n        queue = [rid]\n        for node in queue:\n            for child in self._made_from.get(node, ()):\n                if child not in reached:\n                    reached[child] = None\n                    queue.append(child)\n"
+        },
+        {
+          "file": "lineage.py",
+          "old": "        for child in sorted(reached, key=self._created.__getitem__):\n",
+          "new": "        for child in reached:\n"
+        }
+      ],
+      "expect": "every record made from the stale one, once each, sources before the records made from them"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "depth-first preorder",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "        reached: set[str] = set()\n        stack = [rid]\n        while stack:  # no recursion: a chain of rolling summaries can be thousands deep\n            for child in self._made_from.get(stack.pop(), ()):\n                if child not in reached:\n                    reached.add(child)\n                    stack.append(child)\n",
+          "new": "        reached: dict[str, None] = {}\n\n        def visit(node):\n            for child in self._made_from.get(node, ()):\n                if child not in reached:\n                    reached[child] = None\n                    visit(child)\n\n        visit(rid)\n"
+        },
+        {
+          "file": "lineage.py",
+          "old": "        for child in sorted(reached, key=self._created.__getitem__):\n",
+          "new": "        for child in reached:\n"
+        }
+      ],
+      "expect": "every record made from the stale one, once each, sources before the records made from them"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "recursive walk",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "        reached: set[str] = set()\n        stack = [rid]\n        while stack:  # no recursion: a chain of rolling summaries can be thousands deep\n            for child in self._made_from.get(stack.pop(), ()):\n                if child not in reached:\n                    reached.add(child)\n                    stack.append(child)\n",
+          "new": "        reached: set[str] = set()\n\n        def visit(node):\n            for child in self._made_from.get(node, ()):\n                if child not in reached:\n                    reached.add(child)\n                    visit(child)\n\n        visit(rid)\n"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "records sorted by id string",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "        for child in sorted(reached, key=self._created.__getitem__):\n",
+          "new": "        for child in sorted(reached):\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "chain through the first source listed",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "            via = min(\n                (source for source in self._sources[child] if source in chains),\n                key=lambda source: (len(chains[source]), self._created.get(source, -1)),\n            )\n",
+          "new": "            via = next(source for source in self._sources[child] if source in chains)\n"
+        }
+      ],
+      "expect": "each chain is the shortest path of derivations, ties through the earlier source"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "ties go to the later source",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "key=lambda source: (len(chains[source]), self._created.get(source, -1)),",
+          "new": "key=lambda source: (len(chains[source]), -self._created.get(source, -1)),"
+        }
+      ],
+      "expect": "each chain is the shortest path of derivations, ties through the earlier source"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "already-invalid records listed again",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "            if self.archival.invalidate(child, f\"derived from {via}\"):\n                out.append(Rederive(child, chains[child], root.reason))\n",
+          "new": "            self.archival.invalidate(child, f\"derived from {via}\")\n            out.append(Rederive(child, chains[child], root.reason))\n"
+        }
+      ],
+      "expect": "invalidating again changes nothing"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "stop when the source was already invalid",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "        self.archival.invalidate(rid, reason)\n        reached",
+          "new": "        if not self.archival.invalidate(rid, reason):\n            return []\n        reached"
+        }
+      ],
+      "expect": "records made from a source that consolidation invalidated are caught too"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "the new reason reported instead of the stored one",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "out.append(Rederive(child, chains[child], root.reason))",
+          "new": "out.append(Rederive(child, chains[child], reason))"
+        }
+      ],
+      "expect": "each entry carries the stale record's reason as the archive holds it"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "derived records invalidated with the stale record's reason",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "self.archival.invalidate(child, f\"derived from {via}\")",
+          "new": "self.archival.invalidate(child, reason)"
+        }
+      ],
+      "expect": "each record is invalidated through the record before it on its chain"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "sorted by at instead of creation",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "        for child in sorted(reached, key=self._created.__getitem__):\n",
+          "new": "        for child in sorted(reached, key=lambda r: self.archival.get(r).at):\n"
+        }
+      ],
+      "expect": "every record made from the stale one, once each, sources before the records made from them"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "walk stops at records that are already invalid",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "                if child not in reached:\n",
+          "new": "                if child not in reached and self.archival.get(child).valid:\n"
+        }
+      ],
+      "expect": "records made from a source that consolidation invalidated are caught too"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "chains from breadth-first parent pointers (the first source found wins a tie)",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "        reached: set[str] = set()\n        stack = [rid]\n        while stack:  # no recursion: a chain of rolling summaries can be thousands deep\n            for child in self._made_from.get(stack.pop(), ()):\n                if child not in reached:\n                    reached.add(child)\n                    stack.append(child)\n        chains = {rid: (rid,)}\n        out = []\n        for child in sorted(reached, key=self._created.__getitem__):\n            via = min(\n                (source for source in self._sources[child] if source in chains),\n                key=lambda source: (len(chains[source]), self._created.get(source, -1)),\n            )\n            chains[child] = chains[via] + (child,)\n",
+          "new": "        chains = {rid: (rid,)}\n        queue = [rid]\n        for node in queue:\n            for child in self._made_from.get(node, ()):\n                if child not in chains:\n                    chains[child] = chains[node] + (child,)\n                    queue.append(child)\n        out = []\n        for child in sorted(queue[1:], key=self._created.__getitem__):\n            via = chains[child][-2]\n"
+        }
+      ],
+      "expect": "each chain is the shortest path of derivations, ties through the earlier source"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "ties broken by the earlier at",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "key=lambda source: (len(chains[source]), self._created.get(source, -1)),",
+          "new": "key=lambda source: (len(chains[source]), self.archival.get(source).at),"
+        }
+      ],
+      "expect": "each chain is the shortest path of derivations, ties through the earlier source"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "derive inserts the record before checking its sources",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "        for source in sources:\n            self.archival.get(source)\n        rid = self.archival.insert(text, at)\n",
+          "new": "        rid = self.archival.insert(text, at)\n        for source in sources:\n            self.archival.get(source)\n"
+        }
+      ],
+      "expect": "a derive that raises stores nothing"
+    },
+    {
+      "test": "test_lineage_invalidation",
+      "name": "every record invalidated as derived from the root",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "self.archival.invalidate(child, f\"derived from {via}\")",
+          "new": "self.archival.invalidate(child, f\"derived from {rid}\")"
+        }
+      ],
+      "expect": "each record is invalidated through the record before it on its chain"
+    }
+  ]
+}

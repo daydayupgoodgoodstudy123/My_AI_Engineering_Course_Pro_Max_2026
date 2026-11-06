@@ -1,0 +1,134 @@
+{
+  "lesson": "phases/14-agent-engineering/08-memory-blocks-sleep-time-compute",
+  "title": "Memory Blocks and Sleep-Time Compute",
+  "format": "staged-brownfield",
+  "service": "MemBlocks: Letta-style core-memory blocks with a character limit, an archival tier that invalidates instead of deleting, a sleep-time agent that consolidates off the critical path, per-block version logs, compare-and-swap rewrites surfaced as unified diffs, and a lineage graph of consolidated records",
+  "sources": {
+    "docs/en.md": "c9d406091f226f33e6b8336bd887d12e7a8cdbe769b257a6c6bda4988eff6f3b",
+    "code/main.py": "7d75d04bfcaded9183ba07786d66510cc4182910f5245c4abd7516846e351983",
+    "outputs/skill-memory-blocks.md": "bc1ce075b8d38445cb7f3881a91c2ba3f7e72585aa3e268e15841d845176008e"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_block_tools",
+      "kind": "debug",
+      "lesson_anchor": "Memory blocks (block_append, block_replace, block limit); Where this pattern goes wrong: Block bloat; Build It: Block, SleepTimeAgent, Archival; code/main.py Block.append/replace, _summarize, SleepTimeAgent.run, Archival.invalidate; quiz Q9-Q11",
+      "planted_bugs": [
+        "Block._commit never checks limit, so block_append, block_replace and rewrite all succeed past the cap although the class docstring says such a write is refused with an error: observation and changes nothing",
+        "Block.replace accepts an empty old string: '' in value is always true and str.replace('', '-') inserts '-' between every character; it only shows once the limit is enforced, because the result still fits",
+        "summarize counts the lines but not the newlines between them (used += len(line)), so keeping k lines can overshoot target_len by k-1; the sleep pass leaves the 86-character task block at 52 characters instead of at most 50, and the error surfaces two calls later, when the primary agent's next 49-character line is refused by the limit check",
+        "Archival.get scans the whole list, and SleepTimeAgent.run calls invalidate -> get for every contradicted record: quadratic in the archive size"
+      ],
+      "timing_assert": "a sleep pass over 32,000 records that invalidates 8,000 of them under 0.08 s. Measured on this machine while other agents were running (load average 3.5-4.7): the linear get takes 0.97-1.84 s (12x the limit or more), the indexed get 2.1-5.7 ms (14x under it or more)",
+      "overfix_guard": "a refused write must not be truncated to fit or push history; a write landing exactly on the limit is accepted and the limit counts newlines; block_replace and rewrite are capped too, not only append; summarize keeps as many whole newest lines as fit (text[-target_len:], continue instead of break, and >= at the boundary all fail); invalidated records stay in all_records with their reason, and every contradicted record is invalidated; block_replace with an empty new string still deletes text, so refusing it together with the empty old string fails"
+    },
+    {
+      "part": 2,
+      "test": "test_version_log",
+      "kind": "model and persistence",
+      "lesson_anchor": "Where this pattern goes wrong: Silent drift (version blocks); Exercise 3 (block_history so operators can debug why the agent forgot X); outputs/skill-memory-blocks.md (every write bumps version and records the old value)",
+      "storage": "append-only log per block: <root>/<label>.log, one JSON object per line with version, op and the whole value",
+      "exactness": "a value with quotes, a backslash, a tab, \\n, \\r\\n, an emoji, U+2028, U+0085 and a trailing space, and the empty value, come back exactly; restore() rebuilds the Part 1 Block (value, version, history) equal to the original",
+      "traps": [
+        "log opened in write mode",
+        "versions kept in memory only",
+        "tab-separated lines with the raw value",
+        "torn last line skipped on read but left in the file, so the next version is glued to it",
+        "unreadable lines skipped silently",
+        "torn line sealed with a newline instead of cut off, so it stays in the middle of the log (the test counts the newlines after recovery)",
+        "torn line cut by character count instead of bytes",
+        "version numbers not checked, or not continued after a reopen",
+        "record on a reopened log trusting only the versions this instance has read, so persona v1 is accepted again",
+        "an op outside append/replace/rewrite accepted",
+        "label used as a path without checking, or checked with re.match so that human/../persona passes",
+        "ensure_ascii=False read back with str.splitlines() (U+2028 and U+0085 in the value, a covered boundary)",
+        "value_at indexing the list directly (IndexError for 4, the wrong version for -1)",
+        "history restored as the values after each write"
+      ],
+      "clarifying_questions": ["a damaged line in the middle", "fsync on every write", "uppercase labels"]
+    },
+    {
+      "part": 3,
+      "test": "test_sleep_consolidation",
+      "kind": "core algorithm",
+      "lesson_anchor": "Sleep-time compute: natural consolidation window (dedup, summarize, invalidate contradicted facts); Exercise 2 (more than 90% token overlap collapses to one, only in the sleep pass); Where this pattern goes wrong: Poisoned consolidation; quiz Q11 (substring matching, contradictions passed in by the caller)",
+      "traps": [
+        "substring matching: city=Lisbon (updated from Berlin) mentions the old value and must not be invalidated by it",
+        "the note in parentheses kept in the value",
+        "newest by insertion order, so an older transcript ingested late (city=Porto) wins",
+        "facts from the same second: the later write must win, a strict > keeps the earlier one",
+        "an already invalid (poisoned) record superseding the others or being reported again",
+        "exact duplicates dropped before keys are resolved, so a key that changes back to an earlier value loses its newest record",
+        "words compared with case and punctuation, or split on whitespace after stripping commas and periods (citation-heavy against citation heavy)",
+        "a Jaccard overlap of exactly 0.9 counted as a duplicate",
+        "overlap divided by one record's word count instead of the union: the earlier record's (the 12-word record that adds every friday becomes a duplicate) or the newer one's (the 9-word record)",
+        "the later copy kept instead of the first",
+        "changes reported in time order instead of insertion order",
+        "a second pass reporting anything"
+      ],
+      "clarifying_questions": ["case of keys", "facts against free text", "which duplicate stays"]
+    },
+    {
+      "part": 4,
+      "test": "test_sleep_alongside_turns",
+      "kind": "streaming",
+      "lesson_anchor": "Sleep-time compute: No latency cost (primary responses do not wait for memory ops), runs in the background between turns; Silent drift (surface diffs in the trace); quiz Q12 (lost update, compare-and-swap on version)",
+      "wire_format": "unified diffs, one per committed block change, headers --- label@vN and +++ label@vN+1 (primary|sleep-time), every line ending with a newline; decided by the test's replay(), which applies the diffs to the starting blocks and must rebuild every block",
+      "traps": [
+        "a turn that awaits the sleep-time agent (event-gated probe: the scripted model blocks until the test releases it, so the turn times out)",
+        "the sleep-time agent started only by idle()",
+        "a rewrite that ignores the version it read, losing pet=cat",
+        "no retry after a refused rewrite",
+        "a block queued again while it is being consolidated, so the model is called once more",
+        "a refused rewrite written to the trace or bumping the version",
+        "retrying whenever a rewrite commits nothing, which loops forever on a no-op result",
+        "a no-op rewrite committed as a new version",
+        "several workers consolidating at once",
+        "blocks consolidated out of the order turns changed them (a stack, or label order, which puts persona before task after idle())",
+        "idle() returning before the queue is done, or as soon as the queue is empty while its last block (task) is still being consolidated",
+        "a worker started only once, so the writes after idle() are never consolidated",
+        "the empty value diffed as one empty line",
+        "a diff without a newline after its last line, or built with keepends and the default lineterm",
+        "the writer missing from the header",
+        "a write to an unknown block silently skipped"
+      ],
+      "clarifying_questions": ["re-queueing a block written during consolidation", "a model result over the limit", "more than one worker"]
+    },
+    {
+      "part": 5,
+      "test": "test_lineage_invalidation",
+      "kind": "graph",
+      "lesson_anchor": "Sleep-time agents consolidate or invalidate archival records and write learned context; Exercise 3 (why did the agent forget X); outputs/skill-memory-blocks.md (invalidate rather than delete, the sleep-time agent must leave a trace)",
+      "traps": [
+        "breadth-first discovery order (brief before its source voice)",
+        "depth-first preorder (weekly before its source commute)",
+        "sorted by at, which is the time a record covers, not when it was made",
+        "a diamond listed twice",
+        "the chain DFS happens to walk instead of the shortest one",
+        "ties broken toward the later source",
+        "derived records invalidated with the root's reason or through the first listed source",
+        "already invalid records listed again",
+        "stopping when the root was already invalidated by consolidate",
+        "a walk that stops at records already invalid: owner_copy, which consolidate marked as a duplicate, still has valid records made from it",
+        "a depth-3 tie decided by breadth-first discovery or by at (budget, made from food and vet)",
+        "a derive that inserts its record before checking the sources, leaving an orphan behind the KeyError",
+        "the new reason reported instead of the one the archive holds",
+        "recursion on a 1,500-deep chain of rolling summaries",
+        "records sorted by id string (a1000 before a998)"
+      ],
+      "integration": "pet=cat superseded by Part 3's consolidate still takes the records made from it down, including those made through owner_copy, which the same consolidate pass marked as a duplicate of owner",
+      "clarifying_questions": ["cycles", "the invalidated record in the result", "equally short chains"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the suggested accounting defect (len+2 bookkeeping against a len+1 check) is not a defect in the lesson: code/main.py's _summarize is consistent and its output fits target_len, as code/main.讲解.md verifies. The planted accounting defect is a newline left out of the bookkeeping of a line-based summarize, which overshoots target_len in the same way and surfaces at the next write. Block values are lines (block_append adds a line) instead of the lesson's space-joined text, so summaries keep whole lines and Part 4's diffs are line diffs. summarize already keeps the newest lines, the fix quiz Q9 asks for, so the defect is the bookkeeping alone.",
+    "Part 1: the timing defect sits in Archival.get, which invalidate calls, so the slow path runs SleepTimeAgent.run -> invalidate -> get, two calls from the test. 32,000 records instead of 50,000 keep the slow version near one second while other jobs share the machine.",
+    "Part 2: as suggested. The precision trap is a torn tail that has to be cut off at the last newline by byte offset, so the next version starts where the torn line began, and versions continue across a reopen even when record is the first call. The value also carries U+2028 and U+0085 as a boundary for ensure_ascii=False read back with str.splitlines(); chapter 14 already builds Part 2 around that trap in lessons 02 and 17, so here it is covered but not the focus. restore() returns the Part 1 Block, compared with dataclass equality.",
+    "Part 3: duplicates follow the lesson's Exercise 2 (more than 90% token overlap, here the Jaccard similarity of lowercase word sets) for free-text records, instead of exact copies; key=value facts are settled by key only. Summarizing near-limit blocks is left to Part 1. Two traps come from the lesson's pitfalls: an already invalid, poisoned record must take no part, and a key can change back to an earlier value.",
+    "Part 4: the latency probe is gated by events instead of wall-clock time. The scripted sleep-time model waits until the test releases it, so a turn that waits for the sleep-time agent times out after one second, with nothing machine-dependent in the passing case. The sleep-time agent is one background worker; a block already queued or being consolidated is not queued again, because the compare-and-swap retry covers newer writes; a result equal to the current value or over the limit is dropped. The diff header names the version and the writer: --- label@vN, +++ label@vN+1 (writer). The scenario ends with writes after idle() (task, then persona), so the worker has to start again and keep the order the turns wrote in.",
+    "Part 5: as suggested, plus the integration with Part 3: a root that consolidate already invalidated still takes its derived records down, and so does a record in the middle that consolidate marked as a duplicate. A chain is the shortest path of derivations, ties through the earlier-created source; output is creation order, which is topological because sources must exist first. A tie three derivations deep (budget) tells the earlier-created rule apart from breadth-first discovery. A 1,500-deep chain of rolling summaries rules out recursion.",
+    "Facts used beyond docs/en.md: version and history on Block (code/main.py and Exercise 3); invalidate rather than delete, no summarization on the critical path, and a trace for every sleep-time pass (outputs/skill-memory-blocks.md). The key=value fact format, the error: observation prefix, the diff header and the derived from <rid> reason are this service's own conventions, stated in its docstrings."
+  ]
+}
