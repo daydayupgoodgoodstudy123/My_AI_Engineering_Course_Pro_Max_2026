@@ -1,0 +1,73 @@
+{
+  "lesson": "phases/06-speech-and-audio/02-spectrograms-mel-features",
+  "title": "Spectrograms, Mel Scale & Audio Features",
+  "format": "staged-brownfield",
+  "service": "MelKit: a log-mel front end with an on-disk feature cache, deltas, CMVN and layered configs",
+  "sources": {
+    "docs/en.md": "c3ccb984a9bcf8aefcfb077ccafee53704c504b5cc8c7bf3e394f2ccf48af525",
+    "code/main.py": "189c59e884b5ad6d46ad1a3116b9ab0a6df1cf712334ec01fa2742ceee92df81"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_log_mel_frontend",
+      "kind": "debug",
+      "lesson_anchor": "Build It, Steps 4-5 (mel filterbank, log-mel, Whisper's clip + normalize routine); Pitfalls: sample-rate mismatch upstream, dB vs log; code/main.py apply_filterbank (the `if w:` skip)",
+      "planted_bugs": [
+        "hz_to_mel uses math.log with the log10 constant 2595; the error surfaces one call up, in mel_filterbank, as 'mel filter 18 of 40 covers no FFT bins'",
+        "log_mel_spectrogram builds the filterbank without passing sr, so mel_filterbank's default of 16000 Hz is used for 8 kHz audio; after the first fix the same error names filter 0 and sr=16000",
+        "whisper_log_mel clamps every frame at its own maximum minus 8, although the docstring (and Whisper) clamp at the loudest value in the whole clip",
+        "apply_filterbank densifies the sparse filters and multiplies every bin of every filter"
+      ],
+      "timing_assert": "80-mel bank up to 8 kHz on 48 kHz audio (1025 bins), 600 frames under 0.1 s; the dense version takes about 1.3 s, the lesson's `if w:` skip about 0.7 s, the span-only version about 9 ms",
+      "overfix_guard": "the same 1 kHz tone at 16 kHz with fmax 4000 must land in band 18, which rules out changing the default sample rate to the test's 8000 (band 11); the span-only filterbank must match the dense rows to 1e-12; deleting the empty-filter check leaves the tone in band 7"
+    },
+    {
+      "part": 2,
+      "test": "test_feature_cache",
+      "kind": "model and persistence",
+      "lesson_anchor": "Pitfalls: mel count mismatch and sample-rate mismatch (log the feature shape at both ends)",
+      "exactness": "float64 feature matrices round-trip bit for bit across a reopen, including subnormals and -1e300; a zero-frame matrix keeps its width; clips one ulp apart hash differently",
+      "traps": ["float32 storage", "width inferred from the rows", "key without the config", "clip hash without the sample rate", "clip hash at reduced precision, down to %.16g", "rows checked against the first row, each other or the total count only", "validation after the write", "in-memory dict"],
+      "clarifying_questions": ["file format", "same key written twice", "concurrent writers"]
+    },
+    {
+      "part": 3,
+      "test": "test_deltas_and_cmvn",
+      "kind": "core algorithm",
+      "lesson_anchor": "Exercise 3 (MFCC-13 + delta + delta-delta); Pitfalls: normalization drift (per-utterance normalization)",
+      "traps": ["denominator 2*sum(n^2)", "negative index wraps at the start", "zero padding or reflection at the edges", "delta-delta from the static features or with the first width", "a fixed number of delta orders", "CMVN per frame instead of per dimension", "CMVN in place", "sample standard deviation", "constant dimension without a floor"],
+      "integration": "Part 1 log-mels -> 120-dimensional static + delta + delta-delta -> CMVN, every dimension mean 0 and variance 1",
+      "clarifying_questions": ["edge frames", "population or sample standard deviation", "floor on the standard deviation or the variance"]
+    },
+    {
+      "part": 4,
+      "test": "test_online_cmvn",
+      "kind": "streaming",
+      "lesson_anchor": "Pitfalls: normalization drift (training and inference normalize differently); streaming front ends cannot see the whole utterance",
+      "wire_format": "push() returns a list of normalized frames, possibly empty, and flush() returns the rest; the test concatenates them in order",
+      "offline_relation": "output frame t equals cmvn(frames[:max(t + 1, warmup)])[t]; the last frame equals offline per-utterance CMVN",
+      "timing_assert": "1000 frames of 13 dims pushed one at a time under 0.05 s; recomputing cmvn() over the prefix takes 0.55-0.65 s, Welford about 2 ms",
+      "traps": ["statistics reset per chunk", "whole chunk counted before normalizing", "frame normalized before it is counted", "no warm-up hold-back", "warm-up released one frame late or decided by the held count", "variance divided by count - 1", "flush drops held frames", "frames normalized in place", "constant dimension without a floor", "O(T^2) recomputation"],
+      "clarifying_questions": ["global statistics before warm-up", "push after flush", "wrong frame dimension"]
+    },
+    {
+      "part": 5,
+      "test": "test_config_merge_and_fingerprint",
+      "kind": "recursive structure",
+      "lesson_anchor": "Ship It: skill-feature-extractor (frame/hop, mel count and normalization must match the training config)",
+      "traps": ["nested dicts replaced", "lists concatenated", "base or override aliased into the result, including untouched subtrees", "unknown keys accepted, at the top level or below", "KeyError without the dotted path", "None taken as 'not set'", "fingerprint depends on key order", "only top-level keys sorted", "list items sorted", "floats rounded before hashing", "built-in hash() differs between processes"],
+      "integration": "the fingerprint keys the Part 2 cache through FeatureService: a reordered config hits, a changed n_mels misses",
+      "clarifying_questions": ["deleting a key", "dict replacing a scalar", "0 versus 0.0"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the power spectrum, power_to_db and the log floor are asserted but carry no planted bug, because other Phase 6 packs already plant them (a magnitude for power in 06/16, 20 log10 against power in 06/14, the log of digital silence in 06/11, 06/14 and 06/16); the planted bugs are the mel constant, the filterbank's sample rate, Whisper's clip-level floor and the dense filterbank",
+    "Part 1: the timing case covers part of a wide spectrum (80 mels up to 8 kHz on 48 kHz audio); with full-band filters the dense/sparse gap is only about n_mels/2 and cannot give 8x margins on both sides",
+    "Part 2: one file per entry under a directory instead of SQLite, so the traps are about precision, shape and keys rather than transactions; the clip hash also covers the sample rate",
+    "Part 3: delta widths are per order (windows=[2, 2], like HTK's DELTAWINDOW and ACCWINDOW), which gives Part 5 a list whose order matters",
+    "Part 4: a synchronous push/flush API rather than an async generator, plus a timing assertion against recomputing offline CMVN for every frame",
+    "Part 5: unknown keys are rejected with their dotted path (a typo like n_mel would otherwise fall back to 80 mels), the fingerprint is checked across processes, and the part ends by keying the Part 2 cache"
+  ]
+}

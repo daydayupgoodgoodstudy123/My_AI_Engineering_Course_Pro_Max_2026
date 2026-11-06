@@ -1,0 +1,768 @@
+{
+  "package": "melkit",
+  "tests": [
+    "test_log_mel_frontend",
+    "test_feature_cache",
+    "test_deltas_and_cmvn",
+    "test_online_cmvn",
+    "test_config_merge_and_fingerprint"
+  ],
+  "layers": [
+    {
+      "test": "test_log_mel_frontend",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "mel filter 18 of 40 covers no FFT bins"
+        },
+        {
+          "name": "fix hz_to_mel (log10, not ln)",
+          "edits": [
+            {
+              "file": "features.py",
+              "old": "    return 2595.0 * math.log(1.0 + f / 700.0)\n",
+              "new": "    return 2595.0 * math.log10(1.0 + f / 700.0)\n"
+            }
+          ],
+          "expect": "mel filter 0 of 40 covers no FFT bins (n_fft=256, sr=16000)"
+        },
+        {
+          "name": "+ pass sr to mel_filterbank",
+          "edits": [
+            {
+              "file": "features.py",
+              "old": "mel_filterbank(n_mels, n_fft, fmin=fmin, fmax=fmax)",
+              "new": "mel_filterbank(n_mels, n_fft, sr, fmin, fmax)"
+            }
+          ],
+          "expect": "Whisper's floor sits 8 below the loudest value in the whole clip"
+        },
+        {
+          "name": "+ one Whisper floor for the whole clip",
+          "edits": [
+            {
+              "file": "features.py",
+              "old": "    out = []\n    for row in mel:\n        logs = [math.log10(max(v, floor)) for v in row]\n        top = max(logs)\n        out.append([(max(x, top - 8.0) + 4.0) / 4.0 for x in logs])\n    return out\n",
+              "new": "    logs = [[math.log10(max(v, floor)) for v in row] for row in mel]\n    if not logs:\n        return []\n    top = max(max(row) for row in logs)\n    return [[(max(x, top - 8.0) + 4.0) / 4.0 for x in row] for row in logs]\n"
+            }
+          ],
+          "expect": "the filterbank should be fast on wide spectra"
+        },
+        {
+          "name": "+ only each filter's span",
+          "edits": [
+            {
+              "file": "features.py",
+              "old": "    n_bins = len(spec[0]) if spec else 0\n    matrix = [f.dense(n_bins) for f in filters]\n    return [[sum(row[k] * frame[k] for k in range(n_bins)) for row in matrix] for frame in spec]\n",
+              "new": "    out = []\n    for frame in spec:\n        row = []\n        for f in filters:\n            acc = 0.0\n            for k, w in enumerate(f.weights, f.start):\n                acc += w * frame[k]\n            row.append(acc)\n        out.append(row)\n    return out\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_log_mel_frontend",
+      "name": "empty-filter check deleted instead of fixing hz_to_mel",
+      "edits": [
+        {
+          "file": "features.py",
+          "old": "    return 2595.0 * math.log10(1.0 + f / 700.0)\n",
+          "new": "    return 2595.0 * math.log(1.0 + f / 700.0)\n"
+        },
+        {
+          "file": "features.py",
+          "old": "        if not weights:\n            raise ValueError(f\"mel filter {m} of {n_mels} covers no FFT bins (n_fft={n_fft}, sr={sr})\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a 1 kHz tone peaks in mel band 18 of 40"
+    },
+    {
+      "test": "test_log_mel_frontend",
+      "name": "natural-log mel pair: exp in mel_to_hz instead of log10 in hz_to_mel",
+      "edits": [
+        {
+          "file": "features.py",
+          "old": "    return 2595.0 * math.log10(1.0 + f / 700.0)\n",
+          "new": "    return 2595.0 * math.log(1.0 + f / 700.0)\n"
+        },
+        {
+          "file": "features.py",
+          "old": "    return 700.0 * (10.0 ** (m / 2595.0) - 1.0)\n",
+          "new": "    return 700.0 * (math.exp(m / 2595.0) - 1.0)\n"
+        }
+      ],
+      "expect": "HTK mel: 1000 Hz is about 1000 mel"
+    },
+    {
+      "test": "test_log_mel_frontend",
+      "name": "1127 * ln in hz_to_mel, 10 ** (m / 2595) left in mel_to_hz",
+      "edits": [
+        {
+          "file": "features.py",
+          "old": "    return 2595.0 * math.log10(1.0 + f / 700.0)\n",
+          "new": "    return 1127.0 * math.log(1.0 + f / 700.0)\n"
+        }
+      ],
+      "expect": "mel_to_hz inverts hz_to_mel"
+    },
+    {
+      "test": "test_log_mel_frontend",
+      "name": "default sr changed to the test's 8000 instead of passing sr",
+      "edits": [
+        {
+          "file": "features.py",
+          "old": "    n_mels: int, n_fft: int, sr: int, fmin: float = 0.0, fmax: float | None = None\n",
+          "new": "    n_mels: int, n_fft: int, sr: int = 8000, fmin: float = 0.0, fmax: float | None = None\n"
+        },
+        {
+          "file": "features.py",
+          "old": "mel_filterbank(n_mels, n_fft, sr, fmin, fmax)",
+          "new": "mel_filterbank(n_mels, n_fft, fmin=fmin, fmax=fmax)"
+        }
+      ],
+      "expect": "mel bands are in Hz: at 16 kHz, the same tone and fmax give the same band"
+    },
+    {
+      "test": "test_log_mel_frontend",
+      "name": "Whisper floor taken from the first frame",
+      "edits": [
+        {
+          "file": "features.py",
+          "old": "    top = max(max(row) for row in logs)\n",
+          "new": "    top = max(logs[0])\n"
+        }
+      ],
+      "expect": "Whisper's floor sits 8 below the loudest value in the whole clip"
+    },
+    {
+      "test": "test_log_mel_frontend",
+      "name": "Whisper scaling with the natural log",
+      "edits": [
+        {
+          "file": "features.py",
+          "old": "    logs = [[math.log10(max(v, floor)) for v in row] for row in mel]\n",
+          "new": "    logs = [[math.log(max(v, floor)) for v in row] for row in mel]\n"
+        }
+      ],
+      "expect": "Whisper's floor sits 8 below the loudest value in the whole clip"
+    },
+    {
+      "test": "test_log_mel_frontend",
+      "name": "the lesson's `if w:` skip over dense rows",
+      "edits": [
+        {
+          "file": "features.py",
+          "old": "    out = []\n    for frame in spec:\n        row = []\n        for f in filters:\n            acc = 0.0\n            for k, w in enumerate(f.weights, f.start):\n                acc += w * frame[k]\n            row.append(acc)\n        out.append(row)\n    return out\n",
+          "new": "    n_bins = len(spec[0]) if spec else 0\n    matrix = [f.dense(n_bins) for f in filters]\n    out = []\n    for frame in spec:\n        row = []\n        for weights in matrix:\n            acc = 0.0\n            for k, w in enumerate(weights):\n                if w:\n                    acc += frame[k] * w\n            row.append(acc)\n        out.append(row)\n    return out\n"
+        }
+      ],
+      "expect": "the filterbank should be fast on wide spectra"
+    },
+    {
+      "test": "test_log_mel_frontend",
+      "name": "span loop shifted one bin up",
+      "edits": [
+        {
+          "file": "features.py",
+          "old": "enumerate(f.weights, f.start)",
+          "new": "enumerate(f.weights, f.start + 1)"
+        }
+      ],
+      "expect": "each band is its filter's weighted sum of the power spectrum"
+    },
+    {
+      "test": "test_feature_cache",
+      "name": "features stored as float32",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "flat = array(\"d\", ",
+          "new": "flat = array(\"f\", "
+        },
+        {
+          "file": "cache.py",
+          "old": "flat = array(\"d\")",
+          "new": "flat = array(\"f\")"
+        }
+      ],
+      "expect": "features must round-trip exactly"
+    },
+    {
+      "test": "test_feature_cache",
+      "name": "width read back from the first row",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        return Features(n_feats, [values[i * n_feats : (i + 1) * n_feats] for i in range(n_frames)])\n",
+          "new": "        rows = [values[i * n_feats : (i + 1) * n_feats] for i in range(n_frames)]\n        return Features(len(rows[0]) if rows else 0, rows)\n"
+        }
+      ],
+      "expect": "a clip too short for one frame keeps its width"
+    },
+    {
+      "test": "test_feature_cache",
+      "name": "entries keyed by clip only",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "hashlib.sha256(f\"{clip_id}\\0{config_id}\".encode())",
+          "new": "hashlib.sha256(clip_id.encode())"
+        }
+      ],
+      "expect": "each config keeps its own entry for the same clip"
+    },
+    {
+      "test": "test_feature_cache",
+      "name": "clip hash ignores the sample rate",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "digest = hashlib.sha256(struct.pack(\"<Q\", sample_rate))",
+          "new": "digest = hashlib.sha256()"
+        }
+      ],
+      "expect": "the sample rate is part of the clip"
+    },
+    {
+      "test": "test_feature_cache",
+      "name": "clip hash at float32 precision",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "struct.pack(f\"<{len(samples)}d\", *samples)",
+          "new": "struct.pack(f\"<{len(samples)}f\", *samples)"
+        }
+      ],
+      "expect": "every sample counts, at full precision"
+    },
+    {
+      "test": "test_feature_cache",
+      "name": "rows validated after the file is written",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        for i, row in enumerate(feats.frames):\n            if len(row) != feats.n_feats:\n                raise ValueError(f\"row {i} has {len(row)} values, expected {feats.n_feats}\")\n",
+          "new": ""
+        },
+        {
+          "file": "cache.py",
+          "old": "        os.replace(tmp, path)\n",
+          "new": "        os.replace(tmp, path)\n        for i, row in enumerate(feats.frames):\n            if len(row) != feats.n_feats:\n                raise ValueError(f\"row {i} has {len(row)} values, expected {feats.n_feats}\")\n"
+        }
+      ],
+      "expect": "a rejected matrix is not stored"
+    },
+    {
+      "test": "test_feature_cache",
+      "name": "entries kept in a dict in memory",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        self.root.mkdir(parents=True, exist_ok=True)\n",
+          "new": "        self.root.mkdir(parents=True, exist_ok=True)\n        self._memory = {}\n"
+        },
+        {
+          "file": "cache.py",
+          "old": "        flat = array(\"d\", ",
+          "new": "        self._memory[clip_id, config_id] = feats\n        return\n        flat = array(\"d\", "
+        },
+        {
+          "file": "cache.py",
+          "old": "        path = self._path(clip_id, config_id)\n        try:\n",
+          "new": "        return self._memory.get((clip_id, config_id))\n        path = self._path(clip_id, config_id)\n        try:\n"
+        }
+      ],
+      "expect": "entries survive a reopen"
+    },
+    {
+      "test": "test_feature_cache",
+      "name": "rows checked against the first row only",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        for i, row in enumerate(feats.frames):\n            if len(row) != feats.n_feats:\n                raise ValueError(f\"row {i} has {len(row)} values, expected {feats.n_feats}\")\n",
+          "new": "        if feats.frames and len(feats.frames[0]) != feats.n_feats:\n            raise ValueError(f\"rows have {len(feats.frames[0])} values, expected {feats.n_feats}\")\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_feature_cache",
+      "name": "rows checked against each other, not against n_feats",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        for i, row in enumerate(feats.frames):\n            if len(row) != feats.n_feats:\n                raise ValueError(f\"row {i} has {len(row)} values, expected {feats.n_feats}\")\n",
+          "new": "        if len({len(row) for row in feats.frames}) > 1:\n            raise ValueError(\"rows differ in length\")\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_feature_cache",
+      "name": "rows checked by the total number of values",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "        for i, row in enumerate(feats.frames):\n            if len(row) != feats.n_feats:\n                raise ValueError(f\"row {i} has {len(row)} values, expected {feats.n_feats}\")\n",
+          "new": "        if sum(len(row) for row in feats.frames) != len(feats.frames) * feats.n_feats:\n            raise ValueError(\"wrong number of values\")\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_feature_cache",
+      "name": "clip hash of %.16g text, one digit short of exact",
+      "edits": [
+        {
+          "file": "cache.py",
+          "old": "    digest = hashlib.sha256(struct.pack(\"<Q\", sample_rate))\n    digest.update(struct.pack(f\"<{len(samples)}d\", *samples))\n    return digest.hexdigest()\n",
+          "new": "    text = f\"{sample_rate}:\" + \",\".join(f\"{x:.16g}\" for x in samples)\n    return hashlib.sha256(text.encode()).hexdigest()\n"
+        }
+      ],
+      "expect": "every sample counts, at full precision"
+    },
+    {
+      "test": "test_deltas_and_cmvn",
+      "name": "negative index wraps to the end at the start",
+      "edits": [
+        {
+          "file": "deltas.py",
+          "old": "frames[max(t - n, 0)]",
+          "new": "frames[t - n]"
+        }
+      ],
+      "expect": "frames past the edges repeat the first and last frame"
+    },
+    {
+      "test": "test_deltas_and_cmvn",
+      "name": "zeros past the edges",
+      "edits": [
+        {
+          "file": "deltas.py",
+          "old": "            ahead, behind = frames[min(t + n, last)], frames[max(t - n, 0)]\n",
+          "new": "            zero = [0.0] * len(frames[t])\n            ahead = frames[t + n] if t + n <= last else zero\n            behind = frames[t - n] if t - n >= 0 else zero\n"
+        }
+      ],
+      "expect": "frames past the edges repeat the first and last frame"
+    },
+    {
+      "test": "test_deltas_and_cmvn",
+      "name": "denominator sum(n * n), not 2 * sum(n * n)",
+      "edits": [
+        {
+          "file": "deltas.py",
+          "old": "denom = 2 * sum(",
+          "new": "denom = sum("
+        }
+      ],
+      "expect": "away from the edges, the delta of a straight line is its slope"
+    },
+    {
+      "test": "test_deltas_and_cmvn",
+      "name": "delta-delta taken from the static features",
+      "edits": [
+        {
+          "file": "deltas.py",
+          "old": "blocks.append(deltas(blocks[-1], width))",
+          "new": "blocks.append(deltas(frames, width))"
+        }
+      ],
+      "expect": "delta-delta is the delta of the deltas, each order with its own width"
+    },
+    {
+      "test": "test_deltas_and_cmvn",
+      "name": "first window used for every order",
+      "edits": [
+        {
+          "file": "deltas.py",
+          "old": "blocks.append(deltas(blocks[-1], width))",
+          "new": "blocks.append(deltas(blocks[-1], windows[0]))"
+        }
+      ],
+      "expect": "delta-delta is the delta of the deltas, each order with its own width"
+    },
+    {
+      "test": "test_deltas_and_cmvn",
+      "name": "CMVN over each frame instead of each dimension",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "    t = len(frames)\n    columns = list(zip(*frames))\n",
+          "new": "    t = len(frames[0])\n    columns = frames\n"
+        },
+        {
+          "file": "cmvn.py",
+          "old": "    return [[(v - m) / s for v, m, s in zip(row, means, scales)] for row in frames]\n",
+          "new": "    return [[(v - m) / s for v in row] for row, m, s in zip(frames, means, scales)]\n"
+        }
+      ],
+      "expect": "each dimension is normalized over time; a constant one becomes 0"
+    },
+    {
+      "test": "test_deltas_and_cmvn",
+      "name": "sample standard deviation (statistics.stdev)",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "max(math.sqrt(sum((v - m) ** 2 for v in col) / t), floor)",
+          "new": "max(math.sqrt(sum((v - m) ** 2 for v in col) / (t - 1)), floor)"
+        }
+      ],
+      "expect": "each dimension is normalized over time; a constant one becomes 0"
+    },
+    {
+      "test": "test_deltas_and_cmvn",
+      "name": "no floor under the standard deviation",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "max(math.sqrt(sum((v - m) ** 2 for v in col) / t), floor)",
+          "new": "math.sqrt(sum((v - m) ** 2 for v in col) / t)"
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_deltas_and_cmvn",
+      "name": "frames past the edges reflected instead of repeated",
+      "edits": [
+        {
+          "file": "deltas.py",
+          "old": "frames[min(t + n, last)], frames[max(t - n, 0)]",
+          "new": "frames[t + n if t + n <= last else 2 * last - (t + n)], frames[abs(t - n)]"
+        }
+      ],
+      "expect": "frames past the edges repeat the first and last frame"
+    },
+    {
+      "test": "test_deltas_and_cmvn",
+      "name": "add_deltas hard-codes two delta orders",
+      "edits": [
+        {
+          "file": "deltas.py",
+          "old": "    blocks = [frames]\n    for width in windows:\n        blocks.append(deltas(blocks[-1], width))\n",
+          "new": "    first = deltas(frames, windows[0])\n    blocks = [frames, first, deltas(first, windows[1])]\n"
+        }
+      ],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_deltas_and_cmvn",
+      "name": "cmvn normalizes the rows in place",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "    return [[(v - m) / s for v, m, s in zip(row, means, scales)] for row in frames]\n",
+          "new": "    for row in frames:\n        for i, (m, s) in enumerate(zip(means, scales)):\n            row[i] = (row[i] - m) / s\n    return frames\n"
+        }
+      ],
+      "expect": "cmvn leaves its input untouched"
+    },
+    {
+      "test": "test_online_cmvn",
+      "name": "statistics restart with every chunk",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "        out: list[list[float]] = []\n",
+          "new": "        out: list[list[float]] = []\n        self.count, self.mean, self.m2 = 0, [0.0] * self.dim, [0.0] * self.dim\n"
+        }
+      ],
+      "expect": "the same frames whatever the chunking"
+    },
+    {
+      "test": "test_online_cmvn",
+      "name": "whole chunk counted before any of it is normalized",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "        for frame in frames:\n            self._update(frame)\n            self.held.append(frame)\n            if self.count >= self.warmup:\n",
+          "new": "        for frame in frames:\n            self._update(frame)\n        for frame in frames:\n            self.held.append(frame)\n            if self.count >= self.warmup:\n"
+        }
+      ],
+      "expect": "the same frames whatever the chunking"
+    },
+    {
+      "test": "test_online_cmvn",
+      "name": "a frame normalized before it is counted",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "        for frame in frames:\n            self._update(frame)\n            self.held.append(frame)\n            if self.count >= self.warmup:\n",
+          "new": "        for frame in frames:\n            if self.count >= self.warmup:\n                out.append(self._normalize(frame))\n                self._update(frame)\n                continue\n            self._update(frame)\n            self.held.append(frame)\n            if self.count >= self.warmup:\n"
+        }
+      ],
+      "expect": "frame t is normalized with the statistics of frames 0..max(t, warmup - 1)"
+    },
+    {
+      "test": "test_online_cmvn",
+      "name": "no warm-up: every frame normalized on arrival",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "            if self.count >= self.warmup:\n",
+          "new": "            if True:\n"
+        }
+      ],
+      "expect": "frame t is normalized with the statistics of frames 0..max(t, warmup - 1)"
+    },
+    {
+      "test": "test_online_cmvn",
+      "name": "flush drops the held-back frames",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "        out = [self._normalize(f) for f in self.held]\n",
+          "new": "        out = []\n"
+        }
+      ],
+      "expect": "a stream shorter than the warm-up is normalized at flush"
+    },
+    {
+      "test": "test_online_cmvn",
+      "name": "no floor under the standard deviation",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "max(math.sqrt(m2 / self.count), self.floor)",
+          "new": "math.sqrt(m2 / self.count)"
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_online_cmvn",
+      "name": "offline cmvn() recomputed over every frame seen so far",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "                out += [self._normalize(f) for f in self.held]\n",
+          "new": "                self.seen = getattr(self, \"seen\", []) + self.held\n                out += cmvn(self.seen, self.floor)[-len(self.held) :]\n"
+        }
+      ],
+      "expect": "each new frame should cost the same, however long the stream"
+    },
+    {
+      "test": "test_online_cmvn",
+      "name": "warm-up released one frame late (count > warmup)",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "            if self.count >= self.warmup:\n",
+          "new": "            if self.count > self.warmup:\n"
+        }
+      ],
+      "expect": "frame t is normalized with the statistics of frames 0..max(t, warmup - 1)"
+    },
+    {
+      "test": "test_online_cmvn",
+      "name": "hold-back decided by len(held) instead of the frame count",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "            if self.count >= self.warmup:\n",
+          "new": "            if len(self.held) >= self.warmup:\n"
+        }
+      ],
+      "expect": "frame t is normalized with the statistics of frames 0..max(t, warmup - 1)"
+    },
+    {
+      "test": "test_online_cmvn",
+      "name": "Welford variance divided by count - 1",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "max(math.sqrt(m2 / self.count), self.floor)",
+          "new": "max(math.sqrt(m2 / max(self.count - 1, 1)), self.floor)"
+        }
+      ],
+      "expect": "frame t is normalized with the statistics of frames 0..max(t, warmup - 1)"
+    },
+    {
+      "test": "test_online_cmvn",
+      "name": "frames normalized in place",
+      "edits": [
+        {
+          "file": "cmvn.py",
+          "old": "        return [\n            (x - m) / max(math.sqrt(m2 / self.count), self.floor)\n            for x, m, m2 in zip(frame, self.mean, self.m2)\n        ]\n",
+          "new": "        for i, (m, m2) in enumerate(zip(self.mean, self.m2)):\n            frame[i] = (frame[i] - m) / max(math.sqrt(m2 / self.count), self.floor)\n        return frame\n"
+        }
+      ],
+      "expect": "frame t is normalized with the statistics of frames 0..max(t, warmup - 1)"
+    },
+    {
+      "test": "test_config_merge_and_fingerprint",
+      "name": "nested dicts replaced instead of merged",
+      "edits": [
+        {
+          "file": "config.py",
+          "old": "        if isinstance(target[key], dict) and isinstance(value, dict):\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "nested dicts merge key by key; later layers win"
+    },
+    {
+      "test": "test_config_merge_and_fingerprint",
+      "name": "lists concatenated",
+      "edits": [
+        {
+          "file": "config.py",
+          "old": "            _merge_into(target[key], value, path + \".\")\n        else:\n",
+          "new": "            _merge_into(target[key], value, path + \".\")\n        elif isinstance(target[key], list) and isinstance(value, list):\n            target[key] = target[key] + copy.deepcopy(value)\n        else:\n"
+        }
+      ],
+      "expect": "a list is replaced whole, never merged"
+    },
+    {
+      "test": "test_config_merge_and_fingerprint",
+      "name": "base copied shallowly",
+      "edits": [
+        {
+          "file": "config.py",
+          "old": "    result = copy.deepcopy(base)\n",
+          "new": "    result = dict(base)\n"
+        }
+      ],
+      "expect": "merging leaves its inputs untouched"
+    },
+    {
+      "test": "test_config_merge_and_fingerprint",
+      "name": "override values not copied",
+      "edits": [
+        {
+          "file": "config.py",
+          "old": "            target[key] = copy.deepcopy(value)\n",
+          "new": "            target[key] = value\n"
+        }
+      ],
+      "expect": "merging leaves its inputs untouched"
+    },
+    {
+      "test": "test_config_merge_and_fingerprint",
+      "name": "unknown keys added silently",
+      "edits": [
+        {
+          "file": "config.py",
+          "old": "            raise KeyError(f\"unknown config key {path!r}\")\n",
+          "new": "            target[key] = copy.deepcopy(value)\n            continue\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_config_merge_and_fingerprint",
+      "name": "KeyError names only the last key",
+      "edits": [
+        {
+          "file": "config.py",
+          "old": "            raise KeyError(f\"unknown config key {path!r}\")\n",
+          "new": "            raise KeyError(key)\n"
+        }
+      ],
+      "expect": "Regex pattern did not match"
+    },
+    {
+      "test": "test_config_merge_and_fingerprint",
+      "name": "json.dumps without sort_keys",
+      "edits": [
+        {
+          "file": "config.py",
+          "old": "json.dumps(config, sort_keys=True, ",
+          "new": "json.dumps(config, "
+        }
+      ],
+      "expect": "key order, at any depth, does not change the fingerprint"
+    },
+    {
+      "test": "test_config_merge_and_fingerprint",
+      "name": "only the top-level keys sorted",
+      "edits": [
+        {
+          "file": "config.py",
+          "old": "json.dumps(config, sort_keys=True, ",
+          "new": "json.dumps(sorted(config.items()), "
+        }
+      ],
+      "expect": "key order, at any depth, does not change the fingerprint"
+    },
+    {
+      "test": "test_config_merge_and_fingerprint",
+      "name": "list items sorted as well",
+      "edits": [
+        {
+          "file": "config.py",
+          "old": "json.dumps(config, sort_keys=True, ",
+          "new": "json.dumps(json.loads(json.dumps(config), object_hook=lambda d: {k: sorted(v) if isinstance(v, list) else v for k, v in d.items()}), sort_keys=True, "
+        }
+      ],
+      "expect": "list order matters"
+    },
+    {
+      "test": "test_config_merge_and_fingerprint",
+      "name": "built-in hash() of the canonical text",
+      "edits": [
+        {
+          "file": "config.py",
+          "old": "    return hashlib.sha256(canonical.encode(\"utf-8\")).hexdigest()\n",
+          "new": "    return format(hash(canonical) & 0xFFFFFFFFFFFFFFFF, \"016x\")\n"
+        }
+      ],
+      "expect": "the fingerprint is the same in every process"
+    },
+    {
+      "test": "test_config_merge_and_fingerprint",
+      "name": "each level copied with dict(), untouched subtrees shared with the base",
+      "edits": [
+        {
+          "file": "config.py",
+          "old": "    result = copy.deepcopy(base)\n    for override in overrides:\n        _merge_into(result, override, \"\")\n    return result\n",
+          "new": "    result = base\n    for override in overrides:\n        result = _merged(result, override, \"\")\n    return result\n\n\ndef _merged(below: dict, override: dict, prefix: str) -> dict:\n    out = dict(below)\n    for key, value in override.items():\n        path = prefix + str(key)\n        if key not in below:\n            raise KeyError(f\"unknown config key {path!r}\")\n        if isinstance(below[key], dict) and isinstance(value, dict):\n            out[key] = _merged(below[key], value, path + \".\")\n        else:\n            out[key] = copy.deepcopy(value)\n    return out\n"
+        }
+      ],
+      "expect": "merging leaves its inputs untouched"
+    },
+    {
+      "test": "test_config_merge_and_fingerprint",
+      "name": "unknown top-level keys accepted",
+      "edits": [
+        {
+          "file": "config.py",
+          "old": "        if key not in target:\n            raise KeyError(f\"unknown config key {path!r}\")\n",
+          "new": "        if key not in target and not prefix:\n            target[key] = copy.deepcopy(value)\n            continue\n        if key not in target:\n            raise KeyError(f\"unknown config key {path!r}\")\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_config_merge_and_fingerprint",
+      "name": "None in an override taken as 'not set'",
+      "edits": [
+        {
+          "file": "config.py",
+          "old": "        else:\n            target[key] = copy.deepcopy(value)\n",
+          "new": "        elif value is not None:\n            target[key] = copy.deepcopy(value)\n"
+        }
+      ],
+      "expect": "any changed value changes the fingerprint: {'mel': {'fmax': None}}"
+    },
+    {
+      "test": "test_config_merge_and_fingerprint",
+      "name": "floats rounded to 6 places before hashing",
+      "edits": [
+        {
+          "file": "config.py",
+          "old": "    canonical = json.dumps(config, sort_keys=True,",
+          "new": "    def rounded(node):\n        if isinstance(node, dict):\n            return {k: rounded(v) for k, v in node.items()}\n        if isinstance(node, list):\n            return [rounded(v) for v in node]\n        return round(node, 6) if isinstance(node, float) else node\n\n    canonical = json.dumps(rounded(config), sort_keys=True,"
+        }
+      ],
+      "expect": "any changed value changes the fingerprint: {'log': {'floor': 1e-12}}"
+    }
+  ]
+}
