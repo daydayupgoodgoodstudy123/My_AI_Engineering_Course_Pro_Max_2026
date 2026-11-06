@@ -1,0 +1,115 @@
+{
+  "lesson": "phases/14-agent-engineering/11-planning-htn-and-evolutionary",
+  "title": "Planning with HTN and Evolutionary Search",
+  "format": "staged-brownfield",
+  "service": "HTNPlan: a ChatHTN-style HTN planner with a scripted LLM fallback and learned decompositions, an INI method library, an AlphaEvolve-style evolutionary search with a deterministic evaluator, an async mutation ensemble reported as CSV, and decomposition trees with an independent replay check",
+  "sources": {
+    "docs/en.md": "f4999bbfd5e356debc4193581fc9a9b6df991366783c41110c5296781eeeb020",
+    "code/main.py": "ea9676ff2ef3a70697a0ef733a39e97433dde1511a35594f8a79a2c838da5486",
+    "quiz/quiz.md": "e18f40a15db2a31a5452ec2eb787006047dcbd2faf4df4673bca4c92c3a69e31",
+    "outputs/skill-hybrid-planner.md": "628be930709fbfff657c3cebb399e1cc15ebd29f103642ebef2bfd22848cfbb5"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_plan_and_learn",
+      "kind": "debug",
+      "lesson_anchor": "Hierarchical Task Networks; ChatHTN steps 1-5 (validate against the operator schema, reject invalid decompositions; the symbolic layer owns correctness); Online method learning; Where this pattern goes wrong: HTN without operators; code/main.py HTNPlanner.plan and _expand; Exercise 1 (backtracking); quiz Q9 and Q10 (cache before verify, try every method, then the cache, then the LLM); skill file: cache successful LLM decompositions",
+      "planted_bugs": [
+        "_plan tries only applicable[0] and asks the LLM only when no method's preconditions hold: release comes back None with no exception, two decompositions above the real choice, where deploy_canary's watch_canary fails and deploy_direct is never tried",
+        "an LLM reply is written into cached_methods before it expands (the lesson code's order): ('open_pr',) is learned although it fails from {'logged_in'}; without the direct check the poisoned entry shows up one request later",
+        "a learned decomposition that fails from a new state returns None without falling back to the LLM",
+        "with backtracking, a (task, state) that failed is searched again on every path: a dead end behind 18 two-way waves costs 2^18 paths and 524,287 LLM calls"
+      ],
+      "timing_assert": "plan('rollout') behind an 18-wave dead end under 0.05 s: without the failure record 0.70-0.74 s on this machine (load average about 4.5), with it about 50 microseconds and 19 LLM calls",
+      "overfix_guard": "the failure record is keyed by the state as well as the task (redeploy: deploy fails before the build and must work after it) and lives for one plan() call only (hotfix is asked again on the next request, so a record kept on the instance or an LLM-reply cache fails); replies naming anything outside the schema are rejected whole before expansion (trimming the unknown name learns ('open_editor',)); a reply that fails leaves the learned decomposition in place (writing it to the cache first and deleting it on failure loses SHIP); methods keep library order (fewest-subtasks-first picks direct over canary); library before learned before LLM; an expansion cap stops the dead end but still costs 4999 LLM calls; the caller's state is never changed"
+    },
+    {
+      "part": 2,
+      "test": "test_method_library",
+      "kind": "model and persistence",
+      "lesson_anchor": "Online method learning (LLM decompositions stored and reused); ChatHTN: the LLM expands the method library; Method (name, task, preconditions, subtasks); skill file: methods.py and the hybrid planner scaffold",
+      "exactness": "every Entry (method, source, note) reads back equal after the file is reopened: names with '%', spaces and commas, empty preconditions and empty subtasks as (), tuples not lists, a note with leading spaces, a '#' line, a blank line and a trailing newline; one section per method in the order added, with task and source readable as plain INI values",
+      "traps": [
+        "default BasicInterpolation on write (ValueError) or on read (InterpolationSyntaxError)",
+        "the note written as a raw multi-line value or with newlines escaped by hand",
+        "lists joined with commas (empty list reads back as ('',), and with that handled 'approved_by(release-eng, sre)' still splits) or with spaces (splits 'error_rate < 1%')",
+        "subtasks read back as a list",
+        "methods() sorted by name",
+        "a handle that rewrites the file from its own methods, or opens it with 'w'",
+        "duplicate names not checked, checked only against the object's own adds or within one task, or left to add_section (DuplicateSectionError)",
+        "unknown source accepted, or checked after the write",
+        "a missing file treated as an error",
+        "task written as JSON"
+      ],
+      "clarifying_questions": ["duplicate names across tasks", "characters in names", "who else reads the file", "concurrent writers"]
+    },
+    {
+      "part": 3,
+      "test": "test_evolve",
+      "kind": "core algorithm",
+      "lesson_anchor": "AlphaEvolve loop (seed program, programmatic evaluator, ensemble mutations, keep the best, mutate again); the evaluator must be deterministic and fast; code/main.py evolutionary_demo (the lesson's 3x + 7 target, squared-error evaluator and random_mutation, which seeds the global random module); quiz Q8 and Q12 (evaluation counts, early stopping); skill file: selection loop with early stopping",
+      "traps": [
+        "ties ranked by pool order instead of (fitness, genome)",
+        "mutators in the outer loop (the budget=5 cut evaluates [5, 7] instead of [3, 5])",
+        "generation 0 counted in generations",
+        "duplicate genomes among the parents",
+        "no evaluation cache, or the seed's evaluation not counted",
+        "one copy of the parent shared by the ensemble, or the caller's seed list handed out (the mutators edit in place)",
+        "cache hits counted against the budget, the budget checked between generations, off by one, or cache hits still taken after it is spent",
+        "a generation cut short by the budget dropped",
+        "the target checked after every child, with <, as a truthy test (target 0.0), or not for generation 0",
+        "random.seed on the global generator, one generator for the run or per generation, or the slot numbered off by one",
+        "no elitism"
+      ],
+      "integration": "the lesson's own evaluator and random_mutation, seeded, give an exact eleven-generation history to fitness 0",
+      "clarifying_questions": ["what generations counts", "which loop is outer", "a generation cut by the budget", "cache hits and the budget", "when the target is checked", "duplicates within a generation"]
+    },
+    {
+      "part": 4,
+      "test": "test_stream_generations",
+      "kind": "streaming",
+      "lesson_anchor": "AlphaEvolve: an ensemble of LLMs (Gemini 2.0 Flash and Pro) proposes mutations, the evaluator filters them; the evaluator is the expensive, deterministic part; Use It: build it as a background worker",
+      "wire_format": "CSV, decided by the test's csv.DictReader and json.loads: a header line gen,best_genome,best_fitness,evaluations,cache_hits, then one line per generation, every line ending in a line break, best_genome a quoted JSON list, fitness exact",
+      "traps": [
+        "children evaluated in completion order (as_completed), so a mid-generation budget cut depends on which model answers first",
+        "a generation's children evaluated together with gather",
+        "mutations awaited one after another",
+        "pending mutations not cancelled (the run hangs on a model that never answers), cancelled but not awaited (one sleep(0) is not enough: the model takes a turn to clean up), or left running",
+        "a generation's mutations all awaited before scoring, or the budget checked after awaiting the next mutation (both wait on the model that never answers)",
+        "no header, fields joined by hand, fitness rounded, no line ending",
+        "lines held back to the end, or a generation's line held back until the next generation has started",
+        "the generation cut short by the budget not reported",
+        "one generator shared by concurrent mutations"
+      ],
+      "clarifying_questions": ["header and line ending", "evaluating in completion order", "a model that never answers"]
+    },
+    {
+      "part": 5,
+      "test": "test_task_tree",
+      "kind": "recursive structure",
+      "lesson_anchor": "htn-tree-expand figure (compound task, methods, subtasks, primitive operators; the plan is the left-to-right reading of the primitive leaves); ChatHTN: every plan provably sound because LLM suggestions only enter as candidate decompositions; HTN without operators; skill file: a validation step that rejects decompositions referencing unknown operators or methods",
+      "traps": [
+        "the first applicable method recorded instead of the one that worked",
+        "method choices remembered per task name (ensure_login appears twice, with fresh_login and reuse_session)",
+        "LLM and learned decompositions not labeled llm",
+        "the check trusts a method node's children, skips the method's preconditions, replays only the operators, or looks methods up across tasks",
+        "the check applies effects to the caller's state",
+        "paths built with list.index (two identical merge_pr siblings), or the root's empty path returned as None",
+        "any name accepted under an llm node, a compound task without a decomposition skipped, subtrees under an llm node not replayed",
+        "an operator node accepted with a method and children (its leaves are a plan the check never replayed)",
+        "next() without a default"
+      ],
+      "clarifying_questions": ["path format", "label of a learned decomposition", "which of several problems to report"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the lesson's plan(task, state, depth, max_depth) becomes plan(task, state) with max_depth a planner field, because the lesson's _expand does not pass max_depth down and a per-call failure record needs a clear start of the call. Following quiz Q10, the LLM is the fallback whenever no library method and no learned decomposition expands, not only when no method's preconditions hold; the starter keeps the lesson's narrower condition as part of the first bug. The docstring states the per-call rule (a task that failed from a state is not tried from it again), so the LLM-call count in the timing block is a documented contract. The scripted LLM gives out a list of replies per task in order, so that asking again can give a different answer.",
+    "Part 1: the failure record is keyed by (task, state) without the depth, as the docstring says; the depth caveat is an interviewer follow-up rather than a test.",
+    "Part 2: the default optionxform is not a trap here. With one section per method every key is a fixed lowercase field name, and section names keep their case in configparser. The whitespace trap comes from a free-text note per method instead, which also brings in the comment-line and trailing-newline losses of multi-line values.",
+    "Part 3: genomes are the lesson's own (a, b) coefficients of a x + b with its target 3x + 7 and its random_mutation, so the search is lesson-grown rather than a new program representation. Every mutation draws from random.Random(f'{seed}/{generation}/{parent}/{mutator}'), fixed by its place in the run, instead of one shared generator: that is what makes Part 4's concurrent ensemble reproducible, and it replaces the lesson's global random.seed. The target is checked at generation ends, the budget immediately.",
+    "Part 4: there is no evaluator lock. The evaluator scores children one at a time in evolve()'s slot order, each as soon as it and the ones before it are ready; a lock with completion-order evaluation would make a mid-generation budget cut depend on timing. The test compares the CSV rows with evolve() for the same arguments under two latency orders, and adds a model that never answers to test cancellation.",
+    "Part 5: the planner's tree is built by the same search as plan() (the reference's _plan returns nodes, and plan() reads the leaves), so Part 5 refactors the Part 1 planner. The check also enforces the method structure (children equal the method's subtasks, the method belongs to the node's task), not only operator preconditions, because a primitive sequence that runs is not by itself a valid HTN decomposition."
+  ]
+}

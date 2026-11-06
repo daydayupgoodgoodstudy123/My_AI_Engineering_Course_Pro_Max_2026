@@ -1,0 +1,1306 @@
+{
+  "package": "htnplan",
+  "tests": [
+    "test_plan_and_learn",
+    "test_method_library",
+    "test_evolve",
+    "test_stream_generations",
+    "test_task_tree"
+  ],
+  "layers": [
+    {
+      "test": "test_plan_and_learn",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "when a method fails further down, try the next one"
+        },
+        {
+          "name": "try every applicable method, then the learned decomposition and the LLM",
+          "edits": [
+            {
+              "file": "planner.py",
+              "old": "        applicable = [m for m in self.methods.get(task, []) if m.applicable(state)]\n        if not applicable and task in self.cached_methods:\n            return self._expand(self.cached_methods[task], state, depth)\n        if not applicable:\n            suggested = self.llm.decompose(task, set(state))\n            if suggested is None:\n                return None\n            if not all(s in self.operators or s in self.methods for s in suggested):\n                return None\n            self.cached_methods[task] = tuple(suggested)\n            return self._expand(tuple(suggested), state, depth)\n        return self._expand(applicable[0].subtasks, state, depth)\n",
+              "new": "        for method in self.methods.get(task, []):\n            if method.applicable(state):\n                steps = self._expand(method.subtasks, state, depth)\n                if steps is not None:\n                    return steps\n        if task in self.cached_methods:\n            return self._expand(self.cached_methods[task], state, depth)\n        suggested = self.llm.decompose(task, set(state))\n        if suggested is None:\n            return None\n        if not all(s in self.operators or s in self.methods for s in suggested):\n            return None\n        self.cached_methods[task] = tuple(suggested)\n        return self._expand(tuple(suggested), state, depth)\n"
+            }
+          ],
+          "expect": "a decomposition that does not expand is never learned"
+        },
+        {
+          "name": "+ learn a reply only after it expands",
+          "edits": [
+            {
+              "file": "planner.py",
+              "old": "        self.cached_methods[task] = tuple(suggested)\n        return self._expand(tuple(suggested), state, depth)\n",
+              "new": "        steps = self._expand(tuple(suggested), state, depth)\n        if steps is not None:\n            self.cached_methods[task] = tuple(suggested)\n        return steps\n"
+            }
+          ],
+          "expect": "when the learned decomposition fails, ask the LLM"
+        },
+        {
+          "name": "+ fall back to the LLM when the learned decomposition fails",
+          "edits": [
+            {
+              "file": "planner.py",
+              "old": "        if task in self.cached_methods:\n            return self._expand(self.cached_methods[task], state, depth)\n",
+              "new": "        if task in self.cached_methods:\n            steps = self._expand(self.cached_methods[task], state, depth)\n            if steps is not None:\n                return steps\n"
+            }
+          ],
+          "expect": "planning should stay fast when many methods lead to the same dead end"
+        },
+        {
+          "name": "+ remember failed (task, state) pairs within one call",
+          "edits": [
+            {
+              "file": "planner.py",
+              "old": "        return self._plan(task, set(state), 0)\n",
+              "new": "        self._failed: set = set()\n        return self._plan(task, set(state), 0)\n"
+            },
+            {
+              "file": "planner.py",
+              "old": "    def _plan(self, task: str, state: set[str], depth: int) -> list[str] | None:\n        if depth > self.max_depth:\n",
+              "new": "    def _plan(self, task: str, state: set[str], depth: int) -> list[str] | None:\n        key = (task, frozenset(state))\n        if key in self._failed:\n            return None\n        steps = self._search(task, state, depth)\n        if steps is None:\n            self._failed.add(key)\n        return steps\n\n    def _search(self, task: str, state: set[str], depth: int) -> list[str] | None:\n        if depth > self.max_depth:\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_plan_and_learn",
+      "name": "failure memo keyed by the task name only",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "        if (task, state) in failed:\n",
+          "new": "        if task in failed:\n"
+        },
+        {
+          "file": "planner.py",
+          "old": "        failed.add((task, state))",
+          "new": "        failed.add(task)"
+        }
+      ],
+      "expect": "a task that failed from one state can still work from another"
+    },
+    {
+      "test": "test_plan_and_learn",
+      "name": "failure memo kept across plan() calls",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "        found = self._plan(task, frozenset(state), 0, set())\n",
+          "new": "        found = self._plan(task, frozenset(state), 0, self.__dict__.setdefault('_failed', set()))\n"
+        }
+      ],
+      "expect": "a new request asks the LLM again"
+    },
+    {
+      "test": "test_plan_and_learn",
+      "name": "LLM replies remembered per task and state across calls",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "        suggested = self.llm.decompose(task, set(state))\n",
+          "new": "        asked = self.__dict__.setdefault('_asked', {})\n        if (task, state) not in asked:\n            asked[(task, state)] = self.llm.decompose(task, set(state))\n        suggested = asked[(task, state)]\n"
+        }
+      ],
+      "expect": "a new request asks the LLM again"
+    },
+    {
+      "test": "test_plan_and_learn",
+      "name": "the method with the fewest subtasks tried first",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "        for method in self.methods.get(task, []):\n",
+          "new": "        for method in sorted(self.methods.get(task, []), key=lambda m: len(m.subtasks)):\n"
+        }
+      ],
+      "expect": "methods are tried in library order"
+    },
+    {
+      "test": "test_plan_and_learn",
+      "name": "the LLM asked only when no method's preconditions hold, as in the lesson code",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "        learned = self.cached_methods.get(task)\n",
+          "new": "        if any(m.applicable(state) for m in self.methods.get(task, [])):\n            failed.add((task, state))\n            return None\n        learned = self.cached_methods.get(task)\n"
+        }
+      ],
+      "expect": "when no library method works, ask the LLM"
+    },
+    {
+      "test": "test_plan_and_learn",
+      "name": "learned decomposition tried before the library",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "        for method in self.methods.get(task, []):\n            if method.applicable(state):\n",
+          "new": "        early = self.cached_methods.get(task)\n        if early is not None:\n            found = self._expand(task, LLM, early, state, depth, failed)\n            if found is not None:\n                return found\n        for method in self.methods.get(task, []):\n            if method.applicable(state):\n"
+        }
+      ],
+      "expect": "library methods come before learned ones"
+    },
+    {
+      "test": "test_plan_and_learn",
+      "name": "the LLM asked before the library",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "        for method in self.methods.get(task, []):\n            if method.applicable(state):\n",
+          "new": "        early = self.llm.decompose(task, set(state))\n        if early is not None and all(s in self.operators or s in self.methods for s in early):\n            found = self._expand(task, LLM, tuple(early), state, depth, failed)\n            if found is not None:\n                self.cached_methods[task] = tuple(early)\n                return found\n        for method in self.methods.get(task, []):\n            if method.applicable(state):\n"
+        }
+      ],
+      "expect": "ask the LLM only where the library has nothing that works"
+    },
+    {
+      "test": "test_plan_and_learn",
+      "name": "LLM replies expanded without the schema check",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "        if suggested is not None and all(s in self.operators or s in self.methods for s in suggested):\n",
+          "new": "        if suggested is not None:\n"
+        }
+      ],
+      "expect": "a reply that names something outside the schema is rejected as a whole, not planned"
+    },
+    {
+      "test": "test_plan_and_learn",
+      "name": "a reply that expands is never learned",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "                self.cached_methods[task] = tuple(suggested)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a learned decomposition saves the LLM call"
+    },
+    {
+      "test": "test_plan_and_learn",
+      "name": "the first decomposition learned for a task is never replaced",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "                self.cached_methods[task] = tuple(suggested)\n",
+          "new": "                self.cached_methods.setdefault(task, tuple(suggested))\n"
+        }
+      ],
+      "expect": "the newest decomposition that worked is kept"
+    },
+    {
+      "test": "test_plan_and_learn",
+      "name": "an expansion cap instead of a failure memo",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "        if (task, state) in failed:\n            return None\n",
+          "new": "        failed.add(len(failed))\n        if len(failed) > 5000:\n            return None\n"
+        },
+        {
+          "file": "planner.py",
+          "old": "        failed.add((task, state))  # this search will not try task from this state again\n",
+          "new": ""
+        }
+      ],
+      "expect": "a dead end costs one LLM call per search, not one per path"
+    },
+    {
+      "test": "test_plan_and_learn",
+      "name": "unknown names dropped from the reply instead of rejecting it",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "        if suggested is not None and all(s in self.operators or s in self.methods for s in suggested):\n",
+          "new": "        if suggested is not None:\n            suggested = tuple(s for s in suggested if s in self.operators or s in self.methods)\n        if suggested:\n"
+        }
+      ],
+      "expect": "rejected as a whole, not planned"
+    },
+    {
+      "test": "test_plan_and_learn",
+      "name": "reply written to the cache first and deleted when it fails",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "            found = self._expand(task, LLM, tuple(suggested), state, depth, failed)\n            if found is not None:\n                self.cached_methods[task] = tuple(suggested)\n                return found\n",
+          "new": "            self.cached_methods[task] = tuple(suggested)\n            found = self._expand(task, LLM, tuple(suggested), state, depth, failed)\n            if found is not None:\n                return found\n            del self.cached_methods[task]\n"
+        }
+      ],
+      "expect": "a reply that does not expand leaves the learned decomposition in place"
+    },
+    {
+      "test": "test_method_library",
+      "name": "default interpolation when writing",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "        section = configparser.ConfigParser(interpolation=None)\n",
+          "new": "        section = configparser.ConfigParser()\n"
+        }
+      ],
+      "expect": "invalid interpolation syntax"
+    },
+    {
+      "test": "test_method_library",
+      "name": "default interpolation when reading",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "        parser = configparser.ConfigParser(interpolation=None)\n",
+          "new": "        parser = configparser.ConfigParser()\n"
+        }
+      ],
+      "expect": "InterpolationSyntaxError"
+    },
+    {
+      "test": "test_method_library",
+      "name": "lists written comma-separated and split on commas",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "            \"preconditions\": json.dumps(list(method.preconditions)),\n            \"subtasks\": json.dumps(list(method.subtasks)),\n",
+          "new": "            \"preconditions\": \", \".join(method.preconditions),\n            \"subtasks\": \", \".join(method.subtasks),\n"
+        },
+        {
+          "file": "library.py",
+          "old": "        tuple(json.loads(section[\"preconditions\"])),\n        tuple(json.loads(section[\"subtasks\"])),\n",
+          "new": "        tuple(section[\"preconditions\"].split(\", \")),\n        tuple(section[\"subtasks\"].split(\", \")),\n"
+        }
+      ],
+      "expect": "every method reads back exactly as it was added"
+    },
+    {
+      "test": "test_method_library",
+      "name": "lists written space-separated and split on whitespace",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "            \"preconditions\": json.dumps(list(method.preconditions)),\n            \"subtasks\": json.dumps(list(method.subtasks)),\n",
+          "new": "            \"preconditions\": \" \".join(method.preconditions),\n            \"subtasks\": \" \".join(method.subtasks),\n"
+        },
+        {
+          "file": "library.py",
+          "old": "        tuple(json.loads(section[\"preconditions\"])),\n        tuple(json.loads(section[\"subtasks\"])),\n",
+          "new": "        tuple(section[\"preconditions\"].split()),\n        tuple(section[\"subtasks\"].split()),\n"
+        }
+      ],
+      "expect": "every method reads back exactly as it was added"
+    },
+    {
+      "test": "test_method_library",
+      "name": "note written as a raw multi-line value",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "            \"note\": json.dumps(note),\n",
+          "new": "            \"note\": note,\n"
+        },
+        {
+          "file": "library.py",
+          "old": "json.loads(section[\"note\"])",
+          "new": "section[\"note\"]"
+        }
+      ],
+      "expect": "every method reads back exactly as it was added"
+    },
+    {
+      "test": "test_method_library",
+      "name": "note with its newlines escaped by hand",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "            \"note\": json.dumps(note),\n",
+          "new": "            \"note\": note.replace(\"\\n\", \"\\\\n\"),\n"
+        },
+        {
+          "file": "library.py",
+          "old": "json.loads(section[\"note\"])",
+          "new": "section[\"note\"].replace(\"\\\\n\", \"\\n\")"
+        }
+      ],
+      "expect": "every method reads back exactly as it was added"
+    },
+    {
+      "test": "test_method_library",
+      "name": "subtasks read back as a list",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "        tuple(json.loads(section[\"subtasks\"])),\n",
+          "new": "        json.loads(section[\"subtasks\"]),\n"
+        }
+      ],
+      "expect": "every method reads back exactly as it was added"
+    },
+    {
+      "test": "test_method_library",
+      "name": "methods() sorted by method name",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "        for entry in self.entries():\n",
+          "new": "        for entry in sorted(self.entries(), key=lambda entry: entry.method.name):\n"
+        }
+      ],
+      "expect": "methods are grouped by task, each task's methods in the order they were added"
+    },
+    {
+      "test": "test_method_library",
+      "name": "each object rewrites the file from the methods it added itself",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "        with open(self.path, \"a\", encoding=\"utf-8\") as f:\n            section.write(f)\n",
+          "new": "        mine = self.__dict__.setdefault(\"_mine\", [])\n        mine.append(section)\n        with open(self.path, \"w\", encoding=\"utf-8\") as f:\n            for written in mine:\n                written.write(f)\n"
+        }
+      ],
+      "expect": "every method reads back exactly as it was added"
+    },
+    {
+      "test": "test_method_library",
+      "name": "file opened with 'w' on every add",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "        with open(self.path, \"a\", encoding=\"utf-8\") as f:\n",
+          "new": "        with open(self.path, \"w\", encoding=\"utf-8\") as f:\n"
+        }
+      ],
+      "expect": "every method reads back exactly as it was added"
+    },
+    {
+      "test": "test_method_library",
+      "name": "no duplicate check",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "        if any(entry.method.name == method.name for entry in self.entries()):\n            raise ValueError(f\"the library already has a method named {method.name!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_method_library",
+      "name": "duplicates left to configparser's add_section",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "        if any(entry.method.name == method.name for entry in self.entries()):\n            raise ValueError(f\"the library already has a method named {method.name!r}\")\n        section = configparser.ConfigParser(interpolation=None)\n",
+          "new": "        section = configparser.ConfigParser(interpolation=None)\n        section.read(self.path, encoding=\"utf-8\")\n        section.add_section(method.name)\n"
+        },
+        {
+          "file": "library.py",
+          "old": "        with open(self.path, \"a\", encoding=\"utf-8\") as f:\n",
+          "new": "        with open(self.path, \"w\", encoding=\"utf-8\") as f:\n"
+        }
+      ],
+      "expect": "DuplicateSectionError"
+    },
+    {
+      "test": "test_method_library",
+      "name": "any source accepted",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "        if source not in SOURCES:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_method_library",
+      "name": "source checked after the write",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "        if source not in SOURCES:\n            raise ValueError(f\"source must be one of {SOURCES}, got {source!r}\")\n",
+          "new": ""
+        },
+        {
+          "file": "library.py",
+          "old": "            section.write(f)\n",
+          "new": "            section.write(f)\n        if source not in SOURCES:\n            raise ValueError(f\"source must be one of {SOURCES}, got {source!r}\")\n"
+        }
+      ],
+      "expect": "a rejected method leaves the file as it was"
+    },
+    {
+      "test": "test_method_library",
+      "name": "a library file that does not exist yet is an error",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "        parser.read(self.path, encoding=\"utf-8\")\n",
+          "new": "        with open(self.path, encoding=\"utf-8\") as f:\n            parser.read_file(f)\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_method_library",
+      "name": "task written as JSON",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "            \"task\": method.task,\n",
+          "new": "            \"task\": json.dumps(method.task),\n"
+        },
+        {
+          "file": "library.py",
+          "old": "        section[\"task\"],\n",
+          "new": "        json.loads(section[\"task\"]),\n"
+        }
+      ],
+      "expect": "task and source are plain values that other tools can read"
+    },
+    {
+      "test": "test_method_library",
+      "name": "lists joined with commas, the empty list handled",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "            \"preconditions\": json.dumps(list(method.preconditions)),\n            \"subtasks\": json.dumps(list(method.subtasks)),\n",
+          "new": "            \"preconditions\": \", \".join(method.preconditions),\n            \"subtasks\": \", \".join(method.subtasks),\n"
+        },
+        {
+          "file": "library.py",
+          "old": "        tuple(json.loads(section[\"preconditions\"])),\n        tuple(json.loads(section[\"subtasks\"])),\n",
+          "new": "        tuple(section[\"preconditions\"].split(\", \")) if section[\"preconditions\"] else (),\n        tuple(section[\"subtasks\"].split(\", \")) if section[\"subtasks\"] else (),\n"
+        }
+      ],
+      "expect": "every method reads back exactly as it was added"
+    },
+    {
+      "test": "test_method_library",
+      "name": "duplicates checked only against this object's own adds",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "        if any(entry.method.name == method.name for entry in self.entries()):\n",
+          "new": "        mine = self.__dict__.setdefault(\"_mine\", set())\n        if method.name in mine:\n"
+        },
+        {
+          "file": "library.py",
+          "old": "        with open(self.path, \"a\", encoding=\"utf-8\") as f:\n",
+          "new": "        mine.add(method.name)\n        with open(self.path, \"a\", encoding=\"utf-8\") as f:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_method_library",
+      "name": "names checked for duplicates within one task only",
+      "edits": [
+        {
+          "file": "library.py",
+          "old": "if any(entry.method.name == method.name for entry in self.entries()):",
+          "new": "if any(entry.method.name == method.name and entry.method.task == method.task for entry in self.entries()):"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_evolve",
+      "name": "ranked by fitness only, ties left in pool order",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "        ranked = sorted(set(self.parents) | set(children), key=lambda g: (self.fitness[g], g))\n",
+          "new": "        ranked = sorted(dict.fromkeys(self.parents + children), key=lambda g: self.fitness[g])\n"
+        }
+      ],
+      "expect": "keep the best distinct genomes, ties broken by the genome"
+    },
+    {
+      "test": "test_evolve",
+      "name": "duplicate genomes kept among the parents",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "        ranked = sorted(set(self.parents) | set(children), key=lambda g: (self.fitness[g], g))\n",
+          "new": "        ranked = sorted(self.parents + children, key=lambda g: (self.fitness[g], g))\n"
+        }
+      ],
+      "expect": "evaluations and cache hits so far, generation by generation"
+    },
+    {
+      "test": "test_evolve",
+      "name": "no evaluation cache",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "                if not pool.scored(child):\n",
+          "new": "                if True:\n"
+        }
+      ],
+      "expect": "evaluations and cache hits so far, generation by generation"
+    },
+    {
+      "test": "test_evolve",
+      "name": "one copy of the parent shared by the whole ensemble",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "        for p, parent in enumerate(pool.parents):\n            for m, mutate in enumerate(mutators):\n",
+          "new": "        for p, parent in enumerate(pool.parents):\n            shared = list(parent)\n            for m, mutate in enumerate(mutators):\n"
+        },
+        {
+          "file": "evolve.py",
+          "old": "                child = tuple(mutate(list(parent), mutation_rng(seed, g, p, m)))\n",
+          "new": "                child = tuple(mutate(shared, mutation_rng(seed, g, p, m)))\n"
+        }
+      ],
+      "expect": "keep the best distinct genomes, ties broken by the genome"
+    },
+    {
+      "test": "test_evolve",
+      "name": "cache hits counted against the budget",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "        return self.budget is not None and self.evaluations >= self.budget\n",
+          "new": "        return self.budget is not None and self.evaluations + self.cache_hits >= self.budget\n"
+        }
+      ],
+      "expect": "only evaluator calls count against the budget"
+    },
+    {
+      "test": "test_evolve",
+      "name": "budget checked only between generations",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "                if pool.spent():\n                    break\n",
+          "new": ""
+        }
+      ],
+      "expect": "only evaluator calls count against the budget"
+    },
+    {
+      "test": "test_evolve",
+      "name": "budget off by one",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "        return self.budget is not None and self.evaluations >= self.budget\n",
+          "new": "        return self.budget is not None and self.evaluations > self.budget\n"
+        }
+      ],
+      "expect": "only evaluator calls count against the budget"
+    },
+    {
+      "test": "test_evolve",
+      "name": "cache hits still taken after the budget is spent",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "                if pool.spent():\n                    break\n",
+          "new": ""
+        },
+        {
+          "file": "evolve.py",
+          "old": "                if not pool.scored(child):\n                    pool.record(child, evaluate(list(child)))\n",
+          "new": "                if not pool.scored(child):\n                    if pool.spent():\n                        break\n                    pool.record(child, evaluate(list(child)))\n"
+        }
+      ],
+      "expect": "nothing is mutated once the budget is spent"
+    },
+    {
+      "test": "test_evolve",
+      "name": "target checked after every child",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "                children.append(child)\n",
+          "new": "                children.append(child)\n                if target is not None and pool.fitness[child] <= target:\n                    pool.budget = pool.evaluations\n"
+        }
+      ],
+      "expect": "evaluations and cache hits so far, generation by generation"
+    },
+    {
+      "test": "test_evolve",
+      "name": "target compared with <",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "fitness <= self.target",
+          "new": "fitness < self.target"
+        }
+      ],
+      "expect": "until a generation reaches the target"
+    },
+    {
+      "test": "test_evolve",
+      "name": "the global random generator seeded and handed out",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "    return random.Random(f\"{seed}/{generation}/{parent}/{mutator}\")\n",
+          "new": "    random.seed(f\"{seed}/{generation}/{parent}/{mutator}\")\n    return random\n"
+        }
+      ],
+      "expect": "the search leaves the global random generator alone"
+    },
+    {
+      "test": "test_evolve",
+      "name": "one generator for the whole run",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "    pool = Pool(survivors, budget, target)\n    first = tuple(seed_genome)\n",
+          "new": "    pool = Pool(survivors, budget, target)\n    rng = random.Random(seed)\n    first = tuple(seed_genome)\n"
+        },
+        {
+          "file": "evolve.py",
+          "old": "mutate(list(parent), mutation_rng(seed, g, p, m))",
+          "new": "mutate(list(parent), rng)"
+        }
+      ],
+      "expect": "each mutation draws from the generator the docstring names"
+    },
+    {
+      "test": "test_evolve",
+      "name": "one generator per generation",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "    return random.Random(f\"{seed}/{generation}/{parent}/{mutator}\")\n",
+          "new": "    return random.Random(f\"{seed}/{generation}\")\n"
+        }
+      ],
+      "expect": "each mutation draws from the generator the docstring names"
+    },
+    {
+      "test": "test_evolve",
+      "name": "generations counted from 0 in the generator seed",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "mutation_rng(seed, g, p, m)",
+          "new": "mutation_rng(seed, g - 1, p, m)"
+        }
+      ],
+      "expect": "each mutation draws from the generator the docstring names"
+    },
+    {
+      "test": "test_evolve",
+      "name": "parents ranked from 1 in the generator seed",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "mutation_rng(seed, g, p, m)",
+          "new": "mutation_rng(seed, g, p + 1, m)"
+        }
+      ],
+      "expect": "each mutation draws from the generator the docstring names"
+    },
+    {
+      "test": "test_evolve",
+      "name": "no elitism: the next parents come from the children only",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "        ranked = sorted(set(self.parents) | set(children), key=lambda g: (self.fitness[g], g))\n",
+          "new": "        ranked = sorted(set(children) or set(self.parents), key=lambda g: (self.fitness[g], g))\n"
+        }
+      ],
+      "expect": "each mutation draws from the generator the docstring names"
+    },
+    {
+      "test": "test_evolve",
+      "name": "the target not checked for generation 0",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "        if self.spent() or (self.target is not None and fitness <= self.target):\n",
+          "new": "        if self.spent() or (number > 0 and self.target is not None and fitness <= self.target):\n"
+        }
+      ],
+      "expect": "a seed that already meets the target ends the run"
+    },
+    {
+      "test": "test_evolve",
+      "name": "the seed's evaluation not counted",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "    pool.record(first, evaluate(list(first)))\n",
+          "new": "    pool.fitness[first] = evaluate(list(first))\n"
+        }
+      ],
+      "expect": "evaluations and cache hits so far, generation by generation"
+    },
+    {
+      "test": "test_evolve",
+      "name": "the caller's seed list handed to the first mutators",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "                child = tuple(mutate(list(parent), mutation_rng(seed, g, p, m)))\n",
+          "new": "                handed = seed_genome if g == 1 else list(parent)\n                child = tuple(mutate(handed, mutation_rng(seed, g, p, m)))\n"
+        }
+      ],
+      "expect": "the seed genome is never edited"
+    },
+    {
+      "test": "test_evolve",
+      "name": "generation 0 not reported",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "    history = [pool.close(0, [first])]\n",
+          "new": "    pool.close(0, [first])\n    history = []\n"
+        }
+      ],
+      "expect": "keep the best distinct genomes, ties broken by the genome"
+    },
+    {
+      "test": "test_evolve",
+      "name": "a generation cut short by the budget is dropped",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "        children: list[tuple[int, ...]] = []\n        for p, parent in enumerate(pool.parents):\n",
+          "new": "        children: list[tuple[int, ...]] = []\n        slots = len(pool.parents) * len(mutators)\n        for p, parent in enumerate(pool.parents):\n"
+        },
+        {
+          "file": "evolve.py",
+          "old": "        history.append(pool.close(g, children))\n",
+          "new": "        closed = pool.close(g, children)\n        if len(children) == slots:\n            history.append(closed)\n"
+        }
+      ],
+      "expect": "only evaluator calls count against the budget"
+    },
+    {
+      "test": "test_evolve",
+      "name": "mutators in the outer loop, parents inner",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "        for p, parent in enumerate(pool.parents):\n            for m, mutate in enumerate(mutators):\n",
+          "new": "        for m, mutate in enumerate(mutators):\n            for p, parent in enumerate(pool.parents):\n"
+        }
+      ],
+      "expect": "each parent, best first, goes through every mutator before the next parent"
+    },
+    {
+      "test": "test_evolve",
+      "name": "generation 0 counted in generations",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "    for g in range(1, generations + 1):\n",
+          "new": "    for g in range(1, generations):\n"
+        }
+      ],
+      "expect": "generations counts the generations after the seed"
+    },
+    {
+      "test": "test_evolve",
+      "name": "a target of 0.0 treated as no target",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "(self.target is not None and fitness <= self.target)",
+          "new": "(self.target and fitness <= self.target)"
+        }
+      ],
+      "expect": "until a generation reaches the target"
+    },
+    {
+      "test": "test_evolve",
+      "name": "a child already made this generation skipped instead of scored from the cache",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "                if not pool.scored(child):\n",
+          "new": "                if child in children:\n                    continue\n                if not pool.scored(child):\n"
+        }
+      ],
+      "expect": "evaluations and cache hits so far, generation by generation"
+    },
+    {
+      "test": "test_evolve",
+      "name": "parent and mutator swapped in the generator seed",
+      "edits": [
+        {
+          "file": "evolve.py",
+          "old": "mutation_rng(seed, g, p, m)",
+          "new": "mutation_rng(seed, g, m, p)"
+        }
+      ],
+      "expect": "each mutation draws from the generator the docstring names"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "children evaluated as their mutations finish",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "            for task in tasks:\n                if pool.spent():\n",
+          "new": "            for task in asyncio.as_completed(tasks):\n                if pool.spent():\n"
+        }
+      ],
+      "expect": "the same generations as evolve()"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "a generation's new children evaluated together",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "            for task in tasks:\n                if pool.spent():\n                    break\n                child = tuple(await task)\n                if not pool.scored(child):\n                    pool.record(child, await evaluate(list(child)))\n                children.append(child)\n",
+          "new": "            fresh: list[tuple[int, ...]] = []\n            for task in tasks:\n                if pool.budget is not None and pool.evaluations + len(fresh) >= pool.budget:\n                    break\n                child = tuple(await task)\n                if child in pool.fitness or child in fresh:\n                    pool.cache_hits += 1\n                else:\n                    fresh.append(child)\n                children.append(child)\n            scores = await asyncio.gather(*(evaluate(list(c)) for c in fresh))\n            for c, f in zip(fresh, scores):\n                pool.record(c, f)\n"
+        }
+      ],
+      "expect": "the evaluator scores one child at a time"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "mutations run one after another",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "        tasks = [\n            asyncio.ensure_future(mutate(list(parent), mutation_rng(seed, g, p, m)))\n            for p, parent in enumerate(pool.parents)\n            for m, mutate in enumerate(mutators)\n        ]\n",
+          "new": "        tasks = []\n        for p, parent in enumerate(pool.parents):\n            for m, mutate in enumerate(mutators):\n                done = asyncio.get_running_loop().create_future()\n                done.set_result(await mutate(list(parent), mutation_rng(seed, g, p, m)))\n                tasks.append(done)\n"
+        }
+      ],
+      "expect": "all mutations of a generation run at the same time"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "mutations still running are awaited, not cancelled",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "            for task in tasks:\n                task.cancel()\n",
+          "new": ""
+        }
+      ],
+      "expect": "TimeoutError"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "mutations cancelled but not awaited",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "            await asyncio.gather(*tasks, return_exceptions=True)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a mutation still running when the budget runs out is cancelled"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "mutations left running when the budget runs out",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "            for task in tasks:\n                task.cancel()\n            await asyncio.gather(*tasks, return_exceptions=True)\n",
+          "new": "            pass\n"
+        }
+      ],
+      "expect": "a mutation still running when the budget runs out is cancelled"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "no header line",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "    yield _line(COLUMNS)\n",
+          "new": ""
+        }
+      ],
+      "expect": "the first line is the CSV header"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "fields joined with commas by hand",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "    out = io.StringIO()\n    csv.writer(out).writerow(values)\n    return out.getvalue()\n",
+          "new": "    return \",\".join(str(v) for v in values) + \"\\n\"\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "fitness rounded to two decimals",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "json.dumps(gen.best), gen.fitness,",
+          "new": "json.dumps(gen.best), f\"{gen.fitness:.2f}\","
+        }
+      ],
+      "expect": "the same generations as evolve()"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "lines without a line ending",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "    return out.getvalue()\n",
+          "new": "    return out.getvalue().rstrip(\"\\r\\n\")\n"
+        }
+      ],
+      "expect": "every line ends with a line break"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "every line held back until the run ends",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "    yield _row(pool.close(0, [first]))\n",
+          "new": "    rows = [_row(pool.close(0, [first]))]\n"
+        },
+        {
+          "file": "ensemble.py",
+          "old": "        yield _row(pool.close(g, children))\n",
+          "new": "        rows.append(_row(pool.close(g, children)))\n    for row in rows:\n        yield row\n"
+        }
+      ],
+      "expect": "each generation's line comes out before the next one starts"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "a generation's line held back until the next generation has started",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "    yield _row(pool.close(0, [first]))\n",
+          "new": "    late = _row(pool.close(0, [first]))\n"
+        },
+        {
+          "file": "ensemble.py",
+          "old": "        children: list[tuple[int, ...]] = []\n        try:\n",
+          "new": "        await asyncio.sleep(0)\n        yield late\n        children: list[tuple[int, ...]] = []\n        try:\n"
+        },
+        {
+          "file": "ensemble.py",
+          "old": "        yield _row(pool.close(g, children))\n",
+          "new": "        late = _row(pool.close(g, children))\n    yield late\n"
+        }
+      ],
+      "expect": "each generation's line comes out before the next one starts"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "a generation cut short by the budget is not reported",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "        yield _row(pool.close(g, children))\n",
+          "new": "        closed = _row(pool.close(g, children))\n        if not pool.spent():\n            yield closed\n"
+        }
+      ],
+      "expect": "the one the budget cut short too"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "one generator shared by the concurrent mutations",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "    pool = Pool(survivors, budget, target)\n",
+          "new": "    pool = Pool(survivors, budget, target)\n    shared = random.Random(seed)\n"
+        },
+        {
+          "file": "ensemble.py",
+          "old": "mutate(list(parent), mutation_rng(seed, g, p, m))",
+          "new": "mutate(list(parent), shared)"
+        }
+      ],
+      "expect": "the same generations as evolve()"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "mutations cancelled, then one sleep(0) instead of awaiting them",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "            await asyncio.gather(*tasks, return_exceptions=True)\n",
+          "new": "            await asyncio.sleep(0)\n"
+        }
+      ],
+      "expect": "a mutation still running when the budget runs out is cancelled"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "a generation's mutations all awaited before the first is scored",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "            for task in tasks:\n                if pool.spent():\n",
+          "new": "            await asyncio.gather(*tasks)\n            for task in tasks:\n                if pool.spent():\n"
+        }
+      ],
+      "expect": "TimeoutError"
+    },
+    {
+      "test": "test_stream_generations",
+      "name": "budget checked after awaiting the next mutation",
+      "edits": [
+        {
+          "file": "ensemble.py",
+          "old": "                if pool.spent():\n                    break\n                child = tuple(await task)\n",
+          "new": "                child = tuple(await task)\n                if pool.spent():\n                    break\n"
+        }
+      ],
+      "expect": "TimeoutError"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "the first applicable method recorded, not the one that worked",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "                found = self._expand(task, method.name, method.subtasks, state, depth, failed)\n",
+          "new": "                first = next(m.name for m in self.methods[task] if m.applicable(state))\n                found = self._expand(task, first, method.subtasks, state, depth, failed)\n"
+        }
+      ],
+      "expect": "every compound task records the method that worked for it"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "method choices remembered per task name",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "        return Node(task, method, tuple(children)), state\n",
+          "new": "        self.__dict__.setdefault('_chosen', {})[task] = method\n        return Node(task, method, tuple(children)), state\n"
+        },
+        {
+          "file": "planner.py",
+          "old": "        return None if found is None else found[0]\n",
+          "new": "        chosen = self.__dict__.get('_chosen', {})\n\n        def relabel(node):\n            return Node(node.task, chosen.get(node.task, node.method), tuple(map(relabel, node.children)))\n\n        return None if found is None else relabel(found[0])\n"
+        }
+      ],
+      "expect": "every compound task records the method that worked for it"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "a decomposition from the LLM left unlabeled",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "            found = self._expand(task, LLM, tuple(suggested), state, depth, failed)\n",
+          "new": "            found = self._expand(task, None, tuple(suggested), state, depth, failed)\n"
+        }
+      ],
+      "expect": "a decomposition from the LLM is marked llm"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "a learned decomposition labeled 'learned'",
+      "edits": [
+        {
+          "file": "planner.py",
+          "old": "            found = self._expand(task, LLM, learned, state, depth, failed)\n",
+          "new": "            found = self._expand(task, 'learned', learned, state, depth, failed)\n"
+        }
+      ],
+      "expect": "a learned decomposition is marked llm too"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "the check trusts a method node's children",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "            or tuple(child.task for child in node.children) != method.subtasks\n",
+          "new": ""
+        }
+      ],
+      "expect": "a method's node has exactly the method's subtasks"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "the check skips a method's preconditions",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "            or not method.applicable(current)\n",
+          "new": ""
+        }
+      ],
+      "expect": "the root is checked like any other node"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "the check only replays the operators",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "        if (\n            method is None\n",
+          "new": "        if False and (\n            method is None\n"
+        }
+      ],
+      "expect": "the root is checked like any other node"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "the check applies effects to the caller's state",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    current = frozenset(state)\n",
+          "new": "    current = state\n"
+        },
+        {
+          "file": "tree.py",
+          "old": "            current = frozenset(op.apply(current))\n",
+          "new": "            current.difference_update(op.effects_remove)\n            current.update(op.effects_add)\n"
+        }
+      ],
+      "expect": "the check replays on its own copy of the state"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "paths built with list.index",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "                broken = visit(child, path + (i,))\n",
+          "new": "                broken = visit(child, path + (node.children.index(child),))\n"
+        }
+      ],
+      "expect": "of two identical steps, the second one is the one that fails"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "any name accepted under an llm node",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "                if child.task not in operators and child.task not in methods:\n",
+          "new": "                if False:\n"
+        }
+      ],
+      "expect": "an llm node may only use operators and library tasks"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "methods looked up by name across every task",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "        method = next((m for m in methods.get(node.task, []) if m.name == node.method), None)\n",
+          "new": "        method = next((m for ms in methods.values() for m in ms if m.name == node.method), None)\n"
+        }
+      ],
+      "expect": "a method only decomposes its own task"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "a node without a method skipped",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "        method = next((m for m in methods.get(node.task, []) if m.name == node.method), None)\n",
+          "new": "        if node.method is None:\n            return None\n        method = next((m for m in methods.get(node.task, []) if m.name == node.method), None)\n"
+        }
+      ],
+      "expect": "a compound task needs a decomposition"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "an empty path returned as None",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    return visit(tree, ())\n",
+          "new": "    return visit(tree, ()) or None\n"
+        }
+      ],
+      "expect": "the root is checked like any other node"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "method looked up with next() and no default",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "        method = next((m for m in methods.get(node.task, []) if m.name == node.method), None)\n",
+          "new": "        method = next(m for m in methods.get(node.task, []) if m.name == node.method)\n"
+        }
+      ],
+      "expect": "StopIteration"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "subtrees under an llm node not replayed",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "        if node.method == LLM:\n",
+          "new": "        if node.method == LLM:\n            return None\n"
+        }
+      ],
+      "expect": "of two identical steps, the second one is the one that fails"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "an operator node accepted with a method and children",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "            if node.method is not None or node.children or not op.applicable(current):\n",
+          "new": "            if not op.applicable(current):\n"
+        }
+      ],
+      "expect": "an operator node has no method and no children"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "an llm node's children checked up front and reported on the llm node",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "        if node.method == LLM:\n            for i, child in enumerate(node.children):\n                if child.task not in operators and child.task not in methods:\n                    return path + (i,)\n",
+          "new": "        if node.method == LLM:\n            if any(c.task not in operators and c.task not in methods for c in node.children):\n                return path\n            for i, child in enumerate(node.children):\n"
+        }
+      ],
+      "expect": "an llm node may only use operators and library tasks"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "children compared as a list with the method's tuple of subtasks",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "tuple(child.task for child in node.children) != method.subtasks",
+          "new": "[child.task for child in node.children] != method.subtasks"
+        }
+      ],
+      "expect": "the planner's tree replays"
+    },
+    {
+      "test": "test_task_tree",
+      "name": "every child replayed from its parent's state",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "        for i, child in enumerate(node.children):\n            broken = visit(child, path + (i,))\n            if broken is not None:\n                return broken\n        return None\n\n    return visit(tree, ())",
+          "new": "        saved = current\n        for i, child in enumerate(node.children):\n            current = saved\n            broken = visit(child, path + (i,))\n            if broken is not None:\n                return broken\n        return None\n\n    return visit(tree, ())"
+        }
+      ],
+      "expect": "the planner's tree replays"
+    }
+  ]
+}
