@@ -1,0 +1,156 @@
+{
+  "lesson": "phases/14-agent-engineering/02-rewoo-plan-and-execute",
+  "title": "ReWOO and Plan-and-Execute: Decoupled Planning",
+  "format": "staged-brownfield",
+  "service": "ReWOO: a plan-then-execute runtime whose workers fill #E evidence references into nested tool arguments, with a JSONL dataset of teacher plans for planner distillation, a Plan-and-Execute replanner that patches only the affected subgraph, a streamed text plan executed while it is written, and nested sub-plans flattened into one DAG",
+  "sources": {
+    "docs/en.md": "6415552ddca63102995206c84e95e9b0225b77c0c06ac808f316eb36431bb4df",
+    "code/main.py": "840b29ae5c67841213c752fcfff78da457ac61faf850cb884d09e8b0765bacfe"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_run_plan",
+      "kind": "debug",
+      "lesson_anchor": "The three roles (references like #E1 substituted at dispatch time); Why it is more robust (worker 3 returns an error string, failure localization per node); code/main.py resolve_references, topological, run_workers; quiz Q8 and Q10",
+      "planted_bugs": [
+        "resolve_references returns every non-string value unchanged, so #E references inside lists and dicts reach the tool as text; topological finds them through str(args), so the order is right and only the values are wrong; the largest tool reads '#E4' as 4 and '#E5' as 5 and picks '#E2', and the failure is a wrong solver answer two calls from the root cause, with no exception",
+        "run_workers substitutes a failed step's 'error: ...' text into the steps that use it, although the docstring says those steps are skipped, never call their tool, and get MISSING; skipping has to carry through skipped steps and through nested references",
+        "a reference to a step that is not in the plan (#E9) raises ValueError('cyclic plan') instead of the documented KeyError naming E9",
+        "topological rescans every pending step with str(args) and a regex in every round and releases one step per round: a 3000-step chain given in reverse order is quadratic"
+      ],
+      "timing_assert": "run_workers on a reversed 3000-step chain under 0.1 s: the round-by-round version takes 1.73-1.90 s (median 1.77 s), an indegree queue 4.5-7.9 ms (median 4.7 ms), the reference 5.8-14 ms (median 5.9 ms), measured on this machine under load average about 3; a half fix that caches the references but still rescans in rounds takes about 0.84 s and still fails; an indegree count without a dependents table, which scans every step after each pop, is also quadratic but cheap per step: about 0.2 s, caught with only a twofold margin, so it is not a listed trap",
+      "overfix_guard": "#E1 and #E10 in one string with #E1 mentioned twice (str.replace per id, a one-digit regex, and indegree counted per step but released per mention all fail); the plan is never rewritten (in-place recursive substitution fails); no tool runs before a KeyError (a lazy topological generator fails); cycles and self-references stay ValueError; recursive DFS hits RecursionError on 3000 steps; substitution on json.dumps(args) breaks on evidence with double quotes; an unknown tool rejects the whole plan instead of failing its step (the 'serch' step); references checked against the steps listed before them (E3 uses E4 and E5 further down); a self-reference left out of the waiting count"
+    },
+    {
+      "part": 2,
+      "test": "test_plan_dataset",
+      "kind": "model and persistence",
+      "lesson_anchor": "Planner distillation (the planner does not see observations, so a 7B model can be fine-tuned on planner outputs from a 175B teacher); Exercise 4 (what training data, how to score plan quality); quiz Q5 and Q14",
+      "exactness": "examples read back with the same repr: nested lists and dicts, 1 versus 1.0 versus True, None, argument key order, #E reference text, CJK, an emoji and U+2028 in the question, an integer score; the line layout is pinned and checked on the raw file",
+      "traps": [
+        "file opened with 'w' when the dataset is opened",
+        "a handle kept open without flush, or examples cached when the dataset is opened, so a reader created first sees nothing",
+        "indent=2 records",
+        "ensure_ascii=False written, splitlines() read, so U+2028 cuts a record in two",
+        "sort_keys=True",
+        "steps read back as dicts or as a tuple, score written as float",
+        "dataclasses.asdict layout",
+        "dedupe with == or hash, where 1, 1.0 and True collide",
+        "dedupe key with the answer and score, or with the steps only",
+        "dedupe set kept in memory only",
+        "validation after the write",
+        "NaN passing score < 0 or score > 1, a bool score",
+        "references checked in top-level strings only, repeated step ids",
+        "min_score compared with >",
+        "examples() on a file that does not exist yet",
+        "examples cached on the first call to examples()",
+        "a score of 0 rejected (0 < score), or only floats accepted"
+      ],
+      "clarifying_questions": [
+        "argument key order and duplicates",
+        "a duplicate with a better score",
+        "keeping the file open",
+        "a torn last line",
+        "score 0, 1 and ints",
+        "a question of spaces only"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_replan",
+      "kind": "core algorithm",
+      "lesson_anchor": "Plan-and-Execute (2023): an optional replanner revises after observing results; Exercise 2 (add a replanner that fires on errors); quiz Q6 and Q17 (replan only the remaining plan, reuse evidence, bound the number of replans)",
+      "traps": [
+        "new ids from the largest id string ('E9' > 'E10'), from len(steps) (the planner skipped E3), from the live steps only, or from the planner's original plan in the second round",
+        "#P references left as written, or not rewritten inside lists",
+        "only direct dependents dropped, dependents found in top-level strings only, or downstream computed without earlier patch steps",
+        "the whole live plan run again, or failed live steps run again",
+        "dropped evidence deleted from the run record",
+        "the solver or the replanner shown dropped steps, or the solver shown only successful steps",
+        "the replanner asked max_replans + 1 times, or until it accepts",
+        "a patch allowed to use a step it drops, checked only against earlier drops, or checked step by step while it runs",
+        "an unknown #P reference left as text, replacing a step that is not in the plan, a negative max_replans",
+        "the replanner asked again after it accepts (max_replans=3, accepted on the second review)",
+        "the replanner or the solver handed every step with only the live evidence",
+        "the replanner shown only the steps that succeeded, so it never sees the failure"
+      ],
+      "integration": "patch steps run through Part 1's run_workers with the kept evidence, so Part 1's failure and skip rules apply to them",
+      "clarifying_questions": [
+        "what the replanner and solver see",
+        "rerunning failed steps that were not replaced",
+        "a patch that uses a live failed step",
+        "patch id order",
+        "an empty patch",
+        "failures left when max_replans runs out",
+        "asking the replanner again after it accepts"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_stream_plan",
+      "kind": "streaming",
+      "lesson_anchor": "The three roles: one planner call emits the whole plan, the largest prompt in ReWOO; #E references and dependency order; Why it is more robust (per-node failures)",
+      "wire_format": "raw text records, one per line: '#E<k> = <tool>[<input with references filled in>] -> <evidence>', decided by the test's join/split('\\n')/regex fullmatch",
+      "traps": [
+        "reading the whole plan before running",
+        "parsing each chunk on its own",
+        "a line taken as complete at ']' (the grep input '[0-9.]+ million' ends with ']' halfway)",
+        "a non-greedy bracket match",
+        "a last line without a newline dropped (it is the line every waiting step needs)",
+        "line breaks in the evidence written as they are, or no newline after a record",
+        "waiting steps checked once per line, so the cascade stops and a step is left waiting",
+        "ready steps run by id number instead of line order",
+        "the record showing the input as written",
+        "a step that needs a failed step run anyway, only direct dependents skipped, or the skipped record filled in",
+        "a repeated id not rejected",
+        "steps still waiting at the end dropped silently, all reported as KeyError, all reported as ValueError, or the KeyError naming the waiting step",
+        "a reference to a later line rejected at once",
+        "ready steps found in passes that carry on after each run, so a step on an earlier line that was just freed runs late",
+        "a repeated id caught only when the first one has already run",
+        "line breaks replaced in the evidence but not in an input that has multi-line evidence filled in"
+      ],
+      "clarifying_questions": [
+        "running tools concurrently",
+        "lines and #E split between chunks",
+        "spaces around =",
+        "malformed step lines",
+        "where to look for the next ready step after a run"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_flatten",
+      "kind": "recursive structure",
+      "lesson_anchor": "Plan-and-Act (long-horizon plans past 30-50 steps); Exercise 5 (sequence versus DAG); the plan DAG and #E references; flat plans run on Part 1's workers",
+      "traps": [
+        "sequential str.replace renaming, which renames an imported #E1 twice",
+        "references inside a sub-plan left as written, or only top-level strings renamed",
+        "the output step given a new id",
+        "imports looked up in the top-level plan instead of the enclosing one",
+        "outer names visible without an import",
+        "new ids counted from the number of top-level steps (top-level ids E1, E2, E4)",
+        "nested sub-plans left unexpanded",
+        "arguments rewritten in place",
+        "an import of a missing id passed through, an unknown reference left as written",
+        "output not checked, or an output allowed to name an import",
+        "an import named like a step, repeated ids",
+        "new ids counted from the highest number at any depth (density has a local E8)"
+      ],
+      "clarifying_questions": [
+        "direct access to outer steps",
+        "numbering order for nested sub-plans",
+        "importing an import",
+        "repeated top-level ids"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the error surfaces as a silently wrong answer rather than an exception, because the fake largest tool reads the digits in '#E4'; the failure path includes the lesson quiz's 'serch' typo as an unknown tool. Steps are listed out of dependency order (E3 uses E4 and E5) and E3 mentions #E1 twice through a title argument, so sorting by step number and indegree mistakes also fail. The chain is 3000 steps with a 0.1 s limit after measuring.",
+    "Part 2: besides the round trip, the dataset deduplicates (question, steps) by their JSON text, which is where 1 versus 1.0 versus True matters in practice (Python's == and hash merge them), validates examples before writing, and serves a reader that exists before the first append. A torn last line is left out of scope.",
+    "Part 3: the replanner reviews every run and names the steps it replaces, instead of replanning only on exceptions. With Part 1's rule a failed step's dependents are already skipped, so a failure-only trigger would let candidates read the affected subgraph off the statuses; here the main case is an observation ('no data' with status ok), so the downstream set has to come from the dependency graph through nested references. Patch steps use local ids P1, P2 with #P references, so the patch's own references and references to kept evidence cannot be confused (that confusion is Part 5's topic). Dropped steps stay in the run record; the solver and the replanner see live steps only.",
+    "Part 4: tools take the bracket text as their only argument; the record shows the input with references filled in; line breaks in a record become spaces; failures and skips follow Part 1; reasoning lines are ignored; when several steps are ready the earliest line runs first. The probe pulls 50 lines and allows two to be read before the first record.",
+    "Part 5: imports map a local id to an id of the enclosing plan; the output step takes the sub-plan's id so no forwarding step is needed; numbering continues after the highest top-level step number. The test compares flat plans exactly instead of running them, so it does not depend on Part 1. The tests only use sub-plans where 'number a level first' and 'number in reading order' give the same ids."
+  ]
+}

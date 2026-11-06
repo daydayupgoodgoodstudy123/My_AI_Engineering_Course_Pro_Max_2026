@@ -1,0 +1,1654 @@
+{
+  "package": "rewoo",
+  "tests": [
+    "test_run_plan",
+    "test_plan_dataset",
+    "test_replan",
+    "test_stream_plan",
+    "test_flatten"
+  ],
+  "layers": [
+    {
+      "test": "test_run_plan",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "the solver answers from the evidence of every step"
+        },
+        {
+          "name": "fill in references inside lists and dicts",
+          "edits": [
+            {
+              "file": "workers.py",
+              "old": "    if not isinstance(value, str):\n        return value\n    return REF.sub(",
+              "new": "    if isinstance(value, list):\n        return [resolve_references(item, evidence) for item in value]\n    if isinstance(value, dict):\n        return {key: resolve_references(item, evidence) for key, item in value.items()}\n    if not isinstance(value, str):\n        return value\n    return REF.sub("
+            }
+          ],
+          "expect": "a step that needs a failed step is skipped, and so is everything after it"
+        },
+        {
+          "name": "+ skip a step that needs a failed or skipped step",
+          "edits": [
+            {
+              "file": "workers.py",
+              "old": "from .plan import REF, Evidence, Plan, Step\n",
+              "new": "from .plan import MISSING, REF, Evidence, Plan, Step\n"
+            },
+            {
+              "file": "workers.py",
+              "old": "    for step in topological(plan):\n        args = {",
+              "new": "    for step in topological(plan):\n        if any(evidence[f\"E{r}\"].status != \"ok\" for r in REF.findall(str(step.args))):\n            evidence[step.id] = Evidence(\"skipped\", MISSING)\n            continue\n        args = {"
+            }
+          ],
+          "expect": "ValueError: cyclic plan"
+        },
+        {
+          "name": "+ KeyError for a reference to a step that is not in the plan",
+          "edits": [
+            {
+              "file": "workers.py",
+              "old": "        if not progress:\n            raise ValueError(\"cyclic plan\")\n",
+              "new": "        if not progress:\n            ids = {s.id for s in plan.steps}\n            for s in rest:\n                for r in REF.findall(str(s.args)):\n                    if f\"E{r}\" not in ids:\n                        raise KeyError(f\"E{r}\")\n            raise ValueError(\"cyclic plan\")\n"
+            }
+          ],
+          "expect": "run_workers should be fast on long plans"
+        },
+        {
+          "name": "+ order the steps with an indegree queue",
+          "edits": [
+            {
+              "file": "workers.py",
+              "old": "from typing import Any, Callable\n",
+              "new": "from collections import deque\nfrom typing import Any, Callable\n"
+            },
+            {
+              "file": "workers.py",
+              "old": "    resolved: list[Step] = []\n    known: set[str] = set()\n    pending = list(plan.steps)\n    while pending:\n        progress = False\n        rest: list[Step] = []\n        for step in pending:\n            refs = REF.findall(str(step.args))\n            if all(f\"E{r}\" in known for r in refs):\n                resolved.append(step)\n                known.add(step.id)\n                progress = True\n            else:\n                rest.append(step)\n        if not progress:\n            ids = {s.id for s in plan.steps}\n            for s in rest:\n                for r in REF.findall(str(s.args)):\n                    if f\"E{r}\" not in ids:\n                        raise KeyError(f\"E{r}\")\n            raise ValueError(\"cyclic plan\")\n        pending = rest\n    return resolved\n",
+              "new": "    refs = {step.id: {f\"E{r}\" for r in REF.findall(str(step.args))} for step in plan.steps}\n    dependents: dict[str, list[Step]] = {step.id: [] for step in plan.steps}\n    waiting: dict[str, int] = {}\n    for step in plan.steps:\n        for ref in refs[step.id]:\n            if ref not in dependents:\n                raise KeyError(ref)\n            dependents[ref].append(step)\n        waiting[step.id] = len(refs[step.id])\n    queue = deque(step for step in plan.steps if waiting[step.id] == 0)\n    order: list[Step] = []\n    while queue:\n        step = queue.popleft()\n        order.append(step)\n        for dependent in dependents[step.id]:\n            waiting[dependent.id] -= 1\n            if waiting[dependent.id] == 0:\n                queue.append(dependent)\n    if len(order) < len(plan.steps):\n        raise ValueError(\"cyclic plan\")\n    return order\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_run_plan",
+      "name": "str.replace once per evidence id",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "        return REF.sub(lambda m: evidence[f\"E{m.group(1)}\"].text, value)\n",
+          "new": "        for step_id, ev in evidence.items():\n            value = value.replace(f\"#{step_id}\", ev.text)\n        return value\n"
+        }
+      ],
+      "expect": "#E1 and #E10 are different steps"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "references matched one digit at a time",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "REF = re.compile(r\"#E(\\d+)\")",
+          "new": "REF = re.compile(r\"#E(\\d)\")"
+        }
+      ],
+      "expect": "#E1 and #E10 are different steps"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "references filled in place, inside the plan's own lists and dicts",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "    if isinstance(value, list):\n        return [resolve_references(item, evidence) for item in value]\n    if isinstance(value, dict):\n        return {key: resolve_references(item, evidence) for key, item in value.items()}\n",
+          "new": "    if isinstance(value, list):\n        for i, item in enumerate(value):\n            value[i] = resolve_references(item, evidence)\n        return value\n    if isinstance(value, dict):\n        for key, item in value.items():\n            value[key] = resolve_references(item, evidence)\n        return value\n"
+        }
+      ],
+      "expect": "the plan itself is never rewritten"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "lists recursed into, dicts inside them left alone",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "    if isinstance(value, dict):\n        return {key: resolve_references(item, evidence) for key, item in value.items()}\n",
+          "new": ""
+        },
+        {
+          "file": "workers.py",
+          "old": "            result = tools.call(step.tool, **resolve_references(step.args, seen))\n",
+          "new": "            result = tools.call(step.tool, **{k: resolve_references(v, seen) for k, v in step.args.items()})\n"
+        }
+      ],
+      "expect": "the solver answers from the evidence of every step"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "every value turned into a string on the way",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "        return {key: resolve_references(item, evidence) for key, item in value.items()}\n    return value\n",
+          "new": "        return {key: resolve_references(item, evidence) for key, item in value.items()}\n    return str(value)\n"
+        }
+      ],
+      "expect": "the solver answers from the evidence of every step"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "only a step that needs a failed step is skipped",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "        if any(seen[ref].status != \"ok\" for ref in references(step.args)):\n",
+          "new": "        if any(seen[ref].status == \"failed\" for ref in references(step.args)):\n"
+        }
+      ],
+      "expect": "a step that needs a failed step is skipped, and so is everything after it"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "failure read from the evidence text",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "        if any(seen[ref].status != \"ok\" for ref in references(step.args)):\n",
+          "new": "        if any(seen[ref].text.startswith(\"error:\") for ref in references(step.args)):\n"
+        }
+      ],
+      "expect": "a step that needs a failed step is skipped, and so is everything after it"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "a skipped step gets empty evidence",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "            result = Evidence(\"skipped\", MISSING)\n",
+          "new": "            result = Evidence(\"skipped\", \"\")\n"
+        }
+      ],
+      "expect": "a step that needs a failed step is skipped, and so is everything after it"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "steps run in the order of their numbers",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "    return order\n",
+          "new": "    return sorted(order, key=lambda step: int(step.id[1:]))\n"
+        }
+      ],
+      "expect": "KeyError: 'E4'"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "steps start while the plan is still being checked",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "            elif ref not in known:\n                raise KeyError(f\"step {step.id} refers to {ref}, which is not in the plan\")\n",
+          "new": "            elif ref not in known:\n                waiting[i] += 1\n"
+        },
+        {
+          "file": "workers.py",
+          "old": "        order.append(step)\n",
+          "new": "        order.append(step)\n        yield step\n"
+        },
+        {
+          "file": "workers.py",
+          "old": "    if len(order) < len(steps):\n        stuck = [step.id for i, step in enumerate(steps) if waiting[i]]\n        raise ValueError(f\"cyclic plan: {', '.join(stuck)} wait on each other\")\n    return order\n",
+          "new": "    if len(order) < len(steps):\n        for step in steps:\n            for ref in references(step.args):\n                if ref not in position and ref not in known:\n                    raise KeyError(f\"step {step.id} refers to {ref}, which is not in the plan\")\n        stuck = [step.id for i, step in enumerate(steps) if waiting[i]]\n        raise ValueError(f\"cyclic plan: {', '.join(stuck)} wait on each other\")\n"
+        }
+      ],
+      "expect": "a plan that cannot run calls no tool"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "a cycle reported as a KeyError too",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "        raise ValueError(f\"cyclic plan: {', '.join(stuck)} wait on each other\")\n",
+          "new": "        raise KeyError(f\"cyclic plan: {', '.join(stuck)} wait on each other\")\n"
+        }
+      ],
+      "expect": "KeyError: 'cyclic plan"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "recursive depth-first ordering",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "def topological(plan: Plan, known: Iterable[str] = ()) -> list[Step]:\n    \"\"\"Order the steps so that every step comes after the steps it references.\n\n    A reference to a step that is not in the plan raises KeyError naming the missing step;\n    a cycle raises ValueError. known names steps outside the plan that already have evidence.\n    \"\"\"\n    steps = plan.steps\n    known = set(known)\n    position: dict[str, int] = {}\n    for i, step in enumerate(steps):\n        if step.id in position:\n            raise ValueError(f\"step id {step.id} is used twice\")\n        position[step.id] = i\n    waiting = [0] * len(steps)\n    dependents: dict[str, list[int]] = {}\n    for i, step in enumerate(steps):\n        for ref in references(step.args):\n            if ref in position:\n                waiting[i] += 1\n                dependents.setdefault(ref, []).append(i)\n            elif ref not in known:\n                raise KeyError(f\"step {step.id} refers to {ref}, which is not in the plan\")\n    ready = [i for i, count in enumerate(waiting) if count == 0]\n    heapq.heapify(ready)  # among ready steps, the planner's order wins\n    order: list[Step] = []\n    while ready:\n        step = steps[heapq.heappop(ready)]\n        order.append(step)\n        for j in dependents.get(step.id, ()):\n            waiting[j] -= 1\n            if waiting[j] == 0:\n                heapq.heappush(ready, j)\n    if len(order) < len(steps):\n        stuck = [step.id for i, step in enumerate(steps) if waiting[i]]\n        raise ValueError(f\"cyclic plan: {', '.join(stuck)} wait on each other\")\n    return order",
+          "new": "def topological(plan: Plan, known: Iterable[str] = ()) -> list[Step]:\n    known = set(known)\n    by_id = {step.id: step for step in plan.steps}\n    state: dict[str, str] = {}\n    order: list[Step] = []\n\n    def visit(step: Step) -> None:\n        if state.get(step.id) == \"done\":\n            return\n        if state.get(step.id) == \"active\":\n            raise ValueError(f\"cyclic plan at {step.id}\")\n        state[step.id] = \"active\"\n        for ref in references(step.args):\n            if ref in by_id:\n                visit(by_id[ref])\n            elif ref not in known:\n                raise KeyError(f\"step {step.id} refers to {ref}, which is not in the plan\")\n        state[step.id] = \"done\"\n        order.append(step)\n\n    for step in plan.steps:\n        visit(step)\n    return order"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "references found once, steps still rescanned round after round",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "def topological(plan: Plan, known: Iterable[str] = ()) -> list[Step]:\n    \"\"\"Order the steps so that every step comes after the steps it references.\n\n    A reference to a step that is not in the plan raises KeyError naming the missing step;\n    a cycle raises ValueError. known names steps outside the plan that already have evidence.\n    \"\"\"\n    steps = plan.steps\n    known = set(known)\n    position: dict[str, int] = {}\n    for i, step in enumerate(steps):\n        if step.id in position:\n            raise ValueError(f\"step id {step.id} is used twice\")\n        position[step.id] = i\n    waiting = [0] * len(steps)\n    dependents: dict[str, list[int]] = {}\n    for i, step in enumerate(steps):\n        for ref in references(step.args):\n            if ref in position:\n                waiting[i] += 1\n                dependents.setdefault(ref, []).append(i)\n            elif ref not in known:\n                raise KeyError(f\"step {step.id} refers to {ref}, which is not in the plan\")\n    ready = [i for i, count in enumerate(waiting) if count == 0]\n    heapq.heapify(ready)  # among ready steps, the planner's order wins\n    order: list[Step] = []\n    while ready:\n        step = steps[heapq.heappop(ready)]\n        order.append(step)\n        for j in dependents.get(step.id, ()):\n            waiting[j] -= 1\n            if waiting[j] == 0:\n                heapq.heappush(ready, j)\n    if len(order) < len(steps):\n        stuck = [step.id for i, step in enumerate(steps) if waiting[i]]\n        raise ValueError(f\"cyclic plan: {', '.join(stuck)} wait on each other\")\n    return order",
+          "new": "def topological(plan: Plan, known: Iterable[str] = ()) -> list[Step]:\n    done = set(known)\n    ids = {step.id for step in plan.steps}\n    refs = {step.id: references(step.args) for step in plan.steps}\n    for step in plan.steps:\n        for ref in refs[step.id]:\n            if ref not in ids and ref not in done:\n                raise KeyError(f\"step {step.id} refers to {ref}, which is not in the plan\")\n    order: list[Step] = []\n    pending = list(plan.steps)\n    while pending:\n        rest = []\n        for step in pending:\n            if all(ref in done for ref in refs[step.id]):\n                order.append(step)\n                done.add(step.id)\n            else:\n                rest.append(step)\n        if len(rest) == len(pending):\n            raise ValueError(\"cyclic plan\")\n        pending = rest\n    return order"
+        }
+      ],
+      "expect": "run_workers should be fast on long plans"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "the skip check reads top-level strings only",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "        if any(seen[ref].status != \"ok\" for ref in references(step.args)):\n",
+          "new": "        if any(seen[ref].status != \"ok\" for ref in references([v for v in step.args.values() if isinstance(v, str)])):\n"
+        }
+      ],
+      "expect": "a step that needs a failed step is skipped, and so is everything after it"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "a KeyError that does not name the step",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "                raise KeyError(f\"step {step.id} refers to {ref}, which is not in the plan\")\n",
+          "new": "                raise KeyError(\"a reference points outside the plan\")\n"
+        }
+      ],
+      "expect": "Regex pattern did not match"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "the tool called first, the evidence then marked skipped",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "        if any(seen[ref].status != \"ok\" for ref in references(step.args)):\n            result = Evidence(\"skipped\", MISSING)\n        else:\n            result = tools.call(step.tool, **resolve_references(step.args, seen))\n",
+          "new": "        result = tools.call(step.tool, **resolve_references(step.args, seen))\n        if any(seen[ref].status != \"ok\" for ref in references(step.args)):\n            result = Evidence(\"skipped\", MISSING)\n"
+        }
+      ],
+      "expect": "a skipped step never calls its tool"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "waiting counted once per step, released once per mention",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "        for ref in references(step.args):\n            if ref in position:\n                waiting[i] += 1\n                dependents.setdefault(ref, []).append(i)\n            elif ref not in known:\n                raise KeyError(f\"step {step.id} refers to {ref}, which is not in the plan\")\n",
+          "new": "        for ref in references(step.args):\n            if ref in position:\n                waiting[i] += 1\n            elif ref not in known:\n                raise KeyError(f\"step {step.id} refers to {ref}, which is not in the plan\")\n        for digits in REF.findall(str(step.args)):\n            if f\"E{digits}\" in position:\n                dependents.setdefault(f\"E{digits}\", []).append(i)\n"
+        }
+      ],
+      "expect": "KeyError: 'E4'"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "a cycle leaves its steps out instead of raising",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "    if len(order) < len(steps):\n        stuck = [step.id for i, step in enumerate(steps) if waiting[i]]\n        raise ValueError(f\"cyclic plan: {', '.join(stuck)} wait on each other\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "references filled in on the JSON text of the arguments",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "import heapq\n",
+          "new": "import heapq\nimport json\n"
+        },
+        {
+          "file": "workers.py",
+          "old": "            result = tools.call(step.tool, **resolve_references(step.args, seen))\n",
+          "new": "            text = REF.sub(lambda m: seen[f\"E{m.group(1)}\"].text, json.dumps(step.args))\n            result = tools.call(step.tool, **json.loads(text))\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "an unknown tool rejected before the plan runs",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "    for step in topological(plan, seen):\n",
+          "new": "    for step in plan.steps:\n        if step.tool not in tools._tools:\n            raise ValueError(f\"unknown tool {step.tool!r}\")\n    for step in topological(plan, seen):\n"
+        }
+      ],
+      "expect": "ValueError: unknown tool 'serch'"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "a reference to a step further down the list rejected",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "        for ref in references(step.args):\n            if ref in position:\n                waiting[i] += 1\n",
+          "new": "        for ref in references(step.args):\n            if ref in position and position[ref] > i:\n                raise KeyError(f\"step {step.id} refers to {ref}, which is not in the plan\")\n            if ref in position:\n                waiting[i] += 1\n"
+        }
+      ],
+      "expect": "step E3 refers to E4"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "a step that refers to itself not counted as waiting",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "        for ref in references(step.args):\n            if ref in position:\n                waiting[i] += 1\n",
+          "new": "        for ref in references(step.args):\n            if ref == step.id:\n                continue\n            if ref in position:\n                waiting[i] += 1\n"
+        }
+      ],
+      "expect": "KeyError: 'E1'"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "a failed step's error text replaced by MISSING",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "            result = tools.call(step.tool, **resolve_references(step.args, seen))\n",
+          "new": "            result = tools.call(step.tool, **resolve_references(step.args, seen))\n            if result.status == \"failed\":\n                result = Evidence(\"failed\", MISSING)\n"
+        }
+      ],
+      "expect": "a step that needs a failed step is skipped, and so is everything after it"
+    },
+    {
+      "test": "test_run_plan",
+      "name": "a skipped step marked failed",
+      "edits": [
+        {
+          "file": "workers.py",
+          "old": "            result = Evidence(\"skipped\", MISSING)\n",
+          "new": "            result = Evidence(\"failed\", MISSING)\n"
+        }
+      ],
+      "expect": "a step that needs a failed step is skipped, and so is everything after it"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "file opened for writing when the dataset is opened",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "        self._keys: set[str] | None = None\n",
+          "new": "        self._keys: set[str] | None = None\n        self._file = self.path.open(\"w\", encoding=\"utf-8\")\n"
+        },
+        {
+          "file": "dataset.py",
+          "old": "        with self.path.open(\"a\", encoding=\"utf-8\") as f:\n            f.write(json.dumps(record) + \"\\n\")\n",
+          "new": "        self._file.write(json.dumps(record) + \"\\n\")\n        self._file.flush()\n"
+        }
+      ],
+      "expect": "opening the file again keeps every example in it"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "one handle kept open, never flushed",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "        self._keys: set[str] | None = None\n",
+          "new": "        self._keys: set[str] | None = None\n        self._file = self.path.open(\"a\", encoding=\"utf-8\")\n"
+        },
+        {
+          "file": "dataset.py",
+          "old": "        with self.path.open(\"a\", encoding=\"utf-8\") as f:\n            f.write(json.dumps(record) + \"\\n\")\n",
+          "new": "        self._file.write(json.dumps(record) + \"\\n\")\n"
+        }
+      ],
+      "expect": "a trainer sees every example while the teacher job is still writing"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "pretty-printed records",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "f.write(json.dumps(record) + \"\\n\")",
+          "new": "f.write(json.dumps(record, indent=2) + \"\\n\")"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "non-ASCII written as is, lines split with splitlines()",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "f.write(json.dumps(record) + \"\\n\")",
+          "new": "f.write(json.dumps(record, ensure_ascii=False) + \"\\n\")"
+        },
+        {
+          "file": "dataset.py",
+          "old": "        with self.path.open(encoding=\"utf-8\") as f:\n            return [json.loads(line) for line in f if line.strip()]\n",
+          "new": "        text = self.path.read_text(encoding=\"utf-8\")\n        return [json.loads(line) for line in text.splitlines() if line.strip()]\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "keys sorted when written",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "f.write(json.dumps(record) + \"\\n\")",
+          "new": "f.write(json.dumps(record, sort_keys=True) + \"\\n\")"
+        }
+      ],
+      "expect": "every field reads back exactly as it was appended"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "steps read back as plain dicts",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "    steps = [Step(s[\"id\"], s[\"tool\"], s[\"args\"]) for s in record[\"steps\"]]\n",
+          "new": "    steps = record[\"steps\"]\n"
+        }
+      ],
+      "expect": "every field reads back exactly as it was appended"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "steps read back as a tuple",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "    return Example(record[\"question\"], Plan(steps),",
+          "new": "    return Example(record[\"question\"], Plan(tuple(steps)),"
+        }
+      ],
+      "expect": "every field reads back exactly as it was appended"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "score written as a float",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "        \"score\": example.score,\n",
+          "new": "        \"score\": float(example.score),\n"
+        }
+      ],
+      "expect": "every field reads back exactly as it was appended"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "duplicates found with ==",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "        key = _key(record)\n        if self._keys is None:\n            self._keys = {_key(stored) for stored in self._read()}\n        if key in self._keys:\n            return False\n",
+          "new": "        if any(old.question == example.question and old.plan == example.plan for old in self.examples()):\n            return False\n"
+        },
+        {
+          "file": "dataset.py",
+          "old": "        self._keys.add(key)\n",
+          "new": ""
+        }
+      ],
+      "expect": "1, 1.0 and True make different plans"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "a duplicate is the same question",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "    return json.dumps([record[\"question\"], record[\"steps\"]])\n",
+          "new": "    return record[\"question\"]\n"
+        }
+      ],
+      "expect": "1, 1.0 and True make different plans"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "duplicates remembered in memory only",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "            self._keys = {_key(stored) for stored in self._read()}\n",
+          "new": "            self._keys = set()\n"
+        }
+      ],
+      "expect": "a reopened dataset still knows what it holds"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "example checked after it is written",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "        _check(example)\n        record = _record(example)\n",
+          "new": "        record = _record(example)\n"
+        },
+        {
+          "file": "dataset.py",
+          "old": "        self._keys.add(key)\n",
+          "new": "        _check(example)\n        self._keys.add(key)\n"
+        }
+      ],
+      "expect": "a rejected example writes nothing"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "score range checked with < and >, so NaN passes",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "or not 0 <= score <= 1:",
+          "new": "or score < 0 or score > 1:"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "a bool accepted as a score",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "    if isinstance(score, bool) or not isinstance(score, (int, float))",
+          "new": "    if not isinstance(score, (int, float))"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "references checked in top-level strings only",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "        for ref in references(step.args):\n",
+          "new": "        for ref in references([v for v in step.args.values() if isinstance(v, str)]):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "repeated step ids accepted",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "    if len(set(ids)) != len(ids):\n        raise ValueError(f\"step ids repeat: {ids}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "min_score compared with >",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "if ex.score >= min_score]",
+          "new": "if ex.score > min_score]"
+        }
+      ],
+      "expect": "examples(min_score) keeps the examples scored at least min_score"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "examples() before the first append",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "        if not self.path.exists():\n            return []\n",
+          "new": ""
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "a duplicate is the same question, steps, answer and score",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "    return json.dumps([record[\"question\"], record[\"steps\"]])\n",
+          "new": "    return json.dumps(record)\n"
+        }
+      ],
+      "expect": "the same plan for the same question is stored once"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "a duplicate is the same steps",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "    return json.dumps([record[\"question\"], record[\"steps\"]])\n",
+          "new": "    return json.dumps(record[\"steps\"])\n"
+        }
+      ],
+      "expect": "the same plan for another question is a new example"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "examples read once, when the dataset is opened",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "        self._keys: set[str] | None = None\n",
+          "new": "        self._keys: set[str] | None = None\n        self._loaded = self._read()\n"
+        },
+        {
+          "file": "dataset.py",
+          "old": "        return [ex for ex in map(_example, self._read()) if ex.score >= min_score]\n",
+          "new": "        return [ex for ex in map(_example, self._loaded) if ex.score >= min_score]\n"
+        },
+        {
+          "file": "dataset.py",
+          "old": "        self._keys.add(key)\n",
+          "new": "        self._keys.add(key)\n        self._loaded.append(record)\n"
+        }
+      ],
+      "expect": "a trainer sees every example while the teacher job is still writing"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "records laid out by dataclasses.asdict",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "import json\n",
+          "new": "import dataclasses\nimport json\n"
+        },
+        {
+          "file": "dataset.py",
+          "old": "    return {\n        \"question\": example.question,\n        \"steps\": [{\"id\": s.id, \"tool\": s.tool, \"args\": s.args} for s in example.plan.steps],\n        \"answer\": example.answer,\n        \"score\": example.score,\n    }\n",
+          "new": "    return dataclasses.asdict(example)\n"
+        },
+        {
+          "file": "dataset.py",
+          "old": "    return json.dumps([record[\"question\"], record[\"steps\"]])\n",
+          "new": "    return json.dumps([record[\"question\"], record[\"plan\"]])\n"
+        },
+        {
+          "file": "dataset.py",
+          "old": "    steps = [Step(s[\"id\"], s[\"tool\"], s[\"args\"]) for s in record[\"steps\"]]\n",
+          "new": "    steps = [Step(**s) for s in record[\"plan\"][\"steps\"]]\n"
+        }
+      ],
+      "expect": "KeyError: 'steps'"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "examples read once, on the first call",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "        return [ex for ex in map(_example, self._read()) if ex.score >= min_score]\n",
+          "new": "        if not hasattr(self, \"_cache\"):\n            self._cache = self._read()\n        return [ex for ex in map(_example, self._cache) if ex.score >= min_score]\n"
+        }
+      ],
+      "expect": "a trainer sees every example while the teacher job is still writing"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "a score of 0 rejected",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "or not 0 <= score <= 1:",
+          "new": "or not 0 < score <= 1:"
+        }
+      ],
+      "expect": "from 0 to 1, got 0"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "an empty plan accepted",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "    if not steps:\n        raise ValueError(\"an example needs at least one step\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "only a float accepted as a score",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "not isinstance(score, (int, float))",
+          "new": "not isinstance(score, float)"
+        }
+      ],
+      "expect": "from 0 to 1, got 1"
+    },
+    {
+      "test": "test_plan_dataset",
+      "name": "the file split on newlines, the empty piece after the last line parsed",
+      "edits": [
+        {
+          "file": "dataset.py",
+          "old": "        with self.path.open(encoding=\"utf-8\") as f:\n            return [json.loads(line) for line in f if line.strip()]\n",
+          "new": "        return [json.loads(line) for line in self.path.read_text(encoding=\"utf-8\").split(\"\\n\")]\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_replan",
+      "name": "new ids after the largest id string",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "    first = max((number(step.id) for step in steps), default=0) + 1\n",
+          "new": "    first = number(max(step.id for step in steps)) + 1\n"
+        }
+      ],
+      "expect": "patch steps are numbered after the highest step number in the plan"
+    },
+    {
+      "test": "test_replan",
+      "name": "new ids after the number of steps",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "    first = max((number(step.id) for step in steps), default=0) + 1\n",
+          "new": "    first = len(steps) + 1\n"
+        }
+      ],
+      "expect": "a new id never takes the number of a step that already exists"
+    },
+    {
+      "test": "test_replan",
+      "name": "new ids after the highest live step",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "    first = max((number(step.id) for step in steps), default=0) + 1\n",
+          "new": "    first = max((number(step.id) for step in steps if step.id not in gone), default=0) + 1\n"
+        }
+      ],
+      "expect": "patch steps are numbered after the highest step number in the plan"
+    },
+    {
+      "test": "test_replan",
+      "name": "each patch checked and numbered against the planner's plan",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "        added = _apply(patch, steps, dropped)\n",
+          "new": "        added = _apply(patch, list(plan.steps), dropped)\n"
+        }
+      ],
+      "expect": "a new id never takes the number of a step that already exists"
+    },
+    {
+      "test": "test_replan",
+      "name": "#P references left as the replanner wrote them",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "        added.append(Step(renamed[step.id], step.tool, _rename(step.args, renamed)))\n",
+          "new": "        added.append(Step(renamed[step.id], step.tool, step.args))\n"
+        }
+      ],
+      "expect": "references between patch steps follow the new numbers"
+    },
+    {
+      "test": "test_replan",
+      "name": "only direct dependents dropped",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "    found = set(roots)\n    todo = list(roots)\n    while todo:\n        for step_id in dependents.get(todo.pop(), ()):\n            if step_id not in found:\n                found.add(step_id)\n                todo.append(step_id)\n    return found\n",
+          "new": "    found = set(roots)\n    for root in roots:\n        found.update(dependents.get(root, ()))\n    return found\n"
+        }
+      ],
+      "expect": "a replaced step and every step downstream of it are dropped"
+    },
+    {
+      "test": "test_replan",
+      "name": "dependents found in top-level strings only",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "    for step in steps:\n        for ref in references(step.args):\n            dependents",
+          "new": "    for step in steps:\n        for ref in references([v for v in step.args.values() if isinstance(v, str)]):\n            dependents"
+        }
+      ],
+      "expect": "a replaced step and every step downstream of it are dropped"
+    },
+    {
+      "test": "test_replan",
+      "name": "the whole live plan runs again after a patch",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "        evidence.update(run_workers(Plan(added), tools, known=kept))\n",
+          "new": "        evidence.update(run_workers(Plan([s for s in steps + added if s.id not in dropped]), tools))\n"
+        }
+      ],
+      "expect": "kept steps never run again"
+    },
+    {
+      "test": "test_replan",
+      "name": "dropped evidence deleted from the run",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "        added = _apply(patch, steps, dropped)\n",
+          "new": "        added = _apply(patch, steps, dropped)\n        for step_id in dropped:\n            evidence.pop(step_id, None)\n"
+        }
+      ],
+      "expect": "KeyError: 'E4'"
+    },
+    {
+      "test": "test_replan",
+      "name": "the solver sees every step, dropped ones included",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "    answer = solver.solve(question, Plan(live), {s.id: evidence[s.id] for s in live})\n",
+          "new": "    answer = solver.solve(question, Plan(steps), dict(evidence))\n"
+        }
+      ],
+      "expect": "the solver never sees dropped evidence"
+    },
+    {
+      "test": "test_replan",
+      "name": "the replanner reviews every step, dropped ones included",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "        patch = replanner.review(question, Plan(live), {s.id: evidence[s.id] for s in live})\n",
+          "new": "        patch = replanner.review(question, Plan(steps), dict(evidence))\n"
+        }
+      ],
+      "expect": "the replanner reviews the live steps"
+    },
+    {
+      "test": "test_replan",
+      "name": "the replanner asked once more after the last patch",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "    for _ in range(max_replans):\n",
+          "new": "    for _ in range(max_replans + 1):\n"
+        }
+      ],
+      "expect": "the replanner was asked for more patches than max_replans allows"
+    },
+    {
+      "test": "test_replan",
+      "name": "replan until the replanner accepts",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "    for _ in range(max_replans):\n",
+          "new": "    while True:\n"
+        }
+      ],
+      "expect": "the replanner was asked for more patches than max_replans allows"
+    },
+    {
+      "test": "test_replan",
+      "name": "a patch may use the steps it drops",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "            if ref in gone:\n                raise ValueError(f\"patch step {step.id} refers to {ref}, which the patch drops\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "refers to E9, which is not in the plan"
+    },
+    {
+      "test": "test_replan",
+      "name": "a patch checked against earlier drops only",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "            if ref in gone:\n",
+          "new": "            if ref in dropped:\n"
+        }
+      ],
+      "expect": "refers to E9, which is not in the plan"
+    },
+    {
+      "test": "test_replan",
+      "name": "each patch step checked just before it runs",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "            if ref in gone:\n                raise ValueError(f\"patch step {step.id} refers to {ref}, which the patch drops\")\n",
+          "new": ""
+        },
+        {
+          "file": "replan.py",
+          "old": "        evidence.update(run_workers(Plan(added), tools, known=kept))\n",
+          "new": "        for step in added:\n            for ref in references(step.args):\n                if ref in dropped:\n                    raise ValueError(f\"patch step {step.id} refers to {ref}, which the patch drops\")\n            evidence.update(run_workers(Plan([step]), tools, known={**kept, **{s.id: evidence[s.id] for s in added if s.id in evidence}}))\n"
+        }
+      ],
+      "expect": "a rejected patch runs nothing"
+    },
+    {
+      "test": "test_replan",
+      "name": "an unknown #P reference left as text",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "            if local not in renamed:\n                raise KeyError(f\"#{local} is not a step of the patch\")\n",
+          "new": "            if local not in renamed:\n                return match.group(0)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_replan",
+      "name": "replacing a step that is not in the plan",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "        if step_id not in ids:\n            raise KeyError(f\"the patch replaces {step_id}, which is not in the plan\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_replan",
+      "name": "failed live steps run again after each patch",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "        evidence.update(run_workers(Plan(added), tools, known=kept))\n",
+          "new": "        evidence.update(run_workers(Plan(added), tools, known=kept))\n        retry = [s for s in steps + added if s.id not in dropped and evidence[s.id].status == \"failed\"]\n        if retry:\n            again = {s.id for s in retry}\n            rest = {k: v for k, v in evidence.items() if k not in dropped and k not in again}\n            evidence.update(run_workers(Plan(retry), tools, known=rest))\n"
+        }
+      ],
+      "expect": "every step that runs, runs once"
+    },
+    {
+      "test": "test_replan",
+      "name": "the solver sees the steps that succeeded only",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "    answer = solver.solve(question, Plan(live), {s.id: evidence[s.id] for s in live})\n",
+          "new": "    answer = solver.solve(question, Plan(live), {s.id: evidence[s.id] for s in live if evidence[s.id].status == \"ok\"})\n"
+        }
+      ],
+      "expect": "the solver answers from each live step with its evidence"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "the whole plan read before any step runs",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for chunk in chunks:\n        buffer += chunk\n        *lines, buffer = buffer.split(\"\\n\")\n",
+          "new": "    text = \"\".join([chunk async for chunk in chunks])\n    for chunk in [text]:\n        buffer += chunk\n        *lines, buffer = buffer.split(\"\\n\")\n"
+        }
+      ],
+      "expect": "a step runs as soon as its line is complete, while the planner is still writing"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "every chunk parsed on its own",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        buffer += chunk\n        *lines, buffer = buffer.split(\"\\n\")\n",
+          "new": "        *lines, buffer = chunk.split(\"\\n\")\n"
+        }
+      ],
+      "expect": "the same records however the plan is cut into chunks"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "a line taken as complete at its closing bracket",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        *lines, buffer = buffer.split(\"\\n\")\n",
+          "new": "        *lines, buffer = buffer.split(\"\\n\")\n        if buffer.rstrip().endswith(\"]\"):\n            lines.append(buffer)\n            buffer = \"\"\n"
+        }
+      ],
+      "expect": "the same records however the plan is cut into chunks"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "input taken up to the first ]",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        match = STEP_LINE.fullmatch(line.strip())\n",
+          "new": "        match = re.match(r\"#(E\\d+)\\s*=\\s*([A-Za-z_]\\w*)\\[(.*?)\\]\", line.strip())\n"
+        }
+      ],
+      "expect": "the same records however the plan is cut into chunks"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "a last line without a newline dropped",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    for record in runner.accept(buffer):\n        yield record\n",
+          "new": ""
+        }
+      ],
+      "expect": "which the plan never wrote"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "line breaks in the evidence written as they are",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    return f\"#{step_id} = {tool}[{LINE_BREAK.sub(' ', given)}] -> {LINE_BREAK.sub(' ', result)}\\n\"\n",
+          "new": "    return f\"#{step_id} = {tool}[{given}] -> {result}\\n\"\n"
+        }
+      ],
+      "expect": "one record per line"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "records written without a newline",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "{LINE_BREAK.sub(' ', result)}\\n\"\n",
+          "new": "{LINE_BREAK.sub(' ', result)}\"\n"
+        }
+      ],
+      "expect": "every record ends with a newline"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "waiting steps checked once per line",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        records = []\n        while True:\n            for i, (step_id, tool, given, refs) in enumerate(self.waiting):\n                if all(ref in self.evidence for ref in refs):\n                    del self.waiting[i]\n                    records.append(self._run(step_id, tool, given, refs))\n                    break\n            else:\n                return records\n",
+          "new": "        records = []\n        for entry in list(self.waiting):\n            if all(ref in self.evidence for ref in entry[3]):\n                self.waiting.remove(entry)\n                records.append(self._run(*entry))\n        return records\n"
+        }
+      ],
+      "expect": "steps wait on each other"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "ready steps run in the order of their numbers",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        records = []\n        while True:\n            for i, (step_id, tool, given, refs) in enumerate(self.waiting):\n                if all(ref in self.evidence for ref in refs):\n                    del self.waiting[i]\n                    records.append(self._run(step_id, tool, given, refs))\n                    break\n            else:\n                return records\n",
+          "new": "        records = []\n        while True:\n            ready = [w for w in self.waiting if all(ref in self.evidence for ref in w[3])]\n            if not ready:\n                return records\n            entry = min(ready, key=lambda w: int(w[0][1:]))\n            self.waiting.remove(entry)\n            records.append(self._run(*entry))\n"
+        }
+      ],
+      "expect": "the same records however the plan is cut into chunks"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "the record shows the input as the planner wrote it",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        return _record(step_id, tool, filled, result.text)\n",
+          "new": "        return _record(step_id, tool, given, result.text)\n"
+        }
+      ],
+      "expect": "the same records however the plan is cut into chunks"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "a step that needs a failed step runs anyway",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if any(self.evidence[ref].status != \"ok\" for ref in refs):\n            self.evidence[step_id] = Evidence(\"skipped\", MISSING)\n            return _record(step_id, tool, given, \"skipped\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a failed step reports its error, and the steps that need it are skipped"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "only a step that needs a failed step is skipped",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if any(self.evidence[ref].status != \"ok\" for ref in refs):\n",
+          "new": "        if any(self.evidence[ref].status == \"failed\" for ref in refs):\n"
+        }
+      ],
+      "expect": "a failed step reports its error, and the steps that need it are skipped"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "a skipped record shows the failed evidence filled in",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            return _record(step_id, tool, given, \"skipped\")\n",
+          "new": "            filled = REF.sub(lambda m: self.evidence[f\"E{m.group(1)}\"].text, given)\n            return _record(step_id, tool, filled, \"skipped\")\n"
+        }
+      ],
+      "expect": "a failed step reports its error, and the steps that need it are skipped"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "a repeated id runs again",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if step_id in self.written:\n            raise ValueError(f\"the plan writes {step_id} twice\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "steps still waiting at the end dropped silently",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    for record in runner.accept(buffer):\n        yield record\n    runner.finish()\n",
+          "new": "    for record in runner.accept(buffer):\n        yield record\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "every step still waiting at the end reported as a KeyError",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            raise ValueError(\"steps wait on each other: \"",
+          "new": "            raise KeyError(\"steps wait on each other: \""
+        }
+      ],
+      "expect": "KeyError: 'steps wait on each other"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "a reference to a step not written yet rejected at once",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        self.written.add(step_id)\n",
+          "new": "        self.written.add(step_id)\n        for ref in REF.findall(given):\n            if f\"E{ref}\" not in self.written:\n                raise KeyError(f\"E{ref}\")\n"
+        }
+      ],
+      "expect": "KeyError: 'E3'"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "every step still waiting at the end reported as a ValueError",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        for step_id, _, _, refs in self.waiting:\n            for ref in refs:\n                if ref not in self.written:\n                    raise KeyError(f\"{step_id} refers to {ref}, which the plan never wrote\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "ValueError: steps wait on each other"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "a KeyError naming the waiting step instead of the missing one",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                    raise KeyError(f\"{step_id} refers to {ref}, which the plan never wrote\")\n",
+          "new": "                    raise KeyError(step_id)\n"
+        }
+      ],
+      "expect": "Regex pattern did not match"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "ready steps run in passes, each pass carrying on after a run",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        records = []\n        while True:\n            for i, (step_id, tool, given, refs) in enumerate(self.waiting):\n                if all(ref in self.evidence for ref in refs):\n                    del self.waiting[i]\n                    records.append(self._run(step_id, tool, given, refs))\n                    break\n            else:\n                return records\n",
+          "new": "        records = []\n        progress = True\n        while progress:\n            progress = False\n            for entry in list(self.waiting):\n                if all(ref in self.evidence for ref in entry[3]):\n                    self.waiting.remove(entry)\n                    records.append(self._run(*entry))\n                    progress = True\n        return records\n"
+        }
+      ],
+      "expect": "when several steps are ready, the one whose line came first runs first"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "a repeated id rejected only once the first one has run",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if step_id in self.written:\n",
+          "new": "        if step_id in self.evidence:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "line breaks replaced in the evidence only",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "{LINE_BREAK.sub(' ', given)}",
+          "new": "{given}"
+        }
+      ],
+      "expect": "one record per line"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "a skipped record shows MISSING",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            return _record(step_id, tool, given, \"skipped\")\n",
+          "new": "            return _record(step_id, tool, given, MISSING)\n"
+        }
+      ],
+      "expect": "a failed step reports its error, and the steps that need it are skipped"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "the tool given its input as query=",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        result = self.tools.call(tool, filled)\n",
+          "new": "        result = self.tools.call(tool, query=filled)\n"
+        }
+      ],
+      "expect": "the same records however the plan is cut into chunks"
+    },
+    {
+      "test": "test_stream_plan",
+      "name": "steps left at the end checked against the evidence instead of the lines written",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                if ref not in self.written:\n",
+          "new": "                if ref not in self.evidence:\n"
+        }
+      ],
+      "expect": "KeyError: 'E1 refers to E2"
+    },
+    {
+      "test": "test_replan",
+      "name": "a negative max_replans taken as zero",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "    if max_replans < 0:\n",
+          "new": "    if max_replans < -1000:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_replan",
+      "name": "the replanner asked again after it accepts",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "        if patch is None:\n            break\n",
+          "new": "        if patch is None:\n            continue\n"
+        }
+      ],
+      "expect": "once the replanner accepts the plan, it is not asked again"
+    },
+    {
+      "test": "test_replan",
+      "name": "the replanner handed every step with only the live evidence",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "        patch = replanner.review(question, Plan(live), {s.id: evidence[s.id] for s in live})\n",
+          "new": "        patch = replanner.review(question, Plan(steps), {s.id: evidence[s.id] for s in live})\n"
+        }
+      ],
+      "expect": "the replanner reviews each live step with its evidence"
+    },
+    {
+      "test": "test_replan",
+      "name": "the solver handed every step with only the live evidence",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "    answer = solver.solve(question, Plan(live), {s.id: evidence[s.id] for s in live})\n",
+          "new": "    answer = solver.solve(question, Plan(steps), {s.id: evidence[s.id] for s in live})\n"
+        }
+      ],
+      "expect": "the solver answers from each live step with its evidence"
+    },
+    {
+      "test": "test_replan",
+      "name": "the replanner shown only the steps that succeeded",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "        patch = replanner.review(question, Plan(live), {s.id: evidence[s.id] for s in live})\n",
+          "new": "        ok = [s for s in live if evidence[s.id].status == \"ok\"]\n        patch = replanner.review(question, Plan(ok), {s.id: evidence[s.id] for s in ok})\n"
+        }
+      ],
+      "expect": "the replanner also reviews failed and skipped steps"
+    },
+    {
+      "test": "test_replan",
+      "name": "downstream looked up among the planner's steps only",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "    steps = list(plan.steps)\n    evidence = run_workers(plan, tools)\n",
+          "new": "    steps = list(plan.steps)\n    _apply.planned = list(plan.steps)\n    evidence = run_workers(plan, tools)\n"
+        },
+        {
+          "file": "replan.py",
+          "old": "    gone = dropped | _downstream(steps, patch.replaces)\n",
+          "new": "    gone = dropped | _downstream(_apply.planned, patch.replaces)\n"
+        }
+      ],
+      "expect": "dropping a step also drops later patch steps that used it"
+    },
+    {
+      "test": "test_replan",
+      "name": "a reference to a step the patch drops reported as a KeyError",
+      "edits": [
+        {
+          "file": "replan.py",
+          "old": "            if ref in gone:\n                raise ValueError(f\"patch step {step.id} refers to {ref}, which the patch drops\")\n            if ref not in ids:\n",
+          "new": "            if ref not in ids or ref in gone:\n"
+        }
+      ],
+      "expect": "patch step P2 refers to E9"
+    },
+    {
+      "test": "test_flatten",
+      "name": "references renamed one id at a time with str.replace",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "    if isinstance(value, str):\n\n        def flat_ref(match) -> str:\n",
+          "new": "    if isinstance(value, str):\n        for digits in REF.findall(value):\n            if f\"E{digits}\" not in scope:\n                raise KeyError(f\"#E{digits} is neither a step of this plan nor an import\")\n        for local, flat_id in scope.items():\n            value = value.replace(f\"#{local}\", f\"#{flat_id}\")\n        return value\n\n        def flat_ref(match) -> str:\n"
+        }
+      ],
+      "expect": "inside a sub-plan, #E names are its own"
+    },
+    {
+      "test": "test_flatten",
+      "name": "references inside a sub-plan left as written",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "            flat.append(Step(flat_id, item.tool, _rewrite(item.args, scope)))\n",
+          "new": "            flat.append(Step(flat_id, item.tool, item.args))\n"
+        }
+      ],
+      "expect": "inside a sub-plan, #E names are its own"
+    },
+    {
+      "test": "test_flatten",
+      "name": "the output step gets a new id too",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "            inner[step.id] = flat_id if step.id == item.output else next_id()\n",
+          "new": "            inner[step.id] = next_id()\n"
+        }
+      ],
+      "expect": "inside a sub-plan, #E names are its own"
+    },
+    {
+      "test": "test_flatten",
+      "name": "imports looked up in the top-level plan",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "            if outer not in scope:\n                raise KeyError(f\"sub-plan {item.id} imports {outer}, which its enclosing plan does not have\")\n            inner[local] = scope[outer]\n",
+          "new": "            if outer not in top_scope:\n                raise KeyError(f\"sub-plan {item.id} imports {outer}, which its enclosing plan does not have\")\n            inner[local] = top_scope[outer]\n"
+        }
+      ],
+      "expect": "imports E9, which its enclosing plan does not have"
+    },
+    {
+      "test": "test_flatten",
+      "name": "names of the enclosing plans visible without an import",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "        inner: dict[str, str] = {}\n",
+          "new": "        inner: dict[str, str] = dict(scope)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_flatten",
+      "name": "new ids counted from the number of top-level steps",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "    counter = max(number(step_id) for step_id in top)\n",
+          "new": "    counter = len(top)\n"
+        }
+      ],
+      "expect": "imports pass evidence down level by level"
+    },
+    {
+      "test": "test_flatten",
+      "name": "a nested sub-plan left unexpanded",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "        for step in item.steps:\n            expand(step, inner[step.id], inner)\n",
+          "new": "        for step in item.steps:\n            if isinstance(step, SubPlan):\n                flat.append(step)\n            else:\n                expand(step, inner[step.id], inner)\n"
+        }
+      ],
+      "expect": "imports pass evidence down level by level"
+    },
+    {
+      "test": "test_flatten",
+      "name": "arguments rewritten in place",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "    if isinstance(value, list):\n        return [_rewrite(item, scope) for item in value]\n    if isinstance(value, dict):\n        return {key: _rewrite(item, scope) for key, item in value.items()}\n",
+          "new": "    if isinstance(value, list):\n        for i, item in enumerate(value):\n            value[i] = _rewrite(item, scope)\n        return value\n    if isinstance(value, dict):\n        for key, item in value.items():\n            value[key] = _rewrite(item, scope)\n        return value\n"
+        }
+      ],
+      "expect": "flattening leaves the nested plan as it was"
+    },
+    {
+      "test": "test_flatten",
+      "name": "an import of a missing id passed through",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "            if outer not in scope:\n                raise KeyError(f\"sub-plan {item.id} imports {outer}, which its enclosing plan does not have\")\n            inner[local] = scope[outer]\n",
+          "new": "            inner[local] = scope.get(outer, outer)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_flatten",
+      "name": "a reference to an unknown name left as written",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "            if name not in scope:\n                raise KeyError(f\"#{name} is neither a step of this plan nor an import\")\n            return f\"#{scope[name]}\"\n",
+          "new": "            return f\"#{scope.get(name, name)}\"\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_flatten",
+      "name": "output not checked",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "        if item.output not in own:\n            raise ValueError(f\"sub-plan {item.id} outputs {item.output}, which is not one of its steps\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_flatten",
+      "name": "an import may share a name with a step",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "            if local in own:\n                raise ValueError(f\"sub-plan {item.id} imports {local}, which is also one of its steps\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_flatten",
+      "name": "repeated ids accepted",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "    if len(set(ids)) != len(ids):\n        raise ValueError(f\"step ids repeat: {ids}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_flatten",
+      "name": "top-level strings renamed, nested ones left",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "            flat.append(Step(flat_id, item.tool, _rewrite(item.args, scope)))\n",
+          "new": "            flat.append(Step(flat_id, item.tool, {k: _rewrite(v, scope) if isinstance(v, str) else v for k, v in item.args.items()}))\n"
+        }
+      ],
+      "expect": "imports pass evidence down level by level"
+    },
+    {
+      "test": "test_flatten",
+      "name": "an output may name an import",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "        if item.output not in own:\n",
+          "new": "        if item.output not in own and item.output not in item.imports:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_flatten",
+      "name": "an import used as a flat id without looking it up",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "            inner[local] = scope[outer]\n",
+          "new": "            inner[local] = outer\n"
+        }
+      ],
+      "expect": "imports pass evidence down level by level"
+    },
+    {
+      "test": "test_flatten",
+      "name": "a sub-plan's steps put after the top-level steps",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "    flat: list[Step] = []\n",
+          "new": "    flat: list[Step] = []\n    tail: list[Step] = []\n"
+        },
+        {
+          "file": "nested.py",
+          "old": "        if isinstance(item, Step):\n            flat.append(Step(flat_id, item.tool, _rewrite(item.args, scope)))\n            return\n",
+          "new": "        if isinstance(item, Step):\n            (flat if scope is top_scope else tail).append(Step(flat_id, item.tool, _rewrite(item.args, scope)))\n            return\n"
+        },
+        {
+          "file": "nested.py",
+          "old": "    return Plan(flat)\n",
+          "new": "    return Plan(flat + tail)\n"
+        }
+      ],
+      "expect": "inside a sub-plan, #E names are its own"
+    },
+    {
+      "test": "test_flatten",
+      "name": "ids required to be unique across all levels",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "    top = _ids(steps)\n",
+          "new": "    top = _ids(steps)\n    every: list[str] = []\n\n    def collect(items):\n        for it in items:\n            every.append(it.id)\n            if isinstance(it, SubPlan):\n                collect(it.steps)\n\n    collect(steps)\n    if len(set(every)) != len(every):\n        raise ValueError(\"ids repeat\")\n"
+        }
+      ],
+      "expect": "ValueError: ids repeat"
+    },
+    {
+      "test": "test_flatten",
+      "name": "new ids counted from the highest step number at any depth",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "    counter = max(number(step_id) for step_id in top)\n",
+          "new": "    def deep(items):\n        for it in items:\n            yield number(it.id)\n            if isinstance(it, SubPlan):\n                yield from deep(it.steps)\n\n    counter = max(deep(steps))\n"
+        }
+      ],
+      "expect": "imports pass evidence down level by level"
+    },
+    {
+      "test": "test_flatten",
+      "name": "an import may name only a step of the enclosing plan, not one of its imports",
+      "edits": [
+        {
+          "file": "nested.py",
+          "old": "    top_scope = {step_id: step_id for step_id in top}\n",
+          "new": "    top_scope = {step_id: step_id for step_id in top}\n    own_of = {id(top_scope): set(top)}\n"
+        },
+        {
+          "file": "nested.py",
+          "old": "        inner: dict[str, str] = {}\n",
+          "new": "        inner: dict[str, str] = {}\n        own_of[id(inner)] = set(own)\n"
+        },
+        {
+          "file": "nested.py",
+          "old": "            if outer not in scope:\n",
+          "new": "            if outer not in own_of[id(scope)]:\n"
+        }
+      ],
+      "expect": "imports E9, which its enclosing plan does not have"
+    }
+  ]
+}
