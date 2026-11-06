@@ -40,6 +40,19 @@ python3 run_tests.py --core
 
 上游自动翻译、电子书和网站发布 workflows 未导入本个人学习副本。`site/data.js`、`catalog.json` 与 lockfile 等生成物不作为学习源文件提交。
 
+## 以后怎样更新 GitHub
+
+在这个个人仓库副本内修改后，每次只提交一个小节。例如，从 `my_ultra_AI_Engineering_Course` 仓库根目录运行：
+
+```bash
+git status
+git add phases/13-tools-and-protocols/02-function-calling-deep-dive/
+git commit -m "docs(phase-13/02): update learning notes"
+git push origin main
+```
+
+如果仍在原来的 `ai-engineering-from-scratch` 目录学习，先把对应改动复制到这个个人副本，再执行提交和推送。这个副本的 `origin` 指向个人仓库，原课程目录的 `origin` 指向上游课程。
+
 ## 来源与许可
 
 原始课程来自 [rohitg00/ai-engineering-from-scratch](https://github.com/rohitg00/ai-engineering-from-scratch)，上游基础版本为 `5b5ab48cd63d7ae5b4002985d9ac9de4ed86c2c0`，同时包含本地已有的学习增补。原作者版权和 MIT 许可保留于 [LICENSE](LICENSE)。本仓库的提交历史继续保留此前的 Phase 13 学习快照。
