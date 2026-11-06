@@ -1,0 +1,373 @@
+{
+  "package": "riskmap",
+  "tests": [
+    "test_assumption_map",
+    "test_csv_map_roundtrip",
+    "test_registered_experiment",
+    "test_online_experiment_decisions",
+    "test_composite_assumptions"
+  ],
+  "layers": [
+    {
+      "test": "test_assumption_map",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "rejecting evidence must change the build decision"
+        },
+        {
+          "name": "preserve evidence polarity",
+          "edits": [
+            {
+              "file": "ranking.py",
+              "old": "return 'supported'",
+              "new": "return 'supported' if item.evidence.verdict == 'supports' else 'rejected'"
+            }
+          ],
+          "expect": "rejected assumptions are not unresolved experiment candidates"
+        },
+        {
+          "name": "choose open assumptions only",
+          "edits": [
+            {
+              "file": "ranking.py",
+              "old": "evidence_status(item) != 'supported'",
+              "new": "evidence_status(item) == 'open'"
+            }
+          ],
+          "expect": "equal-risk selection must match the stable public ranking"
+        },
+        {
+          "name": "stable risk ties",
+          "edits": [
+            {
+              "file": "ranking.py",
+              "old": "return max(opened, key=risk_score).id if opened else None",
+              "new": "return min(opened, key=lambda item: (-risk_score(item), item.id)).id if opened else None"
+            }
+          ],
+          "expect": "generate risk ranks without comparing every pair"
+        },
+        {
+          "name": "rank in one sorted pass",
+          "edits": [
+            {
+              "file": "ranking.py",
+              "old": "    rows = []",
+              "new": "    positions = {key[1]:i for i,key in enumerate(sorted(keys.values()),1)}\n    rows = []"
+            },
+            {
+              "file": "ranking.py",
+              "old": "rank = 1 + sum(other < keys[item.id] for other in keys.values())",
+              "new": "rank = positions[item.id]"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_assumption_map",
+      "name": "drop decided assumptions from ranking",
+      "edits": [
+        {
+          "file": "ranking.py",
+          "old": "    keys = {item.id:",
+          "new": "    items = [item for item in items if evidence_status(item)=='open']\n    keys = {item.id:"
+        }
+      ],
+      "expect": "KeyError: 'rejected'"
+    },
+    {
+      "test": "test_assumption_map",
+      "name": "accept exact floats and bool dimensions",
+      "edits": [
+        {
+          "file": "model.py",
+          "old": "if type(value) is not int or not 1 <= value <= 5:",
+          "new": "if value not in range(1,6):"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_csv_map_roundtrip",
+      "name": "round threshold for readable CSV",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "repr(x.threshold)",
+          "new": "str(round(x.threshold,4))"
+        }
+      ],
+      "expect": "CSV must preserve typed values"
+    },
+    {
+      "test": "test_csv_map_roundtrip",
+      "name": "lose evidence presence marker",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "Evidence(verdict,evidence) if present=='1' else None",
+          "new": "Evidence(verdict,evidence) if evidence else None"
+        }
+      ],
+      "expect": "CSV must preserve typed values"
+    },
+    {
+      "test": "test_csv_map_roundtrip",
+      "name": "sort loaded assumptions",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "return items,experiments",
+          "new": "return sorted(items,key=lambda x:x.id),experiments"
+        }
+      ],
+      "expect": "CSV must preserve typed values"
+    },
+    {
+      "test": "test_csv_map_roundtrip",
+      "name": "append to existing tables",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": ".open('w',newline=''",
+          "new": ".open('a',newline=''"
+        }
+      ],
+      "expect": "saving replaces both tables"
+    },
+    {
+      "test": "test_registered_experiment",
+      "name": "allow equal-time registration",
+      "edits": [
+        {
+          "file": "experiments.py",
+          "old": "instant(exp.registered_at) >= min",
+          "new": "instant(exp.registered_at) > min"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_registered_experiment",
+      "name": "compare raw ISO text",
+      "edits": [
+        {
+          "file": "experiments.py",
+          "old": "instant(exp.registered_at) >= min(instant(s.at) for s in used)",
+          "new": "exp.registered_at >= min(s.at for s in used)"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_registered_experiment",
+      "name": "use strict at-least threshold",
+      "edits": [
+        {
+          "file": "experiments.py",
+          "old": "mean>=exp.threshold",
+          "new": "mean>exp.threshold"
+        }
+      ],
+      "expect": "inclusive threshold uses the mean"
+    },
+    {
+      "test": "test_registered_experiment",
+      "name": "reduce uncertainty for ambiguous evidence",
+      "edits": [
+        {
+          "file": "experiments.py",
+          "old": "Outcome('open',exp.ambiguous_action,item.uncertainty)",
+          "new": "Outcome('open',exp.ambiguous_action,max(1,item.uncertainty-1))"
+        }
+      ],
+      "expect": "partial evidence stays ambiguous"
+    },
+    {
+      "test": "test_registered_experiment",
+      "name": "use all samples instead of first batch",
+      "edits": [
+        {
+          "file": "experiments.py",
+          "old": "used=samples[:exp.sample_size]",
+          "new": "used=samples"
+        }
+      ],
+      "expect": "not pre-registered"
+    },
+    {
+      "test": "test_online_experiment_decisions",
+      "name": "buffer the source before emitting",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for key,sample in source:",
+          "new": "    buffered=[event async for event in source]\n    for key,sample in buffered:"
+        }
+      ],
+      "expect": "completed experiments must not pull future observations"
+    },
+    {
+      "test": "test_online_experiment_decisions",
+      "name": "keep pulling after every experiment completes",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if book.completed(): return",
+          "new": "            if False: return"
+        }
+      ],
+      "expect": "completed experiments must not pull future observations"
+    },
+    {
+      "test": "test_online_experiment_decisions",
+      "name": "omit partial EOF decisions",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    for key in book.pending():",
+          "new": "    for key in []:"
+        }
+      ],
+      "expect": "EOF flushes partial and empty batches"
+    },
+    {
+      "test": "test_online_experiment_decisions",
+      "name": "ignore the experiment declared action",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "'decision':outcome.decision",
+          "new": "'decision':'bounded build'"
+        }
+      ],
+      "expect": "emit the actual judged outcome"
+    },
+    {
+      "test": "test_composite_assumptions",
+      "name": "flatten all open leaves irrespective of decided branch",
+      "edits": [
+        {
+          "file": "logic.py",
+          "old": "active=set().union(*(leaves for _,leaves in results)) if state=='open' else set()",
+          "new": "active=set().union(*(leaves for _,leaves in results))"
+        }
+      ],
+      "expect": "a rejected conjunct decides ALL without more experiments"
+    },
+    {
+      "test": "test_composite_assumptions",
+      "name": "ALL treats open as supported",
+      "edits": [
+        {
+          "file": "logic.py",
+          "old": "all(s=='supported' for s in states)",
+          "new": "all(s!='rejected' for s in states)"
+        }
+      ],
+      "expect": "open truth and stable risk ties"
+    },
+    {
+      "test": "test_composite_assumptions",
+      "name": "ANY treats rejected as open",
+      "edits": [
+        {
+          "file": "logic.py",
+          "old": "all(s=='rejected' for s in states)",
+          "new": "False"
+        }
+      ],
+      "expect": "all rejected alternatives remain rejected"
+    },
+    {
+      "test": "test_composite_assumptions",
+      "name": "reverse stable experiment ties",
+      "edits": [
+        {
+          "file": "logic.py",
+          "old": "key=lambda key:(-risk_score(by_id[key]),key)",
+          "new": "key=lambda key:(-risk_score(by_id[key]),tuple(-ord(c) for c in key))"
+        }
+      ],
+      "expect": "open truth and stable risk ties"
+    },
+    {
+      "test": "test_csv_map_roundtrip",
+      "name": "treat an existing empty-verdict evidence object as absent",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "'0' if x.evidence is None else '1'",
+          "new": "'0' if x.evidence is None or not x.evidence.verdict else '1'"
+        }
+      ],
+      "expect": "CSV must preserve typed values"
+    },
+    {
+      "test": "test_csv_map_roundtrip",
+      "name": "trim the recorded assumption statement when serializing CSV",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "[x.id,x.kind,x.statement,x.impact",
+          "new": "[x.id,x.kind,x.statement.strip(),x.impact"
+        }
+      ],
+      "expect": "CSV must preserve typed values"
+    },
+    {
+      "test": "test_registered_experiment",
+      "name": "enforce preregistration only after a batch is complete",
+      "edits": [
+        {
+          "file": "experiments.py",
+          "old": "if used and instant(exp.registered_at)",
+          "new": "if len(used)==exp.sample_size and instant(exp.registered_at)"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_online_experiment_decisions",
+      "name": "sort pending experiment ids at EOF instead of declared plan order",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "for key in book.pending():",
+          "new": "for key in sorted(book.pending()):"
+        }
+      ],
+      "expect": "EOF preserves declared experiment order"
+    },
+    {
+      "test": "test_composite_assumptions",
+      "name": "reject ALL only when every child is rejected",
+      "edits": [
+        {
+          "file": "logic.py",
+          "old": "state='rejected' if 'rejected' in states else",
+          "new": "state='rejected' if all(s=='rejected' for s in states) else"
+        }
+      ],
+      "expect": "a rejected conjunct decides ALL"
+    },
+    {
+      "test": "test_composite_assumptions",
+      "name": "choose the smallest influential open id without risk weighting",
+      "edits": [
+        {
+          "file": "logic.py",
+          "old": "min(active,key=lambda key:(-risk_score(by_id[key]),key))",
+          "new": "min(active)"
+        }
+      ],
+      "expect": "decided subtrees must not leak high-risk candidates"
+    }
+  ]
+}
