@@ -1,0 +1,1021 @@
+{
+  "package": "speakerid",
+  "tests": [
+    "test_trial_list_eer",
+    "test_enrollment_registry",
+    "test_snorm_verification",
+    "test_online_diarization",
+    "test_dendrogram_cut"
+  ],
+  "layers": [
+    {
+      "test": "test_trial_list_eer",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "the EER threshold is where false accepts and false rejects come closest"
+        },
+        {
+          "name": "fix the starting gap",
+          "edits": [
+            {
+              "file": "trials.py",
+              "old": "    best = (1.0, 1.0, 0.0)  # (fa, fr, threshold)\n    for t in thresholds:\n        fr = sum(1 for s in target if s < t) / len(target)\n        fa = sum(1 for s in nontarget if s >= t) / len(nontarget)\n        if abs(fa - fr) < abs(best[0] - best[1]):\n            best = (fa, fr, t)\n",
+              "new": "    best_gap = float(\"inf\")\n    best = (1.0, 0.0, 0.0)  # (fa, fr, threshold)\n    for t in thresholds:\n        fr = sum(1 for s in target if s < t) / len(target)\n        fa = sum(1 for s in nontarget if s >= t) / len(nontarget)\n        if abs(fa - fr) < best_gap:\n            best_gap = abs(fa - fr)\n            best = (fa, fr, t)\n"
+            }
+          ],
+          "expect": "ZeroDivisionError"
+        },
+        {
+          "name": "+ label 1 means target",
+          "edits": [
+            {
+              "file": "trials.py",
+              "old": "Trial(enroll, test, bool(label))",
+              "new": "Trial(enroll, test, label == \"1\")"
+            }
+          ],
+          "expect": "EER of the trial list, scored by cosine"
+        },
+        {
+          "name": "+ cosine normalizes",
+          "edits": [
+            {
+              "file": "embed.py",
+              "old": "    return sum(x * y for x, y in zip(a, b))\n",
+              "new": "    return sum(x * y for x, y in zip(l2_normalize(a), l2_normalize(b)))\n"
+            }
+          ],
+          "expect": "eer should be fast on a large trial list"
+        },
+        {
+          "name": "+ sort once, count with bisect",
+          "edits": [
+            {
+              "file": "trials.py",
+              "old": "    best_gap = float(\"inf\")\n    best = (1.0, 0.0, 0.0)  # (fa, fr, threshold)\n    for t in thresholds:\n        fr = sum(1 for s in target if s < t) / len(target)\n        fa = sum(1 for s in nontarget if s >= t) / len(nontarget)\n        if abs(fa - fr) < best_gap:\n            best_gap = abs(fa - fr)\n            best = (fa, fr, t)\n",
+              "new": "    from bisect import bisect_left\n\n    tg, nt = sorted(target), sorted(nontarget)\n    best_gap = float(\"inf\")\n    best = (1.0, 0.0, 0.0)  # (fa, fr, threshold)\n    for t in thresholds:\n        fr = bisect_left(tg, t) / len(tg)\n        fa = (len(nt) - bisect_left(nt, t)) / len(nt)\n        if abs(fa - fr) < best_gap:\n            best_gap = abs(fa - fr)\n            best = (fa, fr, t)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_trial_list_eer",
+      "name": "sorted sweep that moves tied scores one at a time",
+      "edits": [
+        {
+          "file": "trials.py",
+          "old": "    tg, nt = sorted(target), sorted(nontarget)\n    s, d = len(tg), len(nt)\n    i = j = 0  # at threshold t: tg[:i] are rejected, nt[j:] are accepted\n    best: tuple[int, float, float] | None = None  # (|FAR - FRR| * s * d, EER, threshold)\n    while i < s or j < d:\n        t = tg[i] if j == d or (i < s and tg[i] <= nt[j]) else nt[j]\n        gap = abs((d - j) * s - i * d)\n        if best is None or gap < best[0]:\n            best = (gap, ((d - j) / d + i / s) / 2, t)\n        while i < s and tg[i] == t:  # scores equal to t are accepted at t, rejected above it\n            i += 1\n        while j < d and nt[j] == t:\n            j += 1\n    return best[1], best[2]\n",
+          "new": "    s, d = len(target), len(nontarget)\n    scores = sorted([(x, True) for x in target] + [(x, False) for x in nontarget])\n    rejected, accepted = 0, d\n    best = None\n    for t, is_target in scores:\n        gap = abs(accepted * s - rejected * d)\n        if best is None or gap < best[0]:\n            best = (gap, (accepted / d + rejected / s) / 2, t)\n        if is_target:\n            rejected += 1\n        else:\n            accepted -= 1\n    return best[1], best[2]\n"
+        }
+      ],
+      "expect": "a score equal to the threshold is accepted"
+    },
+    {
+      "test": "test_trial_list_eer",
+      "name": "starts from the FAR = 1, FRR = 0 corner instead of an infinite gap",
+      "edits": [
+        {
+          "file": "trials.py",
+          "old": "    best: tuple[int, float, float] | None = None  # (|FAR - FRR| * s * d, EER, threshold)\n",
+          "new": "    best = (s * d, 0.5, 0.0)  # start from FAR = 1, FRR = 0\n"
+        },
+        {
+          "file": "trials.py",
+          "old": "        if best is None or gap < best[0]:\n",
+          "new": "        if gap < best[0]:\n"
+        }
+      ],
+      "expect": "a scorer that cannot tell trials apart has an EER of 0.5"
+    },
+    {
+      "test": "test_trial_list_eer",
+      "name": "rates read after the tied scores move, so a score equal to the threshold is rejected",
+      "edits": [
+        {
+          "file": "trials.py",
+          "old": "        gap = abs((d - j) * s - i * d)\n        if best is None or gap < best[0]:\n            best = (gap, ((d - j) / d + i / s) / 2, t)\n        while i < s and tg[i] == t:  # scores equal to t are accepted at t, rejected above it\n            i += 1\n        while j < d and nt[j] == t:\n            j += 1\n",
+          "new": "        while i < s and tg[i] == t:\n            i += 1\n        while j < d and nt[j] == t:\n            j += 1\n        gap = abs((d - j) * s - i * d)\n        if best is None or gap < best[0]:\n            best = (gap, ((d - j) / d + i / s) / 2, t)\n"
+        }
+      ],
+      "expect": "the EER threshold is where false accepts and false rejects come closest"
+    },
+    {
+      "test": "test_trial_list_eer",
+      "name": "cosine divides by the norms with no zero-vector check",
+      "edits": [
+        {
+          "file": "embed.py",
+          "old": "    return sum(x * y for x, y in zip(l2_normalize(a), l2_normalize(b)))\n",
+          "new": "    dot = sum(x * y for x, y in zip(a, b))\n    return dot / (math.sqrt(sum(x * x for x in a)) * math.sqrt(sum(y * y for y in b)))\n"
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_trial_list_eer",
+      "name": "sorted merge that moves tied scores of one class at a time",
+      "edits": [
+        {
+          "file": "trials.py",
+          "old": "        t = tg[i] if j == d or (i < s and tg[i] <= nt[j]) else nt[j]\n        gap = abs((d - j) * s - i * d)\n        if best is None or gap < best[0]:\n            best = (gap, ((d - j) / d + i / s) / 2, t)\n        while i < s and tg[i] == t:  # scores equal to t are accepted at t, rejected above it\n            i += 1\n        while j < d and nt[j] == t:\n            j += 1\n",
+          "new": "        from_target = j == d or (i < s and tg[i] <= nt[j])\n        t = tg[i] if from_target else nt[j]\n        gap = abs((d - j) * s - i * d)\n        if best is None or gap < best[0]:\n            best = (gap, ((d - j) / d + i / s) / 2, t)\n        if from_target:\n            while i < s and tg[i] == t:\n                i += 1\n        else:\n            while j < d and nt[j] == t:\n                j += 1\n"
+        }
+      ],
+      "expect": "a score equal to the threshold is accepted"
+    },
+    {
+      "test": "test_trial_list_eer",
+      "name": "EER reported as max(FAR, FRR) instead of their mean",
+      "edits": [
+        {
+          "file": "trials.py",
+          "old": "best = (gap, ((d - j) / d + i / s) / 2, t)",
+          "new": "best = (gap, max((d - j) / d, i / s), t)"
+        }
+      ],
+      "expect": "the EER threshold is where false accepts and false rejects come closest"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "never commits",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        with self._db:\n            self._db.execute(\n                \"INSERT",
+          "new": "        if True:\n            self._db.execute(\n                \"INSERT"
+        },
+        {
+          "file": "registry.py",
+          "old": "        with self._db:\n            deleted = ",
+          "new": "        if True:\n            deleted = "
+        }
+      ],
+      "expect": "enrollments round-trip exactly, in the order they were added"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "running (sum, count) per speaker, subtracted on remove",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        self._db = sqlite3.connect(path)\n",
+          "new": "        self._db = sqlite3.connect(path)\n        self._sums: dict = {}\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        return enrollment_id\n",
+          "new": "        total, count = self._sums.get(speaker, ([0.0] * len(embedding), 0))\n        self._sums[speaker] = ([a + b for a, b in zip(total, l2_normalize(embedding))], count + 1)\n        return enrollment_id\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        \"\"\"Delete one enrollment. Unknown ids raise KeyError.\"\"\"\n",
+          "new": "        \"\"\"Delete one enrollment. Unknown ids raise KeyError.\"\"\"\n        row = self._db.execute(\n            \"SELECT speaker, embedding FROM enrollments WHERE enrollment_id = ?\", (enrollment_id,)\n        ).fetchone()\n        if row is not None:\n            total, count = self._sums[row[0]]\n            unit = l2_normalize(json.loads(row[1]))\n            self._sums[row[0]] = ([a - b for a, b in zip(total, unit)], count - 1)\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        return l2_normalize([math.fsum(column) / len(units) for column in zip(*units)])\n",
+          "new": "        total, count = self._sums[speaker]\n        return l2_normalize([x / count for x in total])\n"
+        }
+      ],
+      "expect": "removing an enrollment gives back the earlier template exactly"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "running mean of means: (template + new) / 2",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        return l2_normalize([math.fsum(column) / len(units) for column in zip(*units)])\n",
+          "new": "        centroid = units[0]\n        for unit in units[1:]:\n            centroid = [(c + u) / 2 for c, u in zip(centroid, unit)]\n        return l2_normalize(centroid)\n"
+        }
+      ],
+      "expect": "a template is the mean of the unit-length enrollments, scaled to unit length"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "averages the raw embeddings, so loud enrollments dominate",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "units = [l2_normalize(e.embedding) for e in self.enrollments(speaker)]",
+          "new": "units = [e.embedding for e in self.enrollments(speaker)]"
+        }
+      ],
+      "expect": "a template is the mean of the unit-length enrollments, scaled to unit length"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "stores the normalized embedding instead of the given one",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "json.dumps(list(embedding))",
+          "new": "json.dumps(l2_normalize(embedding))"
+        }
+      ],
+      "expect": "enrollments round-trip exactly, in the order they were added"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "running Welford mean per speaker, undone on remove",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        self._db = sqlite3.connect(path)\n",
+          "new": "        self._db = sqlite3.connect(path)\n        self._means: dict = {}\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        return enrollment_id\n",
+          "new": "        mean, count = self._means.get(speaker, ([0.0] * len(embedding), 0))\n        unit = l2_normalize(embedding)\n        count += 1\n        self._means[speaker] = ([m + (u - m) / count for m, u in zip(mean, unit)], count)\n        return enrollment_id\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        \"\"\"Delete one enrollment. Unknown ids raise KeyError.\"\"\"\n",
+          "new": "        \"\"\"Delete one enrollment. Unknown ids raise KeyError.\"\"\"\n        row = self._db.execute(\n            \"SELECT speaker, embedding FROM enrollments WHERE enrollment_id = ?\", (enrollment_id,)\n        ).fetchone()\n        if row is not None and row[0] in self._means:\n            mean, count = self._means[row[0]]\n            unit = l2_normalize(json.loads(row[1]))\n            if count == 1:\n                del self._means[row[0]]\n            else:\n                self._means[row[0]] = ([(m * count - u) / (count - 1) for m, u in zip(mean, unit)], count - 1)\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        return l2_normalize([math.fsum(column) / len(units) for column in zip(*units)])\n",
+          "new": "        if speaker in self._means:\n            return l2_normalize(self._means[speaker][0])\n        return l2_normalize([math.fsum(column) / len(units) for column in zip(*units)])\n"
+        }
+      ],
+      "expect": "removing an enrollment gives back the earlier template exactly"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "template cache cleared on enroll but not on remove",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        self._db = sqlite3.connect(path)\n",
+          "new": "        self._db = sqlite3.connect(path)\n        self._cache: dict = {}\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        return enrollment_id\n",
+          "new": "        self._cache.pop(speaker, None)\n        return enrollment_id\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        units = [l2_normalize(e.embedding) for e in self.enrollments(speaker)]\n",
+          "new": "        if speaker in self._cache:\n            return self._cache[speaker]\n        units = [l2_normalize(e.embedding) for e in self.enrollments(speaker)]\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        return l2_normalize([math.fsum(column) / len(units) for column in zip(*units)])\n",
+          "new": "        self._cache[speaker] = l2_normalize([math.fsum(column) / len(units) for column in zip(*units)])\n        return self._cache[speaker]\n"
+        }
+      ],
+      "expect": "removing an enrollment gives back the earlier template exactly"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "mean of the unit enrollments not scaled back to unit length",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        return l2_normalize([math.fsum(column) / len(units) for column in zip(*units)])\n",
+          "new": "        return [math.fsum(column) / len(units) for column in zip(*units)]\n"
+        }
+      ],
+      "expect": "a template is the mean of the unit-length enrollments, scaled to unit length"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "speaker names kept in a set that remove never prunes",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        self._db = sqlite3.connect(path)\n",
+          "new": "        self._db = sqlite3.connect(path)\n        self._names: set = set()\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        return enrollment_id\n",
+          "new": "        self._names.add(speaker)\n        return enrollment_id\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        rows = self._db.execute(\"SELECT DISTINCT speaker FROM enrollments ORDER BY speaker\")\n        return [name for (name,) in rows]\n",
+          "new": "        return sorted(self._names)\n"
+        }
+      ],
+      "expect": "a speaker with no enrollments is no longer enrolled"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "speakers() in enrollment order instead of by name",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "\"SELECT DISTINCT speaker FROM enrollments ORDER BY speaker\"",
+          "new": "\"SELECT DISTINCT speaker FROM enrollments\""
+        }
+      ],
+      "expect": "speakers are listed by name"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "dimension compared with the same speaker's enrollments only",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "\"SELECT embedding FROM enrollments ORDER BY seq LIMIT 1\"\n        ).fetchone()",
+          "new": "\"SELECT embedding FROM enrollments WHERE speaker = ? ORDER BY seq LIMIT 1\", (speaker,)\n        ).fetchone()"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "zero-vector check tests for an empty list",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        if not any(embedding):\n",
+          "new": "        if not embedding:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "remove ignores unknown ids",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        if deleted == 0:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "embedding read back as a tuple",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "Enrollment(eid, spk, json.loads(emb))",
+          "new": "Enrollment(eid, spk, tuple(json.loads(emb)))"
+        }
+      ],
+      "expect": "enrollments round-trip exactly"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "embedding stored as float32",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "json.dumps(list(embedding))",
+          "new": "json.dumps([__import__('struct').unpack('f', __import__('struct').pack('f', v))[0] for v in embedding])"
+        }
+      ],
+      "expect": "enrollments round-trip exactly"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "templates built from an in-memory copy that a reopen does not have",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        self._db = sqlite3.connect(path)\n",
+          "new": "        self._db = sqlite3.connect(path)\n        self._units: dict = {}\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        return enrollment_id\n",
+          "new": "        self._units.setdefault(speaker, {})[enrollment_id] = l2_normalize(embedding)\n        return enrollment_id\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        if deleted == 0:\n",
+          "new": "        for units in self._units.values():\n            units.pop(enrollment_id, None)\n        if deleted == 0:\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        units = [l2_normalize(e.embedding) for e in self.enrollments(speaker)]\n",
+          "new": "        units = list(self._units.get(speaker, {}).values())\n"
+        }
+      ],
+      "expect": "KeyError: 'alice'"
+    },
+    {
+      "test": "test_enrollment_registry",
+      "name": "running sum of unit vectors per speaker, subtracted on remove, normalized without dividing",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        self._db = sqlite3.connect(path)\n",
+          "new": "        self._db = sqlite3.connect(path)\n        self._sums: dict = {}\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        return enrollment_id\n",
+          "new": "        total = self._sums.get(speaker, [0.0] * len(embedding))\n        self._sums[speaker] = [a + b for a, b in zip(total, l2_normalize(embedding))]\n        return enrollment_id\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        \"\"\"Delete one enrollment. Unknown ids raise KeyError.\"\"\"\n",
+          "new": "        \"\"\"Delete one enrollment. Unknown ids raise KeyError.\"\"\"\n        row = self._db.execute(\n            \"SELECT speaker, embedding FROM enrollments WHERE enrollment_id = ?\", (enrollment_id,)\n        ).fetchone()\n        if row is not None and row[0] in self._sums:\n            unit = l2_normalize(json.loads(row[1]))\n            self._sums[row[0]] = [a - b for a, b in zip(self._sums[row[0]], unit)]\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        return l2_normalize([math.fsum(column) / len(units) for column in zip(*units)])\n",
+          "new": "        if speaker in self._sums:\n            return l2_normalize(self._sums[speaker])\n        return l2_normalize([math.fsum(column) for column in zip(*units)])\n"
+        }
+      ],
+      "expect": "removing an enrollment gives back the earlier template exactly"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "z-norm only: normalizes by the template side",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        return 0.5 * (self._normalize(raw, template) + self._normalize(raw, embedding))\n",
+          "new": "        return self._normalize(raw, template)\n"
+        }
+      ],
+      "expect": "S-norm averages the template-side and clip-side normalized scores"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "sample standard deviation",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "statistics.pstdev(scores)",
+          "new": "statistics.stdev(scores)"
+        }
+      ],
+      "expect": "S-norm averages the template-side and clip-side normalized scores"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "AS-norm picks one cohort subset, from the template side",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        template = self.registry.template(speaker)\n",
+          "new": "        template = self.registry.template(speaker)\n        self._anchor = template\n"
+        },
+        {
+          "file": "scoring.py",
+          "old": "            scores = sorted(scores, reverse=True)[: self.top_k]\n",
+          "new": "            anchor = [cosine(self._anchor, member) for member in self.cohort]\n            keep = sorted(range(len(scores)), key=lambda i: -anchor[i])[: self.top_k]\n            scores = [scores[i] for i in keep]\n"
+        }
+      ],
+      "expect": "AS-norm: each side keeps its own top_k cohort scores"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "candidate thresholds from the non-target scores only",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "for t in sorted(set(target) | set(nontarget)):",
+          "new": "for t in sorted(set(nontarget)):"
+        }
+      ],
+      "expect": "the lowest dev score whose FAR meets the target"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "FAR measured on the target scores",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    nt = sorted(nontarget)\n",
+          "new": "    nt = sorted(target)\n"
+        }
+      ],
+      "expect": "no dev score brings FAR down"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "calibrates on raw cosine scores",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "(target if is_target else nontarget).append(self.score(speaker, embedding))",
+          "new": "(target if is_target else nontarget).append(cosine(self.registry.template(speaker), embedding))"
+        }
+      ],
+      "expect": "no dev score brings FAR down to 0.0"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "calibrate returns the threshold but does not keep it",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        self.threshold = threshold_at_far(target, nontarget, target_far)\n        return self.threshold\n",
+          "new": "        return threshold_at_far(target, nontarget, target_far)\n"
+        }
+      ],
+      "expect": "RuntimeError"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "verify rejects a score equal to the threshold",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "return self.score(speaker, embedding) >= self.threshold",
+          "new": "return self.score(speaker, embedding) > self.threshold"
+        }
+      ],
+      "expect": "a claim scoring exactly the threshold is accepted"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "AS-norm keeps the lowest top_k cohort cosines",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "scores = sorted(scores, reverse=True)[: self.top_k]",
+          "new": "scores = sorted(scores)[: self.top_k]"
+        }
+      ],
+      "expect": "AS-norm: each side keeps its own top_k cohort scores"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "S-norm adds the two normalized scores instead of averaging",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "return 0.5 * (self._normalize(raw, template) + self._normalize(raw, embedding))",
+          "new": "return self._normalize(raw, template) + self._normalize(raw, embedding)"
+        }
+      ],
+      "expect": "S-norm averages the template-side and clip-side normalized scores"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "cohort scored by dot product with the unnormalized clip",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        scores = [cosine(side, member) for member in self.cohort]\n",
+          "new": "        scores = [sum(a * b for a, b in zip(side, member)) for member in self.cohort]\n"
+        }
+      ],
+      "expect": "S-norm averages the template-side and clip-side normalized scores"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "FAR must fall strictly below the target",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "/ len(nt) <= target_far:",
+          "new": "/ len(nt) < target_far:"
+        }
+      ],
+      "expect": "the lowest dev score whose FAR meets the target"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "false accepts counted strictly above the threshold (bisect_right)",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "(len(nt) - bisect_left(nt, t))",
+          "new": "(len(nt) - __import__('bisect').bisect_right(nt, t))"
+        }
+      ],
+      "expect": "the lowest dev score whose FAR meets the target"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "candidate thresholds from the target scores only",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "for t in sorted(set(target) | set(nontarget)):",
+          "new": "for t in sorted(set(target)):"
+        }
+      ],
+      "expect": "a non-target scoring exactly the threshold is a false accept"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "unreachable FAR answered with a threshold above every score",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    raise ValueError(f\"no dev score brings FAR down to {target_far}\")\n",
+          "new": "    return max(nontarget) + 1e-9\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "threshold starts at 0.0, so verify works before calibrate",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        self.threshold: float | None = None\n",
+          "new": "        self.threshold: float | None = 0.0\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "one pooled cohort distribution for both sides",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        return 0.5 * (self._normalize(raw, template) + self._normalize(raw, embedding))\n",
+          "new": "        pooled = [cosine(side, m) for side in (template, embedding) for m in self.cohort]\n        return (raw - statistics.fmean(pooled)) / statistics.pstdev(pooled)\n"
+        }
+      ],
+      "expect": "S-norm averages the template-side and clip-side normalized scores"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "AS-norm picks top_k by absolute cosine",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "scores = sorted(scores, reverse=True)[: self.top_k]",
+          "new": "scores = sorted(scores, key=abs, reverse=True)[: self.top_k]"
+        }
+      ],
+      "expect": "AS-norm: each side keeps its own top_k cohort scores"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "FAR divided by every dev trial, not the non-target ones",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "/ len(nt) <= target_far:",
+          "new": "/ (len(nt) + len(target)) <= target_far:"
+        }
+      ],
+      "expect": "a non-target scoring exactly the threshold is a false accept"
+    },
+    {
+      "test": "test_snorm_verification",
+      "name": "calibrate swaps target and non-target scores",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "(target if is_target else nontarget).append(self.score(speaker, embedding))",
+          "new": "(nontarget if is_target else target).append(self.score(speaker, embedding))"
+        }
+      ],
+      "expect": "no dev score brings FAR down to 0.0"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "no newline after each RTTM line",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "<NA> <NA>\\n\"",
+          "new": "<NA> <NA>\""
+        }
+      ],
+      "expect": "one RTTM SPEAKER line per turn"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "fifth field written as the end time",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "{end - start:.3f}",
+          "new": "{end:.3f}"
+        }
+      ],
+      "expect": "the fifth RTTM field is the turn's duration"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "times written with str()",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "{start:.3f} {end - start:.3f}",
+          "new": "{start} {end - start}"
+        }
+      ],
+      "expect": "RTTM times are in seconds with three decimals"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "compares with each speaker's first segment only",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "            sums[best] = [a + b for a, b in zip(sums[best], unit)]\n",
+          "new": "            pass\n"
+        }
+      ],
+      "expect": "each segment joins the most similar speaker centroid"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "compares with each speaker's latest segment",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "            sums[best] = [a + b for a, b in zip(sums[best], unit)]\n",
+          "new": "            sums[best] = unit\n"
+        }
+      ],
+      "expect": "each segment joins the most similar speaker centroid"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "centroid sums the raw embeddings",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "        unit = l2_normalize(segment.embedding)\n",
+          "new": "        unit = segment.embedding\n"
+        }
+      ],
+      "expect": "each segment joins the most similar speaker centroid"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "last turn never written",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "        turn = [speaker, segment.start, segment.end]\n    if turn is not None:\n        yield _rttm(file_id, *turn)\n",
+          "new": "        turn = [speaker, segment.start, segment.end]\n"
+        }
+      ],
+      "expect": "each segment joins the most similar speaker centroid"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "reads every segment before writing a turn",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "    async for segment in segments:\n",
+          "new": "    for segment in [s async for s in segments]:\n"
+        }
+      ],
+      "expect": "a turn is written as soon as the next speaker starts"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "writes the last turn even when there is none",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "        turn = [speaker, segment.start, segment.end]\n    if turn is not None:\n        yield _rttm(file_id, *turn)\n",
+          "new": "        turn = [speaker, segment.start, segment.end]\n    yield _rttm(file_id, *turn)\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "centroid updated as normalize(old centroid + new segment)",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "            sums[best] = [a + b for a, b in zip(sums[best], unit)]\n",
+          "new": "            sums[best] = l2_normalize([a + b for a, b in zip(sums[best], unit)])\n"
+        }
+      ],
+      "expect": "each segment joins the most similar speaker centroid"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "joins the first speaker over the threshold, not the most similar",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "            sim = cosine(total, unit)\n            if best is None or sim > best_sim:\n",
+          "new": "            sim = cosine(total, unit)\n            if sim >= threshold:\n                best, best_sim = index, sim\n                break\n            if best is None or sim > best_sim:\n"
+        }
+      ],
+      "expect": "each segment joins the most similar speaker centroid"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "mean centroid compared by dot product, not cosine",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "    sums: list[list[float]] = []",
+          "new": "    sums: list[list[float]] = []\n    counts: list[int] = []"
+        },
+        {
+          "file": "diarize.py",
+          "old": "            sim = cosine(total, unit)\n",
+          "new": "            mean = [x / counts[index] for x in total]\n            sim = sum(a * b for a, b in zip(mean, unit))\n"
+        },
+        {
+          "file": "diarize.py",
+          "old": "            sums.append(unit)\n",
+          "new": "            sums.append(unit)\n            counts.append(1)\n"
+        },
+        {
+          "file": "diarize.py",
+          "old": "            sums[best] = [a + b for a, b in zip(sums[best], unit)]\n",
+          "new": "            sums[best] = [a + b for a, b in zip(sums[best], unit)]\n            counts[best] += 1\n"
+        }
+      ],
+      "expect": "each segment joins the most similar speaker centroid"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "a gap between one speaker's segments starts a new turn",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "        if turn is not None and turn[0] == speaker:\n",
+          "new": "        if turn is not None and turn[0] == speaker and segment.start == turn[2]:\n"
+        }
+      ],
+      "expect": "a speaker's consecutive segments are one turn"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "speakers numbered from spk1",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "speaker = f\"spk{best}\"",
+          "new": "speaker = f\"spk{best + 1}\""
+        }
+      ],
+      "expect": "each segment joins the most similar speaker centroid"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "turn start moves to the latest segment",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "            turn[2] = segment.end\n",
+          "new": "            turn[1], turn[2] = segment.start, segment.end\n"
+        }
+      ],
+      "expect": "each segment joins the most similar speaker centroid"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "finished turn held back until one more segment arrives",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "    async for segment in segments:\n        unit = l2_normalize(segment.embedding)\n",
+          "new": "    pending = None\n    async for segment in segments:\n        if pending is not None:\n            yield pending\n            pending = None\n        unit = l2_normalize(segment.embedding)\n"
+        },
+        {
+          "file": "diarize.py",
+          "old": "        if turn is not None:\n            yield _rttm(file_id, *turn)\n        turn = [speaker, segment.start, segment.end]\n",
+          "new": "        if turn is not None:\n            pending = _rttm(file_id, *turn)\n        turn = [speaker, segment.start, segment.end]\n    if pending is not None:\n        yield pending\n"
+        }
+      ],
+      "expect": "a turn is written as soon as the next speaker starts"
+    },
+    {
+      "test": "test_online_diarization",
+      "name": "an empty meeting yields an empty string",
+      "edits": [
+        {
+          "file": "diarize.py",
+          "old": "        turn = [speaker, segment.start, segment.end]\n    if turn is not None:\n        yield _rttm(file_id, *turn)\n",
+          "new": "        turn = [speaker, segment.start, segment.end]\n    yield _rttm(file_id, *turn) if turn is not None else \"\"\n"
+        }
+      ],
+      "expect": "an empty meeting has no turns"
+    },
+    {
+      "test": "test_dendrogram_cut",
+      "name": "checks only the top merge of each subtree",
+      "edits": [
+        {
+          "file": "cluster.py",
+          "old": "    # Post-order walk with an explicit stack. Each finished subtree leaves one result:\n    # (True, its segments) when it is a single cluster, (False, its clusters) when it was cut.\n    results: list[tuple[bool, list]] = []\n    seen: set[int] = set()\n    stack: list[tuple[Dendrogram, bool]] = [(tree, False)]\n    while stack:\n        node, children_done = stack.pop()\n        if not isinstance(node, tuple):\n            if node in seen:\n                raise ValueError(f\"segment {node} appears twice in the tree\")\n            seen.add(node)\n            results.append((True, [node]))\n        elif not children_done:\n            left, right, _ = node\n            stack += [(node, True), (right, False), (left, False)]\n        else:\n            right_whole, right = results.pop()\n            left_whole, left = results.pop()\n            if left_whole and right_whole and node[2] >= threshold:\n                left.extend(right)\n                results.append((True, left))\n            else:\n                parts = ([left] if left_whole else left) + ([right] if right_whole else right)\n                results.append((False, parts))\n    whole, found = results.pop()\n    return sorted(sorted(cluster) for cluster in ([found] if whole else found))\n",
+          "new": "    clusters, seen, stack = [], set(), [tree]\n    while stack:\n        node = stack.pop()\n        if isinstance(node, tuple) and node[2] < threshold:\n            stack += [node[1], node[0]]\n            continue\n        members, todo = [], [node]\n        while todo:\n            item = todo.pop()\n            if isinstance(item, tuple):\n                todo += [item[1], item[0]]\n            else:\n                if item in seen:\n                    raise ValueError(f\"segment {item} appears twice in the tree\")\n                seen.add(item)\n                members.append(item)\n        clusters.append(sorted(members))\n    return sorted(clusters)\n"
+        }
+      ],
+      "expect": "every merge inside a cluster reaches the threshold, not only the last one"
+    },
+    {
+      "test": "test_dendrogram_cut",
+      "name": "recursive walk",
+      "edits": [
+        {
+          "file": "cluster.py",
+          "old": "    # Post-order walk with an explicit stack. Each finished subtree leaves one result:\n    # (True, its segments) when it is a single cluster, (False, its clusters) when it was cut.\n    results: list[tuple[bool, list]] = []\n    seen: set[int] = set()\n    stack: list[tuple[Dendrogram, bool]] = [(tree, False)]\n    while stack:\n        node, children_done = stack.pop()\n        if not isinstance(node, tuple):\n            if node in seen:\n                raise ValueError(f\"segment {node} appears twice in the tree\")\n            seen.add(node)\n            results.append((True, [node]))\n        elif not children_done:\n            left, right, _ = node\n            stack += [(node, True), (right, False), (left, False)]\n        else:\n            right_whole, right = results.pop()\n            left_whole, left = results.pop()\n            if left_whole and right_whole and node[2] >= threshold:\n                left.extend(right)\n                results.append((True, left))\n            else:\n                parts = ([left] if left_whole else left) + ([right] if right_whole else right)\n                results.append((False, parts))\n    whole, found = results.pop()\n    return sorted(sorted(cluster) for cluster in ([found] if whole else found))\n",
+          "new": "    seen: set[int] = set()\n\n    def walk(node):\n        if not isinstance(node, tuple):\n            if node in seen:\n                raise ValueError(f\"segment {node} appears twice in the tree\")\n            seen.add(node)\n            return True, [node]\n        left_whole, left = walk(node[0])\n        right_whole, right = walk(node[1])\n        if left_whole and right_whole and node[2] >= threshold:\n            return True, left + right\n        return False, ([left] if left_whole else left) + ([right] if right_whole else right)\n\n    whole, found = walk(tree)\n    return sorted(sorted(cluster) for cluster in ([found] if whole else found))\n"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_dendrogram_cut",
+      "name": "a merge must beat the threshold strictly",
+      "edits": [
+        {
+          "file": "cluster.py",
+          "old": "node[2] >= threshold",
+          "new": "node[2] > threshold"
+        }
+      ],
+      "expect": "a merge exactly at the threshold joins"
+    },
+    {
+      "test": "test_dendrogram_cut",
+      "name": "no check for a segment that appears twice",
+      "edits": [
+        {
+          "file": "cluster.py",
+          "old": "            if node in seen:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_dendrogram_cut",
+      "name": "clusters left in tree order",
+      "edits": [
+        {
+          "file": "cluster.py",
+          "old": "    return sorted(sorted(cluster) for cluster in ([found] if whole else found))\n",
+          "new": "    return [found] if whole else found\n"
+        }
+      ],
+      "expect": "a subtree whose merges all reach the threshold is one cluster"
+    },
+    {
+      "test": "test_dendrogram_cut",
+      "name": "clusters ordered largest first",
+      "edits": [
+        {
+          "file": "cluster.py",
+          "old": "    return sorted(sorted(cluster) for cluster in ([found] if whole else found))\n",
+          "new": "    return sorted((sorted(cluster) for cluster in ([found] if whole else found)), key=lambda c: (-len(c), c))\n"
+        }
+      ],
+      "expect": "clusters are ordered by their first index"
+    },
+    {
+      "test": "test_dendrogram_cut",
+      "name": "duplicate segments looked for inside each cluster only",
+      "edits": [
+        {
+          "file": "cluster.py",
+          "old": "            if node in seen:\n",
+          "new": "            if False:\n"
+        },
+        {
+          "file": "cluster.py",
+          "old": "    return sorted(sorted(cluster) for cluster in ([found] if whole else found))\n",
+          "new": "    clusters = [sorted(cluster) for cluster in ([found] if whole else found)]\n    if any(len(set(c)) != len(c) for c in clusters):\n        raise ValueError('segment appears twice')\n    return sorted(clusters)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_dendrogram_cut",
+      "name": "similarity threshold read as a distance",
+      "edits": [
+        {
+          "file": "cluster.py",
+          "old": "node[2] >= threshold",
+          "new": "node[2] <= threshold"
+        }
+      ],
+      "expect": "a subtree whose merges all reach the threshold is one cluster"
+    },
+    {
+      "test": "test_dendrogram_cut",
+      "name": "clusters ordered by their last index",
+      "edits": [
+        {
+          "file": "cluster.py",
+          "old": "    return sorted(sorted(cluster) for cluster in ([found] if whole else found))\n",
+          "new": "    return sorted((sorted(cluster) for cluster in ([found] if whole else found)), key=lambda c: c[-1])\n"
+        }
+      ],
+      "expect": "a subtree whose merges all reach the threshold is one cluster"
+    }
+  ]
+}

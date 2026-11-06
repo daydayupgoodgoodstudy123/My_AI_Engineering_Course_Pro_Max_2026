@@ -1,0 +1,137 @@
+{
+  "lesson": "phases/06-speech-and-audio/06-speaker-recognition-verification",
+  "title": "Speaker Recognition & Verification",
+  "format": "staged-brownfield",
+  "service": "SpeakerID: cosine scoring and EER over trial lists, a SQLite speaker registry, S-norm verification, online and agglomerative diarization",
+  "sources": {
+    "docs/en.md": "63ddce2e943e59e1b2aa18bb698df67409fd0011f0d8421139ec7c46cba2f217",
+    "code/main.py": "7627294339a6b005e73baba0f2a706d56f115e026996d421024a92d42f1ec05c"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_trial_list_eer",
+      "kind": "debug",
+      "lesson_anchor": "Build It, Steps 2-3: cosine + threshold, EER from similarity pairs; Pitfalls: cosine on non-normalized embeddings",
+      "planted_bugs": [
+        "eer is the lesson's Step 3 version: best starts at (1.0, 1.0, 0.0), whose gap is 0, so it never updates and always returns (1.0, 0.0)",
+        "parse_trials reads the VoxCeleb label with bool(label), and bool('0') is True; every trial becomes a target and eer raises ZeroDivisionError on the empty non-target list, one call away from the parser",
+        "cosine is the lesson code's raw dot product, which assumes unit vectors; on unnormalized embeddings the trial-list EER is 0.5 at threshold 25 instead of 0.25 at 0.8",
+        "eer recounts every score for every candidate threshold, O(T (S + D))"
+      ],
+      "timing_assert": "eer on 6000 + 6000 scores under 0.1 s (the recount takes 1.1-1.8 s on Python 3.10-3.14; a sorted sweep 2-5 ms)",
+      "overfix_guard": "scores tied across classes cross the threshold together (an ungrouped sorted sweep gives 0.25 at 0.6, a merge that moves one class's ties at a time 0.625 at 0.6, instead of 0.375 at 0.7); all-equal scores give EER 0.5 at that score (a corner-initialized search returns threshold 0.0); a silent clip's zero embedding scores 0.0 (dividing by the norms raises ZeroDivisionError)"
+    },
+    {
+      "part": 2,
+      "test": "test_enrollment_registry",
+      "kind": "model and persistence",
+      "lesson_anchor": "Step 4 enrollment by averaging clean samples; Pitfalls: enrollment with noise, L2-normalize first; quiz Q12 (average, then renormalize)",
+      "exactness": "raw enrollment embeddings round-trip bit-for-bit across close and reopen; removing an enrollment gives back the earlier template bit-for-bit, which rules out a float (sum, count) cache updated by subtraction",
+      "traps": [
+        "running (sum, count) per speaker, subtracted on remove",
+        "mean of means: (template + new) / 2",
+        "averaging the raw embeddings",
+        "storing the normalized embedding",
+        "missing commit",
+        "speaker still listed after the last enrollment is removed",
+        "Welford running mean undone on remove",
+        "template cache cleared on enroll but not on remove",
+        "mean of the unit enrollments not scaled back to unit length (quiz Q12)",
+        "tuple or float32 read-back",
+        "dimension compared with the same speaker only",
+        "speakers() in enrollment order instead of by name"
+      ],
+      "clarifying_questions": [
+        "raw or normalized storage",
+        "caching templates",
+        "mixed dimensions"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_snorm_verification",
+      "kind": "core algorithm",
+      "lesson_anchor": "Scoring: S-norm / AS-norm against an imposter cohort; Pitfalls: fixed threshold across conditions, tune on a held-out dev set; quiz Q15 (threshold at a target FAR)",
+      "traps": [
+        "one-sided normalization (z-norm or t-norm only)",
+        "sample instead of population standard deviation",
+        "AS-norm with one cohort subset shared by both sides",
+        "threshold candidates from the non-target scores only",
+        "FAR measured on the target scores",
+        "calibrating on raw cosine, where the lookalike imposter outscores the genuine speaker and 0% FAR is unreachable",
+        "verify with > instead of >=",
+        "calibrate that does not keep its threshold",
+        "AS-norm keeping the lowest top_k cohort cosines",
+        "adding the two normalized scores instead of averaging them",
+        "threshold candidates from the target scores only",
+        "FAR required strictly below the target, or non-targets at the threshold not counted",
+        "a threshold invented above every score when the target FAR is unreachable",
+        "a default threshold that lets verify run before calibrate",
+        "one pooled cohort distribution for both sides, or AS-norm top_k by absolute cosine",
+        "FAR divided by every dev trial instead of the non-target ones"
+      ],
+      "integration": "templates from the Part 2 registry, scored with the Part 1 cosine",
+      "clarifying_questions": [
+        "population or sample std",
+        "claimed speaker in the cohort",
+        "unreachable target FAR"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_online_diarization",
+      "kind": "streaming",
+      "lesson_anchor": "Diarization: VAD -> segment -> embed each segment -> cluster -> smooth boundaries; Step 5 turns (start, end, speaker); Pitfalls: cosine on non-normalized embeddings (the centroid is a mean of unit vectors)",
+      "wire_format": "RTTM SPEAKER lines, onset and duration in seconds with three decimals, decided by the test's join/splitlines/split",
+      "traps": [
+        "missing newline",
+        "end time in the duration field",
+        "times without three decimals",
+        "comparing with a speaker's first or latest segment instead of the centroid",
+        "centroid of the raw embeddings",
+        "last turn never written",
+        "reading the whole stream first",
+        "writing a turn for an empty stream",
+        "centroid updated as normalize(old centroid + new segment), which overweights recent segments",
+        "joining the first speaker over the threshold instead of the most similar one",
+        "dot product with the mean centroid instead of cosine",
+        "holding a finished turn back for one more segment"
+      ],
+      "clarifying_questions": [
+        "gaps between same-speaker segments",
+        "order and overlap",
+        "revising written turns"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_dendrogram_cut",
+      "kind": "recursive structure",
+      "lesson_anchor": "Diarization: agglomerative clustering; Use It: pyannote speaker-diarization-3.1",
+      "traps": [
+        "checking only the top merge of a subtree (centroid-linkage inversion)",
+        "recursion on a 3000-deep chain",
+        "strict > at the threshold",
+        "segment index appearing twice",
+        "clusters left in tree order",
+        "duplicate segments checked inside each cluster only",
+        "clusters ordered by size or by last index",
+        "similarity threshold applied as a distance"
+      ],
+      "clarifying_questions": [
+        "merge exactly at the threshold",
+        "leaf type"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the suggested FAR/FRR swap is replaced by the VoxCeleb trial-list label parsed with bool(label). Swapping the FA and FR names leaves this EER unchanged, while the parser bug gives the failure one call away from its root cause (ZeroDivisionError inside eer). FAR/FRR confusion is a Part 3 trap instead (FAR measured on target scores).",
+    "Part 1: the zero vector is a guard on the cosine fix, not a planted bug in l2_normalize. The lesson's l2_normalize already maps the zero vector to zeros, and its Step 2 cosine returns 0.0 for it.",
+    "Part 1: tie handling is the guard on the speed-up (a sorted sweep moves tied scores together), and the all-equal-scores case guards the corner-initialized fix of the starting gap.",
+    "Part 2: exact (sum, count) is tested as 'removing an enrollment restores the template bit-for-bit'. A float (sum, count) cache cannot meet it, so the reference recomputes from the stored raw embeddings with math.fsum. No enrollment-order check: Python 3.12's sum() is compensated, so plain sum() would pass on 3.12 and fail on 3.10/3.11.",
+    "Part 3: AS-norm (top_k per side) is tested next to S-norm. Threshold selection at a target FAR is the pure function threshold_at_far; calibrate and verify connect it to the S-norm scores.",
+    "Part 4: the wire format is RTTM, the diarization standard, instead of NDJSON, which 06/03 already uses."
+  ]
+}
