@@ -1,0 +1,1671 @@
+{
+  "package": "feedlog",
+  "tests": [
+    "test_runner",
+    "test_rotating_log",
+    "test_truncate_lines",
+    "test_follow",
+    "test_retry_chains"
+  ],
+  "layers": [
+    {
+      "test": "test_runner",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "Object of type bytes is not JSON serializable"
+        },
+        {
+          "name": "fix the timeout branch: decode the partial output and capture it like any other",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "        except subprocess.TimeoutExpired as exc:\n            record = FeedbackRecord(\n                **base,\n                stdout_tail=exc.stdout or \"\",\n                stderr_tail=exc.stderr or \"\",\n                exit_code=None,\n                duration_ms=_ms_since(start),\n                error=f\"timeout after {timeout_s}s\",\n                truncations={\"stdout\": 0, \"stderr\": 0},\n                redactions={\"stdout\": 0, \"stderr\": 0},\n            )\n",
+              "new": "        except subprocess.TimeoutExpired as exc:\n            out, out_cut, out_hits = self._capture(_decode(exc.stdout))\n            err, err_cut, err_hits = self._capture(_decode(exc.stderr))\n            record = FeedbackRecord(\n                **base,\n                stdout_tail=out,\n                stderr_tail=err,\n                exit_code=None,\n                duration_ms=_ms_since(start),\n                error=f\"timeout after {timeout_s}s\",\n                truncations={\"stdout\": out_cut, \"stderr\": err_cut},\n                redactions={\"stdout\": out_hits, \"stderr\": err_hits},\n            )\n"
+            }
+          ],
+          "expect": "no part of a private key reaches the record"
+        },
+        {
+          "name": "+ redact before truncating",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "        kept, cut = self.truncate(text)\n        clean, hits = redact(kept)\n        return clean, cut, hits\n",
+              "new": "        clean, hits = redact(text)\n        kept, cut = self.truncate(clean)\n        return kept, cut, hits\n"
+            }
+          ],
+          "expect": "a command that never started gave no feedback"
+        },
+        {
+          "name": "+ a command that could not start has no exit code",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "                exit_code=COMMAND_NOT_FOUND,\n",
+              "new": "                exit_code=None,\n"
+            },
+            {
+              "file": "runner.py",
+              "old": "\nCOMMAND_NOT_FOUND = 127\n",
+              "new": ""
+            }
+          ],
+          "expect": "PermissionError: [Errno 13] Permission denied"
+        },
+        {
+          "name": "+ every OSError at start leaves a record",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "        except FileNotFoundError as exc:\n",
+              "new": "        except OSError as exc:\n"
+            }
+          ],
+          "expect": "UnicodeDecodeError"
+        },
+        {
+          "name": "+ bytes that are not UTF-8 become U+FFFD",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "    return data.decode(\"utf-8\") if data else \"\"\n",
+              "new": "    return data.decode(\"utf-8\", errors=\"replace\") if data else \"\"\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_runner",
+      "name": "the loop advances only on exit code 0",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    return record.exit_code is not None\n",
+          "new": "    return record.exit_code == 0\n"
+        }
+      ],
+      "expect": "a failing exit code is feedback the loop has to react to"
+    },
+    {
+      "test": "test_runner",
+      "name": "the loop advances when there is any output",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "    return record.exit_code is not None\n",
+          "new": "    return record.exit_code is not None or bool(record.stdout_tail)\n"
+        }
+      ],
+      "expect": "no exit code, no progress"
+    },
+    {
+      "test": "test_runner",
+      "name": "timed-out output decoded but not captured",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            out, out_cut, out_hits = self._capture(_decode(exc.stdout))\n            err, err_cut, err_hits = self._capture(_decode(exc.stderr))\n",
+          "new": "            out, out_cut, out_hits = _decode(exc.stdout), 0, 0\n            err, err_cut, err_hits = _decode(exc.stderr), 0, 0\n"
+        }
+      ],
+      "expect": "what a command printed before it timed out is kept, redacted and truncated like any other output"
+    },
+    {
+      "test": "test_runner",
+      "name": "timed-out output redacted but not truncated",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            out, out_cut, out_hits = self._capture(_decode(exc.stdout))\n            err, err_cut, err_hits = self._capture(_decode(exc.stderr))\n",
+          "new": "            out, out_hits = redact(_decode(exc.stdout))\n            out_cut = 0\n            err, err_hits = redact(_decode(exc.stderr))\n            err_cut = 0\n"
+        }
+      ],
+      "expect": "what a command printed before it timed out is kept, redacted and truncated like any other output"
+    },
+    {
+      "test": "test_runner",
+      "name": "only the timed-out command's stdout decoded and captured",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            out, out_cut, out_hits = self._capture(_decode(exc.stdout))\n            err, err_cut, err_hits = self._capture(_decode(exc.stderr))\n",
+          "new": "            out, out_cut, out_hits = self._capture(_decode(exc.stdout))\n            err, err_cut, err_hits = exc.stderr or \"\", 0, 0\n"
+        }
+      ],
+      "expect": "Object of type bytes is not JSON serializable"
+    },
+    {
+      "test": "test_runner",
+      "name": "timed-out output dropped",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            out, out_cut, out_hits = self._capture(_decode(exc.stdout))\n            err, err_cut, err_hits = self._capture(_decode(exc.stderr))\n",
+          "new": "            out, out_cut, out_hits = \"\", 0, 0\n            err, err_cut, err_hits = \"\", 0, 0\n"
+        }
+      ],
+      "expect": "what a command printed before it timed out is kept, redacted and truncated like any other output"
+    },
+    {
+      "test": "test_runner",
+      "name": "a timed-out command recorded with 124, the code timeout(1) exits with",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                exit_code=None,\n                duration_ms=_ms_since(start),\n                error=f\"timeout after {timeout_s}s\",\n",
+          "new": "                exit_code=124,\n                duration_ms=_ms_since(start),\n                error=f\"timeout after {timeout_s}s\",\n"
+        }
+      ],
+      "expect": "a command that ran out of time has no exit code"
+    },
+    {
+      "test": "test_runner",
+      "name": "a timed-out command recorded with the killed process's -9",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                exit_code=None,\n                duration_ms=_ms_since(start),\n                error=f\"timeout after {timeout_s}s\",\n",
+          "new": "                exit_code=-9,\n                duration_ms=_ms_since(start),\n                error=f\"timeout after {timeout_s}s\",\n"
+        }
+      ],
+      "expect": "a command that ran out of time has no exit code"
+    },
+    {
+      "test": "test_runner",
+      "name": "the timeout's error is str(exc), which also repeats the argv",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                error=f\"timeout after {timeout_s}s\",\n",
+          "new": "                error=str(exc),\n"
+        }
+      ],
+      "expect": "error says why there is no exit code"
+    },
+    {
+      "test": "test_runner",
+      "name": "each line redacted on its own",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        clean, hits = redact(text)\n",
+          "new": "        pieces = [redact(line) for line in text.split(\"\\n\")]\n        clean, hits = \"\\n\".join(piece[0] for piece in pieces), sum(piece[1] for piece in pieces)\n"
+        }
+      ],
+      "expect": "no part of a private key reaches the record"
+    },
+    {
+      "test": "test_runner",
+      "name": "lines that mention a key or a token dropped as well",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        kept, cut = self.truncate(clean)\n",
+          "new": "        clean = \"\\n\".join(line for line in clean.split(\"\\n\") if \"key\" not in line.lower() and \"token\" not in line.lower())\n        kept, cut = self.truncate(clean)\n"
+        }
+      ],
+      "expect": "the key is replaced and every other line is kept as it is"
+    },
+    {
+      "test": "test_runner",
+      "name": "truncate first, then drop the lines that look like base64",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        clean, hits = redact(text)\n        kept, cut = self.truncate(clean)\n        return kept, cut, hits\n",
+          "new": "        kept, cut = self.truncate(text)\n        clean, hits = redact(kept)\n        clean = \"\\n\".join(line for line in clean.split(\"\\n\") if not __import__(\"re\").fullmatch(r\"[A-Za-z0-9+/=]{40,}\", line))\n        return clean, cut, hits\n"
+        }
+      ],
+      "expect": "the key is replaced and every other line is kept as it is"
+    },
+    {
+      "test": "test_runner",
+      "name": "127 kept, and the loop told to treat 127 as no feedback",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                exit_code=None,\n                duration_ms=_ms_since(start),\n                error=f\"{type(exc).__name__}: {exc}\",\n",
+          "new": "                exit_code=127,\n                duration_ms=_ms_since(start),\n                error=f\"{type(exc).__name__}: {exc}\",\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "    return record.exit_code is not None\n",
+          "new": "    return record.exit_code not in (None, 127)\n"
+        }
+      ],
+      "expect": "a command that never started has no exit code"
+    },
+    {
+      "test": "test_runner",
+      "name": "a command that could not start recorded with 127, as a shell would",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                exit_code=None,\n                duration_ms=_ms_since(start),\n                error=f\"{type(exc).__name__}: {exc}\",\n",
+          "new": "                exit_code=127,\n                duration_ms=_ms_since(start),\n                error=f\"{type(exc).__name__}: {exc}\",\n"
+        }
+      ],
+      "expect": "a command that never started gave no feedback"
+    },
+    {
+      "test": "test_runner",
+      "name": "only FileNotFoundError caught",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        except OSError as exc:\n",
+          "new": "        except FileNotFoundError as exc:\n"
+        }
+      ],
+      "expect": "PermissionError: [Errno 13] Permission denied"
+    },
+    {
+      "test": "test_runner",
+      "name": "error is str(exc), without the exception class",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                error=f\"{type(exc).__name__}: {exc}\",\n",
+          "new": "                error=str(exc),\n"
+        }
+      ],
+      "expect": "error names the exception class and its message"
+    },
+    {
+      "test": "test_runner",
+      "name": "error is the exception class only",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                error=f\"{type(exc).__name__}: {exc}\",\n",
+          "new": "                error=type(exc).__name__,\n"
+        }
+      ],
+      "expect": "error names the exception class and its message"
+    },
+    {
+      "test": "test_runner",
+      "name": "only commands with an exit code are written",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        self.sink.append(record)\n        return record\n",
+          "new": "        if record.exit_code is not None:\n            self.sink.append(record)\n        return record\n"
+        }
+      ],
+      "expect": "every command leaves exactly one record"
+    },
+    {
+      "test": "test_runner",
+      "name": "non-UTF-8 bytes dropped",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "data.decode(\"utf-8\", errors=\"replace\")",
+          "new": "data.decode(\"utf-8\", errors=\"ignore\")"
+        }
+      ],
+      "expect": "bytes that are not UTF-8 become U+FFFD"
+    },
+    {
+      "test": "test_runner",
+      "name": "output decoded as latin-1",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "data.decode(\"utf-8\", errors=\"replace\")",
+          "new": "data.decode(\"latin-1\")"
+        }
+      ],
+      "expect": "bytes that are not UTF-8 become U+FFFD"
+    },
+    {
+      "test": "test_runner",
+      "name": "non-UTF-8 bytes written as backslash escapes",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "data.decode(\"utf-8\", errors=\"replace\")",
+          "new": "data.decode(\"utf-8\", errors=\"backslashreplace\")"
+        }
+      ],
+      "expect": "bytes that are not UTF-8 become U+FFFD"
+    },
+    {
+      "test": "test_runner",
+      "name": "cwd always recorded as the runner's own directory",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            cwd=os.getcwd() if cwd is None else cwd,\n",
+          "new": "            cwd=os.getcwd(),\n"
+        }
+      ],
+      "expect": "the record says where the command ran"
+    },
+    {
+      "test": "test_runner",
+      "name": "cwd not passed on to the command",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            done = self.execute(argv, cwd, timeout_s)\n",
+          "new": "            done = self.execute(argv, None, timeout_s)\n"
+        }
+      ],
+      "expect": "each command runs where it was asked to, with its own timeout"
+    },
+    {
+      "test": "test_runner",
+      "name": "every command gets the default timeout",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            done = self.execute(argv, cwd, timeout_s)\n",
+          "new": "            done = self.execute(argv, cwd, 30.0)\n"
+        }
+      ],
+      "expect": "each command runs where it was asked to, with its own timeout"
+    },
+    {
+      "test": "test_runner",
+      "name": "parent not recorded",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            parent_command_id=parent,\n",
+          "new": "            parent_command_id=None,\n"
+        }
+      ],
+      "expect": "a retry points at the attempt it retries"
+    },
+    {
+      "test": "test_runner",
+      "name": "the command recorded as one joined string",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            command=argv,\n",
+          "new": "            command=\" \".join(argv),\n"
+        }
+      ],
+      "expect": "the record keeps the exact argv, where it ran and the agent's note"
+    },
+    {
+      "test": "test_runner",
+      "name": "the timed-out command's stderr decoded but not redacted or truncated",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            err, err_cut, err_hits = self._capture(_decode(exc.stderr))\n",
+          "new": "            err, err_cut, err_hits = _decode(exc.stderr), 0, 0\n"
+        }
+      ],
+      "expect": "what a command printed before it timed out is kept, redacted and truncated like any other output"
+    },
+    {
+      "test": "test_runner",
+      "name": "the timed-out command's stdout truncated but not redacted",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            out, out_cut, out_hits = self._capture(_decode(exc.stdout))\n",
+          "new": "            (out, out_cut), out_hits = self.truncate(_decode(exc.stdout)), 0\n"
+        }
+      ],
+      "expect": "what a command printed before it timed out is kept, redacted and truncated like any other output"
+    },
+    {
+      "test": "test_runner",
+      "name": "redactions counted again on the text that is left",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        clean, hits = redact(text)\n        kept, cut = self.truncate(clean)\n        return kept, cut, hits\n",
+          "new": "        clean, _ = redact(text)\n        kept, cut = self.truncate(clean)\n        _, hits = redact(kept)\n        return kept, cut, hits\n"
+        }
+      ],
+      "expect": "truncations and redactions count, per stream, the lines cut and the secrets replaced"
+    },
+    {
+      "test": "test_runner",
+      "name": "only FileNotFoundError and PermissionError caught",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        except OSError as exc:\n",
+          "new": "        except (FileNotFoundError, PermissionError) as exc:\n"
+        }
+      ],
+      "expect": "OSError: [Errno 8] Exec format error"
+    },
+    {
+      "test": "test_runner",
+      "name": "non-UTF-8 bytes kept as surrogate escapes",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "data.decode(\"utf-8\", errors=\"replace\")",
+          "new": "data.decode(\"utf-8\", errors=\"surrogateescape\")"
+        }
+      ],
+      "expect": "UnicodeEncodeError"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "rotate once the file has passed max_bytes, as the lesson's maybe_rotate does",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if size and size + len(line) > self.max_bytes:\n",
+          "new": "        if size >= self.max_bytes:\n"
+        }
+      ],
+      "expect": "the log keeps feedback.jsonl.1 to feedback.jsonl.12"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "rotate after writing the record that overflowed",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if size and size + len(line) > self.max_bytes:\n            self._rotate()\n        with open(self.path, \"ab\") as fh:\n            fh.write(line)\n",
+          "new": "        with open(self.path, \"ab\") as fh:\n            fh.write(line)\n        if self.path.stat().st_size > self.max_bytes:\n            self._rotate()\n"
+        }
+      ],
+      "expect": "the log keeps feedback.jsonl.1 to feedback.jsonl.12"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "sizes counted in characters",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        size = self.path.stat().st_size if self.path.exists() else 0\n        if size and size + len(line) > self.max_bytes:\n",
+          "new": "        size = len(self.path.read_text(encoding=\"utf-8\")) if self.path.exists() else 0\n        if size and size + len(record.to_json()) + 1 > self.max_bytes:\n"
+        }
+      ],
+      "expect": "the log keeps feedback.jsonl.1 to feedback.jsonl.12"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "rotate whenever the record would not fit, even with nothing to rotate",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if size and size + len(line) > self.max_bytes:\n",
+          "new": "        if size + len(line) > self.max_bytes:\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "lines written with json.dumps defaults, non-ASCII escaped",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        line = (record.to_json() + \"\\n\").encode(\"utf-8\")\n",
+          "new": "        line = (__import__(\"json\").dumps(__import__(\"dataclasses\").asdict(record)) + \"\\n\").encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "no file grows past max_bytes"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "a file may not reach max_bytes exactly",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if size and size + len(line) > self.max_bytes:\n",
+          "new": "        if size and size + len(line) >= self.max_bytes:\n"
+        }
+      ],
+      "expect": "a file may fill up to max_bytes exactly"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "the size kept in memory, so a reopened log starts from 0",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        self.keep = keep\n",
+          "new": "        self.keep = keep\n        self._size = 0\n"
+        },
+        {
+          "file": "store.py",
+          "old": "        size = self.path.stat().st_size if self.path.exists() else 0\n        if size and size + len(line) > self.max_bytes:\n            self._rotate()\n        with open(self.path, \"ab\") as fh:\n            fh.write(line)\n",
+          "new": "        size = self._size\n        if size and size + len(line) > self.max_bytes:\n            self._rotate()\n            self._size = 0\n        with open(self.path, \"ab\") as fh:\n            fh.write(line)\n        self._size += len(line)\n"
+        }
+      ],
+      "expect": "no file grows past max_bytes"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "rotated files read in name order, so .10 to .12 come after .2",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        for i in range(self.keep, 0, -1):\n            records.extend(_read(self._rotated(i)))\n",
+          "new": "        for rotated in sorted(self.path.parent.glob(self.path.name + \".[0-9]*\"), reverse=True):\n            records.extend(_read(rotated))\n"
+        }
+      ],
+      "expect": "load_all reads every file the log keeps, oldest first"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "every file whose name starts with the log's, as the lesson's load_all globs",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        for i in range(self.keep, 0, -1):\n            records.extend(_read(self._rotated(i)))\n        records.extend(_read(self.path))\n",
+          "new": "        def age(p):\n            suffix = p.name[len(self.path.name):].lstrip(\".\")\n            return int(suffix) if suffix.isdigit() else (0 if not suffix else 99)\n        for p in sorted(self.path.parent.glob(self.path.name + \"*\"), key=age, reverse=True):\n            records.extend(_read(p))\n"
+        }
+      ],
+      "expect": "a log with no file yet is empty, whatever else is in the directory"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "load_all stops one file short",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        for i in range(self.keep, 0, -1):\n            records.extend",
+          "new": "        for i in range(self.keep - 1, 0, -1):\n            records.extend"
+        }
+      ],
+      "expect": "load_all reads every file the log keeps, oldest first"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "load_all reads the newest file first",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        for i in range(self.keep, 0, -1):\n            records.extend(_read(self._rotated(i)))\n        records.extend(_read(self.path))\n",
+          "new": "        records.extend(_read(self.path))\n        for i in range(1, self.keep + 1):\n            records.extend(_read(self._rotated(i)))\n"
+        }
+      ],
+      "expect": "load_all reads every file the log keeps, oldest first"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "load_all leaves out the current file",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        records.extend(_read(self.path))\n        return records\n",
+          "new": "        return records\n"
+        }
+      ],
+      "expect": "load_all reads every file the log keeps, oldest first"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "current() returns every file",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return _read(self.path)\n",
+          "new": "        return self.load_all()\n"
+        }
+      ],
+      "expect": "the loop reads the current file only"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "rotation renames the newest file first, overwriting the next",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        for i in range(self.keep - 1, 0, -1):\n            if self._rotated(i).exists():",
+          "new": "        for i in range(1, self.keep):\n            if self._rotated(i).exists():"
+        }
+      ],
+      "expect": "the log keeps feedback.jsonl.1 to feedback.jsonl.12"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "keep + 1 rotated files",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        self._rotated(self.keep).unlink(missing_ok=True)\n        for i in range(self.keep - 1, 0, -1):",
+          "new": "        self._rotated(self.keep + 1).unlink(missing_ok=True)\n        for i in range(self.keep, 0, -1):"
+        }
+      ],
+      "expect": "the log keeps feedback.jsonl.1 to feedback.jsonl.12"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "rotated names built with with_suffix",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return self.path.with_name(f\"{self.path.name}.{i}\")\n",
+          "new": "        return self.path.with_suffix(f\".{i}\")\n"
+        }
+      ],
+      "expect": "the log keeps feedback.jsonl.1 to feedback.jsonl.12"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "the log opened with 'wb', which truncates it",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        with open(self.path, \"ab\") as fh:\n",
+          "new": "        with open(self.path, \"wb\") as fh:\n"
+        }
+      ],
+      "expect": "the log keeps feedback.jsonl.1 to feedback.jsonl.12"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "a record larger than max_bytes refused",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        line = (record.to_json() + \"\\n\").encode(\"utf-8\")\n",
+          "new": "        line = (record.to_json() + \"\\n\").encode(\"utf-8\")\n        if len(line) > self.max_bytes:\n            raise ValueError(\"record does not fit in max_bytes\")\n"
+        }
+      ],
+      "expect": "ValueError: record does not fit in max_bytes"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "a record larger than max_bytes written only up to max_bytes",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        with open(self.path, \"ab\") as fh:\n            fh.write(line)\n",
+          "new": "        with open(self.path, \"ab\") as fh:\n            fh.write(line[: self.max_bytes])\n"
+        }
+      ],
+      "expect": "a record larger than max_bytes gets a file to itself"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "the newline left out of the size check, so a file can reach max_bytes + 1",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if size and size + len(line) > self.max_bytes:\n",
+          "new": "        if size and size + len(record.to_json().encode(\"utf-8\")) > self.max_bytes:\n"
+        }
+      ],
+      "expect": "no file grows past max_bytes, not even by one byte"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "keep counting the current file, one rotated file short",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        self._rotated(self.keep).unlink(missing_ok=True)\n        for i in range(self.keep - 1, 0, -1):",
+          "new": "        self._rotated(self.keep - 1).unlink(missing_ok=True)\n        for i in range(self.keep - 2, 0, -1):"
+        }
+      ],
+      "expect": "the log keeps feedback.jsonl.1 to feedback.jsonl.12"
+    },
+    {
+      "test": "test_rotating_log",
+      "name": "a record larger than max_bytes appended to the current file",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if size and size + len(line) > self.max_bytes:\n",
+          "new": "        if size and size + len(line) > self.max_bytes and len(line) <= self.max_bytes:\n"
+        }
+      ],
+      "expect": "a record larger than max_bytes gets a file to itself"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "lines split with str.splitlines()",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "    lines = body.split(\"\\n\") if text else []\n",
+          "new": "    lines = text.splitlines() if text else []\n"
+        }
+      ],
+      "expect": "lines end at \\n and nowhere else"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "universal newlines: \\r\\n and \\r end lines too",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "    lines = body.split(\"\\n\") if text else []\n",
+          "new": "    lines = __import__(\"re\").split(r\"\\r\\n|\\r|\\n\", body) if text else []\n"
+        }
+      ],
+      "expect": "lines end at \\n and nowhere else"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "\\r\\n turned into \\n first",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "    closed = text.endswith(\"\\n\")\n",
+          "new": "    text = text.replace(\"\\r\\n\", \"\\n\")\n    closed = text.endswith(\"\\n\")\n"
+        }
+      ],
+      "expect": "lines end at \\n and nowhere else"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "the final \\n counted as the start of an empty line",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "    body = text[:-1] if closed else text\n",
+          "new": "    body = text\n"
+        }
+      ],
+      "expect": "keep the first head lines and the last tail lines"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "every final newline stripped",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "    body = text[:-1] if closed else text\n",
+          "new": "    body = text.rstrip(\"\\n\")\n"
+        }
+      ],
+      "expect": "empty lines are lines"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "the final \\n dropped",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "    return \"\\n\".join(kept) + (\"\\n\" if closed else \"\"), cut\n",
+          "new": "    return \"\\n\".join(kept), cut\n"
+        }
+      ],
+      "expect": "keep the first head lines and the last tail lines"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "a final \\n added to text that had none",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "    return \"\\n\".join(kept) + (\"\\n\" if closed else \"\"), cut\n",
+          "new": "    return \"\\n\".join(kept) + \"\\n\", cut\n"
+        }
+      ],
+      "expect": "the result ends with \\n exactly when text does"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "lines[-tail:], which keeps every line when tail is 0",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "lines[len(lines) - tail :]",
+          "new": "lines[-tail:]"
+        }
+      ],
+      "expect": "tail=0 keeps no tail lines"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "a marker even when nothing is cut",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "    if len(lines) <= head + tail:\n",
+          "new": "    if len(lines) < head + tail:\n"
+        }
+      ],
+      "expect": "nothing is cut when head and tail cover every line"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "empty lines skipped",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "    lines = body.split(\"\\n\") if text else []\n",
+          "new": "    lines = [line for line in body.split(\"\\n\") if line] if text else []\n"
+        }
+      ],
+      "expect": "empty lines are lines"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "negative head or tail accepted",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "    if head < 0 or tail < 0:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "the cut lines dropped one at a time from the front of the string",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "    kept = lines[:head] + [f\"...truncated {cut} lines...\"] + lines[len(lines) - tail :]\n",
+          "new": "    rest = body + \"\\n\"\n    for _ in range(head + cut):\n        rest = rest[rest.index(\"\\n\") + 1 :]\n    kept = lines[:head] + [f\"...truncated {cut} lines...\"] + rest.split(\"\\n\")[:-1]\n"
+        }
+      ],
+      "expect": "truncating a long log should be quick"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "the cut lines popped from the front of a list",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "    kept = lines[:head] + [f\"...truncated {cut} lines...\"] + lines[len(lines) - tail :]\n",
+          "new": "    rest = lines[head:]\n    while len(rest) > tail:\n        rest.pop(0)\n    kept = lines[:head] + [f\"...truncated {cut} lines...\"] + rest\n"
+        }
+      ],
+      "expect": "truncating a long log should be quick"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "one cut line written as ...truncated 1 line...",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "[f\"...truncated {cut} lines...\"]",
+          "new": "[f\"...truncated {cut} line{'s' if cut != 1 else ''}...\"]"
+        }
+      ],
+      "expect": "the marker is always ...truncated N lines..., even for one line"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "only head + tail checked for being negative",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "    if head < 0 or tail < 0:\n",
+          "new": "    if head + tail < 0:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_truncate_lines",
+      "name": "the final \\n dropped when nothing is cut",
+      "edits": [
+        {
+          "file": "truncate.py",
+          "old": "    if len(lines) <= head + tail:\n        return text, 0\n",
+          "new": "    if len(lines) <= head + tail:\n        return body, 0\n"
+        }
+      ],
+      "expect": "nothing is cut when head and tail cover every line"
+    },
+    {
+      "test": "test_follow",
+      "name": "stdout read to the end before stderr",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    reading = {name: asyncio.ensure_future(pipe.read(chunk_size)) for name, pipe in pipes.items()}\n",
+          "new": "    reading = {\"stdout\": asyncio.ensure_future(process.stdout.read(chunk_size))}\n"
+        },
+        {
+          "file": "live.py",
+          "old": "                if not data:\n                    del reading[name]\n                    continue\n",
+          "new": "                if not data:\n                    del reading[name]\n                    if name == \"stdout\":\n                        reading[\"stderr\"] = asyncio.ensure_future(process.stderr.read(chunk_size))\n                    continue\n"
+        }
+      ],
+      "expect": "each line goes out once it is complete, in the order the command finished it"
+    },
+    {
+      "test": "test_follow",
+      "name": "stderr never read",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    reading = {name: asyncio.ensure_future(pipe.read(chunk_size)) for name, pipe in pipes.items()}\n",
+          "new": "    reading = {\"stdout\": asyncio.ensure_future(process.stdout.read(chunk_size))}\n"
+        }
+      ],
+      "expect": "each line goes out once it is complete, in the order the command finished it"
+    },
+    {
+      "test": "test_follow",
+      "name": "read() with no size, which waits for the end of the pipe",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    reading = {name: asyncio.ensure_future(pipe.read(chunk_size)) for name, pipe in pipes.items()}\n",
+          "new": "    reading = {name: asyncio.ensure_future(pipe.read()) for name, pipe in pipes.items()}\n"
+        },
+        {
+          "file": "live.py",
+          "old": "                reading[name] = asyncio.ensure_future(pipes[name].read(chunk_size))\n",
+          "new": "                reading[name] = asyncio.ensure_future(pipes[name].read())\n"
+        }
+      ],
+      "expect": "each line goes out once it is complete, in the order the command finished it"
+    },
+    {
+      "test": "test_follow",
+      "name": "a timeout for each read instead of the whole run",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "                timeout=max(0.0, deadline - loop.time()),\n",
+          "new": "                timeout=timeout_s,\n"
+        }
+      ],
+      "expect": "the whole run gets timeout_s, not each read"
+    },
+    {
+      "test": "test_follow",
+      "name": "the line being written dropped when the deadline hits",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    last = b\"\"\n    for name in pipes:\n",
+          "new": "    last = b\"\"\n    for name in pipes if not timed_out else ():\n"
+        }
+      ],
+      "expect": "the line being written at the deadline still goes out"
+    },
+    {
+      "test": "test_follow",
+      "name": "one line buffer for both pipes",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    kept = {name: _Kept(head, tail) for name in pipes}\n",
+          "new": "    shared = _Kept(head, tail)\n    kept = {name: shared for name in pipes}\n"
+        }
+      ],
+      "expect": "each line goes out once it is complete, in the order the command finished it"
+    },
+    {
+      "test": "test_follow",
+      "name": "progress decoded and encoded again",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "                    yield b\"\".join(PREFIX[name] + line + b\"\\n\" for line in lines)\n",
+          "new": "                    yield b\"\".join(PREFIX[name] + line.decode(\"utf-8\", \"replace\").encode() + b\"\\n\" for line in lines)\n"
+        }
+      ],
+      "expect": "bytes as written"
+    },
+    {
+      "test": "test_follow",
+      "name": "\\r stripped from progress lines",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "                    yield b\"\".join(PREFIX[name] + line + b\"\\n\" for line in lines)\n",
+          "new": "                    yield b\"\".join(PREFIX[name] + line.rstrip(b\"\\r\") + b\"\\n\" for line in lines)\n"
+        }
+      ],
+      "expect": "bytes as written"
+    },
+    {
+      "test": "test_follow",
+      "name": "one yield per line",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "                if lines:\n                    yield b\"\".join(PREFIX[name] + line + b\"\\n\" for line in lines)\n",
+          "new": "                for line in lines:\n                    yield PREFIX[name] + line + b\"\\n\"\n"
+        }
+      ],
+      "expect": "the lines one chunk completes go out together, in one yield"
+    },
+    {
+      "test": "test_follow",
+      "name": "each chunk relayed as it came, prefix in front",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "                if lines:\n                    yield b\"\".join(PREFIX[name] + line + b\"\\n\" for line in lines)\n",
+          "new": "                yield PREFIX[name] + data\n"
+        }
+      ],
+      "expect": "every yield is one or more whole lines"
+    },
+    {
+      "test": "test_follow",
+      "name": "an empty yield for a chunk that completes no line",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "                if lines:\n                    yield b\"\".join(PREFIX[name] + line + b\"\\n\" for line in lines)\n",
+          "new": "                yield b\"\".join(PREFIX[name] + line + b\"\\n\" for line in lines)\n"
+        }
+      ],
+      "expect": "every yield is one or more whole lines"
+    },
+    {
+      "test": "test_follow",
+      "name": "the unfinished last line dropped",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        line = kept[name].finish()\n        if line is not None:\n            last += PREFIX[name] + line + b\"\\n\"\n",
+          "new": "        pass\n"
+        }
+      ],
+      "expect": "each line goes out once it is complete, in the order the command finished it"
+    },
+    {
+      "test": "test_follow",
+      "name": "the unfinished last line sent without its newline",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "            last += PREFIX[name] + line + b\"\\n\"\n",
+          "new": "            last += PREFIX[name] + line\n"
+        }
+      ],
+      "expect": "every yield is one or more whole lines"
+    },
+    {
+      "test": "test_follow",
+      "name": "the record sent in the same yield as the last lines",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    if last:\n        yield last\n",
+          "new": ""
+        },
+        {
+          "file": "live.py",
+          "old": "    yield b\"[record] \" + json.dumps(record, ensure_ascii=False).encode(\"utf-8\") + b\"\\n\"\n",
+          "new": "    yield last + b\"[record] \" + json.dumps(record, ensure_ascii=False).encode(\"utf-8\") + b\"\\n\"\n"
+        }
+      ],
+      "expect": "the record comes last: one line, in a yield of its own"
+    },
+    {
+      "test": "test_follow",
+      "name": "the record pretty-printed",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "json.dumps(record, ensure_ascii=False)",
+          "new": "json.dumps(record, ensure_ascii=False, indent=2)"
+        }
+      ],
+      "expect": "the record comes last: one line, in a yield of its own"
+    },
+    {
+      "test": "test_follow",
+      "name": "only the last lines kept, no head",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        if len(self.first) < self.head:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "each pipe keeps its own first and last lines"
+    },
+    {
+      "test": "test_follow",
+      "name": "tails decoded as latin-1",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        lines = [line.decode(\"utf-8\", errors=\"replace\") for line in self.first]\n        if self.cut:",
+          "new": "        lines = [line.decode(\"latin-1\") for line in self.first]\n        if self.cut:"
+        },
+        {
+          "file": "live.py",
+          "old": "        lines.extend(line.decode(\"utf-8\", errors=\"replace\") for line in self.last)\n",
+          "new": "        lines.extend(line.decode(\"latin-1\") for line in self.last)\n"
+        }
+      ],
+      "expect": "each pipe keeps its own first and last lines"
+    },
+    {
+      "test": "test_follow",
+      "name": "tails decoded strictly",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        lines.extend(line.decode(\"utf-8\", errors=\"replace\") for line in self.last)\n",
+          "new": "        lines.extend(line.decode(\"utf-8\") for line in self.last)\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_follow",
+      "name": "every line kept, the tail sliced off at the end",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        self.last: deque[bytes] = deque(maxlen=tail)\n",
+          "new": "        self.last: deque[bytes] = deque()\n        self.tail = tail\n"
+        },
+        {
+          "file": "live.py",
+          "old": "        return self.lines - len(self.first) - len(self.last)\n",
+          "new": "        return self.lines - len(self.first) - min(self.tail, len(self.last))\n"
+        },
+        {
+          "file": "live.py",
+          "old": "        lines.extend(line.decode(\"utf-8\", errors=\"replace\") for line in self.last)\n",
+          "new": "        lines.extend(line.decode(\"utf-8\", errors=\"replace\") for line in list(self.last)[max(0, len(self.last) - self.tail) :])\n"
+        }
+      ],
+      "expect": "memory stays flat however much the command prints"
+    },
+    {
+      "test": "test_follow",
+      "name": "everything read before anything is yielded",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    timed_out = False\n    exit_code: int | None = None\n",
+          "new": "    timed_out = False\n    exit_code: int | None = None\n    held: list[bytes] = []\n"
+        },
+        {
+          "file": "live.py",
+          "old": "                    yield b\"\".join(PREFIX[name] + line + b\"\\n\" for line in lines)\n",
+          "new": "                    held.append(b\"\".join(PREFIX[name] + line + b\"\\n\" for line in lines))\n"
+        },
+        {
+          "file": "live.py",
+          "old": "    if timed_out:\n        if process.returncode is None:",
+          "new": "    for piece in held:\n        yield piece\n    if timed_out:\n        if process.returncode is None:"
+        }
+      ],
+      "expect": "a line goes out as soon as the chunk that ends it is read"
+    },
+    {
+      "test": "test_follow",
+      "name": "the deadline checked only after a chunk arrives",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "                timeout=max(0.0, deadline - loop.time()),\n",
+          "new": "                timeout=None,\n"
+        },
+        {
+          "file": "live.py",
+          "old": "                if lines:\n                    yield b\"\".join(PREFIX[name] + line + b\"\\n\" for line in lines)\n        if not timed_out and process.returncode is None:\n",
+          "new": "                if lines:\n                    yield b\"\".join(PREFIX[name] + line + b\"\\n\" for line in lines)\n            if loop.time() >= deadline:\n                timed_out = True\n                break\n        if not timed_out and process.returncode is None:\n"
+        }
+      ],
+      "expect": "at the deadline the follower kills the command and stops reading"
+    },
+    {
+      "test": "test_follow",
+      "name": "no deadline on waiting for the exit",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "                    await asyncio.wait_for(process.wait(), remaining)\n",
+          "new": "                    await process.wait()\n"
+        }
+      ],
+      "expect": "waiting for the exit counts against the deadline too"
+    },
+    {
+      "test": "test_follow",
+      "name": "the killed command's -9 recorded as its exit code",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "            process.kill()\n        await process.wait()\n",
+          "new": "            process.kill()\n        await process.wait()\n        exit_code = process.returncode\n"
+        }
+      ],
+      "expect": "a command killed at the deadline has no exit code"
+    },
+    {
+      "test": "test_follow",
+      "name": "the rest of the output read after the kill",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "            process.kill()\n        await process.wait()\n",
+          "new": "            process.kill()\n        await process.wait()\n        for name in pipes:\n            while data := await pipes[name].read(chunk_size):\n                kept[name].feed(data)\n"
+        }
+      ],
+      "expect": "at the deadline the follower kills the command and stops reading"
+    },
+    {
+      "test": "test_follow",
+      "name": "the process not killed at the deadline",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        if process.returncode is None:\n            process.kill()\n        await process.wait()\n",
+          "new": "        await process.wait()\n"
+        }
+      ],
+      "expect": "at the deadline the follower kills the command and stops reading"
+    },
+    {
+      "test": "test_follow",
+      "name": "wait for the exit first, then read",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    timed_out = False\n    exit_code: int | None = None\n",
+          "new": "    timed_out = False\n    exit_code: int | None = None\n    await process.wait()\n"
+        }
+      ],
+      "expect": "each line goes out once it is complete, in the order the command finished it"
+    },
+    {
+      "test": "test_follow",
+      "name": "a fresh timeout_s for waiting on the exit",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "                    await asyncio.wait_for(process.wait(), remaining)\n",
+          "new": "                    await asyncio.wait_for(process.wait(), timeout_s)\n"
+        }
+      ],
+      "expect": "waiting for the exit counts against the deadline too"
+    },
+    {
+      "test": "test_follow",
+      "name": "the deadline starts with the first chunk",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "    deadline = loop.time() + timeout_s\n",
+          "new": "    deadline = None\n"
+        },
+        {
+          "file": "live.py",
+          "old": "                timeout=max(0.0, deadline - loop.time()),\n",
+          "new": "                timeout=None if deadline is None else max(0.0, deadline - loop.time()),\n"
+        },
+        {
+          "file": "live.py",
+          "old": "                data = task.result()\n",
+          "new": "                data = task.result()\n                if deadline is None:\n                    deadline = loop.time() + timeout_s\n"
+        }
+      ],
+      "expect": "a command that prints nothing is killed at the deadline too"
+    },
+    {
+      "test": "test_follow",
+      "name": "the unfinished last line sent but left out of the tail",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        line, self.pending = self.pending, b\"\"\n        self._keep(line)\n",
+          "new": "        line, self.pending = self.pending, b\"\"\n"
+        }
+      ],
+      "expect": "each pipe keeps its own first and last lines"
+    },
+    {
+      "test": "test_follow",
+      "name": "a tail that ends in an unfinished line given a final newline",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        return \"\\n\".join(lines) + (\"\" if self.unfinished else \"\\n\")\n",
+          "new": "        return \"\\n\".join(lines) + \"\\n\"\n"
+        }
+      ],
+      "expect": "each pipe keeps its own first and last lines"
+    },
+    {
+      "test": "test_follow",
+      "name": "bytes that are not UTF-8 dropped from the tails",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        lines.extend(line.decode(\"utf-8\", errors=\"replace\") for line in self.last)\n",
+          "new": "        lines.extend(line.decode(\"utf-8\", errors=\"ignore\") for line in self.last)\n"
+        }
+      ],
+      "expect": "each pipe keeps its own first and last lines"
+    },
+    {
+      "test": "test_follow",
+      "name": "the record given the feedback record's duration_ms as well",
+      "edits": [
+        {
+          "file": "live.py",
+          "old": "        \"truncations\": {name: kept[name].cut for name in pipes},\n",
+          "new": "        \"truncations\": {name: kept[name].cut for name in pipes},\n        \"duration_ms\": 0,\n"
+        }
+      ],
+      "expect": "each pipe keeps its own first and last lines"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "a parent that is gone raises KeyError",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        while path[-1].parent_command_id in position:\n",
+          "new": "        while path[-1].parent_command_id is not None:\n"
+        }
+      ],
+      "expect": "KeyError: 'gone-7'"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "an orphaned chain reported as a root",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "                orphaned_from=path[0].parent_command_id,\n",
+          "new": "                orphaned_from=None,\n"
+        }
+      ],
+      "expect": "a chain whose first attempt retries a record that is gone says which one"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "orphaned chains left out",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        path.reverse()\n",
+          "new": "        path.reverse()\n        if path[0].parent_command_id is not None:\n            continue\n"
+        }
+      ],
+      "expect": "one chain per attempt nobody retried, first attempt first, in the order those last attempts were written"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "one retry per attempt: a fork keeps only its last retry",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "    chains = []\n    for record in records:\n        if record.command_id in retried:\n            continue\n        path = [record]\n        while path[-1].parent_command_id in position:\n            path.append(records[position[path[-1].parent_command_id]])\n        path.reverse()\n",
+          "new": "    retry_of = {r.parent_command_id: r for r in records if r.parent_command_id in position}\n    chains = []\n    for record in records:\n        if record.parent_command_id in position:\n            continue\n        path = [record]\n        while path[-1].command_id in retry_of:\n            path.append(retry_of[path[-1].command_id])\n"
+        }
+      ],
+      "expect": "one chain per attempt nobody retried, first attempt first, in the order those last attempts were written"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "one retry per attempt: a fork keeps only its first retry",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "    chains = []\n    for record in records:\n        if record.command_id in retried:\n            continue\n        path = [record]\n        while path[-1].parent_command_id in position:\n            path.append(records[position[path[-1].parent_command_id]])\n        path.reverse()\n",
+          "new": "    retry_of: dict[str, FeedbackRecord] = {}\n    for r in records:\n        if r.parent_command_id in position:\n            retry_of.setdefault(r.parent_command_id, r)\n    chains = []\n    for record in records:\n        if record.parent_command_id in position:\n            continue\n        path = [record]\n        while path[-1].command_id in retry_of:\n            path.append(retry_of[path[-1].command_id])\n        record = path[-1]\n"
+        },
+        {
+          "file": "chains.py",
+          "old": "    return chains\n",
+          "new": "    chains.sort(key=lambda chain: position[chain.attempts[-1]])\n    return chains\n"
+        }
+      ],
+      "expect": "one chain per attempt nobody retried, first attempt first, in the order those last attempts were written"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "attempts shared by two chains walked only once, so the second fork stops at d2",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "    chains = []\n    for record in records:\n        if record.command_id in retried:\n            continue\n        path = [record]\n        while path[-1].parent_command_id in position:\n            path.append(records[position[path[-1].parent_command_id]])\n        path.reverse()\n",
+          "new": "    chains = []\n    walked: set[str] = set()\n    for record in records:\n        if record.command_id in retried:\n            continue\n        path = [record]\n        while path[-1].parent_command_id in position and path[-1].parent_command_id not in walked:\n            path.append(records[position[path[-1].parent_command_id]])\n        walked.update(r.command_id for r in path)\n        path.reverse()\n"
+        }
+      ],
+      "expect": "one chain per attempt nobody retried, first attempt first, in the order those last attempts were written"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "chains in the order their first attempts were written",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "    return chains\n",
+          "new": "    chains.sort(key=lambda chain: position[chain.attempts[0]])\n    return chains\n"
+        }
+      ],
+      "expect": "one chain per attempt nobody retried, first attempt first, in the order those last attempts were written"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "chains sorted by the last attempt's started_at",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "    return chains\n",
+          "new": "    chains.sort(key=lambda chain: records[position[chain.attempts[-1]]].started_at)\n    return chains\n"
+        }
+      ],
+      "expect": "one chain per attempt nobody retried, first attempt first, in the order those last attempts were written"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "an attempt without an exit code counted as a failure",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "if r.exit_code is not None and r.exit_code != 0]",
+          "new": "if r.exit_code != 0]"
+        }
+      ],
+      "expect": "last_failure is the latest attempt that exited non-zero"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "negative exit codes not counted as failures",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "if r.exit_code is not None and r.exit_code != 0]",
+          "new": "if r.exit_code is not None and r.exit_code > 0]"
+        }
+      ],
+      "expect": "last_failure is the latest attempt that exited non-zero"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "the first failure instead of the latest",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "                last_failure=failures[-1] if failures else None,\n",
+          "new": "                last_failure=failures[0] if failures else None,\n"
+        }
+      ],
+      "expect": "last_failure is the latest attempt that exited non-zero"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "last_failure taken over the whole retry tree, so both forks get d3",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        failures = [r.command_id for r in path if r.exit_code is not None and r.exit_code != 0]\n",
+          "new": "        tree = {path[0].command_id}\n        for r in records:\n            if r.parent_command_id in tree:\n                tree.add(r.command_id)\n        failures = [r.command_id for r in records if r.command_id in tree and r.exit_code is not None and r.exit_code != 0]\n"
+        }
+      ],
+      "expect": "last_failure is the latest attempt that exited non-zero"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "last_failure set only when the chain's last attempt failed",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "                last_failure=failures[-1] if failures else None,\n",
+          "new": "                last_failure=record.command_id if record.exit_code not in (0, None) else None,\n"
+        }
+      ],
+      "expect": "last_failure is the latest attempt that exited non-zero"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "the chain's exit code taken from its first attempt",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "                exit_code=record.exit_code,\n",
+          "new": "                exit_code=path[0].exit_code,\n"
+        }
+      ],
+      "expect": "a chain ends with its last attempt's exit code"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "every record starts a chain of its own",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        if record.command_id in retried:\n            continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "one chain per attempt nobody retried, first attempt first, in the order those last attempts were written"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "a record nobody retried and that retries nothing left out",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        path.reverse()\n",
+          "new": "        path.reverse()\n        if len(path) == 1 and record.parent_command_id is None:\n            continue\n"
+        }
+      ],
+      "expect": "one chain per attempt nobody retried, first attempt first, in the order those last attempts were written"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "attempts newest first",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        path.reverse()\n",
+          "new": ""
+        }
+      ],
+      "expect": "one chain per attempt nobody retried, first attempt first, in the order those last attempts were written"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "attempts kept as a list",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "                attempts=tuple(r.command_id for r in path),\n",
+          "new": "                attempts=[r.command_id for r in path],\n"
+        }
+      ],
+      "expect": "chains are Chain values, attempts a tuple"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "parents followed recursively",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        path = [record]\n        while path[-1].parent_command_id in position:\n            path.append(records[position[path[-1].parent_command_id]])\n        path.reverse()\n",
+          "new": "        def back(r):\n            if r.parent_command_id not in position:\n                return [r]\n            return back(records[position[r.parent_command_id]]) + [r]\n\n        path = back(record)\n"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "retries followed recursively down from each first attempt",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "    chains = []\n    for record in records:\n        if record.command_id in retried:\n            continue\n        path = [record]\n        while path[-1].parent_command_id in position:\n            path.append(records[position[path[-1].parent_command_id]])\n        path.reverse()\n        failures = [r.command_id for r in path if r.exit_code is not None and r.exit_code != 0]\n        chains.append(\n            Chain(\n                attempts=tuple(r.command_id for r in path),\n                orphaned_from=path[0].parent_command_id,\n                exit_code=record.exit_code,\n                last_failure=failures[-1] if failures else None,\n            )\n        )\n    return chains\n",
+          "new": "    children: dict[str, list[FeedbackRecord]] = {}\n    for r in records:\n        if r.parent_command_id in position:\n            children.setdefault(r.parent_command_id, []).append(r)\n    chains = []\n\n    def down(path):\n        kids = children.get(path[-1].command_id, [])\n        if not kids:\n            failures = [r.command_id for r in path if r.exit_code is not None and r.exit_code != 0]\n            chains.append(\n                Chain(\n                    attempts=tuple(r.command_id for r in path),\n                    orphaned_from=path[0].parent_command_id,\n                    exit_code=path[-1].exit_code,\n                    last_failure=failures[-1] if failures else None,\n                )\n            )\n        for kid in kids:\n            down(path + [kid])\n\n    for record in records:\n        if record.parent_command_id not in position:\n            down([record])\n    chains.sort(key=lambda chain: position[chain.attempts[-1]])\n    return chains\n"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "parents followed recursively with a memo, so forks share their prefix",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "    chains = []\n",
+          "new": "    memo: dict[str, tuple[str, ...]] = {}\n\n    def path_to(cid):\n        if cid not in memo:\n            parent = records[position[cid]].parent_command_id\n            memo[cid] = (path_to(parent) if parent in position else ()) + (cid,)\n        return memo[cid]\n\n    chains = []\n"
+        },
+        {
+          "file": "chains.py",
+          "old": "        path = [record]\n        while path[-1].parent_command_id in position:\n            path.append(records[position[path[-1].parent_command_id]])\n        path.reverse()\n",
+          "new": "        path = [records[position[cid]] for cid in path_to(record.command_id)]\n"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "a retry checked against started_at instead of the order records were written",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "            if position[parent] >= i:\n",
+          "new": "            if records[position[parent]].started_at >= record.started_at:\n"
+        }
+      ],
+      "expect": "ValueError: 'a3' retries 'a2'"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "a command id used twice accepted",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        if record.command_id in position:\n            raise ValueError",
+          "new": "        if False:\n            raise ValueError"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "a retry of a later record accepted",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "            if position[parent] >= i:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_retry_chains",
+      "name": "cycles found by walking the parents, a retry of a later record accepted",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "            if position[parent] >= i:\n                raise ValueError(f\"{record.command_id!r} retries {parent!r}, which is not written before it\")\n",
+          "new": "            seen, cursor = {record.command_id}, parent\n            while cursor in position:\n                if cursor in seen:\n                    raise ValueError(f\"cycle through {cursor!r}\")\n                seen.add(cursor)\n                cursor = records[position[cursor]].parent_command_id\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    }
+  ]
+}

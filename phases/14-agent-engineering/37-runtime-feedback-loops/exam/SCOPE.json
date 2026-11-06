@@ -1,0 +1,149 @@
+{
+  "lesson": "phases/14-agent-engineering/37-runtime-feedback-loops",
+  "title": "Runtime Feedback Loops",
+  "format": "staged-brownfield",
+  "service": "FeedLog: a feedback runner that records each command's argv, redacted and truncated stdout and stderr, exit code, duration and agent note, writes the records to a size-rotated JSONL log, follows long-running commands live, and links retries into chains",
+  "sources": {
+    "docs/en.md": "702a2f8ef5e03dc631ba401af3b12cbfff1e4cfa1f5d1ae3a38f3ddd8f7681eb",
+    "code/main.py": "f145730b32c35f47fcc96742115ed2e56ccb1865a66179b825cd443b22ad9b47",
+    "quiz/quiz.md": "9122b828f7ad14b3cd8d8b11079364e4df62da935ed5a272f086724ae10e2ed1"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network and no LLM: commands run against FakeShell (a scripted subprocess.run) and FakeProcess (a scripted asyncio subprocess), plus one real `python -c` run in Parts 1 and 4",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_runner",
+      "kind": "debug",
+      "lesson_anchor": "What goes in a feedback record; Refuse to advance without feedback (exit_code null and error); Redact at write, not at read; code/main.py run_with_feedback, _process_capture and loop_can_advance; quiz Q3, Q6, Q11, Q12",
+      "planted_bugs": [
+        "the timeout branch puts TimeoutExpired.stdout (bytes) into the record unprocessed; the TypeError surfaces two calls away, in FeedbackRecord.to_json called from JsonlSink.append, and the output was neither redacted nor truncated",
+        "_capture truncates before it redacts: the 30-line cut drops the private key's BEGIN line, the multi-line pattern never matches and 27 key lines reach the record, although redact() itself is correct",
+        "a missing program is recorded with exit code 127, the shell's convention, so the correct loop_can_advance takes it for feedback; the assertion fails one call away from the cause",
+        "only FileNotFoundError is caught: a PermissionError escapes the runner and leaves no record",
+        "_decode decodes strictly, so binary output raises UnicodeDecodeError and loses the record"
+      ],
+      "timing_assert": "none in this part; the timing assertion is in Part 3",
+      "overfix_guard": "exit code 1 must still let the loop advance (quiz Q3: rules out loop_can_advance as exit_code == 0); the timed-out output is kept, redacted and truncated (decoding only, dropping it, or not truncating are caught; decoding stdout only fails on stderr's bytes, and capturing stdout only leaves the password in stderr's dsn line); the private key must go while keyboard: us-intl, tokenizer=fast and the deploy_key lines stay (dropping lines with key or token, filtering base64-looking lines after truncating, and redacting line by line are caught); 127 taught to loop_can_advance is caught by exit_code is None; a script without a #! line raises a plain OSError (Exec format error), so catching FileNotFoundError and PermissionError only is caught; error is '<class>: <message>' and the timeout's error is built from timeout_s, not str(exc), which repeats the argv; errors='ignore', latin-1 and backslashreplace are caught; every command leaves exactly one record; cwd, timeout and parent reach the executor and the record; the exact argv list is kept"
+    },
+    {
+      "part": 2,
+      "test": "test_rotating_log",
+      "kind": "model and persistence",
+      "lesson_anchor": "Rotation policy, not a single file (cap per file, rotate to .1, .2, drop the oldest; the agent's loop reads only the current file, CI gets the full set); Exercise 3; Parent-command id lineage across rotated files; quiz Q8 and Q16",
+      "storage": "append-only JSONL: one record.to_json() line per record, UTF-8 with non-ASCII kept as is, in path and path.1 (newest) to path.<keep> (oldest)",
+      "exactness": "records read back equal, and every file's bytes are exactly the records' JSON lines; sizes are bytes on disk: records padded with a 4-byte emoji are 700 bytes but about 415 characters, two fit in an 1800-byte file, a 400-byte record fills one to exactly 1800, a 401-byte record after a 1400-byte file starts a new one (the newline counts), a 4000-byte record gets a file of its own and is never split",
+      "traps": [
+        "rotating after the file has passed max_bytes, as the lesson's maybe_rotate does, or after writing the record that overflowed",
+        "sizes in characters instead of bytes",
+        "the newline left out of the size check, so a file reaches max_bytes + 1",
+        ">= instead of >, so a file may not reach max_bytes exactly",
+        "the size kept in memory, so a reopened log starts from 0",
+        "rotated files read in name order, so .10 to .12 come between .1 and .2 (the defect suggested for this lesson's Part 1)",
+        "the lesson's glob over the log's name plus *, which reads feedback.jsonl.bak too",
+        "load_all one file short, newest first, or without the current file; current() reading every file",
+        "renaming .1 to .2 first, which overwrites; keeping keep + 1 files",
+        "with_suffix naming (feedback.1) and opening with 'wb'",
+        "an oversized record refused, cut at max_bytes, or rotated with nothing to rotate on a fresh log",
+        "lines written with json.dumps defaults, which escape non-ASCII and change the byte sizes"
+      ],
+      "clarifying_questions": [
+        "bytes or characters",
+        "a file exactly at max_bytes",
+        "whether the newline counts",
+        "a record larger than max_bytes",
+        "what keep counts",
+        "other files in the directory",
+        "several writer processes",
+        "a torn last line"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_truncate_lines",
+      "kind": "core algorithm",
+      "lesson_anchor": "Truncation is deterministic (head and tail with a ...truncated N lines... marker, no sampling, the final error lives at the tail); A 50 MB log destroys the loop; Learning objective 3; code/main.py deterministic_tail; quiz Q4, Q11 and Q14",
+      "traps": [
+        "the final \\n counted as a line, dropped, added to text without one, or stripped with rstrip so that trailing empty lines vanish",
+        "str.splitlines(), universal newlines or \\r\\n normalised to \\n: lines must end at \\n only, and a \\r\\n line keeps its \\r",
+        "lines[-tail:] keeping every line when tail is 0",
+        "a marker when head + tail cover every line",
+        "empty lines skipped",
+        "negative head or tail accepted",
+        "dropping the cut lines one at a time from the front of the string, or popping them from the front of a list"
+      ],
+      "timing_assert": "truncate_lines on a 60,000-line, 2.4 MB access log under 0.1 s. Measured on this machine in separate processes at load average 5 to 10: dropping the cut lines from the front of the string one at a time 1.10-1.28 s with Python 3.12 (11-13x the limit), 1.14-1.23 s with 3.10 and 1.14-1.30 s with 3.14; popping them from the front of a list 0.22-0.27 s (caught, 2.2-2.7x); the reference 2.0-5.2 ms with 3.12 (1/19 to 1/50 of the limit), 2.0-3.2 ms with 3.10 and 1.8-3.2 ms with 3.14. A character-by-character scan is linear but takes 40-60 ms with 3.12 and 3.14 and 90-160 ms with 3.10, so it can fail the limit (noted in INTERVIEWER.md)",
+      "integration": "the Part 1 runner with its default truncation (5 head and 30 tail lines) on output whose private key starts inside the head and ends inside the cut: the record keeps 5 + 30 lines of the redacted text and no key line, which needs Part 1's redact-before-truncate fix",
+      "clarifying_questions": [
+        "\\r\\n and other separators",
+        "head and tail overlapping",
+        "the marker for one line",
+        "text without a final newline",
+        "a very long single line",
+        "negative head or tail"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_follow",
+      "kind": "streaming",
+      "lesson_anchor": "Every command goes through the runner; Truncation is deterministic (bounded head and tail); Refuse to advance without feedback (timeout gives exit_code null); A 50 MB log destroys the loop; code/main.py timeout branch",
+      "wire_format": "raw byte stream: an async generator of bytes, one yield per chunk with the lines it completed, each b'[stdout] ' or b'[stderr] ' plus the line's bytes as written plus b'\\n', the unfinished last lines at the end, then the record alone as b'[record] ' plus one line of JSON; decided by the test's b''.join, split on b'\\n' and json.loads",
+      "traps": [
+        "reading stdout to the end before stderr, never reading stderr, or read() with no size (which waits for EOF): the fake pipe holds one write, so the command blocks as with a full OS pipe",
+        "one line buffer for both pipes",
+        "progress decoded and encoded again, or with \\r stripped",
+        "one yield per line, chunks relayed with the prefix in front, empty yields",
+        "the unfinished last line dropped, sent without its newline, or dropped at the deadline",
+        "the record joined to the last progress lines, or pretty-printed",
+        "a tail-only deque, tails decoded as latin-1 or strictly",
+        "every line kept and the tail sliced off at the end (tracemalloc peak about 5 MB against a 1 MB limit; the reference peaks near 60 KB)",
+        "everything read before anything is yielded",
+        "the deadline checked only after a chunk arrives or started at the first chunk (a silent command is never killed), a timeout per read instead of per run, no deadline or a fresh timeout_s on waiting for the exit",
+        "-9 recorded as the exit code, the rest of the output read after the kill, the process not killed, waiting for the exit before reading"
+      ],
+      "clarifying_questions": [
+        "separate tails per pipe",
+        "redacting the live view",
+        "a line split across chunks",
+        "decoding progress",
+        "reading after the deadline",
+        "pipes closed but the process alive",
+        "several lines in one chunk",
+        "the exit code of a killed process"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_retry_chains",
+      "kind": "graph",
+      "lesson_anchor": "Parent-command id for retry chains (command_id, parent_command_id pointing at the previous attempt; the reviewer's failed-attempts list and the verification gate follow the chain); Exercise 4; Exercise 5 (highlight the latest non-zero exit); code/main.py retry_chain (a while loop over parent_command_id); rotation drops old parents (quiz Q8 and Q16: tell a chain's first attempt from a lost parent); quiz Q7",
+      "traps": [
+        "a fork (one attempt retried twice) kept as one chain: a child-by-parent dict keeps only d3 or only d4, and a walked set shared by all chains stops the second fork at d2",
+        "a chain whose parent rotated away (orphaned_from the lost parent's id; f1 and g1 both point at gone-3) raising KeyError, reported as a root, or left out",
+        "last_failure: an attempt without an exit code counted as a failure, -9 not counted, the first failure instead of the latest, taken over the whole retry tree (both forks get d3), or set only when the last attempt failed",
+        "a recursive walk on a 1500-attempt polling chain (RecursionError), up through the parents, down from the first attempt, or memoized",
+        "the chain's exit code taken from its first attempt",
+        "every record starting a chain, single attempts left out, attempts newest first, attempts as a list",
+        "duplicate ids or a retry of a later record accepted, only cycles rejected (a retry written before its parent without a cycle)",
+        "incidental, stated in the docstring (before and after mean position in records, never started_at): chains ordered by their first attempt or by started_at (the clock stepped back for a3), or a retry of a later record checked with started_at"
+      ],
+      "clarifying_questions": [
+        "a missing parent",
+        "an attempt retried twice",
+        "a timeout as a failure",
+        "a signal exit",
+        "how long a chain gets",
+        "the order of chains",
+        "cycles and duplicate ids",
+        "a retry written before its parent"
+      ]
+    }
+  ],
+  "deviations": [
+    "Parts 1 and 3 swapped part of their content. The suggested Part 1 fixed _process_capture and deterministic_tail, and the suggested Part 3 implemented the same truncation and redaction again, so the same functions would have been tested twice. Here Part 3 implements truncate_lines from scratch (the lesson's core algorithm), with the suggested splitlines defect and the 50 MB quadratic tail as its traps and its timing assertion, and Part 1 debugs the runner around it. The suggested truncate-then-redact leak stays in Part 1 as a defect in the runner's _capture; the Part 1 test passes a tail-only truncation of its own, so Part 1 does not depend on Part 3, and Part 3 ends with the suggested scenario (BEGIN line in the head, END line in the cut) on the real truncation. The keyboard layout and tokenizer=fast guard is kept in Part 1.",
+    "The suggested Part 1 defect of rotated files sorted by name (.10 and .11 before .2) moved to Part 2, which writes and reads the rotated files, as a trap with keep=12. Part 1 instead gets three defects from the lesson's own pitfalls: TimeoutExpired output stored as bytes (the error two calls away), 127 for a missing program (quiz Q6), only FileNotFoundError caught (quiz Q12), plus strict decoding. Monotonic durations and argv normalisation were left out because lessons 35 and 38 own them. Part 1 has no timing assertion; Part 3 has it.",
+    "Part 2: append-only JSONL as assigned. Per-pattern redaction counts were left out (the record keeps per-stream counts as in code/main.py). The U+2028 and str.splitlines() trap for JSONL is not used here because lesson 08 of this chapter already uses it and Part 3 uses the splitlines trap for truncation; it is a follow-up question instead.",
+    "Part 4: raw byte stream as assigned. The fake process has two pipes that each hold one write, so reading the pipes one after the other deadlocks as it would with a real full pipe, and the follower also runs against a real asyncio subprocess. Nothing is redacted in the live view (stated in the docstring), so cross-chunk redaction stays with chapter 13 lesson 26; besides the suggested traps, the deadline covers waiting for the exit, and an unfinished line still goes out at the deadline.",
+    "Part 5: as suggested (roots, the last attempt's exit code, the latest non-zero exit, orphaned instead of an error, forks, order by the chain's last attempt), with -9 counted as a failure and an exit code of None not, and duplicate ids and retries of later records rejected. The test centres on what the lesson's parent_command_id chains bring: forks, chains orphaned by rotation, the latest real failure and a 1500-attempt polling chain that rules out recursion. Order is position in records, never started_at, and the docstring says so; a3, whose clock stepped back, stays as a side check, because lessons 09 and 24 of this chapter already centre on write order against a skewed clock."
+  ]
+}
