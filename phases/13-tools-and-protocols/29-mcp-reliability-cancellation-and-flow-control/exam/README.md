@@ -10,7 +10,7 @@ You need Python 3.10+ and pytest (`python -m pip install pytest`). Run `python -
 
 ## Pt 1 `test_cancellation_races`
 
-Comment out `@pytest.mark.skip("Part 1")`, run pytest, and work out why the coordinator and its buffers misbehave.
+Comment out `@pytest.mark.skip("Part 1")`, run pytest, and work out why request completion, progress reporting and bounded buffering misbehave.
 
 ## Pt 2 `test_idempotency_ledger`
 

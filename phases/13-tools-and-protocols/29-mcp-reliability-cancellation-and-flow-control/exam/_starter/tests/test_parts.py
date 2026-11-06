@@ -49,7 +49,7 @@ def cancelled(request_id, reason=None) -> dict:
 
 @pytest.mark.skip("Part 1")
 def test_cancellation_races() -> None:
-    """Whichever of completion and cancellation the server sees first wins; a slow consumer loses no response."""
+    """The first terminal state wins, progress strictly increases, and a slow consumer loses no response."""
     channel = BoundedSseBuffer(16)
     server = RequestCoordinator(channel)
 
@@ -88,6 +88,51 @@ def test_cancellation_races() -> None:
     server.receive_stdio_cancellation(cancelled(9))
     assert server.progress(9, 1) is None and server.complete(9, RESULT) is None, "a cancelled request sends nothing"
     assert server.requests[9].state == CANCELLED and channel.drain() == [], "a cancelled request sends nothing"
+
+    # A live request's first value may be zero; rejected reports change nothing.
+    progress_channel = BoundedSseBuffer(8)
+    reporter = RequestCoordinator(progress_channel)
+    tracked = reporter.start(11, "tools/call", transport=STDIO, progress_token=0)
+    assert reporter.progress(11, 0) == progress_notification(0, 0), "zero is a valid first progress value"
+    assert tracked.last_progress == 0 and progress_channel.drain() == [progress_notification(0, 0)], (
+        "the first progress is recorded and sent once, even when its value and token are zero"
+    )
+    with pytest.raises(ReliabilityError, match="progress must increase"):
+        reporter.progress(11, 0)
+    assert tracked.last_progress == 0 and progress_channel.drain() == [], (
+        "a repeated zero changes neither the last value nor the queue"
+    )
+    assert reporter.progress(11, 2) == progress_notification(0, 2), "a later greater value is sent"
+    assert progress_channel.drain() == [progress_notification(0, 2)], "accepted progress is queued once"
+    for value in (2, 1, 0):
+        with pytest.raises(ReliabilityError, match="progress must increase"):
+            reporter.progress(11, value)
+        assert tracked.last_progress == 2, "rejected progress leaves the last accepted value unchanged"
+        assert progress_channel.drain() == [], "rejected progress never reaches the queue"
+    assert reporter.progress(11, 3.5) == progress_notification(0, 3.5), (
+        "strictly greater progress still works after rejected reports"
+    )
+    assert tracked.last_progress == 3.5 and progress_channel.drain() == [progress_notification(0, 3.5)], (
+        "the next accepted value replaces the last value and is sent once"
+    )
+    finished = reporter.complete(11, RESULT)
+    assert progress_channel.drain() == [finished], "the running request still completes normally"
+    assert reporter.progress(11, 3.5) is None and reporter.progress(11, 1) is None, (
+        "a completed request ignores even repeated or decreasing progress"
+    )
+    assert tracked.last_progress == 3.5 and progress_channel.drain() == [], (
+        "ignored progress changes neither the completed record nor the queue"
+    )
+    abandoned = reporter.start(12, "tools/call", transport=STDIO, progress_token="p-12")
+    reporter.progress(12, 0)
+    progress_channel.drain()
+    reporter.receive_stdio_cancellation(cancelled(12))
+    assert reporter.progress(12, 0) is None and reporter.progress(12, -1) is None, (
+        "a cancelled request ignores even repeated or decreasing progress"
+    )
+    assert abandoned.last_progress == 0 and progress_channel.drain() == [], (
+        "ignored progress changes neither the cancelled record nor the queue"
+    )
 
     # A stalled consumer: 5000 responses wait ahead of two busy progress tokens.
     backlog = BoundedSseBuffer(5002)
@@ -490,7 +535,7 @@ def test_two_clock_stream() -> None:
 
 
 class LateCancelWins(RequestCoordinator):
-    """Part 1's second bug again: a late cancellation overrides a completed request."""
+    """A terminal-state violation: a late cancellation overrides a completed request."""
 
     def receive_stdio_cancellation(self, notification):
         request = self.requests.get(notification["params"]["requestId"])
@@ -511,7 +556,7 @@ class RespondsAfterCancel(RequestCoordinator):
 
 
 class ProgressAfterCancel(RequestCoordinator):
-    """Part 1's third bug again: a cancelled request still sends progress."""
+    """A terminal-state violation: a cancelled request still sends progress."""
 
     def progress(self, request_id, value, *, total=None, message=None):
         request = self.requests[request_id]

@@ -25,17 +25,6 @@
               "new": "        request = self.requests[request_id]\n        if request.state == CANCELLED:\n            return None\n        if request.state == COMPLETED:\n            return request.response\n"
             }
           ],
-          "expect": "a late cancellation changes nothing"
-        },
-        {
-          "name": "+ a finished request ignores cancellation",
-          "edits": [
-            {
-              "file": "coordinator.py",
-              "old": "        \"\"\"Cancel a request, unless it has already finished.\"\"\"\n        request.state = CANCELLED\n",
-              "new": "        \"\"\"Cancel a request, unless it has already finished.\"\"\"\n        if request.state != IN_PROGRESS:\n            return\n        request.state = CANCELLED\n"
-            }
-          ],
           "expect": "notifications stop once a request completes or is cancelled"
         },
         {
@@ -45,6 +34,17 @@
               "file": "coordinator.py",
               "old": "        if request.progress_token is None:\n            return None\n",
               "new": "        if request.state != IN_PROGRESS or request.progress_token is None:\n            return None\n"
+            }
+          ],
+          "expect": "DID NOT RAISE"
+        },
+        {
+          "name": "+ every progress value is strictly greater than the last",
+          "edits": [
+            {
+              "file": "coordinator.py",
+              "old": "if request.last_progress is not None and value < request.last_progress:",
+              "new": "if request.last_progress is not None and value <= request.last_progress:"
             }
           ],
           "expect": "a push takes constant time, however many responses wait ahead of it"
@@ -1156,6 +1156,78 @@
         }
       ],
       "expect": "the shortest sequence that breaks an invariant, first in the order of events"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "equal progress admitted by a less-than check",
+      "edits": [
+        {
+          "file": "coordinator.py",
+          "old": "        if request.last_progress is not None and value <= request.last_progress:\n            raise ReliabilityError(\"progress must increase\")\n",
+          "new": "        if request.last_progress is not None and value < request.last_progress:\n            raise ReliabilityError(\"progress must increase\")\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "only equal progress refused, decreasing values admitted",
+      "edits": [
+        {
+          "file": "coordinator.py",
+          "old": "        if request.last_progress is not None and value <= request.last_progress:\n            raise ReliabilityError(\"progress must increase\")\n",
+          "new": "        if request.last_progress is not None and value == request.last_progress:\n            raise ReliabilityError(\"progress must increase\")\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "zero progress treated as absent by truthiness",
+      "edits": [
+        {
+          "file": "coordinator.py",
+          "old": "        if request.state != IN_PROGRESS or request.progress_token is None:\n            return None\n",
+          "new": "        if request.state != IN_PROGRESS or request.progress_token is None or not value:\n            return None\n"
+        }
+      ],
+      "expect": "zero is a valid first progress value"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "a rejected value replaces the last accepted progress",
+      "edits": [
+        {
+          "file": "coordinator.py",
+          "old": "        if request.last_progress is not None and value <= request.last_progress:\n            raise ReliabilityError(\"progress must increase\")\n",
+          "new": "        if request.last_progress is not None and value <= request.last_progress:\n            request.last_progress = value\n            raise ReliabilityError(\"progress must increase\")\n"
+        }
+      ],
+      "expect": "rejected progress leaves the last accepted value unchanged"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "a rejected progress queued before it raises",
+      "edits": [
+        {
+          "file": "coordinator.py",
+          "old": "        if request.last_progress is not None and value <= request.last_progress:\n            raise ReliabilityError(\"progress must increase\")\n",
+          "new": "        if request.last_progress is not None and value <= request.last_progress:\n            self._outbox(request).push_progress(progress_notification(request.progress_token, value, total, message))\n            raise ReliabilityError(\"progress must increase\")\n"
+        }
+      ],
+      "expect": "a repeated zero changes neither the last value nor the queue"
+    },
+    {
+      "test": "test_cancellation_races",
+      "name": "progress values checked before the terminal-state guard",
+      "edits": [
+        {
+          "file": "coordinator.py",
+          "old": "        if request.state != IN_PROGRESS or request.progress_token is None:\n            return None\n        if request.last_progress is not None and value <= request.last_progress:\n            raise ReliabilityError(\"progress must increase\")\n",
+          "new": "        if request.last_progress is not None and value <= request.last_progress:\n            raise ReliabilityError(\"progress must increase\")\n        if request.state != IN_PROGRESS or request.progress_token is None:\n            return None\n"
+        }
+      ],
+      "expect": "progress must increase"
     }
   ]
 }

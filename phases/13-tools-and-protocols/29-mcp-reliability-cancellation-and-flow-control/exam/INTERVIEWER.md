@@ -17,6 +17,9 @@
 | 1 | 已经完成的请求又收到取消，要报错吗？ | "No. Ignore it. Turning that race into an error only makes another race." |
 | 1 | 取消之后 worker 还在报进度，要报错吗？ | "No. It hasn't noticed yet. Send nothing and return None." |
 | 1 | 同一个请求 complete 两次呢？ | "Return the response you already sent. Send nothing new." |
+| 1 | 第一次进度可以是 0 吗？ | "Yes. Zero is a valid first value. Every later value must be strictly greater." |
+| 1 | 重复或下降的值呢？ | "Raise ReliabilityError. Queue nothing and keep the last accepted value." |
+| 1 | 已经结束的请求报了重复进度，也要抛异常吗？ | "No. Ignore ended requests before checking the value." |
 | 1 | 合并掉的进度算丢失吗？ | "Yes. It counts in dropped_progress and sets needs_refetch, as the docstring says." |
 | 1 | 为了快，buffer 能调整消息顺序吗？ | "No. drain returns messages in the order they were pushed." |
 | 2 | 结果能缓存在内存里吗？ | "Not as the source of truth. Another replica, or the same one after a restart, never sees your memory." |
@@ -48,13 +51,13 @@
 
 ## 每关：要看什么、提示、追问
 
-### Part 1 修取消竞态和缓冲（目标 12 分钟）
+### Part 1 修取消、进度和缓冲（目标 12 分钟）
 
 一个测试里叠了 4 个缺陷和一组护栏：
 
 1. `complete()` 不看请求是否已经取消。错误不在 coordinator 里报出来，而是在 `buffer.py` 的 `_check_open` 里报 `StreamClosed: write to a closed response stream`：HTTP 请求被取消时，它的响应流已经关了，`complete()` 还往里写最终响应。候选人要从 traceback 读出调用链 `complete → _outbox(...).push_final → _check_open`。在 `complete()` 里吞掉 StreamClosed，或者去掉 buffer 的 closed 检查，都会挂在 "a cancelled request gets no response"。
-2. `_cancel()` 不看状态：完成之后迟到的取消把 completed 改成 cancelled。stdio 那一段挂在 "a late cancellation changes nothing"。只在 `receive_stdio_cancellation` 里修，HTTP 上完成之后再关流照样会改状态，挂在 "..., on Streamable HTTP too"。
-3. `progress()` 不看状态：请求完成以后，进度还会写进通道。挂在 "notifications stop once a request completes or is cancelled"。只查 cancelled、或者只查 completed，都会在另一种情况下漏掉。
+2. `progress()` 不看状态：请求完成以后，进度还会写进通道。挂在 "notifications stop once a request completes or is cancelled"。只查 cancelled、或者只查 completed，都会在另一种情况下漏掉。
+3. `progress()` 只拒绝下降值，相同值照样发。讲义要求 "MCP progress values must increase"；同一个数不是新的进度。首值 0 合法，第二个 0 要抛 ReliabilityError；升到 2 之后，2、1、0 都要拒绝，队列和 last_progress 都不变，之后 3.5 仍能正常发出。
 4. `BoundedSseBuffer._drop_oldest_progress` 每次都从头扫描。5000 条响应排在前面、两个 token 交替推进度时，每推一次都要跨过这 5000 条：5000 次推送要 0.8 到 1.4 秒，限值 0.05 秒。按序号存消息、另用一个 deque 记下进度的序号，一次推送 O(1)，同样的工作 1.3 到 1.6 毫秒。
 
 护栏（提速或修缺陷时最常见的改坏方式）：
@@ -65,14 +68,17 @@
 - 为提速另建的索引（序号 deque、下标列表、指针）在 drain 时没有一起清空：下一轮按旧序号删消息，报 KeyError 或者删错一条，挂在 "a drained buffer starts over empty" 这一段。
 - 丢了进度不置 `needs_refetch`、合并不计数、容量用 `>` 判断、drain 先吐响应再吐进度，都各有断言。
 - 满了全是响应时再来一条响应，要报 ReliabilityError 并且什么都不改；挤掉最旧的响应会挂在 `DID NOT RAISE`。
-- 修第 1 处时让 `complete()` 对一切已结束的请求都返回 None：重复完成要返回已发出的响应，挂在 "completing again returns the response already sent"。修第 2 处时让迟到的取消抛异常、或者干脆不处理 stdio 取消，也都会挂。
+- 修第 1 处时让 `complete()` 对一切已结束的请求都返回 None：重复完成要返回已发出的响应，挂在 "completing again returns the response already sent"。
+- `_cancel()` 已经正确保留第一个终态。迟到取消在 stdio 和 HTTP 上都不能改 completed；改成抛异常、只在 stdio 上忽略，或者干脆不处理 stdio 取消，护栏都会抓住。
+- 进度用真假判断会吞掉首值 0 或 progress token 0；只拒绝相等会放过下降；抛异常前更新 last_progress 或入队会留下半次失败。测试逐次检查拒绝后什么都没改。
+- 终态判断要在数值判断之前。完成或取消之后，即使 worker 报相同或更小的值，也只返回 None，不能再抛进度异常。
 
-看什么：是不是先读 traceback、看出报错的 buffer 本身没有错；是不是先打印请求的 state 再动手；三处状态检查是不是想清楚了“取消先到”和“完成先到”两种顺序；改 buffer 时是不是先说出为什么慢，再选数据结构。
+看什么：是不是先读 traceback、看出报错的 buffer 本身没有错；是不是先打印请求的 state 再动手；是否分清终态保护和严格递增，拒绝进度时是否保持队列与 last_progress 原样；改 buffer 时是不是先说出为什么慢，再选数据结构。
 
 提示：
 - H1："Who wrote to the closed stream? Read the traceback from the bottom up."
 - H2："What state is request 7 in when complete() runs? What should complete() do in that state?"
-- H3：直接指出 `complete()` 开头少了 cancelled 分支，`_cancel()` 和 `progress()` 也都没看状态。
+- H3：直接指出 `complete()` 开头少了 cancelled 分支，`progress()` 要先看终态，再拒绝没有严格增加的值。
 
 追问：
 - "Why ignore a late cancellation instead of answering it with an error?"（它是通知，没有响应；讲义说把竞态变成错误只会制造新的竞态。网络延迟意味着两边都证明不了对方先看到哪个事件，所以目标是任何顺序都有确定的结果）
@@ -134,7 +140,7 @@
 - 截止要在处理下一个事件之前判断。先把事件写出去再看截止，2100 ms 的结果就漏出去了。
 - 保活不是进度：一直没动静的 worker 到 500 ms 照样空闲超时，不能拖到最大截止。worker 的事件用完了也一样，它卡住了，流不能就此结束。
 - 保活按“上一次写出任何东西”计时，安静期每隔 keepalive_ms 写一次。按上次进度计时，会在同一个时刻反复写保活，测试的 `timeline` 最多读 40 块，不会卡死。
-- 进度值必须递增。重复或者更小的值既不发，也不算活动；卡在 1 的 worker 到 600 ms 空闲超时。
+- 进度严格递增沿用 Part 1 的合同。这里的重复/下降脚本保留作双时钟护栏：不发出的值也不能刷新 idle，卡在 1 的 worker 到 600 ms 空闲超时。
 - 没有 progress token：进度一条都不发，也不重置空闲时钟，空闲时钟从请求开始算；但最终响应照发。
 - 结果写出后流就结束：不再向 worker 要下一个事件，并关闭 worker。被取消时、客户端提前关流时，也都要关闭 worker。测试一直持有 CallStream 对象，垃圾回收不会替你关；只在完成和超时两处调用 `close()`、客户端关流时不管，会挂在 "closing the response stream stops the worker"。用 try/finally 在一处收尾。
 - 事件正好落在截止那一毫秒：docstring 说截止那一刻到的也不写。测试避开了精确平局（本章其他课已经考过瞬间边界），`<` 和 `<=` 在这里分不出来，可以口头确认。

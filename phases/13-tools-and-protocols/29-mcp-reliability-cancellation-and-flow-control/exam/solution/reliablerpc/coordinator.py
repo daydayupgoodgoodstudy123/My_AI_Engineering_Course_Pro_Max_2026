@@ -78,7 +78,10 @@ class RequestCoordinator:
     ) -> dict[str, Any] | None:
         """Send progress for a request that is still running and has a progress token.
 
-        Returns the notification, or None when nothing is sent. Values must increase.
+        Returns the notification, or None when the request has ended or has no progress token.
+        The first value may be zero. Every later value must be strictly greater than the last
+        one sent; a repeated or smaller value raises ReliabilityError without sending anything
+        or changing last_progress. Ended requests are ignored before values are checked.
         """
         request = self.requests[request_id]
         if request.state != IN_PROGRESS or request.progress_token is None:

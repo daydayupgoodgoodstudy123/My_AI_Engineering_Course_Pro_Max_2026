@@ -2,7 +2,7 @@
 
 计时结束后再看。参考实现在同目录的 `reliablerpc/` 里，`python3 -m pytest --solution --all-parts` 应该显示 5 passed。
 
-## Part 1 修取消竞态和缓冲
+## Part 1 修取消、进度和缓冲
 
 **现象**：解锁后的第一个错误是 `buffer.py` 里的 `StreamClosed: write to a closed response stream`，而 buffer 拒绝往关掉的流里写，本身没有错。
 
@@ -11,8 +11,8 @@
 **依次修四处**：
 
 1. `complete()`：请求已经 cancelled 就返回 None，什么都不写。
-2. `_cancel()`：请求已经结束（completed 或 cancelled）就什么都不改。stdio 的 `receive_stdio_cancellation` 和 HTTP 的 `close_http_stream` 都走这里，所以改一处两条路都修好；只改 stdio 那条，HTTP 上完成之后再关流照样会把 completed 改成 cancelled。
-3. `progress()`：请求不在 in_progress 就返回 None。讲义："Notifications stop after completion or cancellation."
+2. `progress()`：请求不在 in_progress 就返回 None。讲义："Notifications stop after completion or cancellation."
+3. `progress()`：后一个值必须严格大于前一个，重复或下降都抛 ReliabilityError；必须在入队和更新 last_progress 之前拒绝。首值没有前值可比，所以 0 合法，不能用真假判断来识别“还没报过进度”。终态检查在数值检查之前，结束的请求连重复/下降进度也只忽略。
 4. buffer 改成按序号存消息，另用一个 deque 按先后记下进度消息的序号：
 
 ```python
@@ -28,6 +28,8 @@ def _drop_oldest_progress(self) -> bool:
 ```
 
 队尾消息用 `next(reversed(self._messages))` 取，合并时原地替换，序号不变，所以 deque 不用动。drain 时 dict 和 deque 一起清空，否则下一轮会按旧序号去删已经不在的消息。原来的写法每次都从头找第一条进度：5000 条响应排在前面时，每推一次都要跨过 5000 个元素，5000 次推送约 1 秒；现在每次推送是常数时间，同样的工作 1.3 毫秒左右。
+
+`_cancel()` 的终态保护已经给出：完成以后迟到的 stdio 取消和 HTTP 关流都不能改 completed。两种传输的断言保留这个合同；迟到取消抛异常、只修 stdio、或者完全不处理取消都不行。进度检查从 0 开始，拒绝重复和下降时核对 last_progress 与队列都没变，再用更大的 3.5 验证还能继续。
 
 **护栏**：提速时最省事的写法是 `deque(maxlen=capacity)`，满了自动挤掉最旧的一条。可最旧的往往是一条响应，而响应永远不能丢。讲义的策略有五条：相邻的同一个 token 合并；满了丢最旧的进度；丢了就标记需要重新拉取；保住最终响应；要保住一条响应就得丢另一条响应时，宁可报错。测试为每一条都配了断言：合并只看队尾那一条，越过响应不合并，而且先于容量判断，队列满了也是原地替换；丢的是最旧的进度，不管它是哪个 token；满了全是响应时，新进度直接丢掉并计数，新响应抛 ReliabilityError，队列不变。
 
@@ -129,7 +131,7 @@ while True:
 - `hard_deadline` 只在开头算一次，进度只刷新 `last_progress_at`。讲义的例子里 1999 ms 的进度把空闲截止推到 2499 ms，最大截止仍在 2000 ms，2100 ms 才到的结果写不出去。
 - 截止的判断放在处理事件之前，同一时刻截止优先。
 - 保活只刷新 `last_write_at`，不刷新 `last_progress_at`。讲义："Keepalive is not progress."
-- 不递增的进度值、没有 token 时的进度，都不写，也不刷新空闲时钟；所以没有 token 的请求，空闲时钟从开始算（本课代码的 `timeout_signal` 也是这样）。最终响应不需要 token。
+- 严格递增的进度合同已在 Part 1 建立；这一关保留 worker 重复/下降的脚本来查 idle 时钟。不递增的进度值、没有 token 时的进度，都不写，也不刷新空闲时钟；所以没有 token 的请求，空闲时钟从开始算（本课代码的 `timeout_signal` 也是这样）。最终响应不需要 token。
 - 被取消就直接 return：讲义说取消之后不再为这个请求发任何消息，所以也不发错误响应。
 - finally 里关闭 worker。正常写完、被截止取消、客户端提前关流（生成器在 yield 处收到 GeneratorExit），三种结束都会走到这里，相当于讲义说的 "stop work, free resources"。测试一直持有 CallStream 对象，不能指望垃圾回收替你关闭 worker。
 
@@ -156,8 +158,8 @@ return None
 
 - World 是冻结的 dataclass，比较时不看里面的 coordinator 和 client 对象，所以可以直接放进 set 去重。不去重的话，同一个状态被成千上万条交错各走一遍：这个模型去重后 840 步，不去重 3.6 万步，`max_progress` 再大一点就指数爆炸。
 - 广度优先保证第一个找到的反例最短；同一层按父节点出队的顺序、再按 events 的顺序生成，所以它也是这一层里按事件顺序最靠前的。测试把 events 换个顺序、去掉 `cancel`，预期的反例都跟着变。
-- 修好的 Part 1 协调器跑完所有交错都没有违规。把 Part 1 的三个缺陷分别放回去（测试里的三个子类），explore 都能给出 4 步的最短故事，比如 `start, cancel, complete, server_hears`：客户端放弃，worker 先完成，迟到的取消把已完成的请求改成了 cancelled。客户端用了放弃之后才到的响应，也会被抓住。
+- 修好的 Part 1 协调器跑完所有交错都没有违规。让三个子类分别违反终态合同（迟到取消改终态、取消后仍响应、终态后仍发进度），explore 都能给出 4 步的最短故事，比如 `start, cancel, complete, server_hears`：客户端放弃，worker 先完成，迟到的取消把已完成的请求改成了 cancelled。客户端用了放弃之后才到的响应，也会被抓住。
 
 ## 这套题证明了什么，没证明什么
 
-通过了说明你能在这个规模的代码里顺着 traceback 找到上一层的根因，理解“取消先到”和“完成先到”各自该怎么收尾，能为慢消费者写出常数时间、不丢响应的有界队列；能用 `BEGIN IMMEDIATE` 把查键、副作用和结果放进一个事务，并且知道指纹为什么要规范化；能按应用自己的 contract 做重试分类，按传输和生命周期选取消信号；能写出两套时钟加保活的流式输出，以及带去重、能给出最短反例的广度优先搜索。它不涉及真实的套接字、HTTP 服务器和反向代理（代理头只检查了是否写出），不涉及真正的外部支付和 transactional outbox，也不涉及重连时的 refetch 计划和带抖动的指数退避（本课的 `reconnect_plan`、`retry_delay_ms` 留给追问），以及持久任务本身的状态机（第 13 课）。
+通过了说明你能在这个规模的代码里顺着 traceback 找到上一层的根因，理解“取消先到”和“完成先到”各自该怎么收尾，能拒绝重复或下降的进度而不改变记录和队列，能为慢消费者写出常数时间、不丢响应的有界队列；能用 `BEGIN IMMEDIATE` 把查键、副作用和结果放进一个事务，并且知道指纹为什么要规范化；能按应用自己的 contract 做重试分类，按传输和生命周期选取消信号；能写出两套时钟加保活的流式输出，以及带去重、能给出最短反例的广度优先搜索。它不涉及真实的套接字、HTTP 服务器和反向代理（代理头只检查了是否写出），不涉及真正的外部支付和 transactional outbox，也不涉及重连时的 refetch 计划和带抖动的指数退避（本课的 `reconnect_plan`、`retry_delay_ms` 留给追问），以及持久任务本身的状态机（第 13 课）。

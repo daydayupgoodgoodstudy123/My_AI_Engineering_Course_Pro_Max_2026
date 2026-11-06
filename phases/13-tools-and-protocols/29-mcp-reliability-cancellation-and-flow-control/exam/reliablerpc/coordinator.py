@@ -78,12 +78,15 @@ class RequestCoordinator:
     ) -> dict[str, Any] | None:
         """Send progress for a request that is still running and has a progress token.
 
-        Returns the notification, or None when nothing is sent. Values must increase.
+        Returns the notification, or None when the request has ended or has no progress token.
+        The first value may be zero. Every later value must be strictly greater than the last
+        one sent; a repeated or smaller value raises ReliabilityError without sending anything
+        or changing last_progress. Ended requests are ignored before values are checked.
         """
         request = self.requests[request_id]
         if request.progress_token is None:
             return None
-        if request.last_progress is not None and value <= request.last_progress:
+        if request.last_progress is not None and value < request.last_progress:
             raise ReliabilityError("progress must increase")
         note = progress_notification(request.progress_token, value, total, message)
         self._outbox(request).push_progress(note)
@@ -136,6 +139,8 @@ class RequestCoordinator:
 
     def _cancel(self, request: InFlightRequest, reason: str | None) -> None:
         """Cancel a request, unless it has already finished."""
+        if request.state != IN_PROGRESS:
+            return
         request.state = CANCELLED
         request.cancel_reason = reason
 
