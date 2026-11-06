@@ -1,0 +1,144 @@
+{
+  "lesson": "phases/14-agent-engineering/34-repo-memory-and-state",
+  "title": "Repo Memory and Durable State",
+  "format": "staged-brownfield",
+  "service": "Statefile: schema-first agent state in repo files, with a stdlib JSON Schema subset validator, a StateManager that refuses bad writes, a crash-safe JSON snapshot store, a schema_version migration chain written back atomically, several sessions sharing one state file through revision compare-and-swap reported as NDJSON, and a migration DAG with branches, merges and shortcuts",
+  "sources": {
+    "docs/en.md": "c43ee57ba42296d7536eaa6b46281a3fa64c59ed392b19a7891cfdc0fb50e4bc",
+    "code/main.py": "cc8f48c4fd5c693013533394e0b33c69b2ffe485b5b2c409efa4ef15bca9d0a8",
+    "quiz/quiz.md": "60bdc5d1df3a39a4482d1c47dd6b34f2777228720e3e4df5eccca132b685d243",
+    "outputs/skill-state-schema.md": "fde0eafdb116c3e5e3a9173929bd23cbd4f9f6f22272d98bb4fadecfc3b2641e"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; macOS or Linux (Part 2 checks permission bits and a directory fsync)",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_state_manager",
+      "kind": "debug",
+      "lesson_anchor": "Schema-first state (required keys, allowed status values, null forbidden for arrays, task id pattern T-\\d{3,}, schema_version); Build It: the stdlib validator (required, type, enum, pattern, items) and StateManager.load/update/commit; Exercise 1 (last_human_touch); code/main.py _check_type, validate; quiz Q5 (implicit additionalProperties false), Q8 ($ before a trailing newline), Q9 (update); Schema-first bad write is refused; Atomic writes; StateManager whole-object commit; component checkpoint batch is an explicit exercise extension",
+      "planted_bugs": [
+        "_check_type knows five of JSON Schema's seven type names and has no number or boolean branch; it surfaces two calls away, when update loads a hand-edited file whose last_human_touch is a float and validate reports expected ['number', 'null'], got float",
+        "pattern uses re.match, which anchors only the start, and Python's $ matches before a trailing newline, so 'T-001\\n' passes ^T-\\d{3,}$ (and 'T-001-old' passes an unanchored pattern), although the docstring says the whole string must match",
+        "every object refuses keys its properties do not list, as code/main.py does, although the docstring refuses them only under additionalProperties: false; the board's tasks carry team fields such as estimate_h",
+        "StateManager.update validates and atomically commits after each field of a single changes request: a later invalid field leaves an earlier prefix persisted, and ordinary multi-component checkpoints repeatedly encode/fsync/replace the complete state"
+      ],
+      "timing_assert": "One update of 256 finite component status/proof fields into an 80,369-byte state with 2,000 existing touched_files under 0.03 s. Actual slow update, with the earlier schema defects fixed, 3 runs: 0.255893750, 0.471283667, 0.256397292 s; merged-once reference: 0.002063667, 0.003418167, 0.001898583 s. Minimum slow/limit 8.53x and limit/maximum fast 8.78x; every slow run <0.5 s. Real JSON encoding, file flush/fsync and atomic replacement; no sleeps, timed mocks or artificial helper work. Given enum validation includes a 0.15-s large-repo performance guard.",
+      "overfix_guard": "number refuses True, NaN and Infinity (math.isnan is not enough) and accepts a whole-number timestamp; boolean refuses 1; integer refuses 3.0; re.search, strip() and pattern + \\Z (top-level alternation) fail; dropping the unexpected-fields check lets last_run in; adding the team's fields to BOARD_SCHEMA instead of fixing validate fails on a small schema without additionalProperties; set(options) lets priority true match 1 and breaks on list options; Python type-name tags split 2.0 from 2; order-sensitive object keys fail; an enum cache kept across calls by list identity, or by identity and length, goes stale when a tracked file is renamed in place; given enum implementation is correct and its guards cover typed semantics, per-call freshness and large-repo performance. A later invalid update field must persist no prefix; each successful nonempty request replaces once, empty changes load/validate and return without writing.",
+      "implementation_boundary": "Correct typed-JSON enum key and cache scoped to each top-level validate call are supplied in starter and reference. Candidate still repairs number/boolean support, whole-string patterns, additionalProperties and one-request batch update atomicity.",
+      "clarifying_questions": [
+        "one changes request is all-or-nothing",
+        "empty changes validate but do not replace",
+        "given enum key and per-call cache need no implementation"
+      ]
+    },
+    {
+      "part": 2,
+      "test": "test_snapshot_durability",
+      "kind": "model and persistence",
+      "lesson_anchor": "Atomic writes (write to a tempfile, fsync, rename over the target; a half-written file is worse than no file); Production patterns: tempfile.mkstemp in the same directory, os.replace, the Hive bug (write_text with exceptions silenced); quiz Q4 (same filesystem), Q12 (mkstemp 0600, kill -9 leftovers, directory fsync); outputs/skill-state-schema.md (plain open(path, 'w') is a hard reject)",
+      "storage": "JSON snapshot: one UTF-8 JSON document per file, indent 2, keys in document order, non-ASCII as is, one trailing newline; written through <name>.<random>.tmp in the same directory, fsync, chmod, os.replace, directory fsync",
+      "exactness": "the file is byte-for-byte json.dumps(doc, indent=2, ensure_ascii=False) + newline, and loads back type for type and in key order (exact() tells -0.0 from 0.0 and True from 1): 2**63 + 1, -0.0, 0.1 + 0.2, 5e-324, French, Chinese and an emoji, U+2028, a tab, a quote and a backslash, a non-sorted nested object, [True, 1, 1.0, 0, False, None], empty containers; a save that == would call unchanged (1 -> True, -0.0 -> 0.0, key order) still writes",
+      "traps": [
+        "sort_keys, ensure_ascii, compact separators or no trailing newline",
+        "NaN written (allow_nan default), or NaN or -Infinity accepted on load",
+        "unchanged detected with == or from the last save kept in memory, or never detected",
+        "written in place; temporary file in the system temp directory or without the .tmp suffix",
+        "no fsync, no flush before the fsync (the fsync sees an empty file: the test records each fsynced file's inode and size), the file fsynced after the rename, no directory fsync or a directory fsync before the rename",
+        "mkstemp's 0600 kept, every save resetting the mode to 0644, or the mode set after the rename (the test reads the temporary file's mode when it is renamed)",
+        "temporary file created before the document is encoded",
+        "nothing removed on open; cleanup only in an except Exception block",
+        "open removing <name>.* files, any *.tmp file, or any .tmp file containing the target's name",
+        "a corrupt file read as an empty state, moved aside, decoded with errors='replace', or UnicodeDecodeError left unwrapped",
+        "keys sorted on load"
+      ],
+      "clarifying_questions": [
+        "Windows",
+        "fsync cost",
+        "who removes a crashed save's temp file",
+        "another file's temp file",
+        "what counts as unchanged",
+        "corrupt file",
+        "mode of a new file"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_migration_chain",
+      "kind": "core algorithm",
+      "lesson_anchor": "Migrations (ship a migration script next to the schema bump; schema_version; refuse to load a file from a version it cannot migrate); Production patterns: tools/migrate_state.py runs idempotently on every startup; Exercise 3 (blockers -> risks); quiz Q10 (chained, idempotent, fail loud), Q17",
+      "traps": [
+        "one jump straight to the target instead of v1 -> v2 -> v3",
+        "always migrating to the current version, ignoring target",
+        "the caller's document changed, directly or through a shallow copy (a step appends to a nested list)",
+        "a document already at the target returned as is",
+        "a missing schema_version taken as 1; a version used before it is checked; a missing step left to KeyError; downgrades accepted",
+        "the input not validated against its own version, or a document already at the target copied back unchecked",
+        "validation only at the end (a step's loss repaired by the next step)",
+        "migrate setting schema_version itself (a step that claims the wrong version), or following and checking the version a step claims, as quiz Q10's while loop does (a step that does both bumps at once)",
+        "upgrade_file writing after every step, rewriting a current file, writing in place, swallowing errors, or reporting the versions the other way round"
+      ],
+      "clarifying_questions": [
+        "file without schema_version",
+        "who sets schema_version",
+        "downgrades",
+        "validating a current file",
+        "backups"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_concurrent_sessions",
+      "kind": "streaming",
+      "lesson_anchor": "Exercise 5 (two agents against the same state file with a write race: what goes wrong and what the atomic rename saves); quiz Q11 (lost update; revision plus compare-and-swap); outputs/skill-state-schema.md (atomic rename is necessary but not sufficient); Further Reading: concurrency control",
+      "wire_format": "NDJSON, one object per commit attempt: {session, attempt, base, revision, result in committed | conflict | gave_up}, each line ending in exactly one newline; decided by the test's endswith/count/splitlines/json.loads",
+      "traps": [
+        "commit without the compare, or with a revision cached per RevisionFile (two handles on one file)",
+        "a retry that commits the stale result again, or a state read once per session",
+        "no retry, one attempt too few or too many, max_attempts ignored (the second run passes 2), retrying until the commit goes through (the planner fails on a third call), the last attempt reported as a conflict",
+        "a conflict reporting the revision it expected, or base + 1, instead of the one on disk (a human saves twice)",
+        "lines held until every session is done or until each session ends, or sessions run one after another (probe: each builder turn is released only after the line before it arrives)",
+        "no newline, a blank line, or pretty-printed events",
+        "a commit written in place instead of with atomic_write"
+      ],
+      "clarifying_questions": [
+        "processes or tasks",
+        "what a turn gets",
+        "revision in a conflict line",
+        "session order",
+        "a turn that raises"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_migration_graph",
+      "kind": "graph",
+      "lesson_anchor": "Migrations and schema_version as the contract, extended to a history that branches (two teams bump the schema from v1: Exercise 3's rename and Exercise 1's last_human_touch), merges and gets a shortcut; quiz Q17 (CI checks that every old version migrates to the latest)",
+      "traps": [
+        "neighbours in registration order, or a stack instead of a queue (wrong tie)",
+        "the lexicographically smallest path of any length instead of the fewest steps",
+        "no special case for start == target",
+        "upgrade working on the caller's document",
+        "paths sharing one document, or starting from a shallow copy (a shortcut sorts a list in place)",
+        "results cached per version, which hides a broken merge edge",
+        "every path returned, paths stopping one version short, paths listed in registration order",
+        "an unreachable target reported as []",
+        "upgrade without validating the input first, or validating only the result"
+      ],
+      "clarifying_questions": [
+        "cycles",
+        "what shortest means",
+        "ties",
+        "how results are compared",
+        "a path that fails validation"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1 plants three source-based schema defects: missing number/boolean branches, pattern using re.match, and implicit additionalProperties false. The remote first failure remains update -> load -> validate on a valid hand-edited floating timestamp. Enum typed-JSON membership and per-top-level-call indexing are supplied correct. The fourth defect is StateManager.update committing each field separately; it extends the source bad-write-refusal and whole-object atomic-write contract to one explicit multi-component changes request.",
+    "Part 1 timing measures the batch update itself on finite ordinary status/proof fields and an existing touched-file list, using real JSON encoding, file fsync and replacement. Given enum helper guards cover nested semantics, bool/number distinctions, schema mutation and validation performance. Atomic update means one complete merged validation/commit after load, not one commit per field; an empty update only loads and validates.",
+    "Part 2 is a separate Snapshot class (snapshot.py) rather than a rewrite of manager.atomic_write, so Parts 1, 3 and 4 keep the lesson's working writer and do not depend on Part 2. Crashes are injected by monkeypatching os.fsync and os.replace with a BaseException at three points (file fsync, rename, directory fsync), and fsync order is checked by inode and by the size the file has when it is fsynced. Besides the suggested traps (old or new content after a crash, leftover temp files cleaned on open, non-ASCII, ints past 2**53, -0.0, key order), the part pins quiz Q12's permission bits and directory fsync, a no-op save compared by bytes (== misses 1 -> True), NaN refused both ways and corrupt files reported, not repaired. Lessons 01, 26 and 28 also check that a failed save leaves no temporary file; here that is a side check, and the part is built around the byte-exact format, the unchanged-by-bytes rule, flush and fsync order, the permission bits at the rename and cleanup on open.",
+    "Part 3 as suggested: v1 -> v2 (Exercise 3, blockers -> risks) -> v3 (one form of 'no active task', plus Exercise 1's last_human_touch). Steps may change their argument, so the copy is migrate's job. The reference also refuses a bool or float schema_version with VersionError, but the tests leave those cases out, so the True == 1 trap is not used a third time in this exam.",
+    "Part 4 as suggested, with asyncio tasks in one event loop as the sessions; each opens its own RevisionFile, so a revision cached per instance is caught by the two-handle check. The line format adds attempt and base, and the last allowed attempt reports gave_up. Retries are capped deterministically by a turn during which a 'human' saves twice while the planner thinks, with max_attempts=2, so the cap must come from the argument and a conflict's revision (base + 2) must be the one on disk. The streaming probe gates both builder turns on the line before them, so lines a session keeps until it ends are caught too. The lost-update trap appears in chapter 14 once before (lesson 08, in-memory blocks with unified diffs); here it is a file revision with NDJSON per attempt.",
+    "Part 5: the suggested v2a/v2b labels are integers (versions 2 and 3 are the two branches, 4 the merge, 5 the next bump), because the lesson's schema_version is an integer. path returns the list of (src, dst) steps, [] when start == target. The test does not only compare a shortcut with the chain: disagreements() runs every path and reports the ones that differ from the planned path, which is quiz Q17's CI check; the graph is acyclic by construction (add refuses a migration that does not go up). The fewest-steps BFS with a smallest-sequence tie-break also appears in lesson 16's Part 5 (handoff chains), which makes this its second and last use in chapter 14 (lessons 08 and 25 also want a shortest chain or the fewest rounds, with other tie rules); what is new here is disagreements(), every path run from its own copy and judged by its own steps."
+  ]
+}

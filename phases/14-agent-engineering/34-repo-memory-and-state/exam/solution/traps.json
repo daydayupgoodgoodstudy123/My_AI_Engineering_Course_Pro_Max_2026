@@ -1,0 +1,1493 @@
+{
+  "package": "statefile",
+  "tests": [
+    "test_state_manager",
+    "test_snapshot_durability",
+    "test_migration_chain",
+    "test_concurrent_sessions",
+    "test_migration_graph"
+  ],
+  "layers": [
+    {
+      "test": "test_state_manager",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "expected ['number', 'null'], got float"
+        },
+        {
+          "name": "fix _check_type: number and boolean",
+          "edits": [
+            {
+              "file": "schema.py",
+              "old": "import copy\nimport re\n",
+              "new": "import copy\nimport math\nimport re\n"
+            },
+            {
+              "file": "schema.py",
+              "old": "        if t == \"integer\" and isinstance(value, int) and not isinstance(value, bool):\n            return True\n",
+              "new": "        if t == \"integer\" and isinstance(value, int) and not isinstance(value, bool):\n            return True\n        if t == \"number\" and isinstance(value, (int, float)) and not isinstance(value, bool):\n            if isinstance(value, int) or math.isfinite(value):\n                return True\n        if t == \"boolean\" and isinstance(value, bool):\n            return True\n"
+            }
+          ],
+          "expect": "a bad write is refused: {'active_task_id': 'T-001"
+        },
+        {
+          "name": "+ pattern matches the whole string",
+          "edits": [
+            {
+              "file": "schema.py",
+              "old": "not re.match(schema[\"pattern\"], value)",
+              "new": "not re.fullmatch(schema[\"pattern\"], value)"
+            }
+          ],
+          "expect": "unexpected fields ['estimate_h']"
+        },
+        {
+          "name": "+ unexpected fields only under additionalProperties: false",
+          "edits": [
+            {
+              "file": "schema.py",
+              "old": "        if unexpected:\n",
+              "new": "        if unexpected and schema.get(\"additionalProperties\") is False:\n"
+            }
+          ],
+          "expect": "a refused multi-field update persists no prefix"
+        },
+        {
+          "name": "+ merge all requested fields before one commit",
+          "edits": [
+            {
+              "file": "manager.py",
+              "old": "        for key, value in changes.items():\n            state[key] = value\n            self.commit(state)\n        return state\n",
+              "new": "        if changes:\n            state.update(changes)\n            self.commit(state)\n        return state\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_state_manager",
+      "name": "number accepts a bool",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "        if (\n            t == \"number\"\n            and isinstance(value, (int, float))\n            and not isinstance(value, bool)\n            and (isinstance(value, int) or math.isfinite(value))\n        ):\n            return True\n",
+          "new": "        if (\n            t == \"number\"\n            and isinstance(value, (int, float))\n            and (isinstance(value, int) or math.isfinite(value))\n        ):\n            return True\n"
+        }
+      ],
+      "expect": "a bad write is refused: {'last_human_touch': True}"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "number accepts NaN",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "        if (\n            t == \"number\"\n            and isinstance(value, (int, float))\n            and not isinstance(value, bool)\n            and (isinstance(value, int) or math.isfinite(value))\n        ):\n            return True\n",
+          "new": "        if (\n            t == \"number\"\n            and isinstance(value, (int, float))\n            and not isinstance(value, bool)\n        ):\n            return True\n"
+        }
+      ],
+      "expect": "a bad write is refused: {'last_human_touch': nan}"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "number means float",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "        if (\n            t == \"number\"\n            and isinstance(value, (int, float))\n            and not isinstance(value, bool)\n            and (isinstance(value, int) or math.isfinite(value))\n        ):\n            return True\n",
+          "new": "        if (\n            t == \"number\"\n            and isinstance(value, float)\n            and not isinstance(value, bool)\n            and (isinstance(value, int) or math.isfinite(value))\n        ):\n            return True\n"
+        }
+      ],
+      "expect": "expected ['number', 'null'], got int"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "boolean tested with value in (True, False)",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "if t == \"boolean\" and isinstance(value, bool):",
+          "new": "if t == \"boolean\" and value in (True, False):"
+        }
+      ],
+      "expect": "a bad task is refused: {'needs_review': 1}"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "integer accepts 1.0, as JSON Schema itself does",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "if t == \"integer\" and isinstance(value, int) and not isinstance(value, bool):",
+          "new": "if t == \"integer\" and isinstance(value, (int, float)) and not isinstance(value, bool) and value == int(value):"
+        }
+      ],
+      "expect": "a bad write is refused: {'schema_version': 3.0}"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "pattern searched instead of matched whole",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "re.fullmatch(schema[\"pattern\"], value)",
+          "new": "re.search(schema[\"pattern\"], value)"
+        }
+      ],
+      "expect": "a bad write is refused: {'active_task_id': 'T-001"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "pattern anchored by appending \\Z",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "re.fullmatch(schema[\"pattern\"], value)",
+          "new": "re.match(schema[\"pattern\"] + r\"\\Z\", value)"
+        }
+      ],
+      "expect": "a pattern must match the whole string: 'T-001-old'"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "value stripped before matching",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "re.fullmatch(schema[\"pattern\"], value)",
+          "new": "re.fullmatch(schema[\"pattern\"], value.strip())"
+        }
+      ],
+      "expect": "a bad write is refused: {'active_task_id': 'T-001"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "unexpected-fields check dropped altogether",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "        if schema.get(\"additionalProperties\") is False:\n            unexpected",
+          "new": "        if False:\n            unexpected"
+        }
+      ],
+      "expect": "a bad write is refused: {'last_run': '2026-11-01'}"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "enum options put in a plain set",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "        options = schema[\"enum\"]\n        keys = enums.get(id(options))\n        if keys is None:\n            keys = enums[id(options)] = {_key(option) for option in options}\n        if _key(value) not in keys:\n",
+          "new": "        options = schema[\"enum\"]\n        keys = enums.get(id(options))\n        if keys is None:\n            keys = enums[id(options)] = set(options)\n        if value not in keys:\n"
+        }
+      ],
+      "expect": "a bad task is refused: {'priority': True}"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "enum keys tagged with the Python type name",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    if isinstance(value, (int, float)):\n        return (\"number\", value)\n",
+          "new": "    if isinstance(value, (int, float)):\n        return (type(value).__name__, value)\n"
+        }
+      ],
+      "expect": "2.0 not in [1, 2, 3, 'someday']"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "enum keys without a boolean tag",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "    if isinstance(value, bool):\n        return (\"boolean\", value)\n    if isinstance(value, (int, float)):",
+          "new": "    if isinstance(value, (int, float)):"
+        }
+      ],
+      "expect": "a bad task is refused: {'priority': True}"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "enum keys for objects depend on key order",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "return (\"object\", frozenset((k, _key(v)) for k, v in value.items()))",
+          "new": "return (\"object\", tuple((k, _key(v)) for k, v in value.items()))"
+        }
+      ],
+      "expect": "not in ['x', [1.0, {'a': [True], 'b': 2}]]"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "enum keys cached across calls by list identity",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "def validate(value: Any, schema: dict[str, Any], path: str = \"$\") -> None:\n",
+          "new": "_ENUM_CACHE: dict[int, tuple[list, set]] = {}\n\n\ndef validate(value: Any, schema: dict[str, Any], path: str = \"$\") -> None:\n"
+        },
+        {
+          "file": "schema.py",
+          "old": "        options = schema[\"enum\"]\n        keys = enums.get(id(options))\n        if keys is None:\n            keys = enums[id(options)] = {_key(option) for option in options}\n        if _key(value) not in keys:\n",
+          "new": "        options = schema[\"enum\"]\n        cached = _ENUM_CACHE.get(id(options))\n        if cached is None or cached[0] is not options:\n            cached = _ENUM_CACHE[id(options)] = (options, {_key(option) for option in options})\n        keys = cached[1]\n        if _key(value) not in keys:\n"
+        }
+      ],
+      "expect": "validate reads the schema as it is at the time of the call"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "enum keys built with json.dumps(sort_keys=True)",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "import copy\nimport math\nimport re\n",
+          "new": "import copy\nimport json\nimport math\nimport re\n"
+        },
+        {
+          "file": "schema.py",
+          "old": "        options = schema[\"enum\"]\n        keys = enums.get(id(options))\n        if keys is None:\n            keys = enums[id(options)] = {_key(option) for option in options}\n        if _key(value) not in keys:\n",
+          "new": "        options = schema[\"enum\"]\n        keys = enums.get(id(options))\n        if keys is None:\n            keys = enums[id(options)] = {json.dumps(option, sort_keys=True) for option in options}\n        if json.dumps(value, sort_keys=True) not in keys:\n"
+        }
+      ],
+      "expect": "2.0 not in [1, 2, 3, 'someday']"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "number refuses NaN with math.isnan, so Infinity gets in",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "            and (isinstance(value, int) or math.isfinite(value))\n",
+          "new": "            and (isinstance(value, int) or not math.isnan(value))\n"
+        }
+      ],
+      "expect": "a bad write is refused: {'last_human_touch': inf}"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "enum keys cached across calls by list identity and length",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "def validate(value: Any, schema: dict[str, Any], path: str = \"$\") -> None:\n",
+          "new": "_ENUM_CACHE: dict[tuple[int, int], set] = {}\n\n\ndef validate(value: Any, schema: dict[str, Any], path: str = \"$\") -> None:\n"
+        },
+        {
+          "file": "schema.py",
+          "old": "        options = schema[\"enum\"]\n        keys = enums.get(id(options))\n        if keys is None:\n            keys = enums[id(options)] = {_key(option) for option in options}\n        if _key(value) not in keys:\n",
+          "new": "        options = schema[\"enum\"]\n        keys = _ENUM_CACHE.get((id(options), len(options)))\n        if keys is None:\n            keys = _ENUM_CACHE[(id(options), len(options))] = {_key(option) for option in options}\n        if _key(value) not in keys:\n"
+        }
+      ],
+      "expect": "validate reads the schema as it is at the time of the call"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "the team's fields added to BOARD_SCHEMA instead of fixing validate",
+      "edits": [
+        {
+          "file": "schema.py",
+          "old": "        if schema.get(\"additionalProperties\") is False:\n            unexpected",
+          "new": "        if True:\n            unexpected"
+        },
+        {
+          "file": "schema.py",
+          "old": "            \"needs_review\": {\"type\": \"boolean\"},\n",
+          "new": "            \"needs_review\": {\"type\": \"boolean\"},\n            \"estimate_h\": {},\n            \"labels\": {},\n"
+        }
+      ],
+      "expect": "without additionalProperties: false, other keys are allowed"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "keys sorted for stable diffs",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "json.dumps(doc, indent=2, ensure_ascii=False, allow_nan=False)",
+          "new": "json.dumps(doc, indent=2, ensure_ascii=False, allow_nan=False, sort_keys=True)"
+        }
+      ],
+      "expect": "the file is UTF-8 JSON indented by 2"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "non-ASCII escaped (json.dumps default)",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "json.dumps(doc, indent=2, ensure_ascii=False, allow_nan=False)",
+          "new": "json.dumps(doc, indent=2, allow_nan=False)"
+        }
+      ],
+      "expect": "the file is UTF-8 JSON indented by 2"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "compact JSON",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "json.dumps(doc, indent=2, ensure_ascii=False, allow_nan=False)",
+          "new": "json.dumps(doc, ensure_ascii=False, allow_nan=False, separators=(\",\", \":\"))"
+        }
+      ],
+      "expect": "the file is UTF-8 JSON indented by 2"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "no newline at the end",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "json.dumps(doc, indent=2, ensure_ascii=False, allow_nan=False) + \"\\n\").encode",
+          "new": "json.dumps(doc, indent=2, ensure_ascii=False, allow_nan=False)).encode"
+        }
+      ],
+      "expect": "the file is UTF-8 JSON indented by 2"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "NaN written as NaN (allow_nan default)",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "json.dumps(doc, indent=2, ensure_ascii=False, allow_nan=False)",
+          "new": "json.dumps(doc, indent=2, ensure_ascii=False)"
+        }
+      ],
+      "expect": "DID NOT RAISE ValueError"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "unchanged detected with ==",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "            if self.path.read_bytes() == data:\n                return False\n",
+          "new": "            if self.load() == doc:\n                return False\n"
+        }
+      ],
+      "expect": "a change that == cannot see is still a change: 1 became true"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "unchanged detected from the last save kept in memory",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "            if self.path.read_bytes() == data:\n                return False\n",
+          "new": "            if getattr(self, \"_last\", None) == data or self.path.read_bytes() == data:\n                return False\n"
+        },
+        {
+          "file": "snapshot.py",
+          "old": "            os.close(dir_fd)\n        return True\n",
+          "new": "            os.close(dir_fd)\n        self._last = data\n        return True\n"
+        }
+      ],
+      "expect": "save compares with the file on disk, not with what it saved last"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "every save writes",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "            if self.path.read_bytes() == data:\n                return False\n",
+          "new": ""
+        }
+      ],
+      "expect": "saving the same document again writes nothing"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "written in place, no temporary file",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        fd, tmp_name = tempfile.mkstemp(prefix=self.path.name + \".\", suffix=\".tmp\", dir=self.path.parent)\n        try:\n            with os.fdopen(fd, \"wb\") as fh:\n                fh.write(data)\n                fh.flush()\n                os.chmod(tmp_name, mode)\n                os.fsync(fh.fileno())\n            os.replace(tmp_name, self.path)\n        except BaseException:\n            Path(tmp_name).unlink(missing_ok=True)\n            raise\n",
+          "new": "        self.path.write_bytes(data)\n"
+        }
+      ],
+      "expect": "save renames one temporary file over the target"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "temporary file in the system temp directory",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "suffix=\".tmp\", dir=self.path.parent)",
+          "new": "suffix=\".tmp\")"
+        }
+      ],
+      "expect": "the temporary file sits next to the target"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "temporary file without the .tmp suffix",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "prefix=self.path.name + \".\", suffix=\".tmp\", dir=self.path.parent)",
+          "new": "prefix=self.path.name + \".\", dir=self.path.parent)"
+        }
+      ],
+      "expect": "named <file name>.<random>.tmp"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "no fsync of the file",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "                os.fsync(fh.fileno())\n",
+          "new": ""
+        }
+      ],
+      "expect": "the new file is flushed and fsynced before the rename"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "file fsynced after the rename",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "                os.fsync(fh.fileno())\n",
+          "new": ""
+        },
+        {
+          "file": "snapshot.py",
+          "old": "            os.replace(tmp_name, self.path)\n",
+          "new": "            os.replace(tmp_name, self.path)\n            with open(self.path, \"rb\") as again:\n                os.fsync(again.fileno())\n"
+        }
+      ],
+      "expect": "the new file is flushed and fsynced before the rename"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "no fsync of the directory",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "            os.fsync(dir_fd)\n",
+          "new": "            pass\n"
+        }
+      ],
+      "expect": "the directory is fsynced after the rename"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "directory fsynced before the rename",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        dir_fd = os.open(self.path.parent, os.O_RDONLY)\n        try:\n            os.fsync(dir_fd)\n        finally:\n            os.close(dir_fd)\n        return True\n",
+          "new": "        return True\n"
+        },
+        {
+          "file": "snapshot.py",
+          "old": "            os.replace(tmp_name, self.path)\n",
+          "new": "            dir_fd = os.open(self.path.parent, os.O_RDONLY)\n            os.fsync(dir_fd)\n            os.close(dir_fd)\n            os.replace(tmp_name, self.path)\n"
+        }
+      ],
+      "expect": "the directory is fsynced after the rename"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "mkstemp's 0o600 kept",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "                os.chmod(tmp_name, mode)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a new snapshot is readable by the team (0o644)"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "every save resets the mode to 0o644",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "os.chmod(tmp_name, mode)",
+          "new": "os.chmod(tmp_name, NEW_FILE_MODE)"
+        }
+      ],
+      "expect": "a save keeps the permission bits of the file it replaces"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "temporary file created before the document is encoded",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        fd, tmp_name = tempfile.mkstemp(prefix=self.path.name + \".\", suffix=\".tmp\", dir=self.path.parent)\n",
+          "new": ""
+        },
+        {
+          "file": "snapshot.py",
+          "old": "        data = (json.dumps(doc, indent=2, ensure_ascii=False, allow_nan=False)",
+          "new": "        fd, tmp_name = tempfile.mkstemp(prefix=self.path.name + \".\", suffix=\".tmp\", dir=self.path.parent)\n        data = (json.dumps(doc, indent=2, ensure_ascii=False, allow_nan=False)"
+        }
+      ],
+      "expect": "a save that fails leaves the old file and no temporary file"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "cleanup only for an Exception, nothing removed on open",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        if self.path.parent.is_dir():\n",
+          "new": "        if False:\n"
+        },
+        {
+          "file": "snapshot.py",
+          "old": "        except BaseException:\n            Path(tmp_name)",
+          "new": "        except Exception:\n            Path(tmp_name)"
+        }
+      ],
+      "expect": "opening clears what a crashed save left behind"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "nothing removed on open",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        if self.path.parent.is_dir():\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "opening removes this file's leftover temporary files, and nothing else"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "open removes every <name>.* file",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "                    and name.endswith(suffix)\n                    and len(name) > len(prefix) + len(suffix)\n",
+          "new": ""
+        }
+      ],
+      "expect": "opening removes this file's leftover temporary files, and nothing else"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "open removes every *.tmp file",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "                    name.startswith(prefix)\n                    and name.endswith(suffix)\n",
+          "new": "                    name.endswith(suffix)\n"
+        }
+      ],
+      "expect": "opening removes this file's leftover temporary files, and nothing else"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "open removes any .tmp file whose name contains the target's",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "                    name.startswith(prefix)\n",
+          "new": "                    self.path.name in name\n"
+        }
+      ],
+      "expect": "opening removes this file's leftover temporary files, and nothing else"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "a corrupt file read as an empty state",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "            raise CorruptSnapshot(f\"{self.path}: not a JSON document ({exc})\") from exc\n",
+          "new": "            return {}\n"
+        }
+      ],
+      "expect": "DID NOT RAISE CorruptSnapshot"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "only JSONDecodeError turned into CorruptSnapshot",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors\n",
+          "new": "        except json.JSONDecodeError as exc:\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "bad bytes decoded with errors='replace'",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "data.decode(\"utf-8\")",
+          "new": "data.decode(\"utf-8\", errors=\"replace\")"
+        }
+      ],
+      "expect": "DID NOT RAISE CorruptSnapshot"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "NaN accepted on load",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "json.loads(data.decode(\"utf-8\"), parse_constant=_not_json)",
+          "new": "json.loads(data.decode(\"utf-8\"))"
+        }
+      ],
+      "expect": "DID NOT RAISE CorruptSnapshot"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "a corrupt file moved aside",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors\n",
+          "new": "        except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors\n            self.path.replace(self.path.with_name(self.path.name + \".corrupt\"))\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "keys sorted on load",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "json.loads(data.decode(\"utf-8\"), parse_constant=_not_json)",
+          "new": "json.loads(data.decode(\"utf-8\"), parse_constant=_not_json, object_pairs_hook=lambda pairs: dict(sorted(pairs)))"
+        }
+      ],
+      "expect": "a snapshot reads back exactly"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "os.rename instead of os.replace",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "            os.replace(tmp_name, self.path)\n",
+          "new": "            os.rename(tmp_name, self.path)\n"
+        }
+      ],
+      "expect": "save renames one temporary file over the target"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "leftovers removed by load() instead of on open",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "        prefix, suffix = self.path.name + \".\", \".tmp\"\n        if self.path.parent.is_dir():\n",
+          "new": "\n    def _sweep(self) -> None:\n        prefix, suffix = self.path.name + \".\", \".tmp\"\n        if self.path.parent.is_dir():\n"
+        },
+        {
+          "file": "snapshot.py",
+          "old": "        data = self.path.read_bytes()\n",
+          "new": "        self._sweep()\n        data = self.path.read_bytes()\n"
+        }
+      ],
+      "expect": "opening removes this file's leftover temporary files, and nothing else"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "no flush before the fsync",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "                fh.flush()\n",
+          "new": ""
+        }
+      ],
+      "expect": "the new file is flushed and fsynced before the rename"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "permission bits set on the target after the rename",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "                os.chmod(tmp_name, mode)\n",
+          "new": ""
+        },
+        {
+          "file": "snapshot.py",
+          "old": "            os.replace(tmp_name, self.path)\n",
+          "new": "            os.replace(tmp_name, self.path)\n            os.chmod(self.path, mode)\n"
+        }
+      ],
+      "expect": "from the moment it is renamed into place"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "permission bits set after the directory fsync",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "                os.chmod(tmp_name, mode)\n",
+          "new": ""
+        },
+        {
+          "file": "snapshot.py",
+          "old": "            os.close(dir_fd)\n        return True\n",
+          "new": "            os.close(dir_fd)\n        os.chmod(self.path, mode)\n        return True\n"
+        }
+      ],
+      "expect": "from the moment it is renamed into place"
+    },
+    {
+      "test": "test_snapshot_durability",
+      "name": "only NaN refused on load",
+      "edits": [
+        {
+          "file": "snapshot.py",
+          "old": "parse_constant=_not_json)",
+          "new": "parse_constant=lambda name: _not_json(name) if name == \"NaN\" else float(name))"
+        }
+      ],
+      "expect": "DID NOT RAISE CorruptSnapshot"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "no copy",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "    out = copy.deepcopy(doc)\n",
+          "new": "    out = doc\n"
+        }
+      ],
+      "expect": "migrate never changes the caller's document"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "shallow copy",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "    out = copy.deepcopy(doc)\n",
+          "new": "    out = dict(doc)\n"
+        }
+      ],
+      "expect": "migrate never changes the caller's document"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "one jump straight to the target",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "    for v in range(version, target):\n        if v not in migrations:\n            raise VersionError(f\"no migration from version {v} to {v + 1}\")\n        out = migrations[v](out)\n        validate(out, schemas[v + 1])\n",
+          "new": "    if version < target:\n        out = migrations[target - 1](out)\n        validate(out, schemas[target])\n"
+        }
+      ],
+      "expect": "missing required field 'risks'"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "always migrated to the current version",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "    for v in range(version, target):\n",
+          "new": "    for v in range(version, CURRENT_VERSION):\n"
+        }
+      ],
+      "expect": "migrate stops at the target"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "a current document returned as is",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "    validate(doc, schemas[version])\n",
+          "new": "    if version == target:\n        return doc\n    validate(doc, schemas[version])\n"
+        }
+      ],
+      "expect": "a document already at the target comes back as a copy"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "downgrade quietly does nothing",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "    if version > target:\n        raise VersionError(f\"cannot migrate down from version {version} to {target}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "there are no downgrades"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "a missing schema_version taken as 1",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "doc.get(\"schema_version\") if isinstance(doc, dict)",
+          "new": "doc.get(\"schema_version\", 1) if isinstance(doc, dict)"
+        }
+      ],
+      "expect": "missing required field 'schema_version'"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "the version is not checked before use",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "    if type(version) is not int or version not in schemas:\n        raise VersionError(f\"schema_version {version!r} has no schema\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "a missing step left to KeyError",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "        if v not in migrations:\n            raise VersionError(f\"no migration from version {v} to {v + 1}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "KeyError: 2"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "the input is not validated",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "    validate(doc, schemas[version])\n",
+          "new": ""
+        }
+      ],
+      "expect": "an invalid document is refused before any step runs"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "validated only at the end",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "        out = migrations[v](out)\n        validate(out, schemas[v + 1])\n    return out\n",
+          "new": "        out = migrations[v](out)\n    validate(out, schemas[target])\n    return out\n"
+        }
+      ],
+      "expect": "every step's result is checked against its own version's schema"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "migrate sets schema_version itself",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "        out = migrations[v](out)\n",
+          "new": "        out = migrations[v](out)\n        out[\"schema_version\"] = v + 1\n"
+        }
+      ],
+      "expect": "a step must produce the next version"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "the file written after every step",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "    out = migrate(doc, target, schemas=schemas, migrations=migrations)\n    if out[\"schema_version\"] != doc[\"schema_version\"]:\n        atomic_write(path, dump_state(out))\n",
+          "new": "    out = doc\n    for v in range(doc[\"schema_version\"] + 1, target + 1):\n        out = migrate(out, v, schemas=schemas, migrations=migrations)\n        atomic_write(path, dump_state(out))\n"
+        }
+      ],
+      "expect": "a failed upgrade leaves the file exactly as it was"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "a current file rewritten",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "    if out[\"schema_version\"] != doc[\"schema_version\"]:\n        atomic_write(path, dump_state(out))\n",
+          "new": "    atomic_write(path, dump_state(out))\n"
+        }
+      ],
+      "expect": "a file already at the current version is not rewritten"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "the upgraded file written in place",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "        atomic_write(path, dump_state(out))\n",
+          "new": "        path.write_text(dump_state(out), encoding=\"utf-8\")\n"
+        }
+      ],
+      "expect": "the upgraded file is written once, atomically"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "a failed upgrade reported as nothing to do",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "    out = migrate(doc, target, schemas=schemas, migrations=migrations)\n",
+          "new": "    try:\n        out = migrate(doc, target, schemas=schemas, migrations=migrations)\n    except Exception:\n        return doc[\"schema_version\"], doc[\"schema_version\"]\n"
+        }
+      ],
+      "expect": "DID NOT RAISE RuntimeError"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "versions reported the other way round",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "    return doc[\"schema_version\"], out[\"schema_version\"]",
+          "new": "    return out[\"schema_version\"], doc[\"schema_version\"]"
+        }
+      ],
+      "expect": "upgrade_file reports the version found and the version reached"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "steps followed by the version they claim (quiz Q10's while loop)",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "    for v in range(version, target):\n        if v not in migrations:\n            raise VersionError(f\"no migration from version {v} to {v + 1}\")\n        out = migrations[v](out)\n        validate(out, schemas[v + 1])\n    return out\n",
+          "new": "    v = version\n    while v < target:\n        if v not in migrations:\n            raise VersionError(f\"no migration from version {v} to {v + 1}\")\n        out = migrations[v](out)\n        v = out[\"schema_version\"]\n        validate(out, schemas[v])\n    return out\n"
+        }
+      ],
+      "expect": "a step must produce the next version: leaps"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "each step checked against the version it claims",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "        validate(out, schemas[v + 1])\n",
+          "new": "        validate(out, schemas[out[\"schema_version\"]])\n"
+        }
+      ],
+      "expect": "a step must produce the next version: leaps"
+    },
+    {
+      "test": "test_migration_chain",
+      "name": "a current document copied back without validation",
+      "edits": [
+        {
+          "file": "migrate.py",
+          "old": "    validate(doc, schemas[version])\n",
+          "new": "    if version == target:\n        return copy.deepcopy(doc)\n    validate(doc, schemas[version])\n"
+        }
+      ],
+      "expect": "a document already at the target is validated too"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "commit without compare",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "        if found != expected:\n            raise Conflict(expected, found)\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE Conflict"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "revision remembered per RevisionFile instead of read from disk",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "        return raw[\"revision\"], raw[\"state\"]\n",
+          "new": "        self._seen = raw[\"revision\"]\n        return raw[\"revision\"], raw[\"state\"]\n"
+        },
+        {
+          "file": "sessions.py",
+          "old": "        found, _ = self.read()\n",
+          "new": "        found = getattr(self, \"_seen\", 0)\n"
+        },
+        {
+          "file": "sessions.py",
+          "old": "        return expected + 1\n",
+          "new": "        self._seen = expected + 1\n        return expected + 1\n"
+        }
+      ],
+      "expect": "DID NOT RAISE Conflict"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "retry commits the stale result again",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "            for attempt in range(1, max_attempts + 1):\n                base, state = store.read()\n                new_state = await turn(state)\n",
+          "new": "            new_state = None\n            for attempt in range(1, max_attempts + 1):\n                base, state = store.read()\n                if new_state is None:\n                    new_state = await turn(state)\n"
+        }
+      ],
+      "expect": "a conflict reruns the turn on the fresh state"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "state read once per session",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "            for attempt in range(1, max_attempts + 1):\n                base, state = store.read()\n",
+          "new": "            base, state = store.read()\n            for attempt in range(1, max_attempts + 1):\n"
+        }
+      ],
+      "expect": "the session that lost the race reads again and commits on top"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "no retry after a conflict",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "range(1, max_attempts + 1)",
+          "new": "range(1, 2)"
+        }
+      ],
+      "expect": "the session that lost the race reads again and commits on top"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "one attempt too few",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "range(1, max_attempts + 1)",
+          "new": "range(1, max_attempts)"
+        }
+      ],
+      "expect": "a session gives up after max_attempts attempts"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "one attempt too many",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "range(1, max_attempts + 1)",
+          "new": "range(1, max_attempts + 2)"
+        },
+        {
+          "file": "sessions.py",
+          "old": "result = \"conflict\" if attempt < max_attempts else \"gave_up\"",
+          "new": "result = \"conflict\" if attempt <= max_attempts else \"gave_up\""
+        }
+      ],
+      "expect": "a session gives up after max_attempts attempts"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "the last attempt reported as a conflict",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "result = \"conflict\" if attempt < max_attempts else \"gave_up\"",
+          "new": "result = \"conflict\""
+        }
+      ],
+      "expect": "a session gives up after max_attempts attempts"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "a conflict reports the revision it expected",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "                    revision = lost.found\n",
+          "new": "                    revision = lost.expected\n"
+        }
+      ],
+      "expect": "the session that lost the race reads again and commits on top"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "lines held until every session is done",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "        while running:\n            item = await queue.get()\n            if item is _DONE:\n                running -= 1\n            elif isinstance(item, Exception):\n                raise item\n            else:\n                yield item\n",
+          "new": "        while running:\n            item = await queue.get()\n            if item is _DONE:\n                running -= 1\n            elif isinstance(item, Exception):\n                raise item\n            else:\n                held.append(item)\n        for line in held:\n            yield line\n"
+        },
+        {
+          "file": "sessions.py",
+          "old": "        running = len(tasks)\n",
+          "new": "        running = len(tasks)\n        held = []\n"
+        }
+      ],
+      "expect": "each attempt is reported as soon as it is decided"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "sessions run one after another",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "    tasks = [asyncio.create_task(session(name, turn)) for name, turn in turns.items()]\n    try:\n        running = len(tasks)\n",
+          "new": "    tasks = []\n    try:\n        for name, turn in turns.items():\n            await session(name, turn)\n            while not queue.empty():\n                item = queue.get_nowait()\n                if item is not _DONE:\n                    yield item\n        running = 0\n"
+        }
+      ],
+      "expect": "each attempt is reported as soon as it is decided"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "no newline after an event",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "queue.put_nowait(json.dumps(event) + \"\\n\")",
+          "new": "queue.put_nowait(json.dumps(event))"
+        }
+      ],
+      "expect": "one line of JSON per attempt"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "a blank line after every event",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "queue.put_nowait(json.dumps(event) + \"\\n\")",
+          "new": "queue.put_nowait(json.dumps(event) + \"\\n\\n\")"
+        }
+      ],
+      "expect": "one line of JSON per attempt"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "events pretty-printed",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "queue.put_nowait(json.dumps(event) + \"\\n\")",
+          "new": "queue.put_nowait(json.dumps(event, indent=2) + \"\\n\")"
+        }
+      ],
+      "expect": "one line of JSON per attempt"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "the stream ends when the first session finishes",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "        running = len(tasks)\n",
+          "new": "        running = 1\n"
+        }
+      ],
+      "expect": "the session that lost the race reads again and commits on top"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "a session's lines held until that session ends",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "            store = RevisionFile(path)\n",
+          "new": "            store = RevisionFile(path)\n            held = []\n"
+        },
+        {
+          "file": "sessions.py",
+          "old": "                queue.put_nowait(json.dumps(event) + \"\\n\")\n                if result != \"conflict\":\n                    return\n",
+          "new": "                held.append(json.dumps(event) + \"\\n\")\n                if result != \"conflict\":\n                    for line in held:\n                        queue.put_nowait(line)\n                    return\n"
+        }
+      ],
+      "expect": "each attempt is reported as soon as it is decided"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "a conflict reports base + 1",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "                    revision = lost.found\n",
+          "new": "                    revision = base + 1\n"
+        }
+      ],
+      "expect": "a conflict reports the revision it found on disk"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "max_attempts ignored, always 3",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "range(1, max_attempts + 1)",
+          "new": "range(1, 4)"
+        },
+        {
+          "file": "sessions.py",
+          "old": "result = \"conflict\" if attempt < max_attempts else \"gave_up\"",
+          "new": "result = \"conflict\" if attempt < 3 else \"gave_up\""
+        }
+      ],
+      "expect": "a session gives up after max_attempts attempts"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "retries until the commit goes through",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "import asyncio\n",
+          "new": "import asyncio\nimport itertools\n"
+        },
+        {
+          "file": "sessions.py",
+          "old": "range(1, max_attempts + 1)",
+          "new": "itertools.count(1)"
+        },
+        {
+          "file": "sessions.py",
+          "old": "result = \"conflict\" if attempt < max_attempts else \"gave_up\"",
+          "new": "result = \"conflict\""
+        }
+      ],
+      "expect": "a session gives up after max_attempts attempts"
+    },
+    {
+      "test": "test_concurrent_sessions",
+      "name": "a commit written in place",
+      "edits": [
+        {
+          "file": "sessions.py",
+          "old": "        atomic_write(self.path, json.dumps({\"revision\": expected + 1, \"state\": state}, indent=2) + \"\\n\")\n",
+          "new": "        self.path.write_text(json.dumps({\"revision\": expected + 1, \"state\": state}, indent=2) + \"\\n\", encoding=\"utf-8\")\n"
+        }
+      ],
+      "expect": "a commit replaces the file atomically"
+    },
+    {
+      "test": "test_migration_graph",
+      "name": "neighbours taken in the order they were added",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "            for nxt in sorted(self.edges.get(version, {})):\n                if nxt in parent:",
+          "new": "            for nxt in self.edges.get(version, {}):\n                if nxt in parent:"
+        }
+      ],
+      "expect": "among equally short paths, the smaller versions come first"
+    },
+    {
+      "test": "test_migration_graph",
+      "name": "a stack instead of a queue",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "queue.popleft()",
+          "new": "queue.pop()"
+        }
+      ],
+      "expect": "among equally short paths, the smaller versions come first"
+    },
+    {
+      "test": "test_migration_graph",
+      "name": "the smallest path of any length",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        parent: dict[int, int | None] = {start: None}\n        queue = deque([start])\n        while queue:\n            version = queue.popleft()\n            for nxt in sorted(self.edges.get(version, {})):\n                if nxt in parent:\n                    continue\n                parent[nxt] = version\n                if nxt == target:\n                    steps: list[Step] = []\n                    while parent[nxt] is not None:\n                        steps.append((parent[nxt], nxt))\n                        nxt = parent[nxt]\n                    return steps[::-1]\n                queue.append(nxt)\n",
+          "new": "        paths: list[list[Step]] = []\n\n        def every(version: int, steps: list[Step]) -> None:\n            if version == target:\n                paths.append(steps)\n                return\n            for nxt in self.edges.get(version, {}):\n                every(nxt, steps + [(version, nxt)])\n\n        every(start, [])\n        if paths:\n            return min(paths)\n"
+        }
+      ],
+      "expect": "the fewest migrations win, shortcuts included"
+    },
+    {
+      "test": "test_migration_graph",
+      "name": "no special case when start == target",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        if start == target:\n            return []\n",
+          "new": ""
+        }
+      ],
+      "expect": "no migration path from version 5 to 5"
+    },
+    {
+      "test": "test_migration_graph",
+      "name": "upgrade works on the caller's document",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        out = copy.deepcopy(doc)\n",
+          "new": "        out = doc\n"
+        }
+      ],
+      "expect": "upgrade never changes the caller's document"
+    },
+    {
+      "test": "test_migration_graph",
+      "name": "each path starts from a shallow copy",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        out = copy.deepcopy(doc)\n",
+          "new": "        out = dict(doc)\n"
+        }
+      ],
+      "expect": "every path that disagrees with the planned one, in order"
+    },
+    {
+      "test": "test_migration_graph",
+      "name": "results cached per version",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        def walk(version: int, steps: list[Step]) -> None:\n            if version == target:\n                if steps != planned and self._run(doc, steps) != expected:\n                    found.append(steps)\n                return\n            for nxt in sorted(self.edges.get(version, {})):\n                if nxt <= target:\n                    walk(nxt, steps + [(version, nxt)])\n\n        walk(start, [])\n",
+          "new": "        memo: dict[int, dict] = {}\n\n        def walk(version: int, steps: list[Step], current: dict) -> None:\n            if version == target:\n                if steps != planned and current != expected:\n                    found.append(steps)\n                return\n            for nxt in sorted(self.edges.get(version, {})):\n                if nxt <= target:\n                    if nxt not in memo:\n                        memo[nxt] = self.edges[version][nxt](copy.deepcopy(current))\n                    walk(nxt, steps + [(version, nxt)], memo[nxt])\n\n        walk(start, [], copy.deepcopy(doc))\n"
+        }
+      ],
+      "expect": "each path is judged by its own steps, not by a result cached per version"
+    },
+    {
+      "test": "test_migration_graph",
+      "name": "one document carried down every path",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        def walk(version: int, steps: list[Step]) -> None:\n            if version == target:\n                if steps != planned and self._run(doc, steps) != expected:\n                    found.append(steps)\n                return\n            for nxt in sorted(self.edges.get(version, {})):\n                if nxt <= target:\n                    walk(nxt, steps + [(version, nxt)])\n\n        walk(start, [])\n",
+          "new": "        def walk(version: int, steps: list[Step], current: dict) -> None:\n            if version == target:\n                if steps != planned and current != expected:\n                    found.append(steps)\n                return\n            for nxt in sorted(self.edges.get(version, {})):\n                if nxt <= target:\n                    walk(nxt, steps + [(version, nxt)], self.edges[version][nxt](current))\n\n        walk(start, [], copy.deepcopy(doc))\n"
+        }
+      ],
+      "expect": "KeyError: 'blockers'"
+    },
+    {
+      "test": "test_migration_graph",
+      "name": "every path returned",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "                if steps != planned and self._run(doc, steps) != expected:\n",
+          "new": "                if True:\n"
+        }
+      ],
+      "expect": "the shortcut and both chains give the same document"
+    },
+    {
+      "test": "test_migration_graph",
+      "name": "paths stop one version short",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "                if nxt <= target:\n                    walk(",
+          "new": "                if nxt < target:\n                    walk("
+        }
+      ],
+      "expect": "every path that disagrees with the planned one, in order"
+    },
+    {
+      "test": "test_migration_graph",
+      "name": "paths listed in the order the migrations were added",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "            for nxt in sorted(self.edges.get(version, {})):\n                if nxt <= target:",
+          "new": "            for nxt in self.edges.get(version, {}):\n                if nxt <= target:"
+        }
+      ],
+      "expect": "every path that disagrees with the planned one, in order"
+    },
+    {
+      "test": "test_migration_graph",
+      "name": "an unreachable target gives []",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        planned = self.path(start, target)\n",
+          "new": "        try:\n            planned = self.path(start, target)\n        except VersionError:\n            return []\n"
+        }
+      ],
+      "expect": "a target that cannot be reached is an error, not []"
+    },
+    {
+      "test": "test_migration_graph",
+      "name": "upgrade and disagreements never validate",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        validate(doc, self.schemas[doc[\"schema_version\"]])\n        out = copy.deepcopy(doc)\n        for src, dst in steps:\n            out = self.edges[src][dst](out)\n            validate(out, self.schemas[dst])\n        return out\n",
+          "new": "        out = copy.deepcopy(doc)\n        for src, dst in steps:\n            out = self.edges[src][dst](out)\n        return out\n"
+        }
+      ],
+      "expect": "is refused before any step runs"
+    },
+    {
+      "test": "test_migration_graph",
+      "name": "upgrade validates only the result",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        return self._run(doc, self.path(doc.get(\"schema_version\"), target))\n",
+          "new": "        out = copy.deepcopy(doc)\n        for src, dst in self.path(doc.get(\"schema_version\"), target):\n            out = self.edges[src][dst](out)\n        validate(out, self.schemas[target])\n        return out\n"
+        }
+      ],
+      "expect": "is refused before any step runs"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "update commits field prefixes before a later refusal",
+      "edits": [
+        {
+          "file": "manager.py",
+          "old": "        if changes:\n            state.update(changes)\n            self.commit(state)\n        return state\n",
+          "new": "        for key, value in changes.items():\n            state[key] = value\n            self.commit(state)\n        return state\n"
+        }
+      ],
+      "expect": "a refused multi-field update persists no prefix"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "update rewrites the complete result once per requested field",
+      "edits": [
+        {
+          "file": "manager.py",
+          "old": "        if changes:\n            state.update(changes)\n            self.commit(state)\n        return state\n",
+          "new": "        if changes:\n            state.update(changes)\n            for _ in changes:\n                self.commit(state)\n        return state\n"
+        }
+      ],
+      "expect": "one nonempty update replaces the state once"
+    },
+    {
+      "test": "test_state_manager",
+      "name": "empty update commits a snapshot without a requested change",
+      "edits": [
+        {
+          "file": "manager.py",
+          "old": "        if changes:\n            state.update(changes)\n            self.commit(state)\n        return state\n",
+          "new": "        state.update(changes)\n        self.commit(state)\n        return state\n"
+        }
+      ],
+      "expect": "an empty update validates and returns without replacing"
+    }
+  ]
+}
