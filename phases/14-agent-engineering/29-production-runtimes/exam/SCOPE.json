@@ -1,0 +1,132 @@
+{
+  "lesson": "phases/14-agent-engineering/29-production-runtimes",
+  "title": "Production Runtimes: Queue, Event, Cron",
+  "format": "staged-brownfield",
+  "service": "RunShape: one agent behind production runtime shapes: an async job queue with retries and a dead-letter queue, an event bus, a durable SQLite job table, cron schedules with catch-up after downtime, an SSE stream with backpressure and Last-Event-ID resume, and event cascades with replay",
+  "sources": {
+    "docs/en.md": "693a6f21557b8a6c349730ee6d378eb619b327c65ff8dbfe9474a75968b5f940",
+    "code/main.py": "3a69f2c0257ee99e3fd766f5992f12960ede6c514522850ee623e6cb0770df70"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_queue_and_bus",
+      "kind": "debug",
+      "lesson_anchor": "code/main.py QueueRuntime.worker and EventBus.publish; Queue-based / background; Event-driven; Where production runtimes fail (No DLQ: failed jobs vanish); Exercise 2 (simulate job failure, surface DLQ size); code walkthrough: the lesson's DLQ keeps no failure reason",
+      "planted_bugs": [
+        "_attempt asks fail_policy twice per attempt, once for the retry branch and again for the dead-letter branch, as code/main.py does; the error surfaces one call away, as LookupError: no scripted outcome left for 'A' (attempt 1) raised in ScriptedFaults.__call__ (fail_policy returns the attempt's error, or None when it does not fail)",
+        "the retry condition compares attempts made with the retry count (job.attempts < self.max_retries), so a job gets 2 attempts instead of max_attempts and B, which would succeed on its third attempt, is dead-lettered",
+        "the dead-letter branch parks the job in dlq with the error of its last attempt but, unlike the success branch, neither records it where result() looks nor wakes the callers waiting on it, so for its caller the job vanishes (the lesson's No DLQ failure), while the docstring asks result() to raise DeadLettered(job_id, error) at once, to callers already waiting and to callers that ask later. Every job has a caller waiting before any worker starts and no caller waits more than 1 s, so it surfaces as TimeoutError: nothing came back for j003 within 1 s in the test's outcome helper, in another task than the root cause. It shows only after the retry count is fixed: run_jobs judges completion from the log and the log assertion comes before the callers' outcomes. Its root cause is a missing handoff, not a poll interval or a wake-up timing as in the fourth defect: no wait is long enough",
+        "an idle worker polls the queue every 50 ms although the docstring says enqueue() wakes it, so each submit-and-wait round trip costs a whole poll interval"
+      ],
+      "timing_assert": "40 sequential submit-and-wait round trips through one worker under 0.2 s, each wait capped at 1 s so a worker that enqueue() never wakes fails with TimeoutError instead of hanging. Measured on this machine (load average 4.7 to 5.9 from other agents): the 50 ms polling worker 2.05 to 2.07 s on Python 3.10, 3.11 and 3.12 (at least 10x the limit, and never less, since every round trip sleeps a full interval); woken by enqueue() median 1.9 to 3.0 ms and p99 at most 5.2 ms over 1,200 runs per version, worst 18 ms on 3.11, 23 ms on 3.12 and 32 ms on 3.10 under that load (p99 at least 38x under the limit, the worst run 6x)",
+      "overfix_guard": "with three workers and twelve jobs enqueued at once, every job finishes and the agent runs once per job, which catches clearing the wakeup after every job (a burst strands jobs); serve() returns within 1 s of stop(), which catches a stop() that does not wake sleeping workers; a woken worker that pops without checking the queue raises IndexError when several wake together; a retry pushed to the front of the queue breaks the attempt log. Shrinking the poll interval to 1 ms, or to 0 (a sleep(0) busy loop), also passes the timing assert; the test cannot see either, so they are left to the follow-up question and the code-quality score. publish already isolates subscribers in the starter; its assertions stay, so a rewrite of events.py cannot drop the isolation. The dead-letter handoff is checked for callers waiting before the job dies and for a caller that asks after the run, with the last attempt's error: recording without waking times out, waking without recording raises KeyError: 'j003' in result(), set_exception on the waiters only times out for the later caller, cancelling the waiters gives CancelledError, a second fail_policy call for the error raises LookupError, and an error kept only on retry carries '429 rate limited'. A result() that polls dlq every 50 ms fails the round-trip timing; every 1 ms it passes, which is left to the follow-up question and the code-quality score"
+    },
+    {
+      "part": 2,
+      "test": "test_job_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "Queue-based / background (job enters a queue, workers pick up); The Problem (background worker runs out of memory, cron job dies on machine reboot); No DLQ; Skipping durable state",
+      "exactness": "every job reads back equal as a frozen StoredJob after two crash-and-reopen cycles: a prompt with CRLF, a tab, quotes, non-ASCII text, an emoji and trailing spaces; errors as an ordered tuple holding a multi-line traceback and two 'interrupted' entries; an empty-string result kept apart from None; integer-millisecond run_at_ms values from an injected clock; attempts counted exactly across the interrupted attempts, so the job that crashes its worker twice ends dead after its third attempt",
+      "traps": [
+        "the attempt counted in fail() instead of claim(), so an attempt cut short by a crash never counts",
+        "recovery at open that only puts running jobs back to pending (no 'interrupted' error, no backoff, never dead), or no recovery at all",
+        "backoff doubling from the first retry (2 ** attempts)",
+        "a job counted as due only after run_at_ms (<), so a job added now cannot be claimed now",
+        "due jobs claimed in the order they were added instead of by run_at_ms",
+        "dead letters listed in add order, or by the time they died with ties falling back to add order (x and y die in the same millisecond)",
+        "complete() or fail() accepting a job that is not running: fail() and complete() on a done job, complete() on a dead one",
+        "claim() that updates without committing: later commits hide it until the second crash, which rolls the claim back",
+        "linear backoff (backoff_ms * attempts), which matches 1 s and 2 s and shows only at the third retry of a max_attempts=4 job (3 s instead of 4 s)"
+      ],
+      "clarifying_questions": [
+        "several processes on one store",
+        "a clock that goes backwards",
+        "completing a done or dead job"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_cron_schedule",
+      "kind": "core algorithm",
+      "lesson_anchor": "Scheduled (cron-shaped agents; combine with durable execution so a failing nightly run resumes next tick); The Problem (cron job dies on machine reboot); Exercise 3 (nightly eval agent)",
+      "traps": [
+        "steps counted from 0 (v % step == 0) instead of from the start of the range: 9-17/4 and */10 in day of month",
+        "day of week 7 not folded into Sunday",
+        "Python's weekday() (Monday = 0) used as the cron weekday, or isoweekday(), whose Sunday is 7 and never matches the folded 0",
+        "both day fields required to match when both are restricted, instead of either",
+        "an aware after in another zone read by its wall clock instead of converted to UTC",
+        "a minute-by-minute or hour-by-hour scan",
+        "a search window of four years, which misses 29 February across 2100",
+        "30 February rejected without the either-day rule, although 0 0 30 2 1 fires on Mondays in February",
+        "catch-up: last_fire counted again, a fire exactly at now not due, the oldest missed fire run instead of the latest, an on-time fire dropped by skip, or a fire exactly 60 s old run by skip (now - fire <= 60 s)",
+        "a day field that starts with * (such as */10) taken as unrestricted, as Vixie cron does, although the docstring counts only a bare *",
+        "either day field enough even when the other one is *, so day of week * matches every day",
+        "fires returned in the zone of after: equal to the UTC answer, but not UTC"
+      ],
+      "timing_assert": "the next 29 February from 2026-03-01 and from 2096-03-01 under 0.01 s. Measured on this machine (load average 4 to 9) on Python 3.10, 3.11 and 3.12: a minute-by-minute scan 1.12 to 2.01 s (at least 112x the limit); an hour-by-hour scan 38 to 66 ms (at least 3.8x, so it fails too; a 0.05 s limit would pass it on 3.12 and fail it on 3.10); the reference, which skips whole days and months, 0.075 to 0.89 ms over 1,800 runs (at least 11x under it); a day-by-day scan that does not skip months 0.49 to 1.58 ms, which passes",
+      "clarifying_questions": [
+        "month and weekday names",
+        "a step without * or a range",
+        "whether a day field such as */10 is restricted",
+        "time zone",
+        "how much to catch up after downtime"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_run_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Streaming (SSE, per-chunk timing, first-token latency); Exercise 4 (streaming with backpressure: if the client is slow, pause the agent; how does this interact with a turn budget?)",
+      "wire_format": "SSE, one message per yielded string: id: <n>, event: step or final, one data: line of JSON and a blank line; ids 1, 2, 3 ... with the final event last; decided by the test's EventSource-style parse_sse (field lines, one space after the colon dropped, data lines joined, every line ended by a newline, a blank line after every event)",
+      "traps": [
+        "no backpressure, so the agent runs to the end while the client is slow",
+        "no working ahead: the agent asked only when the client reads",
+        "the next step taken before waiting for room (asyncio.Queue(maxsize=ahead) with put after the step), one step too many",
+        "a disconnect that cancels the run, so the reconnect stalls",
+        "a reconnect that replays the whole run or starts at Last-Event-ID itself, and no replay log for the event that was lost when the connection dropped",
+        "a reconnect after the final event that waits for more instead of ending",
+        "the turn budget measured on the wall clock since the start, so time paused for the client counts; a budget checked with >",
+        "events without the closing blank line",
+        "events() that yields while holding the condition's lock, so the producer cannot run while the client holds an event; the reconnect half of the test closes each stream it opens with contextlib.aclosing, so this fails at the probe after the first read instead of hanging in asyncio.run's cleanup",
+        "the step's start time taken before waiting for room, so time paused for the client counts"
+      ],
+      "clarifying_questions": [
+        "two clients at once",
+        "whether the final event counts toward ahead",
+        "an unknown Last-Event-ID"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_event_cascade",
+      "kind": "graph traversal",
+      "lesson_anchor": "Event-driven (agents subscribe to triggers); skill: explicit subscriber registry + replay path, no event-driven without an audit trail when compliance-bound; code/main.py drops events nobody subscribes to",
+      "traps": [
+        "depth first, or depth counted from 1",
+        "an event reached twice in one cascade (a diamond, or once at depth 2 and again at depth 3) taken again",
+        "events past max_depth dropped silently or delivered",
+        "events nobody subscribes to dropped silently",
+        "the handled ledger kept per event instead of per subscriber, so a replay never reaches a new subscriber; or no ledger, so a replay runs everyone again",
+        "a failed delivery marked as handled, so a replay never retries it",
+        "a loop of fresh events that only max_depth stops",
+        "the ledger keyed by event type instead of event id, so the ping/pong loop stops after one round",
+        "a subscriber that emits nothing (None or []) taken for a failure, so it is neither delivered nor recorded as handled",
+        "a failed delivery also recorded as unhandled, although the event has subscribers"
+      ],
+      "clarifying_questions": [
+        "one name on several event types",
+        "the same id with a different payload",
+        "an event past max_depth that nobody subscribes to"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: two of the three suggested defects are kept (fail_policy asked twice per attempt, attempts off by one), with the suggested polling worker as the timing defect. The third, publish without subscriber isolation, is replaced by the lesson's No DLQ failure (a dead-lettered job never reaches the caller waiting for it), because 13/03, 14/19 and 14/35 already plant a per-item call to outside code whose exception is not caught item by item; publish is correct in the starter and its assertions are kept. fail_policy returns the attempt's error or None instead of a bool, so the DLQ entry and DeadLettered carry the last error (the code walkthrough notes the lesson's DLQ keeps no failure reason). The double call surfaces through a package-level ScriptedFaults injector whose script is exact, so the error appears one call away instead of only as a skewed DLQ count. Timing uses 40 sequential submit-and-wait round trips (2.05 s polled, limit 0.2 s) instead of 100 jobs at about 2.5 s, to stay near the 3 s ceiling with 10x margin. The suggested counting probe is kept as twelve burst jobs on three workers with a per-job agent call count, plus checks for stop() and for popping an empty queue. Callers start waiting before the workers so that, on Python 3.10 and 3.11 too, where wait_for runs the coroutine in a task of its own, they are already waiting when the job dies.",
+    "Part 2: run_at_ms stays an integer millisecond value from an injected clock, as suggested, but timestamp precision is not used as the trap, because 14/09, 14/24 and 14/35 already use lossy time storage. The exactness focus is attempt accounting across a crash instead: the attempt is counted at claim, and a job left running fails as 'interrupted' on open (counted, backed off, dead after the last attempt) rather than simply going back to pending, so a job that keeps crashing its worker still reaches the DLQ. last_error became the full ordered error history, and the dead-letter view orders by a death sequence because two jobs die in the same millisecond.",
+    "Part 3: as suggested (five fields, lists, ranges, */15 and 1-5/2 steps from the range start, Sunday as 0 and 7, the either-day rule, month ends and leap years, catch-up with latest or skip). Added: aware datetimes in any zone converted to UTC, 29 February across 2100, schedules that can never fire, and a timing assert against minute-by-minute and hour-by-hour scans. Known gap: a next_fire with no never-fires check that skips months with date() reaches date(10000, 1, 1), whose ValueError passes the 30 February check by accident in about 0.06 s; a time bound cannot tell it from a sound 400-year search window (4 to 10 ms when it skips months, 27 to 55 ms when it does not), so INTERVIEWER.md leaves it to a follow-up question.",
+    "Part 4: as suggested (step and final events with ids, bounded lead, Last-Event-ID resume, final once, paused time not counted in the turn budget). The reconnect carries the id before the last event sent, as when the last event is lost while the connection drops, so the stream needs a replay log and not only a queue.",
+    "Part 5: as suggested (breadth-first cascade, depth from 0, truncation recorded, one handling per (event id, subscriber), deterministic order). The (event id, subscriber) ledger is kept across cascades so that publishing again is the replay path from the lesson's skill: only subscribers that have not handled the event, or whose delivery failed, get it. Events with no subscribers are recorded as unhandled, because the lesson's code drops them silently."
+  ]
+}

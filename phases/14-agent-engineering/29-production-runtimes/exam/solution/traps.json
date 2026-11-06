@@ -1,0 +1,1327 @@
+{
+  "package": "runshape",
+  "tests": [
+    "test_queue_and_bus",
+    "test_job_store",
+    "test_cron_schedule",
+    "test_run_stream",
+    "test_event_cascade"
+  ],
+  "layers": [
+    {
+      "test": "test_queue_and_bus",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "no scripted outcome left for 'A' (attempt 1)"
+        },
+        {
+          "name": "ask fail_policy once per attempt",
+          "edits": [
+            {
+              "file": "queue.py",
+              "old": "        if self.fail_policy(job) is not None and job.attempts < self.max_retries:\n",
+              "new": "        error = self.fail_policy(job)\n        if error is not None and job.attempts < self.max_retries:\n"
+            },
+            {
+              "file": "queue.py",
+              "old": "        error = self.fail_policy(job)\n        if error is not None:\n",
+              "new": "        if error is not None:\n"
+            }
+          ],
+          "expect": "a job gets max_attempts attempts in total"
+        },
+        {
+          "name": "+ the last retry is attempt max_attempts",
+          "edits": [
+            {
+              "file": "queue.py",
+              "old": "job.attempts < self.max_retries",
+              "new": "job.attempts <= self.max_retries"
+            }
+          ],
+          "expect": "TimeoutError: nothing came back for j003"
+        },
+        {
+          "name": "+ a dead letter reaches its callers",
+          "edits": [
+            {
+              "file": "queue.py",
+              "old": "            self.log.append((job.job_id, \"dead\"))\n            return\n",
+              "new": "            self.log.append((job.job_id, \"dead\"))\n            self._dead[job.job_id] = job\n            self._wake_waiters(job.job_id)\n            return\n"
+            }
+          ],
+          "expect": "an idle worker picks up new work at once"
+        },
+        {
+          "name": "+ enqueue wakes an idle worker",
+          "edits": [
+            {
+              "file": "queue.py",
+              "old": "        self._count = 0\n        self._stopping = False\n",
+              "new": "        self._count = 0\n        self._stopping = False\n        self._wakeup = asyncio.Event()\n"
+            },
+            {
+              "file": "queue.py",
+              "old": "        self.queue.append(job)\n        return job.job_id\n",
+              "new": "        self.queue.append(job)\n        self._wakeup.set()\n        return job.job_id\n"
+            },
+            {
+              "file": "queue.py",
+              "old": "        self._stopping = True\n",
+              "new": "        self._stopping = True\n        self._wakeup.set()\n"
+            },
+            {
+              "file": "queue.py",
+              "old": "                await asyncio.sleep(IDLE_POLL_S)\n",
+              "new": "                self._wakeup.clear()\n                await self._wakeup.wait()\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_queue_and_bus",
+      "name": "the wakeup cleared after every job, so a burst strands jobs",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "            if not self.queue:\n                self._wakeup.clear()\n                await self._wakeup.wait()\n                continue\n            self._attempt(self.queue.popleft())\n",
+          "new": "            await self._wakeup.wait()\n            self._wakeup.clear()\n            if self.queue:\n                self._attempt(self.queue.popleft())\n"
+        }
+      ],
+      "expect": "every queued job finishes, even when jobs arrive together"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "stop() leaves idle workers asleep",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "        self._stopping = True\n        self._wakeup.set()\n",
+          "new": "        self._stopping = True\n"
+        }
+      ],
+      "expect": "serve() returns soon after stop()"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "a woken worker pops without looking at the queue again",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "            if not self.queue:\n                self._wakeup.clear()\n                await self._wakeup.wait()\n                continue\n            self._attempt(self.queue.popleft())\n",
+          "new": "            if not self.queue:\n                self._wakeup.clear()\n                await self._wakeup.wait()\n            self._attempt(self.queue.popleft())\n"
+        }
+      ],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "a retry jumps to the front of the queue",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "        if error is not None and job.attempts <= self.max_retries:\n            self.queue.append(job)\n",
+          "new": "        if error is not None and job.attempts <= self.max_retries:\n            self.queue.appendleft(job)\n"
+        }
+      ],
+      "expect": "a retry goes to the back of the queue"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "publish stops at the first failing subscriber",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "            out = self._deliver(event, name, handler)\n            if out is not None:\n                emitted.extend(out)\n",
+          "new": "            out = self._deliver(event, name, handler)\n            if out is None:\n                break\n            emitted.extend(out)\n"
+        }
+      ],
+      "expect": "a failing subscriber does not stop the others"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "a dead letter keeps only the message",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "f\"{type(exc).__name__}: {exc}\"",
+          "new": "str(exc)"
+        }
+      ],
+      "expect": "a failure is kept as a dead letter"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "enqueue() never wakes an idle worker, only stop() does",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "        self.queue.append(job)\n        self._wakeup.set()\n",
+          "new": "        self.queue.append(job)\n"
+        }
+      ],
+      "expect": "TimeoutError"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "a retry allowed while attempts <= max_attempts",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "error is not None and job.attempts <= self.max_retries",
+          "new": "error is not None and job.attempts <= self.max_attempts"
+        }
+      ],
+      "expect": "no scripted outcome left for 'C' (attempt 4)"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "the last attempt dead-lettered without asking fail_policy",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "        error = self.fail_policy(job)\n",
+          "new": "        error = self.fail_policy(job) if job.attempts < self.max_attempts else \"out of attempts\"\n"
+        }
+      ],
+      "expect": "a job gets max_attempts attempts in total"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "the agent run before fail_policy decides",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "        error = self.fail_policy(job)\n",
+          "new": "        answer_now = self.agent(job.payload)\n        error = self.fail_policy(job)\n"
+        },
+        {
+          "file": "queue.py",
+          "old": "        self._answers[job.job_id] = self.agent(job.payload)\n",
+          "new": "        self._answers[job.job_id] = answer_now\n"
+        }
+      ],
+      "expect": "the agent runs once for every attempt that does not fail"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "a dead letter as repr(exc)",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "f\"{type(exc).__name__}: {exc}\"",
+          "new": "repr(exc)"
+        }
+      ],
+      "expect": "a failure is kept as a dead letter"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "a dead letter keyed by the event type",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "self.dead_letters.append((event.id, name,",
+          "new": "self.dead_letters.append((event.type, name,"
+        }
+      ],
+      "expect": "a failure is kept as a dead letter"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "stop() cancels the worker tasks",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "        self._stopping = False\n        await asyncio.gather(*(self._work() for _ in range(workers)))\n",
+          "new": "        self._stopping = False\n        self._tasks = [asyncio.ensure_future(self._work()) for _ in range(workers)]\n        await asyncio.gather(*self._tasks)\n"
+        },
+        {
+          "file": "queue.py",
+          "old": "        self._stopping = True\n        self._wakeup.set()\n",
+          "new": "        self._stopping = True\n        for task in self._tasks:\n            task.cancel()\n"
+        }
+      ],
+      "expect": "CancelledError"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "the dead job recorded, but callers already waiting never woken",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "            self._dead[job.job_id] = job\n            self._wake_waiters(job.job_id)\n",
+          "new": "            self._dead[job.job_id] = job\n"
+        }
+      ],
+      "expect": "TimeoutError: nothing came back for j003"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "waiting callers woken, but the dead job not recorded for result()",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "            self._dead[job.job_id] = job\n            self._wake_waiters(job.job_id)\n",
+          "new": "            self._wake_waiters(job.job_id)\n"
+        }
+      ],
+      "expect": "KeyError: 'j003'"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "DeadLettered set on the waiting callers only, so a later caller waits",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "            self._dead[job.job_id] = job\n            self._wake_waiters(job.job_id)\n",
+          "new": "            for waiter in self._waiters.pop(job.job_id, []):\n                waiter.set_exception(DeadLettered(job.job_id, error))\n"
+        }
+      ],
+      "expect": "TimeoutError: nothing came back for j003"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "the callers of a dead job cancelled",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "            self._dead[job.job_id] = job\n            self._wake_waiters(job.job_id)\n",
+          "new": "            self._dead[job.job_id] = job\n            for waiter in self._waiters.pop(job.job_id, []):\n                waiter.cancel()\n"
+        }
+      ],
+      "expect": "CancelledError"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "the dead letter's error fetched with another fail_policy call",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "            job.error = error\n",
+          "new": "            job.error = self.fail_policy(job)\n"
+        }
+      ],
+      "expect": "no scripted outcome left for 'C' (attempt 3)"
+    },
+    {
+      "test": "test_queue_and_bus",
+      "name": "the error kept when the job is retried, so a dead letter carries the one before last",
+      "edits": [
+        {
+          "file": "queue.py",
+          "old": "        if error is not None and job.attempts <= self.max_retries:\n            self.queue.append(job)\n",
+          "new": "        if error is not None and job.attempts <= self.max_retries:\n            job.error = error\n            self.queue.append(job)\n"
+        },
+        {
+          "file": "queue.py",
+          "old": "            job.error = error\n            self.dlq.append(job)\n",
+          "new": "            self.dlq.append(job)\n"
+        }
+      ],
+      "expect": "a caller gets the answer, or DeadLettered with the job id and the error of the last attempt"
+    },
+    {
+      "test": "test_job_store",
+      "name": "recovery only puts running jobs back to pending",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "        for (job_id,) in running:\n            self.fail(job_id, INTERRUPTED)\n",
+          "new": "        for (job_id,) in running:\n            with self._db:\n                self._db.execute(\"UPDATE jobs SET status = 'pending' WHERE job_id = ?\", (job_id,))\n"
+        }
+      ],
+      "expect": "a job left running by a crash fails as interrupted when the store opens"
+    },
+    {
+      "test": "test_job_store",
+      "name": "no recovery when the store opens",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "        for (job_id,) in running:\n            self.fail(job_id, INTERRUPTED)\n",
+          "new": "        del running\n"
+        }
+      ],
+      "expect": "a job left running by a crash fails as interrupted when the store opens"
+    },
+    {
+      "test": "test_job_store",
+      "name": "the attempt counted when it fails, not when it is claimed",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "\"UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE job_id = ?\"",
+          "new": "\"UPDATE jobs SET status = 'running' WHERE job_id = ?\""
+        },
+        {
+          "file": "jobstore.py",
+          "old": "        job = self._running(job_id)\n        errors = json.dumps([*job.errors, error])\n",
+          "new": "        job = self._running(job_id)\n        job = StoredJob(job.job_id, job.payload, job.status, job.attempts + 1, job.run_at_ms, job.errors, job.result)\n        errors = json.dumps([*job.errors, error])\n"
+        },
+        {
+          "file": "jobstore.py",
+          "old": "\"UPDATE jobs SET status = 'pending', run_at_ms = ?, errors = ? WHERE job_id = ?\"",
+          "new": "\"UPDATE jobs SET status = 'pending', attempts = attempts + 1, run_at_ms = ?, errors = ? WHERE job_id = ?\""
+        },
+        {
+          "file": "jobstore.py",
+          "old": "\"UPDATE jobs SET status = 'dead', errors = ?, died = ? WHERE job_id = ?\"",
+          "new": "\"UPDATE jobs SET status = 'dead', attempts = attempts + 1, errors = ?, died = ? WHERE job_id = ?\""
+        }
+      ],
+      "expect": "claim takes the oldest due job and counts the attempt"
+    },
+    {
+      "test": "test_job_store",
+      "name": "backoff doubles from the first retry (2 ** attempts)",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "2 ** (job.attempts - 1)",
+          "new": "2 ** job.attempts"
+        }
+      ],
+      "expect": "a failed attempt waits backoff_ms before it is due again"
+    },
+    {
+      "test": "test_job_store",
+      "name": "a job counted as due only after run_at_ms",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "AND run_at_ms <= ?",
+          "new": "AND run_at_ms < ?"
+        }
+      ],
+      "expect": "claim takes the oldest due job and counts the attempt"
+    },
+    {
+      "test": "test_job_store",
+      "name": "due jobs claimed in the order they were added",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "ORDER BY run_at_ms, seq LIMIT 1",
+          "new": "ORDER BY seq LIMIT 1"
+        }
+      ],
+      "expect": "the job that has been due longest goes first"
+    },
+    {
+      "test": "test_job_store",
+      "name": "dead letters in the order the jobs were added",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "WHERE status = 'dead' ORDER BY died",
+          "new": "WHERE status = 'dead' ORDER BY seq"
+        }
+      ],
+      "expect": "dead letters come in the order the jobs died"
+    },
+    {
+      "test": "test_job_store",
+      "name": "dead letters ordered by the time they died (ties fall back to add order)",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "                (died,) = self._db.execute(\"SELECT COALESCE(MAX(died), 0) + 1 FROM jobs\").fetchone()\n",
+          "new": "                died = self._clock()\n"
+        },
+        {
+          "file": "jobstore.py",
+          "old": "WHERE status = 'dead' ORDER BY died",
+          "new": "WHERE status = 'dead' ORDER BY died, seq"
+        }
+      ],
+      "expect": "dead letters come in the order the jobs died"
+    },
+    {
+      "test": "test_job_store",
+      "name": "complete() accepts a job that is not running",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "        \"\"\"Store the result of a running job; the job is done.\"\"\"\n        self._running(job_id)\n",
+          "new": "        \"\"\"Store the result of a running job; the job is done.\"\"\"\n        self.get(job_id)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_job_store",
+      "name": "claim() leaves its update uncommitted",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "        with self._db:\n            row = self._db.execute(\n                \"SELECT job_id FROM jobs WHERE status = 'pending' AND run_at_ms <= ?\"\n                \" ORDER BY run_at_ms, seq LIMIT 1\",\n                (self._clock(),),\n            ).fetchone()\n            if row is None:\n                return None\n            self._db.execute(\n                \"UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE job_id = ?\", row\n            )\n        return self.get(row[0])\n",
+          "new": "        row = self._db.execute(\n            \"SELECT job_id FROM jobs WHERE status = 'pending' AND run_at_ms <= ?\"\n            \" ORDER BY run_at_ms, seq LIMIT 1\",\n            (self._clock(),),\n        ).fetchone()\n        if row is None:\n            return None\n        self._db.execute(\n            \"UPDATE jobs SET status = 'running', attempts = attempts + 1 WHERE job_id = ?\", row\n        )\n        return self.get(row[0])\n"
+        }
+      ],
+      "expect": "a job that keeps killing its worker still ends in the dead-letter queue"
+    },
+    {
+      "test": "test_job_store",
+      "name": "linear backoff (backoff_ms * attempts)",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "self.backoff_ms * 2 ** (job.attempts - 1)",
+          "new": "self.backoff_ms * job.attempts"
+        }
+      ],
+      "expect": "each retry waits twice as long as the one before"
+    },
+    {
+      "test": "test_job_store",
+      "name": "fail() accepts a job that is not running",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "        job = self._running(job_id)\n        errors = json.dumps",
+          "new": "        job = self.get(job_id)\n        errors = json.dumps"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_job_store",
+      "name": "complete() rejects only done jobs",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "        \"\"\"Store the result of a running job; the job is done.\"\"\"\n        self._running(job_id)\n",
+          "new": "        \"\"\"Store the result of a running job; the job is done.\"\"\"\n        if self.get(job_id).status == 'done':\n            raise ValueError(job_id)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_job_store",
+      "name": "errors joined with newlines and split again",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "errors = json.dumps([*job.errors, error])",
+          "new": "errors = \"\\n\".join([*job.errors, error])"
+        },
+        {
+          "file": "jobstore.py",
+          "old": "VALUES (?, ?, 'pending', 0, ?, '[]')",
+          "new": "VALUES (?, ?, 'pending', 0, ?, '')"
+        },
+        {
+          "file": "jobstore.py",
+          "old": "tuple(json.loads(errors))",
+          "new": "(tuple(errors.split(\"\\n\")) if errors else ())"
+        }
+      ],
+      "expect": "a failed attempt waits backoff_ms before it is due again"
+    },
+    {
+      "test": "test_job_store",
+      "name": "an empty result stored as NULL",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "(result, job_id)",
+          "new": "(result or None, job_id)"
+        }
+      ],
+      "expect": "an empty answer is still an answer"
+    },
+    {
+      "test": "test_job_store",
+      "name": "backoff counted from the old run_at instead of now",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "run_at = self._clock() + self.backoff_ms",
+          "new": "run_at = job.run_at_ms + self.backoff_ms"
+        }
+      ],
+      "expect": "a job left running by a crash fails as interrupted when the store opens"
+    },
+    {
+      "test": "test_job_store",
+      "name": "a dead job's run_at moved to now",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "\"UPDATE jobs SET status = 'dead', errors = ?, died = ? WHERE job_id = ?\",\n                    (errors, died, job_id),",
+          "new": "\"UPDATE jobs SET status = 'dead', run_at_ms = ?, errors = ?, died = ? WHERE job_id = ?\",\n                    (self._clock(), errors, died, job_id),"
+        }
+      ],
+      "expect": "a job that keeps killing its worker still ends in the dead-letter queue"
+    },
+    {
+      "test": "test_job_store",
+      "name": "the interrupted attempt not counted",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "        for (job_id,) in running:\n            self.fail(job_id, INTERRUPTED)\n",
+          "new": "        for (job_id,) in running:\n            with self._db:\n                self._db.execute(\"UPDATE jobs SET attempts = attempts - 1 WHERE job_id = ?\", (job_id,))\n            self.fail(job_id, INTERRUPTED)\n"
+        }
+      ],
+      "expect": "a job left running by a crash fails as interrupted when the store opens"
+    },
+    {
+      "test": "test_job_store",
+      "name": "recovery backs off but never lets a job die",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "        for (job_id,) in running:\n            self.fail(job_id, INTERRUPTED)\n",
+          "new": "        for (job_id,) in running:\n            job = self.get(job_id)\n            with self._db:\n                self._db.execute(\n                    \"UPDATE jobs SET status = 'pending', run_at_ms = ?, errors = ? WHERE job_id = ?\",\n                    (self._clock() + self.backoff_ms * 2 ** (job.attempts - 1), json.dumps([*job.errors, INTERRUPTED]), job_id),\n                )\n"
+        }
+      ],
+      "expect": "a job that keeps killing its worker still ends in the dead-letter queue"
+    },
+    {
+      "test": "test_job_store",
+      "name": "fail() counts the attempt a second time",
+      "edits": [
+        {
+          "file": "jobstore.py",
+          "old": "\"UPDATE jobs SET status = 'pending', run_at_ms = ?, errors = ? WHERE job_id = ?\"",
+          "new": "\"UPDATE jobs SET status = 'pending', attempts = attempts + 1, run_at_ms = ?, errors = ? WHERE job_id = ?\""
+        }
+      ],
+      "expect": "a failed attempt waits backoff_ms before it is due again"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "steps counted from 0 (value % step == 0)",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "        values.update(range(start, end + 1, step))\n",
+          "new": "        values.update(v for v in range(start, end + 1) if v % step == 0)\n"
+        }
+      ],
+      "expect": "a step counts from the start of its range"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "day of week 7 kept as a weekday of its own",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "        weekdays=frozenset(d % 7 for d in weekdays),\n",
+          "new": "        weekdays=weekdays,\n"
+        }
+      ],
+      "expect": "day of week 7 is Sunday, like 0"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "Python's weekday() taken as the cron weekday",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "    in_week = (day.weekday() + 1) % 7 in cron.weekdays  # Python: Monday is 0; cron: Sunday is 0\n",
+          "new": "    in_week = day.weekday() in cron.weekdays\n"
+        }
+      ],
+      "expect": "cron counts weekdays from Sunday = 0"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "both day fields must match",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "        return in_month or in_week\n",
+          "new": "        return in_month and in_week\n"
+        }
+      ],
+      "expect": "with both day fields restricted, either one is enough"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "the wall clock of after read as UTC",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "    start = after.astimezone(UTC).replace(second=0, microsecond=0) + timedelta(minutes=1)\n",
+          "new": "    start = after.replace(tzinfo=UTC, second=0, microsecond=0) + timedelta(minutes=1)\n"
+        }
+      ],
+      "expect": "the schedule runs on UTC"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "a minute-by-minute scan",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "    day, earliest = start.date(), (start.hour, start.minute)\n    while True:\n        if day.month not in cron.months:\n            day = date(day.year + day.month // 12, day.month % 12 + 1, 1)\n            earliest = (0, 0)\n            continue\n        if _day_matches(cron, day):\n            found = _first_time(cron, earliest)\n            if found is not None:\n                return datetime(day.year, day.month, day.day, found[0], found[1], tzinfo=UTC)\n        day += timedelta(days=1)\n        earliest = (0, 0)\n",
+          "new": "    fire = start\n    while not (\n        fire.minute in cron.minutes\n        and fire.hour in cron.hours\n        and fire.month in cron.months\n        and _day_matches(cron, fire.date())\n    ):\n        fire += timedelta(minutes=1)\n    return fire\n"
+        }
+      ],
+      "expect": "find the next fire without stepping through every minute"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "the search gives up after four years",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "    while True:\n        if day.month not in cron.months:\n",
+          "new": "    while True:\n        if day.year > after.year + 4:\n            raise ValueError(\"this schedule never fires\")\n        if day.month not in cron.months:\n"
+        }
+      ],
+      "expect": "never fires"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "30 February rejected without the either-day rule",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "    if cron.days_restricted and not cron.weekdays_restricted:\n",
+          "new": "    if cron.days_restricted:\n"
+        }
+      ],
+      "expect": "never fires"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "the last handled fire counted again",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "    fire = next_fire(cron, last_fire)\n",
+          "new": "    fire = next_fire(cron, last_fire - timedelta(minutes=1))\n"
+        }
+      ],
+      "expect": "the last fire was already handled"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "catch-up runs the oldest missed fire",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "        return [due[-1]], len(due) - 1\n",
+          "new": "        return [due[0]], len(due) - 1\n"
+        }
+      ],
+      "expect": "after downtime, catch up with the most recent missed fire only"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "a fire exactly at now not yet due",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "    while fire <= now:\n",
+          "new": "    while fire < now:\n"
+        }
+      ],
+      "expect": "a fire exactly at now is due"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "skip drops the fire that is on time",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "    run = [due[-1]] if due[-1] == this_minute else []\n",
+          "new": "    run = []\n"
+        }
+      ],
+      "expect": "a fire in the current minute is on time"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "a field starting with * taken as unrestricted (Vixie cron)",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "        days_restricted=parts[2] != \"*\",\n        weekdays_restricted=parts[4] != \"*\",\n",
+          "new": "        days_restricted=not parts[2].startswith(\"*\"),\n        weekdays_restricted=not parts[4].startswith(\"*\"),\n"
+        }
+      ],
+      "expect": "a day field is restricted unless it is exactly *"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "either day field always enough, even next to a *",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "    return in_month and in_week\n",
+          "new": "    return in_month or in_week\n"
+        }
+      ],
+      "expect": "with day of week *, only the day of the month decides"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "the fire returned in the zone of after",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "                return datetime(day.year, day.month, day.day, found[0], found[1], tzinfo=UTC)\n",
+          "new": "                return datetime(day.year, day.month, day.day, found[0], found[1], tzinfo=UTC).astimezone(after.tzinfo)\n"
+        }
+      ],
+      "expect": "fire times are given in UTC"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "skip runs only a fire exactly at now",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "    run = [due[-1]] if due[-1] == this_minute else []\n",
+          "new": "    run = [due[-1]] if due[-1] == now else []\n"
+        }
+      ],
+      "expect": "a fire in the current minute is on time"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "an hour-by-hour scan",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "    day, earliest = start.date(), (start.hour, start.minute)\n    while True:\n        if day.month not in cron.months:\n            day = date(day.year + day.month // 12, day.month % 12 + 1, 1)\n            earliest = (0, 0)\n            continue\n        if _day_matches(cron, day):\n            found = _first_time(cron, earliest)\n            if found is not None:\n                return datetime(day.year, day.month, day.day, found[0], found[1], tzinfo=UTC)\n        day += timedelta(days=1)\n        earliest = (0, 0)\n",
+          "new": "    fire = start\n    while True:\n        if fire.month in cron.months and _day_matches(cron, fire.date()) and fire.hour in cron.hours:\n            minute = next((m for m in sorted(cron.minutes) if m >= fire.minute), None)\n            if minute is not None:\n                return fire.replace(minute=minute)\n        fire = (fire + timedelta(hours=1)).replace(minute=0)\n"
+        }
+      ],
+      "expect": "find the next fire without stepping through every minute or every hour"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "February counted as 28 days in the never-fires check",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "MONTH_DAYS = (31, 29,",
+          "new": "MONTH_DAYS = (31, 28,"
+        }
+      ],
+      "expect": "never fires"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "the time of day not reset after skipping to the next month",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "            day = date(day.year + day.month // 12, day.month % 12 + 1, 1)\n            earliest = (0, 0)\n            continue\n",
+          "new": "            day = date(day.year + day.month // 12, day.month % 12 + 1, 1)\n            continue\n"
+        }
+      ],
+      "expect": "30 February never comes, but Mondays in February do"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "Sunday kept as 7 and matched with isoweekday()",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "        weekdays=frozenset(d % 7 for d in weekdays),\n",
+          "new": "        weekdays=frozenset(7 if d == 0 else d for d in weekdays),\n"
+        },
+        {
+          "file": "cron.py",
+          "old": "    in_week = (day.weekday() + 1) % 7 in cron.weekdays",
+          "new": "    in_week = day.isoweekday() in cron.weekdays"
+        }
+      ],
+      "expect": "day of week 7 is Sunday, like 0"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "skip counts one missed fire too few",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "    return run, len(due) - len(run)\n",
+          "new": "    return run, len(due) - 1\n"
+        }
+      ],
+      "expect": "skip runs no late fire, and every missed fire counts as skipped"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "skip runs a fire up to and including 60 s old",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "    run = [due[-1]] if due[-1] == this_minute else []\n",
+          "new": "    run = [due[-1]] if now - due[-1] <= timedelta(minutes=1) else []\n"
+        }
+      ],
+      "expect": "a fire from the minute before is already late"
+    },
+    {
+      "test": "test_cron_schedule",
+      "name": "isoweekday() taken as the cron weekday (Sunday is 7, never 0)",
+      "edits": [
+        {
+          "file": "cron.py",
+          "old": "    in_week = (day.weekday() + 1) % 7 in cron.weekdays",
+          "new": "    in_week = day.isoweekday() in cron.weekdays"
+        }
+      ],
+      "expect": "cron counts weekdays from Sunday = 0"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "no backpressure: the agent runs flat out",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            async with self._changed:\n                await self._changed.wait_for(lambda: len(self._log) - self._read < self.ahead)\n            if worked >= self.budget_s:\n",
+          "new": "            await asyncio.sleep(0)\n            if worked >= self.budget_s:\n"
+        }
+      ],
+      "expect": "the run works ahead of the client by `ahead` events, then waits"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "the next step taken before waiting for room (one event too many)",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            async with self._changed:\n                await self._changed.wait_for(lambda: len(self._log) - self._read < self.ahead)\n            if worked >= self.budget_s:\n                status = \"budget\"\n                break\n            started = self._clock()\n            try:\n                text = await self._agent.__anext__()\n            except StopAsyncIteration:\n                break\n            worked += self._clock() - started\n            steps += 1\n            await self._emit(\"step\", {\"text\": text})\n",
+          "new": "            if worked >= self.budget_s:\n                status = \"budget\"\n                break\n            started = self._clock()\n            try:\n                text = await self._agent.__anext__()\n            except StopAsyncIteration:\n                break\n            worked += self._clock() - started\n            steps += 1\n            async with self._changed:\n                await self._changed.wait_for(lambda: len(self._log) - self._read < self.ahead)\n            await self._emit(\"step\", {\"text\": text})\n"
+        }
+      ],
+      "expect": "the run works ahead of the client by `ahead` events, then waits"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "a reconnect replays the whole run",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        index = 0 if last_event_id is None else int(last_event_id)\n",
+          "new": "        index = 0\n"
+        }
+      ],
+      "expect": "a reconnect resumes right after Last-Event-ID"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "a reconnect starts at Last-Event-ID itself",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        index = 0 if last_event_id is None else int(last_event_id)\n",
+          "new": "        index = 0 if last_event_id is None else int(last_event_id) - 1\n"
+        }
+      ],
+      "expect": "a reconnect resumes right after Last-Event-ID"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "a disconnect cancels the run",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        while index != self._final_id:\n            async with self._changed:\n                await self._changed.wait_for(lambda: index < len(self._log))\n                chunk = self._log[index]\n                index += 1\n                self._read = index\n                self._changed.notify_all()\n            yield chunk\n",
+          "new": "        try:\n            while index != self._final_id:\n                async with self._changed:\n                    await self._changed.wait_for(lambda: index < len(self._log))\n                    chunk = self._log[index]\n                    index += 1\n                    self._read = index\n                    self._changed.notify_all()\n                yield chunk\n        finally:\n            if index != self._final_id and self._task is not None:\n                self._task.cancel()\n"
+        }
+      ],
+      "expect": "the stream stalls"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "a reconnect after the final event waits for more",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        while index != self._final_id:\n            async with self._changed:\n                await self._changed.wait_for(lambda: index < len(self._log))\n                chunk = self._log[index]\n                index += 1\n                self._read = index\n                self._changed.notify_all()\n            yield chunk\n",
+          "new": "        while True:\n            async with self._changed:\n                await self._changed.wait_for(lambda: index < len(self._log))\n                chunk = self._log[index]\n                index += 1\n                self._read = index\n                self._changed.notify_all()\n            yield chunk\n            if index == self._final_id:\n                return\n"
+        }
+      ],
+      "expect": "the stream stalls"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "the budget counts time paused for the client",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        worked = 0.0\n",
+          "new": "        worked = 0.0\n        began = self._clock()\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "            worked += self._clock() - started\n",
+          "new": "            worked = self._clock() - began\n"
+        }
+      ],
+      "expect": "time paused for the client does not count against the budget"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "one step past the budget (> instead of >=)",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if worked >= self.budget_s:\n",
+          "new": "            if worked > self.budget_s:\n"
+        }
+      ],
+      "expect": "the run stops once its work reaches budget_s"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "events without the closing blank line",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "data: {json.dumps(data)}\\n\\n\")",
+          "new": "data: {json.dumps(data)}\\n\")"
+        }
+      ],
+      "expect": "every event ends with a blank line"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "events() yields while holding the condition's lock",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        while index != self._final_id:\n            async with self._changed:\n                await self._changed.wait_for(lambda: index < len(self._log))\n                chunk = self._log[index]\n                index += 1\n                self._read = index\n                self._changed.notify_all()\n            yield chunk\n",
+          "new": "        while index != self._final_id:\n            async with self._changed:\n                await self._changed.wait_for(lambda: index < len(self._log))\n                chunk = self._log[index]\n                index += 1\n                self._read = index\n                self._changed.notify_all()\n                yield chunk\n"
+        }
+      ],
+      "expect": "the run works ahead of the client by `ahead` events, then waits"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "the budget clock started before waiting for room",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            async with self._changed:\n                await self._changed.wait_for(lambda: len(self._log) - self._read < self.ahead)\n            if worked >= self.budget_s:\n                status = \"budget\"\n                break\n            started = self._clock()\n",
+          "new": "            started = self._clock()\n            async with self._changed:\n                await self._changed.wait_for(lambda: len(self._log) - self._read < self.ahead)\n            if worked >= self.budget_s:\n                status = \"budget\"\n                break\n"
+        }
+      ],
+      "expect": "time paused for the client does not count against the budget"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "room checked with <= (one event too many)",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "len(self._log) - self._read < self.ahead",
+          "new": "len(self._log) - self._read <= self.ahead"
+        }
+      ],
+      "expect": "the run works ahead of the client by `ahead` events, then waits"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "an event counted as read only when the client asks for the next one",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        while index != self._final_id:\n            async with self._changed:\n                await self._changed.wait_for(lambda: index < len(self._log))\n                chunk = self._log[index]\n                index += 1\n                self._read = index\n                self._changed.notify_all()\n            yield chunk\n",
+          "new": "        while index != self._final_id:\n            async with self._changed:\n                self._read = index\n                self._changed.notify_all()\n                await self._changed.wait_for(lambda: index < len(self._log))\n                chunk = self._log[index]\n                index += 1\n            yield chunk\n"
+        }
+      ],
+      "expect": "the run works ahead of the client by `ahead` events, then waits"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "a reconnect skips the event right after Last-Event-ID",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        index = 0 if last_event_id is None else int(last_event_id)\n",
+          "new": "        index = 0 if last_event_id is None else int(last_event_id) + 1\n"
+        }
+      ],
+      "expect": "never more than `ahead` events wait for the client"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "no replay: a reconnect resumes after the last event handed out, not after Last-Event-ID",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        index = 0 if last_event_id is None else int(last_event_id)\n",
+          "new": "        index = 0 if last_event_id is None else self._read\n"
+        }
+      ],
+      "expect": "never more than `ahead` events wait for the client"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "CRLF line endings",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "f\"id: {event_id}\\nevent: {kind}\\ndata: {json.dumps(data)}\\n\\n\"",
+          "new": "f\"id: {event_id}\\r\\nevent: {kind}\\r\\ndata: {json.dumps(data)}\\r\\n\\r\\n\""
+        }
+      ],
+      "expect": "unexpected SSE line"
+    },
+    {
+      "test": "test_run_stream",
+      "name": "pretty-printed JSON in data",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "data: {json.dumps(data)}",
+          "new": "data: {json.dumps(data, indent=1)}"
+        }
+      ],
+      "expect": "unexpected SSE line"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "depth first: the work list used as a stack",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "            depth, current = todo.popleft()\n",
+          "new": "            depth, current = todo.pop()\n"
+        }
+      ],
+      "expect": "deliver breadth first with depth counted from 0"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "depth counted from 1",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "deque([(0, event)])",
+          "new": "deque([(1, event)])"
+        }
+      ],
+      "expect": "deliver breadth first with depth counted from 0"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "an event reached twice in one cascade taken again",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "            if current.id in seen:\n                continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "an event deeper than max_depth is recorded, not delivered"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "events past max_depth dropped silently",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "                report.truncated.append(current.id)\n",
+          "new": "                pass\n"
+        }
+      ],
+      "expect": "an event deeper than max_depth is recorded, not delivered"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "events nobody subscribes to dropped silently",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "                report.unhandled.append(current.id)\n",
+          "new": "                pass\n"
+        }
+      ],
+      "expect": "an event nobody subscribes to is recorded"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "handled tracked per event instead of per subscriber",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "            for name, handler in subscribers:\n                if (current.id, name) in self._handled:\n                    continue\n",
+          "new": "            if (current.id, \"\") in self._handled:\n                continue\n            self._handled.add((current.id, \"\"))\n            for name, handler in subscribers:\n"
+        }
+      ],
+      "expect": "a replay reaches only the subscribers that have not handled the event"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "no ledger: a replay runs every subscriber again",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "                if (current.id, name) in self._handled:\n                    continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "a replay reaches only the subscribers that have not handled the event"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "a failed delivery marked as handled",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "                out = self._deliver(current, name, handler)\n                if out is None:\n                    continue\n                self._handled.add((current.id, name))\n",
+          "new": "                self._handled.add((current.id, name))\n                out = self._deliver(current, name, handler)\n                if out is None:\n                    continue\n"
+        }
+      ],
+      "expect": "a delivery that failed is tried again on replay"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "the seen set kept across cascades",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "        seen: set[str] = set()\n",
+          "new": "        seen = self.__dict__.setdefault(\"_seen\", set())\n"
+        }
+      ],
+      "expect": "a replay reaches only the subscribers that have not handled the event"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "an event reached twice detected per (id, depth)",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "            if current.id in seen:\n                continue\n            seen.add(current.id)\n",
+          "new": "            if (current.id, depth) in seen:\n                continue\n            seen.add((current.id, depth))\n"
+        }
+      ],
+      "expect": "an event deeper than max_depth is recorded, not delivered"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "the ledger keyed by event type instead of event id",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "                if (current.id, name) in self._handled:\n",
+          "new": "                if (current.type, name) in self._handled:\n"
+        },
+        {
+          "file": "events.py",
+          "old": "                self._handled.add((current.id, name))\n",
+          "new": "                self._handled.add((current.type, name))\n"
+        }
+      ],
+      "expect": "a subscriber handles every new event id, even of a type it has handled before"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "an event at exactly max_depth truncated",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "            if depth > max_depth:\n",
+          "new": "            if depth >= max_depth:\n"
+        }
+      ],
+      "expect": "deliver breadth first with depth counted from 0"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "failed deliveries listed in deliveries",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "                out = self._deliver(current, name, handler)\n                if out is None:\n                    continue\n",
+          "new": "                out = self._deliver(current, name, handler)\n                report.deliveries.append(Delivery(depth, current.id, name))\n                if out is None:\n                    continue\n"
+        },
+        {
+          "file": "events.py",
+          "old": "                self._handled.add((current.id, name))\n                report.deliveries.append(Delivery(depth, current.id, name))\n",
+          "new": "                self._handled.add((current.id, name))\n"
+        }
+      ],
+      "expect": "a failed delivery is a dead letter, not a delivery or an unhandled event"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "only events with subscribers marked as seen",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "            if current.id in seen:\n                continue\n            seen.add(current.id)\n",
+          "new": "            if current.id in seen:\n                continue\n"
+        },
+        {
+          "file": "events.py",
+          "old": "            for name, handler in subscribers:\n                if (current.id, name) in self._handled:\n",
+          "new": "            seen.add(current.id)\n            for name, handler in subscribers:\n                if (current.id, name) in self._handled:\n"
+        }
+      ],
+      "expect": "an event deeper than max_depth is recorded, not delivered"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "a subscriber that emits nothing taken for a failure (if not out)",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "                out = self._deliver(current, name, handler)\n                if out is None:\n                    continue\n",
+          "new": "                out = self._deliver(current, name, handler)\n                if not out:\n                    continue\n"
+        }
+      ],
+      "expect": "deliveries lists every successful delivery, even one that emits nothing"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "a subscriber that returns None taken for a failure",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "        return list(out or ())\n",
+          "new": "        return None if out is None else list(out)\n"
+        }
+      ],
+      "expect": "deliveries lists every successful delivery, even one that emits nothing"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "a failed delivery also recorded as unhandled",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "                out = self._deliver(current, name, handler)\n                if out is None:\n                    continue\n",
+          "new": "                out = self._deliver(current, name, handler)\n                if out is None:\n                    report.unhandled.append(current.id)\n                    continue\n"
+        }
+      ],
+      "expect": "a failed delivery is a dead letter, not a delivery or an unhandled event"
+    },
+    {
+      "test": "test_event_cascade",
+      "name": "an event whose deliveries all failed recorded as unhandled",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "            for name, handler in subscribers:\n                if (current.id, name) in self._handled:\n",
+          "new": "            delivered_before = len(report.deliveries)\n            for name, handler in subscribers:\n                if (current.id, name) in self._handled:\n"
+        },
+        {
+          "file": "events.py",
+          "old": "                todo.extend((depth + 1, follow_up) for follow_up in out)\n",
+          "new": "                todo.extend((depth + 1, follow_up) for follow_up in out)\n            if len(report.deliveries) == delivered_before and any((current.id, n) not in self._handled for n, _ in subscribers):\n                report.unhandled.append(current.id)\n"
+        }
+      ],
+      "expect": "a failed delivery is a dead letter, not a delivery or an unhandled event"
+    }
+  ]
+}
