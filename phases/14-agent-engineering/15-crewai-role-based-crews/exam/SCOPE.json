@@ -1,0 +1,140 @@
+{
+  "lesson": "phases/14-agent-engineering/15-crewai-role-based-crews",
+  "title": "Role-Based Agent Teams — Roles, Tasks, Processes",
+  "format": "staged-brownfield",
+  "service": "CrewFlow: a CrewAI-shaped toolkit with a sequential crew threading task context, short- and long-term memory, a sync Flow, dbm entity memory, a hierarchical crew whose manager routes while the crew refuses picks that are not ready and keeps the manager-tax books, an async Flow logged in logfmt as steps complete, and a diff of two runs' trace trees",
+  "sources": {
+    "docs/en.md": "cf08c2959fa6c2fc70a935fe932a8693664c61e39a7d7979bc049f487bc70561",
+    "code/main.py": "ce3deea9616029018545f3697dc83df5a308d8ce42a6f783cd93991bc21990c5",
+    "quiz/quiz.md": "82d21a2f278eef1528d39631d0c9e05935aa1926e80f6498e253a1420dfc6be4"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network: every agent's model is a ScriptedLLM, which answers in order, or a KeyedLLM, which answers by prompt (crewflow/llm.py), and the manager is a rule-based stand-in defined in the tests",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_crew_and_flow",
+      "kind": "debug",
+      "lesson_anchor": "Four primitives (Task context: upstream tasks whose outputs are passed in); Sequential (output of task N is available as context to task N+1); Where this pattern goes wrong: Brittle handoffs (task N's outline read as context by task N+1); Crews vs Flows (@start, @listen(topic)); Memory hooks (long-term: persisted across runs, retrieved by similarity); Pitfalls: Memory always-on (scope writes to tasks where the fact is persistent); Build It (mock LLM responses keyed off role plus input prefix); code/main.py SequentialCrew.kickoff, Flow.listen/kickoff, Memory.recall_long_term; quiz Q6, Q7, Q10, Q11",
+      "planted_bugs": [
+        "SequentialCrew.kickoff writes every task's output to long-term memory; the editor's dict (a structured Brief) is stored, and the AttributeError surfaces two calls away, in memory.embed called from recall_long_term ('dict' object has no attribute 'lower')",
+        "kickoff lists each task's reads in context order but joins them by walking outputs.items(), so the outputs come in the order the tasks ran: in the outline, research, draft crew the draft (context=[research, outline]) is sent the outline first, and its KeyedLLM raises Unscripted inside llm.py, away from the join in crew.py",
+        "kickoff puts the previous task in front of every task's reads unless the context already lists it (Sequential's 'output of task N is available as context to task N+1' taken as always), although the docstring gives the previous output only to a task without context; the first crew's edit lists draft itself, so it shows in corrections (context=[fact_check]), which is sent the draft plus fact_check's empty notes, and its KeyedLLM raises Unscripted",
+        "Flow.listen stores [fn], so a second listener of a topic replaces the first (quiz Q11.1); Flow.kickoff already handles fan-out first in, first out",
+        "recall_long_term embeds every long-term record again on every query"
+      ],
+      "timing_assert": "30 recalls over 60 long-term records of about 3,000 words each under 0.1 s, first recall untimed; measured on this machine with other jobs running (load average 5.1-5.5 on 10 cores): re-embedding on every recall 2.01-2.09 s (20x the limit), embedding once at write time 2.9-4.7 ms (21x under), a lazy per-text cache 2.9-3.3 ms",
+      "overfix_guard": "the fallback stays: a task without context reads the previous task's output and the first task reads the topic (every-task-reads-only-context and fallback-to-topic both fail); the starter already passes an empty upstream output on as it is and checks context before any agent runs, so the lesson's joined or prior, falling back when every context output is empty, a check moved into the loop, or a check for crew membership only all fail; the join follows the context (reversed or name-sorted context reverses the first crew's edit, declaration order, a walk of the crew's tasks or every earlier output reverses the outline crew's draft, the previous output put before or after the context fails corrections or the edit); teaching embed to take str(text) or writing only text outputs leaves the draft in long-term memory; vectors cached per role make both kickoffs' research share one vector; a LIFO queue or dropping the steps that end their branch breaks the trace"
+    },
+    {
+      "part": 2,
+      "test": "test_entity_memory",
+      "kind": "model and persistence",
+      "lesson_anchor": "Memory hooks: Entity (per-entity facts, 'Customer X is on the enterprise plan', keyed by entity, not by similarity, survives across runs); Exercise 2 (facts about a customer persist across kickoffs; retrieval pulls the right entity)",
+      "exactness": "facts round-trip exactly through dbm across a close and reopen (two kickoffs): non-ASCII entity names ('Müller & Söhne GmbH', '株式会社ネコ'), values with a trailing newline, CRLF, leading and trailing spaces, quotes, '=' and backslashes; a later remember merges into the stored facts; the raw file has one key per entity (its name in UTF-8) and one JSON object per value",
+      "traps": [
+        "dbm flag 'n' empties the file on every open",
+        "remember replacing the entity's facts instead of merging",
+        "keys read back with str() or Latin-1",
+        "entities() in dbm key order (caught with gdbm, ndbm and dbm.dumb; dbm.sqlite3, the default for new files from Python 3.13, returns keys in byte order, which for UTF-8 names is already sorted)",
+        "names case-folded, looked up by prefix ('Acme' pulls 'Acme Labs'), or matched case-insensitively or trimmed ('acme' and 'Acme ' find nothing)",
+        "facts stored as key=value lines, or stripped",
+        "an unknown entity raising KeyError instead of returning {}",
+        "a read cache that hands out its own dicts",
+        "an empty entity name accepted",
+        "one key per fact, an extra index key, pickle, a Python repr, or a JSON list of pairs as the value"
+      ],
+      "clarifying_questions": [
+        "case and whitespace in names",
+        "shelve or pickle",
+        "which dbm module",
+        "an unknown entity",
+        "an empty facts dict",
+        "non-text values"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_hierarchical_routing",
+      "kind": "core algorithm",
+      "lesson_anchor": "Sequential vs Hierarchical (a manager picks the next task each round and can refuse or re-route); Where this pattern goes wrong: Manager-LLM token tax (a manager call before every specialist call; it carries the full task list plus prior outputs); Exercise 3 (refuse to route to the editor until the writer's output has at least three paragraphs; trace the retry); quiz Q9, Q14",
+      "traps": [
+        "paragraphs counted with split('\\n\\n') (with or without dropping empty chunks), by non-blank lines, or by re.split keeping empty pieces: whitespace-only lines, CRLF, repeated and leading or trailing blank lines",
+        "a refused round that runs nobody",
+        "the writer redoing from its own rejected draft (the lesson's current = out chain), or from the researcher's output with the refusal appended as feedback",
+        "the gate read from the pick's own output, '<=' instead of '<', or hard-coded to editor, writer and 3",
+        "a refused round not counted against max_steps (the writer's script runs out), or the round that says done not fitting in max_steps",
+        "the manager sent the live history list, only each specialist's latest output, the outputs newest first, or a re-routed call under the role that was picked",
+        "refusals padded with the blockers met while re-routing (the writer that cannot run yet is not a refused pick)",
+        "the tax counting only latest outputs, or recorded after the round so the done call is missing",
+        "an unknown pick ending the run quietly, or 'done' checked after the specialist names",
+        "a pick that is not ready stepping back one specialist only (KeyError when the manager picks the editor first)"
+      ],
+      "integration": "the specialists are Part 1's Agent with ScriptedLLM models; a second crew (analyst, reviewer, min_paragraphs=2) checks that the gate is per specialist",
+      "clarifying_questions": [
+        "who enforces the rule",
+        "who redoes, from what",
+        "does the done round count",
+        "rejected drafts in the manager's view",
+        "characters or tokens",
+        "a pick that already ran",
+        "CRLF text"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_flow_event_log",
+      "kind": "streaming",
+      "lesson_anchor": "Crews vs Flows (Flow: event-driven graph you own, @start and @listen(topic), each step plain Python, observable and testable); The Problem (on-call needs to know which agent stalled at 3 AM); Use It (a Flow for production, the audit boundary); quiz Q11 (several listeners per topic)",
+      "wire_format": "logfmt: one line per completed step ending in a newline, 'step=<name> topic=<topic> duration_ms=<ms> out=<output>', only step and duration_ms for a step that returned None, 'step=<name> duration_ms=<ms> error=<Type>: <message>' for a step that raised; values bare, or double-quoted with \\\\ \\\" \\n \\r \\t escapes when empty or holding a space, quote, '=', backslash, newline, CR or tab; decided by the test's strict parser and two direct logfmt() checks",
+      "traps": [
+        "listeners awaited one at a time, gathered per level, or run per level with as_completed (the consumer releases one step at a time, so these wait for a line that never comes)",
+        "every line held back until the run is over",
+        "a step returning None ending the whole run (the lesson's break)",
+        "a topic nobody listens to looked up with [] (KeyError: 'edited')",
+        "the run never ending once no step is running",
+        "values left bare, quoted only when they hold a space, quotes, backslashes, tabs or carriage returns left unescaped, a raw newline, an empty value written bare, json.dumps quoting (\\u00fc)",
+        "empty topic and out on a step that ended its branch; the start step logged as 'start'",
+        "duration_ms with a fraction, or measured from the start of the run",
+        "an exception lost inside a task or treated as the end of a branch, the run failing without the error line, the error logged as repr(), the steps still running left alone",
+        "the stub is an async def without yield: AttributeError about __anext__"
+      ],
+      "integration": "same @start and @listen(topic) registration as Part 1's Flow, with coroutine steps",
+      "clarifying_questions": [
+        "two steps completing together",
+        "quoting non-ASCII",
+        "a slow consumer",
+        "a failing step",
+        "TaskGroup",
+        "where duration_ms starts"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_run_diff",
+      "kind": "recursive structure",
+      "lesson_anchor": "Where this pattern goes wrong: Crew-as-prod (output variability is high, replay is impossible, on-call cannot diff a bad run against a good one; wrap with a Flow); Crews vs Flows (a Flow step can call Crew.kickoff() internally)",
+      "traps": [
+        "siblings aligned by position (at the top or only at nested levels), or by name only",
+        "occurrences counted across the whole run (a shared mutable default), from 1, or left out for the first occurrence",
+        "a one-sided subtree listed node by node",
+        "only leaves compared, outputs compared by truthiness ('' against '3 notes') or with None taken as '', or no descent below a changed node",
+        "first taken from the changed list, from missing then extra then changed, from a walk of the bad run, or with extras moved to the very end or merged in at their place in the bad run (a triage step before a changed review)",
+        "lists sorted by path, a changed node listed after its descendants, or extras placed before the good run's nodes at their level"
+      ],
+      "clarifying_questions": [
+        "the root in paths",
+        "inner nodes' outputs",
+        "'' against None",
+        "where extra nodes go"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: Flow.kickoff in the starter already runs every listener first in, first out and records the steps that end their branch, so the Flow layer is the one-line overwrite in listen (the lesson's own behavior, quiz Q11.1) rather than a rewrite. The far-away error comes from the memory bug: the editor returns a dict (Exercise 5's Brief), and writing every task to long-term memory surfaces as an AttributeError in embed when recall runs. Two of the agents are KeyedLLM stand-ins that answer by prompt (the lesson's mock LLM keys its replies off the input), so a task sent the wrong context fails as Unscripted inside llm.py, not at the join. The starter already passes an empty upstream output on as it is and checks context before any agent runs (a forward reference, or a task from outside the crew, is a ValueError naming it); both are guarded, not planted.",
+    "Part 1 timing: 10,000 records x 500 queries is out of reach in stdlib Python even with cached vectors, because the dot products alone take seconds and caching only removes the per-record embedding. The test uses 60 records of about 3,000 words (long research notes) and 30 queries, so one embedding (about 1.2 ms) dwarfs one 64-dim dot product (about 3 us). The first recall is untimed, so a lazy per-text cache passes too. The embedding is feature hashing (each word hashed to a signed slot) instead of the lesson's sha256-seeded random vector, so recall in the test is meaningful (shared words rank first) and the embedding cost grows with the text, which is what makes the gap measurable.",
+    "Part 2: the two kickoffs are two opens of the same dbm file, without a crew around them. Facts are text, an unknown entity has {}, an empty entity name is a ValueError. Bytes keys and flag 'n' also appear in lesson 06's dbm case bank, which makes two uses in the chapter, the allowed maximum; the traps specific to this part are the merge on a partial update, exact rather than prefix or case-folded lookup, values with newlines and quotes, a copy from recall, and the one-JSON-object-per-entity file layout. From Python 3.13, dbm.open creates dbm.sqlite3 files, which return keys in byte order; for UTF-8 names that is sorted order, so a missing sort in entities() only fails with gdbm, ndbm or dbm.dumb, and on newer Pythons the interviewer reads the code.",
+    "Part 3: the crew, not the manager, enforces min_paragraphs (the manager only proposes; code owns the rule), and the rule lives on each Specialist, so a second crew with a 2-paragraph reviewer is in the test. A refused pick runs the nearest ready specialist upstream of it, which also re-routes a pick made before its input exists. The specialists form a pipeline (each reads the latest output of the one before it) instead of CrewAI's task delegation. The token tax is recorded per manager call as the number of tasks and the characters of earlier outputs it carries, rejected drafts included; there is no tokenizer.",
+    "Part 4: besides the suggested traps, a step that raises is logged with error= and fails the run after the steps still running are cancelled, a step that returns None logs only step and duration_ms, and listeners must start the moment their topic is emitted (a release order catches level-by-level execution). Completion order is forced by events the consumer releases one at a time, so no correct implementation depends on scheduler timing.",
+    "Part 5: paths are name[k] segments with k counted from 0 among same-named siblings; every node both runs have is compared on its output, inner nodes included; first is the earliest difference in good-run reading order, with one-sided extras after the good run's nodes at their level. The trees are built by hand in the test, as stored traces would be."
+  ]
+}

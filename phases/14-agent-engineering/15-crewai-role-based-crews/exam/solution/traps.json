@@ -1,0 +1,1741 @@
+{
+  "package": "crewflow",
+  "tests": [
+    "test_crew_and_flow",
+    "test_entity_memory",
+    "test_hierarchical_routing",
+    "test_flow_event_log",
+    "test_run_diff"
+  ],
+  "layers": [
+    {
+      "test": "test_crew_and_flow",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "AttributeError"
+        },
+        {
+          "name": "long-term memory only for persistent tasks",
+          "edits": [
+            {
+              "file": "crew.py",
+              "old": "                self.memory.write_long_term(task.agent.role, out)\n",
+              "new": "                if task.persistent:\n                    self.memory.write_long_term(task.agent.role, out)\n"
+            }
+          ],
+          "expect": "Unscripted: no reply scripted for 'Outline:"
+        },
+        {
+          "name": "+ context joined in the order the task lists it",
+          "edits": [
+            {
+              "file": "crew.py",
+              "old": "                agent_input = \"\\n\\n\".join(out for name, out in outputs.items() if name in reads)\n",
+              "new": "                agent_input = \"\\n\\n\".join(outputs[name] for name in reads)\n"
+            }
+          ],
+          "expect": "Unscripted: no reply scripted for 'Agents forget"
+        },
+        {
+          "name": "+ the previous task's output only for a task without context",
+          "edits": [
+            {
+              "file": "crew.py",
+              "old": "            if i and self.tasks[i - 1].name not in reads:\n",
+              "new": "            if i and not reads:\n"
+            }
+          ],
+          "expect": "every listener of a topic runs, in registration order"
+        },
+        {
+          "name": "+ listen appends instead of replacing",
+          "edits": [
+            {
+              "file": "flow.py",
+              "old": "            self._listeners[topic] = [fn]\n",
+              "new": "            self._listeners.setdefault(topic, []).append(fn)\n"
+            }
+          ],
+          "expect": "recall_long_term should stay fast as long-term memory grows"
+        },
+        {
+          "name": "+ each record embedded once, when written",
+          "edits": [
+            {
+              "file": "memory.py",
+              "old": "        self._long_term.append((role, text))\n",
+              "new": "        self._long_term.append((role, text, embed(text, self.dim)))\n"
+            },
+            {
+              "file": "memory.py",
+              "old": "_dot(q, embed(text, self.dim))) for role, text in self._long_term]",
+              "new": "_dot(q, vector)) for role, text, vector in self._long_term]"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_crew_and_flow",
+      "name": "symptom fix: embed str() of whatever it gets, every task still written",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "                if task.persistent:\n                    self.memory.write_long_term(task.agent.role, out)\n",
+          "new": "                self.memory.write_long_term(task.agent.role, out)\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "WORD.findall(text.lower())",
+          "new": "WORD.findall(str(text).lower())"
+        }
+      ],
+      "expect": "only persistent tasks write long-term memory"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "only text outputs written to long-term memory",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "                if task.persistent:\n",
+          "new": "                if isinstance(out, str):\n"
+        }
+      ],
+      "expect": "only persistent tasks write long-term memory"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "fallback removed: every task reads only its context",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "            if task.context:\n                agent_input = \"\\n\\n\".join(by_task[id(t)] for t in task.context)\n            else:\n                agent_input = prior\n",
+          "new": "            agent_input = \"\\n\\n\".join(by_task[id(t)] for t in task.context)\n"
+        }
+      ],
+      "expect": "the first task reads the topic"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "fallback to the topic instead of the previous task's output",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "            prior = out\n",
+          "new": ""
+        }
+      ],
+      "expect": "a task without context reads the previous task's output"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "context joined with a single newline",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "                agent_input = \"\\n\\n\".join(",
+          "new": "                agent_input = \"\\n\".join("
+        }
+      ],
+      "expect": "context joins the listed tasks' outputs, in order"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "short-term memory not reset per kickoff",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "        if self.memory is not None:\n            self.memory.reset_short_term()\n",
+          "new": ""
+        }
+      ],
+      "expect": "short-term memory holds this run only"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "context checked while running, after earlier agents ran",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "        position = {id(task): i for i, task in enumerate(self.tasks)}\n        for i, task in enumerate(self.tasks):\n            for upstream in task.context:\n                if position.get(id(upstream), i) >= i:\n                    raise ValueError(\n                        f\"task {task.name!r} reads {upstream.name!r}, which does not run before it\"\n                    )\n",
+          "new": ""
+        },
+        {
+          "file": "crew.py",
+          "old": "            if task.context:\n                agent_input",
+          "new": "            if task.context:\n                for t in task.context:\n                    if id(t) not in by_task:\n                        raise ValueError(f'task {task.name!r} reads {t.name!r} before it runs')\n                agent_input"
+        }
+      ],
+      "expect": "a crew that cannot run fails before any agent runs"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "context checked for membership in the crew only",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "                if position.get(id(upstream), i) >= i:\n",
+          "new": "                if id(upstream) not in position:\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "events handled last in, first out",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "            step, value = pending.popleft()\n",
+          "new": "            step, value = pending.pop()\n"
+        }
+      ],
+      "expect": "every listener of a topic runs, in registration order"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "a step that ends its branch left out of the trace",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "            if result is None:\n                trace.append((step.__name__, None, None))\n                continue\n",
+          "new": "            if result is None:\n                continue\n"
+        }
+      ],
+      "expect": "every listener of a topic runs, in registration order"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "vectors cached per role",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        self._long_term: list[tuple[str, str, list[float]]] = []\n",
+          "new": "        self._long_term: list[tuple[str, str, list[float]]] = []\n        self._vectors: dict[str, list[float]] = {}\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "self._long_term.append((role, text, embed(text, self.dim)))",
+          "new": "self._long_term.append((role, text, self._vectors.setdefault(role, embed(text, self.dim))))"
+        }
+      ],
+      "expect": "long-term memory keeps every kickoff"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "only the query embedding kept, records embedded on every recall",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "_dot(q, vector)) for role, text, vector in self._long_term]",
+          "new": "_dot(q, embed(text, self.dim))) for role, text, vector in self._long_term]"
+        }
+      ],
+      "expect": "recall_long_term should stay fast as long-term memory grows"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "a context task from outside the crew treated as declared earlier, its output skipped",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "if position.get(id(upstream), i) >= i:",
+          "new": "if position.get(id(upstream), -1) >= i:"
+        },
+        {
+          "file": "crew.py",
+          "old": "agent_input = \"\\n\\n\".join(by_task[id(t)] for t in task.context)",
+          "new": "agent_input = \"\\n\\n\".join(by_task[id(t)] for t in task.context if id(t) in by_task)"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "per-word hashing memoized, records still embedded on every recall",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "import hashlib\n",
+          "new": "import functools\nimport hashlib\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "WORD = re.compile(r\"\\w+\")\n",
+          "new": "WORD = re.compile(r\"\\w+\")\n\n\n@functools.lru_cache(maxsize=None)\ndef _slot(word, dim):\n    digest = hashlib.sha256(word.encode(\"utf-8\")).digest()\n    return int.from_bytes(digest[:4], \"little\") % dim, (1.0 if digest[4] & 1 else -1.0)\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "        digest = hashlib.sha256(word.encode(\"utf-8\")).digest()\n        vector[int.from_bytes(digest[:4], \"little\") % dim] += 1.0 if digest[4] & 1 else -1.0\n",
+          "new": "        slot, sign = _slot(word, dim)\n        vector[slot] += sign\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "scored = [(role, text, _dot(q, vector)) for role, text, vector in self._long_term]",
+          "new": "scored = [(role, text, _dot(q, embed(text, self.dim))) for role, text, _ in self._long_term]"
+        }
+      ],
+      "expect": "recall_long_term should stay fast as long-term memory grows"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "short-term memory cleared at the end of kickoff instead of the start",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "        if self.memory is not None:\n            self.memory.reset_short_term()\n",
+          "new": ""
+        },
+        {
+          "file": "crew.py",
+          "old": "        return outputs\n",
+          "new": "        if self.memory is not None:\n            self.memory.reset_short_term()\n        return outputs\n"
+        }
+      ],
+      "expect": "short-term memory holds every task's output, in order"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "listeners called recursively, depth first",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "        trace: list[tuple[str, str | None, Any]] = []\n        pending: deque[tuple[Step, Any]] = deque([(self._start, payload)])\n        while pending:\n            step, value = pending.popleft()\n            result = step(value)\n            if result is None:\n                trace.append((step.__name__, None, None))\n                continue\n            topic, out = result\n            trace.append((step.__name__, topic, out))\n            for listener in self._listeners.get(topic, []):\n                pending.append((listener, out))\n        return trace\n",
+          "new": "        trace: list[tuple[str, str | None, Any]] = []\n\n        def fire(step, value):\n            result = step(value)\n            if result is None:\n                trace.append((step.__name__, None, None))\n                return\n            topic, out = result\n            trace.append((step.__name__, topic, out))\n            for listener in self._listeners.get(topic, []):\n                fire(listener, out)\n\n        fire(self._start, payload)\n        return trace\n"
+        }
+      ],
+      "expect": "every listener of a topic runs, in registration order"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "the ValueError names only the task that reads the bad context",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "f\"task {task.name!r} reads {upstream.name!r}, which does not run before it\"",
+          "new": "f\"task {task.name!r} has a context task that does not run before it\""
+        }
+      ],
+      "expect": "Regex pattern did not match"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "context joined in the order the tasks ran",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "                agent_input = \"\\n\\n\".join(by_task[id(t)] for t in task.context)\n",
+          "new": "                agent_input = \"\\n\\n\".join(out for key, out in by_task.items() if key in {id(t) for t in task.context})\n"
+        }
+      ],
+      "expect": "Unscripted: no reply scripted for 'Outline:"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "context read through the crew's task list",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "                agent_input = \"\\n\\n\".join(by_task[id(t)] for t in task.context)\n",
+          "new": "                agent_input = \"\\n\\n\".join(by_task[id(t)] for t in self.tasks if any(t is c for c in task.context))\n"
+        }
+      ],
+      "expect": "Unscripted: no reply scripted for 'Outline:"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "context sorted by task name",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "                agent_input = \"\\n\\n\".join(by_task[id(t)] for t in task.context)\n",
+          "new": "                agent_input = \"\\n\\n\".join(by_task[id(t)] for t in sorted(task.context, key=lambda t: t.name))\n"
+        }
+      ],
+      "expect": "context joins the listed tasks' outputs, in order"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "context read newest first",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "                agent_input = \"\\n\\n\".join(by_task[id(t)] for t in task.context)\n",
+          "new": "                agent_input = \"\\n\\n\".join(by_task[id(t)] for t in reversed(task.context))\n"
+        }
+      ],
+      "expect": "context joins the listed tasks' outputs, in order"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "the previous task's output put first unless the context already brought it",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "                agent_input = \"\\n\\n\".join(by_task[id(t)] for t in task.context)\n",
+          "new": "                parts = [by_task[id(t)] for t in task.context]\n                agent_input = \"\\n\\n\".join(parts if prior in parts else [prior, *parts])\n"
+        }
+      ],
+      "expect": "Unscripted: no reply scripted for 'Agents forget"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "the previous task's output appended after the context",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "                agent_input = \"\\n\\n\".join(by_task[id(t)] for t in task.context)\n",
+          "new": "                agent_input = \"\\n\\n\".join([*(by_task[id(t)] for t in task.context), prior])\n"
+        }
+      ],
+      "expect": "context joins the listed tasks' outputs, in order"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "an empty context falls back to the previous output (the lesson's joined or prior)",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "                agent_input = \"\\n\\n\".join(by_task[id(t)] for t in task.context)\n",
+          "new": "                agent_input = \"\\n\\n\".join(by_task[id(t)] for t in task.context) or prior\n"
+        }
+      ],
+      "expect": "Unscripted: no reply scripted for 'Agents forget"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "the previous output read whenever every context output is empty",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "            if task.context:\n",
+          "new": "            if task.context and any(by_task[id(t)] for t in task.context):\n"
+        }
+      ],
+      "expect": "Unscripted: no reply scripted for 'Agents forget"
+    },
+    {
+      "test": "test_crew_and_flow",
+      "name": "a task with context reads every earlier output",
+      "edits": [
+        {
+          "file": "crew.py",
+          "old": "                agent_input = \"\\n\\n\".join(by_task[id(t)] for t in task.context)\n",
+          "new": "                agent_input = \"\\n\\n\".join(by_task.values())\n"
+        }
+      ],
+      "expect": "Unscripted: no reply scripted for 'Outline:"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "flag 'n' empties the store on every open",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "dbm.open(path, \"c\")",
+          "new": "dbm.open(path, \"n\")"
+        }
+      ],
+      "expect": "a reopened store lists every entity by its exact name, sorted"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "remember replaces the entity's facts",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "        known = self.recall(entity)\n        known.update(facts)\n        self._db[entity.encode(\"utf-8\")] = json.dumps(known)\n",
+          "new": "        self._db[entity.encode(\"utf-8\")] = json.dumps(facts)\n"
+        }
+      ],
+      "expect": "remembering a fact keeps the entity's other facts"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "keys decoded as Latin-1",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "key.decode(\"utf-8\")",
+          "new": "key.decode(\"latin-1\")"
+        }
+      ],
+      "expect": "a reopened store lists every entity by its exact name, sorted"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "keys turned into text with str()",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "key.decode(\"utf-8\")",
+          "new": "str(key)"
+        }
+      ],
+      "expect": "a reopened store lists every entity by its exact name, sorted"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "entities in dbm key order",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "return sorted(key.decode(\"utf-8\") for key in self._db.keys())",
+          "new": "return [key.decode(\"utf-8\") for key in self._db.keys()]"
+        }
+      ],
+      "expect": "a reopened store lists every entity by its exact name, sorted"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "entity names case-folded",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "self._db.get(entity.encode(\"utf-8\"))",
+          "new": "self._db.get(entity.casefold().encode(\"utf-8\"))"
+        },
+        {
+          "file": "entities.py",
+          "old": "self._db[entity.encode(\"utf-8\")]",
+          "new": "self._db[entity.casefold().encode(\"utf-8\")]"
+        }
+      ],
+      "expect": "a reopened store lists every entity by its exact name, sorted"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "facts stored as key=value lines",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "json.dumps(known)",
+          "new": "\"\\n\".join(f\"{k}={v}\" for k, v in known.items())"
+        },
+        {
+          "file": "entities.py",
+          "old": "json.loads(raw)",
+          "new": "dict(line.partition(\"=\")[::2] for line in raw.decode(\"utf-8\").split(\"\\n\"))"
+        }
+      ],
+      "expect": "facts come back exactly"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "fact text stripped",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "        known.update(facts)\n",
+          "new": "        known.update({k: v.strip() for k, v in facts.items()})\n"
+        }
+      ],
+      "expect": "facts come back exactly"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "lookup by prefix",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "        raw = self._db.get(entity.encode(\"utf-8\"))\n        return {} if raw is None else json.loads(raw)\n",
+          "new": "        found = {}\n        for key in self._db.keys():\n            if key.decode(\"utf-8\").startswith(entity):\n                found.update(json.loads(self._db[key]))\n        return found\n"
+        }
+      ],
+      "expect": "facts are found by the exact entity name"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "an unknown entity raises KeyError",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "        known = self.recall(entity)\n",
+          "new": "        stored = self._db.get(entity.encode(\"utf-8\"))\n        known = {} if stored is None else json.loads(stored)\n"
+        },
+        {
+          "file": "entities.py",
+          "old": "        return {} if raw is None else json.loads(raw)\n",
+          "new": "        if raw is None:\n            raise KeyError(entity)\n        return json.loads(raw)\n"
+        }
+      ],
+      "expect": "KeyError: 'Globex'"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "a read cache that hands out its own dicts",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "        self._db = dbm.open(path, \"c\")\n",
+          "new": "        self._db = dbm.open(path, \"c\")\n        self._cache: dict = {}\n"
+        },
+        {
+          "file": "entities.py",
+          "old": "        raw = self._db.get(entity.encode(\"utf-8\"))\n        return {} if raw is None else json.loads(raw)\n",
+          "new": "        if entity not in self._cache:\n            raw = self._db.get(entity.encode(\"utf-8\"))\n            self._cache[entity] = {} if raw is None else json.loads(raw)\n        return self._cache[entity]\n"
+        }
+      ],
+      "expect": "recall hands out a copy"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "an empty entity name accepted",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "        if not entity:\n            raise ValueError(\"an entity needs a name\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "one dbm key per fact",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "        if not facts:\n            return\n        known = self.recall(entity)\n        known.update(facts)\n        self._db[entity.encode(\"utf-8\")] = json.dumps(known)\n\n    def recall(self, entity: str) -> dict[str, str]:\n        \"\"\"Every fact about entity, exactly as remembered. An unknown entity has none: {}.\"\"\"\n        raw = self._db.get(entity.encode(\"utf-8\"))\n        return {} if raw is None else json.loads(raw)\n\n    def entities(self) -> list[str]:\n        \"\"\"The names of every entity with facts, sorted.\"\"\"\n        return sorted(key.decode(\"utf-8\") for key in self._db.keys())\n\n",
+          "new": "        for fact, text in facts.items():\n            self._db[f\"{entity}\\x1f{fact}\".encode(\"utf-8\")] = text\n\n    def recall(self, entity: str) -> dict[str, str]:\n        prefix = f\"{entity}\\x1f\".encode(\"utf-8\")\n        return {key[len(prefix):].decode(\"utf-8\"): self._db[key].decode(\"utf-8\")\n                for key in self._db.keys() if key.startswith(prefix)}\n\n    def entities(self) -> list[str]:\n        return sorted({key.decode(\"utf-8\").split(\"\\x1f\")[0] for key in self._db.keys()})\n\n"
+        }
+      ],
+      "expect": "one dbm key per entity: its name in UTF-8"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "facts stored as a JSON list of pairs",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "json.dumps(known)",
+          "new": "json.dumps(list(known.items()))"
+        },
+        {
+          "file": "entities.py",
+          "old": "json.loads(raw)",
+          "new": "dict(json.loads(raw))"
+        }
+      ],
+      "expect": "each value is the entity's facts as one JSON object"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "an index key that lists the entities",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "        self._db[entity.encode(\"utf-8\")] = json.dumps(known)\n",
+          "new": "        self._db[entity.encode(\"utf-8\")] = json.dumps(known)\n        index = json.loads(self._db.get(b\"__entities__\", b\"[]\"))\n        self._db[b\"__entities__\"] = json.dumps(sorted(set(index) | {entity}))\n"
+        },
+        {
+          "file": "entities.py",
+          "old": "        return sorted(key.decode(\"utf-8\") for key in self._db.keys())\n",
+          "new": "        return json.loads(self._db.get(b\"__entities__\", b\"[]\"))\n"
+        }
+      ],
+      "expect": "one dbm key per entity: its name in UTF-8"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "facts pickled",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "import json\n",
+          "new": "import json\nimport pickle\n"
+        },
+        {
+          "file": "entities.py",
+          "old": "json.dumps(known)",
+          "new": "pickle.dumps(known)"
+        },
+        {
+          "file": "entities.py",
+          "old": "json.loads(raw)",
+          "new": "pickle.loads(raw)"
+        }
+      ],
+      "expect": "each value is the entity's facts as one JSON object"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "facts stored as a Python repr and read back with ast.literal_eval",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "self._db[entity.encode(\"utf-8\")] = json.dumps(known)",
+          "new": "self._db[entity.encode(\"utf-8\")] = repr(known)"
+        },
+        {
+          "file": "entities.py",
+          "old": "return {} if raw is None else json.loads(raw)",
+          "new": "return {} if raw is None else __import__(\"ast\").literal_eval(raw.decode(\"utf-8\"))"
+        }
+      ],
+      "expect": "each value is the entity's facts as one JSON object"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "entity names trimmed on write and lookup",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "        known = self.recall(entity)\n",
+          "new": "        entity = entity.strip()\n        known = self.recall(entity)\n"
+        },
+        {
+          "file": "entities.py",
+          "old": "raw = self._db.get(entity.encode(\"utf-8\"))",
+          "new": "raw = self._db.get(entity.strip().encode(\"utf-8\"))"
+        }
+      ],
+      "expect": "facts are found by the exact entity name"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "a case-insensitive fallback on lookup",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "        raw = self._db.get(entity.encode(\"utf-8\"))\n",
+          "new": "        raw = self._db.get(entity.encode(\"utf-8\"))\n        if raw is None:\n            raw = next((self._db[k] for k in self._db.keys() if k.decode(\"utf-8\").casefold() == entity.casefold()), None)\n"
+        }
+      ],
+      "expect": "facts are found by the exact entity name"
+    },
+    {
+      "test": "test_entity_memory",
+      "name": "a merge where the stored facts win over the new ones",
+      "edits": [
+        {
+          "file": "entities.py",
+          "old": "        known = self.recall(entity)\n        known.update(facts)\n",
+          "new": "        known = dict(facts)\n        known.update(self.recall(entity))\n"
+        }
+      ],
+      "expect": "remembering a fact keeps the entity's other facts"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "paragraphs = len(text.split('\\n\\n'))",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "    count = 0\n    inside = False\n    for line in text.split(\"\\n\"):\n        if line.strip():\n            if not inside:\n                count += 1\n            inside = True\n        else:\n            inside = False\n    return count\n",
+          "new": "    return len(text.split(\"\\n\\n\"))"
+        }
+      ],
+      "expect": "paragraphs are separated by blank lines"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "paragraphs = non-empty chunks of text.split('\\n\\n')",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "    count = 0\n    inside = False\n    for line in text.split(\"\\n\"):\n        if line.strip():\n            if not inside:\n                count += 1\n            inside = True\n        else:\n            inside = False\n    return count\n",
+          "new": "    return len([p for p in text.split(\"\\n\\n\") if p.strip()])"
+        }
+      ],
+      "expect": "paragraphs are separated by blank lines"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "paragraphs counted as non-blank lines",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "    count = 0\n    inside = False\n    for line in text.split(\"\\n\"):\n        if line.strip():\n            if not inside:\n                count += 1\n            inside = True\n        else:\n            inside = False\n    return count\n",
+          "new": "    return sum(1 for line in text.split(\"\\n\") if line.strip())"
+        }
+      ],
+      "expect": "paragraphs are separated by blank lines"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "paragraphs = re.split on blank lines, empties kept",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "    count = 0\n    inside = False\n    for line in text.split(\"\\n\"):\n        if line.strip():\n            if not inside:\n                count += 1\n            inside = True\n        else:\n            inside = False\n    return count\n",
+          "new": "    import re\n    return len(re.split(r\"\\n\\s*\\n\", text.strip()))"
+        }
+      ],
+      "expect": "paragraphs are separated by blank lines"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "a refused round runs nobody",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "            if refused is not None:\n                refusals.append(refused)\n",
+          "new": "            if refused is not None:\n                refusals.append(refused)\n                rounds.append(Round(pick, None, refused))\n                continue\n"
+        }
+      ],
+      "expect": "a refused editor pick sends the writer back to its draft"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "each specialist reads the last output of anyone",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "            out = specialist.agent.fn(topic if i == 0 else latest[roles[i - 1]])\n",
+          "new": "            out = specialist.agent.fn(history[-1][1] if history else topic)\n"
+        }
+      ],
+      "expect": "the writer redoes its draft from the researcher's output"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the gate counts the pick's own output",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "            got = paragraphs(latest[upstream])\n",
+          "new": "            got = paragraphs(latest.get(roles[i], \"\"))\n"
+        }
+      ],
+      "expect": "no scripted reply left for call 3"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "a draft with exactly min_paragraphs refused",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "            if got < needed:\n",
+          "new": "            if got <= needed:\n"
+        }
+      ],
+      "expect": "no scripted reply left for call 3"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the gate written for the editor and writer only",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "            needed = self.specialists[i].min_paragraphs\n",
+          "new": "            needed = 3 if roles[i] == \"editor\" else 0\n"
+        }
+      ],
+      "expect": "each specialist's own min_paragraphs gates its input"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the manager is not told about refusals",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "ManagerView(tasks, tuple(history), tuple(refusals))",
+          "new": "ManagerView(tasks, tuple(history), ())"
+        }
+      ],
+      "expect": "the manager is told why a pick was refused"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "a refused round not counted against max_steps",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "        for _ in range(self.max_steps):\n",
+          "new": "        steps = 0\n        while steps < self.max_steps:\n"
+        },
+        {
+          "file": "hierarchy.py",
+          "old": "            refused = blocker(i)\n",
+          "new": "            refused = blocker(i)\n            steps += refused is None\n"
+        }
+      ],
+      "expect": "no scripted reply left"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the round that says done does not fit in max_steps",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "        for _ in range(self.max_steps):\n",
+          "new": "        for _ in range(1, self.max_steps):\n"
+        }
+      ],
+      "expect": "max_steps counts rounds, the one that says done included"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the manager is sent each specialist's latest output only",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "ManagerView(tasks, tuple(history), tuple(refusals))",
+          "new": "ManagerView(tasks, tuple(latest.items()), tuple(refusals))"
+        }
+      ],
+      "expect": "each manager call sees the outputs up to that round"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the manager is sent the live history list",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "ManagerView(tasks, tuple(history), tuple(refusals))",
+          "new": "ManagerView(tasks, history, refusals)"
+        }
+      ],
+      "expect": "each manager call sees the outputs up to that round"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the tax counts each specialist's latest output only",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "sum(len(out) for _, out in history)",
+          "new": "sum(len(out) for out in latest.values())"
+        }
+      ],
+      "expect": "every manager call carries the task list and every earlier output"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the tax recorded after the round, so the done call is missing",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "            calls.append(ManagerCall(len(tasks), sum(len(out) for _, out in history)))\n",
+          "new": ""
+        },
+        {
+          "file": "hierarchy.py",
+          "old": "            rounds.append(Round(pick, roles[i], refused))\n",
+          "new": "            rounds.append(Round(pick, roles[i], refused))\n            calls.append(ManagerCall(len(tasks), sum(len(out) for _, out in history)))\n"
+        }
+      ],
+      "expect": "one manager call per round, plus the one that says done"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "an unknown pick ends the run quietly",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "                raise ValueError(f\"the manager picked {pick!r}, which is not a specialist\")\n",
+          "new": "                rounds.append(Round(pick, None, None))\n                return HierarchyRun(rounds, latest, \"done\", calls, specialist_calls)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "a refusal steps back one specialist only",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "                i -= 1\n                while blocker(i) is not None:\n                    i -= 1\n",
+          "new": "                i -= 1\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "'done' checked after the specialist names",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "            if pick == \"done\":\n                rounds.append(Round(pick, None, None))\n                return HierarchyRun(rounds, latest, \"done\", calls, specialist_calls)\n            if pick not in roles:\n                raise ValueError(f\"the manager picked {pick!r}, which is not a specialist\")\n",
+          "new": "            if pick not in roles:\n                raise ValueError(f\"the manager picked {pick!r}, which is not a specialist\")\n            if pick == \"done\":\n                rounds.append(Round(pick, None, None))\n                return HierarchyRun(rounds, latest, \"done\", calls, specialist_calls)\n"
+        }
+      ],
+      "expect": "the manager picked 'done'"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "refusals padded with the blockers met while re-routing",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "                while blocker(i) is not None:\n                    i -= 1\n",
+          "new": "                while blocker(i) is not None:\n                    refusals.append(blocker(i))\n                    i -= 1\n"
+        }
+      ],
+      "expect": "the manager is told why each earlier pick was refused"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the re-routed specialist reads its input plus the refusal as feedback",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "            out = specialist.agent.fn(topic if i == 0 else latest[roles[i - 1]])\n",
+          "new": "            prompt = topic if i == 0 else latest[roles[i - 1]]\n            out = specialist.agent.fn(prompt + (\"\\n\\n\" + refused if refused else \"\"))\n"
+        }
+      ],
+      "expect": "the writer redoes its draft from the researcher's output"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "any refusal restarts the pipeline from the first specialist",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "                i -= 1\n                while blocker(i) is not None:\n                    i -= 1\n",
+          "new": "                i = 0\n"
+        }
+      ],
+      "expect": "no scripted reply left for call 2"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "specialist_calls counts accepted picks only",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "            specialist_calls += 1\n",
+          "new": "            specialist_calls += refused is None\n"
+        }
+      ],
+      "expect": "one manager call per round, plus the one that says done"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "the manager sent the outputs newest first",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "ManagerView(tasks, tuple(history), tuple(refusals))",
+          "new": "ManagerView(tasks, tuple(reversed(history)), tuple(refusals))"
+        }
+      ],
+      "expect": "the manager is sent every specialist call's output, oldest first"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "ManagerCall.tasks counts the specialists still without output",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "calls.append(ManagerCall(len(tasks),",
+          "new": "calls.append(ManagerCall(len([r for r in roles if r not in latest]),"
+        }
+      ],
+      "expect": "every manager call carries the task list and every earlier output"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "one round more than max_steps",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "        for _ in range(self.max_steps):\n",
+          "new": "        for _ in range(self.max_steps + 1):\n"
+        }
+      ],
+      "expect": "a run cut short by max_steps says so"
+    },
+    {
+      "test": "test_hierarchical_routing",
+      "name": "a re-routed call recorded under the role the manager picked",
+      "edits": [
+        {
+          "file": "hierarchy.py",
+          "old": "            history.append((roles[i], out))\n",
+          "new": "            history.append((pick, out))\n"
+        }
+      ],
+      "expect": "a refused editor pick sends the writer back to its draft"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "listeners awaited one at a time",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "        launch(self._start, payload)\n        pending = 1\n        try:\n            while pending:\n                step, result, error, ms = await finished.get()\n                pending -= 1\n                name = step.__name__\n                if error is not None:\n                    yield logfmt(\n                        [(\"step\", name), (\"duration_ms\", str(ms)), (\"error\", f\"{type(error).__name__}: {error}\")]\n                    ) + \"\\n\"\n                    raise error\n                if result is None:\n                    yield logfmt([(\"step\", name), (\"duration_ms\", str(ms))]) + \"\\n\"\n                    continue\n                topic, out = result\n                for listener in self._listeners.get(topic, []):\n                    launch(listener, out)\n                    pending += 1\n                yield logfmt([(\"step\", name), (\"topic\", topic), (\"duration_ms\", str(ms)), (\"out\", str(out))]) + \"\\n\"\n        finally:\n            leftovers = list(running)\n            for task in leftovers:\n                task.cancel()\n            if leftovers:\n                await asyncio.gather(*leftovers, return_exceptions=True)\n",
+          "new": "        todo = [(self._start, payload)]\n        while todo:\n            step, value = todo.pop(0)\n            began = time.perf_counter()\n            result = await step(value)\n            ms = _elapsed_ms(began)\n            if result is None:\n                yield logfmt([(\"step\", step.__name__), (\"duration_ms\", str(ms))]) + \"\\n\"\n                continue\n            topic, out = result\n            todo.extend((listener, out) for listener in self._listeners.get(topic, []))\n            yield logfmt([(\"step\", step.__name__), (\"topic\", topic), (\"duration_ms\", str(ms)), (\"out\", str(out))]) + \"\\n\""
+        }
+      ],
+      "expect": "every step is logged the moment it completes, while other steps still run"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "each topic's listeners gathered, then logged in registration order",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "        launch(self._start, payload)\n        pending = 1\n        try:\n            while pending:\n                step, result, error, ms = await finished.get()\n                pending -= 1\n                name = step.__name__\n                if error is not None:\n                    yield logfmt(\n                        [(\"step\", name), (\"duration_ms\", str(ms)), (\"error\", f\"{type(error).__name__}: {error}\")]\n                    ) + \"\\n\"\n                    raise error\n                if result is None:\n                    yield logfmt([(\"step\", name), (\"duration_ms\", str(ms))]) + \"\\n\"\n                    continue\n                topic, out = result\n                for listener in self._listeners.get(topic, []):\n                    launch(listener, out)\n                    pending += 1\n                yield logfmt([(\"step\", name), (\"topic\", topic), (\"duration_ms\", str(ms)), (\"out\", str(out))]) + \"\\n\"\n        finally:\n            leftovers = list(running)\n            for task in leftovers:\n                task.cancel()\n            if leftovers:\n                await asyncio.gather(*leftovers, return_exceptions=True)\n",
+          "new": "        async def one(step, value):\n            began = time.perf_counter()\n            result = await step(value)\n            return result, _elapsed_ms(began)\n\n        level = [(self._start, payload)]\n        while level:\n            done = await asyncio.gather(*(one(step, value) for step, value in level))\n            following = []\n            for (step, _), (result, ms) in zip(level, done):\n                if result is None:\n                    yield logfmt([(\"step\", step.__name__), (\"duration_ms\", str(ms))]) + \"\\n\"\n                    continue\n                topic, out = result\n                following.extend((listener, out) for listener in self._listeners.get(topic, []))\n                yield logfmt([(\"step\", step.__name__), (\"topic\", topic), (\"duration_ms\", str(ms)), (\"out\", str(out))]) + \"\\n\"\n            level = following"
+        }
+      ],
+      "expect": "every step is logged the moment it completes, while other steps still run"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "the next topic's listeners start only once the whole level is done",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "        launch(self._start, payload)\n        pending = 1\n        try:\n            while pending:\n                step, result, error, ms = await finished.get()\n                pending -= 1\n                name = step.__name__\n                if error is not None:\n                    yield logfmt(\n                        [(\"step\", name), (\"duration_ms\", str(ms)), (\"error\", f\"{type(error).__name__}: {error}\")]\n                    ) + \"\\n\"\n                    raise error\n                if result is None:\n                    yield logfmt([(\"step\", name), (\"duration_ms\", str(ms))]) + \"\\n\"\n                    continue\n                topic, out = result\n                for listener in self._listeners.get(topic, []):\n                    launch(listener, out)\n                    pending += 1\n                yield logfmt([(\"step\", name), (\"topic\", topic), (\"duration_ms\", str(ms)), (\"out\", str(out))]) + \"\\n\"\n        finally:\n            leftovers = list(running)\n            for task in leftovers:\n                task.cancel()\n            if leftovers:\n                await asyncio.gather(*leftovers, return_exceptions=True)\n",
+          "new": "        async def one(step, value):\n            began = time.perf_counter()\n            result = await step(value)\n            return step, result, _elapsed_ms(began)\n\n        level = [(self._start, payload)]\n        while level:\n            following = []\n            for next_done in asyncio.as_completed([one(step, value) for step, value in level]):\n                step, result, ms = await next_done\n                if result is None:\n                    yield logfmt([(\"step\", step.__name__), (\"duration_ms\", str(ms))]) + \"\\n\"\n                    continue\n                topic, out = result\n                following.extend((listener, out) for listener in self._listeners.get(topic, []))\n                yield logfmt([(\"step\", step.__name__), (\"topic\", topic), (\"duration_ms\", str(ms)), (\"out\", str(out))]) + \"\\n\"\n            level = following"
+        }
+      ],
+      "expect": "every step is logged the moment it completes, while other steps still run"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "every line held back until the run is over",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "    async def run(self, payload: Any) -> AsyncIterator[str]:\n",
+          "new": "    async def run(self, payload: Any) -> AsyncIterator[str]:\n        for line in [line async for line in self._live(payload)]:\n            yield line\n\n    async def _live(self, payload: Any) -> AsyncIterator[str]:\n"
+        }
+      ],
+      "expect": "every step is logged the moment it completes, while other steps still run"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "the start step logged as 'start'",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "                name = step.__name__\n",
+          "new": "                name = \"start\" if step is self._start else step.__name__\n"
+        }
+      ],
+      "expect": "one line per step: step, topic, duration_ms and out"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "a step that returns None ends the whole run",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "                    yield logfmt([(\"step\", name), (\"duration_ms\", str(ms))]) + \"\\n\"\n                    continue\n",
+          "new": "                    yield logfmt([(\"step\", name), (\"duration_ms\", str(ms))]) + \"\\n\"\n                    return\n"
+        }
+      ],
+      "expect": "a step that returns None ends only its own branch"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "a topic nobody listens to looked up with []",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "self._listeners.get(topic, [])",
+          "new": "self._listeners[topic]"
+        }
+      ],
+      "expect": "KeyError: 'edited'"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "the run waits for events forever",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "            while pending:\n",
+          "new": "            while True:\n"
+        }
+      ],
+      "expect": "the run ends once no step is running"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "lines without their newline",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "(\"out\", str(out))]) + \"\\n\"",
+          "new": "(\"out\", str(out))])"
+        }
+      ],
+      "expect": "one line per step, ending in a newline"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "values never quoted",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "    if text and not any(c in ' \"=' or c in _ESCAPES for c in text):\n",
+          "new": "    if True:\n"
+        }
+      ],
+      "expect": "a value with spaces, quotes, equals signs or backslashes is quoted and escaped"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "quotes inside a value not escaped",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "'\"': '\\\\\"', ",
+          "new": ""
+        }
+      ],
+      "expect": "a value with spaces, quotes, equals signs or backslashes is quoted and escaped"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "backslashes not escaped",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "\"\\\\\": \"\\\\\\\\\", ",
+          "new": ""
+        }
+      ],
+      "expect": "a value with spaces, quotes, equals signs or backslashes is quoted and escaped"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "an empty value written bare",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "    if text and not any(",
+          "new": "    if not any("
+        }
+      ],
+      "expect": "a value is quoted when it is empty or holds an equals sign or a quote"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "a value quoted only when it holds a space",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "    if text and not any(c in ' \"=' or c in _ESCAPES for c in text):\n",
+          "new": "    if \" \" not in text:\n"
+        }
+      ],
+      "expect": "a value is quoted when it is empty or holds an equals sign or a quote"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "values quoted with json.dumps",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "    return '\"' + \"\".join(_ESCAPES.get(c, c) for c in text) + '\"'\n",
+          "new": "    return __import__(\"json\").dumps(text)\n"
+        }
+      ],
+      "expect": "not a logfmt line"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "newlines inside a value not escaped",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "\"\\n\": \"\\\\n\", ",
+          "new": ""
+        }
+      ],
+      "expect": "one line per step, ending in a newline"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "tabs inside a value not escaped",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": ", \"\\t\": \"\\\\t\"",
+          "new": ""
+        }
+      ],
+      "expect": "not a logfmt line"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "a step that ends its branch logs empty topic and out",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "                    yield logfmt([(\"step\", name), (\"duration_ms\", str(ms))]) + \"\\n\"\n",
+          "new": "                    yield logfmt([(\"step\", name), (\"topic\", \"\"), (\"duration_ms\", str(ms)), (\"out\", \"\")]) + \"\\n\"\n"
+        }
+      ],
+      "expect": "one line per step: step, topic, duration_ms and out"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "duration_ms with a fraction",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "    return round((time.perf_counter() - began) * 1000)\n",
+          "new": "    return round((time.perf_counter() - began) * 1000, 1)\n"
+        }
+      ],
+      "expect": "duration_ms is whole milliseconds"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "duration measured from the start of the run",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "            task = asyncio.create_task(_timed(step, value, finished))\n",
+          "new": "            task = asyncio.create_task(_timed(step, value, finished, began))\n"
+        },
+        {
+          "file": "events.py",
+          "old": "        launch(self._start, payload)\n",
+          "new": "        began = time.perf_counter()\n        launch(self._start, payload)\n"
+        },
+        {
+          "file": "events.py",
+          "old": "async def _timed(step: AsyncStep, value: Any, finished: asyncio.Queue) -> None:\n    began = time.perf_counter()\n",
+          "new": "async def _timed(step: AsyncStep, value: Any, finished: asyncio.Queue, began: float) -> None:\n"
+        }
+      ],
+      "expect": "duration_ms is each step's own run time"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "a step's exception never reaches the run",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "    try:\n        result = await step(value)\n    except Exception as exc:\n        finished.put_nowait((step, None, exc, _elapsed_ms(began)))\n    else:\n        finished.put_nowait((step, result, None, _elapsed_ms(began)))\n",
+          "new": "    result = await step(value)\n    finished.put_nowait((step, result, None, _elapsed_ms(began)))\n"
+        }
+      ],
+      "expect": "a step that raises fails the run"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "a failing step treated as the end of its branch",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "        finished.put_nowait((step, None, exc, _elapsed_ms(began)))\n",
+          "new": "        finished.put_nowait((step, None, None, _elapsed_ms(began)))\n"
+        }
+      ],
+      "expect": "a step that raises fails the run"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "the run fails without logging the failing step",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "                    yield logfmt(\n                        [(\"step\", name), (\"duration_ms\", str(ms)), (\"error\", f\"{type(error).__name__}: {error}\")]\n                    ) + \"\\n\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "a failing step is logged before the run fails"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "the error logged as repr()",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "(\"error\", f\"{type(error).__name__}: {error}\")",
+          "new": "(\"error\", repr(error))"
+        }
+      ],
+      "expect": "a failing step is logged before the run fails"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "the steps still running left alone when one fails",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "            for task in leftovers:\n                task.cancel()\n            if leftovers:\n                await asyncio.gather(*leftovers, return_exceptions=True)\n",
+          "new": "            pass\n"
+        }
+      ],
+      "expect": "the steps still running are cancelled when one fails"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "carriage returns neither force quotes nor get escaped",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "_ESCAPES = {\"\\\\\": \"\\\\\\\\\", '\"': '\\\\\"', \"\\n\": \"\\\\n\", \"\\r\": \"\\\\r\", \"\\t\": \"\\\\t\"}",
+          "new": "_ESCAPES = {\"\\\\\": \"\\\\\\\\\", '\"': '\\\\\"', \"\\n\": \"\\\\n\", \"\\t\": \"\\\\t\"}"
+        }
+      ],
+      "expect": "not a logfmt line"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "a failing step logs an empty topic",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "[(\"step\", name), (\"duration_ms\", str(ms)), (\"error\",",
+          "new": "[(\"step\", name), (\"topic\", \"\"), (\"duration_ms\", str(ms)), (\"error\","
+        }
+      ],
+      "expect": "a failing step is logged before the run fails"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "out written with repr()",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "(\"out\", str(out))",
+          "new": "(\"out\", repr(out))"
+        }
+      ],
+      "expect": "one line per step: step, topic, duration_ms and out"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "the step's exception wrapped in a new RuntimeError",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "                    raise error\n",
+          "new": "                    raise RuntimeError(f\"step {name} failed\") from error\n"
+        }
+      ],
+      "expect": "a step that raises fails the run"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "the error value without the exception type",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "(\"error\", f\"{type(error).__name__}: {error}\")",
+          "new": "(\"error\", str(error))"
+        }
+      ],
+      "expect": "a failing step is logged before the run fails"
+    },
+    {
+      "test": "test_flow_event_log",
+      "name": "duration_ms measured in CPU time",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "    began = time.perf_counter()\n",
+          "new": "    began = time.process_time()\n"
+        },
+        {
+          "file": "events.py",
+          "old": "    return round((time.perf_counter() - began) * 1000)\n",
+          "new": "    return round((time.process_time() - began) * 1000)\n"
+        }
+      ],
+      "expect": "duration_ms is each step's own run time"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "siblings aligned by position",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "        keyed[(node.name, k)] = node\n",
+          "new": "        keyed[(node.name, len(keyed))] = node\n"
+        }
+      ],
+      "expect": "steps are matched by name and occurrence"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "siblings aligned by name only",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "        keyed[(node.name, k)] = node\n",
+          "new": "        keyed[(node.name, 0)] = node\n"
+        }
+      ],
+      "expect": "steps are matched by name and occurrence"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "occurrences counted across the whole run",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "def _by_occurrence(nodes: Sequence[TraceNode]) -> dict[tuple[str, int], TraceNode]:\n    seen: dict[str, int] = {}\n",
+          "new": "def _by_occurrence(nodes: Sequence[TraceNode], seen: dict = {}) -> dict[tuple[str, int], TraceNode]:\n"
+        }
+      ],
+      "expect": "identical runs have no differences"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "nested levels aligned by position",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "        mine, theirs = _by_occurrence(good_nodes), _by_occurrence(bad_nodes)\n",
+          "new": "        if prefix:\n            mine = {(n.name, i): n for i, n in enumerate(good_nodes)}\n            theirs = {(n.name, i): n for i, n in enumerate(bad_nodes)}\n        else:\n            mine, theirs = _by_occurrence(good_nodes), _by_occurrence(bad_nodes)\n"
+        }
+      ],
+      "expect": "steps are matched by name and occurrence"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "occurrences counted from 1",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "f\"{key[0]}[{key[1]}]\"",
+          "new": "f\"{key[0]}[{key[1] + 1}]\""
+        }
+      ],
+      "expect": "steps are matched by name and occurrence"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "the first occurrence written without an index",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "    return f\"{key[0]}[{key[1]}]\"",
+          "new": "    return f\"{key[0]}[{key[1]}]\" if key[1] else key[0]"
+        }
+      ],
+      "expect": "steps are matched by name and occurrence"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "a one-sided subtree listed node by node",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "                found.append((\"missing\", path))\n                continue\n",
+          "new": "                found.append((\"missing\", path))\n                walk(node.children, (), path + \"/\")\n                continue\n"
+        },
+        {
+          "file": "rundiff.py",
+          "old": "                found.append((\"extra\", prefix + _segment(key)))\n",
+          "new": "                found.append((\"extra\", prefix + _segment(key)))\n                walk((), theirs[key].children, prefix + _segment(key) + \"/\")\n"
+        }
+      ],
+      "expect": "a one-sided subtree is reported once"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "only leaves compared",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "            if node.output != other.output:\n",
+          "new": "            if not node.children and node.output != other.output:\n"
+        }
+      ],
+      "expect": "steps are matched by name and occurrence"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "outputs compared only when both are non-empty",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "            if node.output != other.output:\n",
+          "new": "            if node.output and other.output and node.output != other.output:\n"
+        }
+      ],
+      "expect": "steps are matched by name and occurrence"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "no descent below a changed node",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "            if node.output != other.output:\n                found.append((\"changed\", path))\n",
+          "new": "            if node.output != other.output:\n                found.append((\"changed\", path))\n                continue\n"
+        }
+      ],
+      "expect": "steps are matched by name and occurrence"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "first taken from the changed list",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "        first=found[0][1] if found else None,\n",
+          "new": "        first=next((path for kind, path in found if kind == \"changed\"), None),\n"
+        }
+      ],
+      "expect": "first is the earliest difference of any kind, in reading order"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "first taken from missing, then extra, then changed",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "        first=found[0][1] if found else None,\n",
+          "new": "        first=([p for k, p in found if k == \"missing\"] + [p for k, p in found if k == \"extra\"] + [p for k, p in found if k == \"changed\"] or [None])[0],\n"
+        }
+      ],
+      "expect": "steps are matched by name and occurrence"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "extra nodes listed after every other difference",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "    found: list[tuple[str, str]] = []\n",
+          "new": "    found: list[tuple[str, str]] = []\n    late: list[tuple[str, str]] = []\n"
+        },
+        {
+          "file": "rundiff.py",
+          "old": "                found.append((\"extra\", prefix + _segment(key)))\n",
+          "new": "                late.append((\"extra\", prefix + _segment(key)))\n"
+        },
+        {
+          "file": "rundiff.py",
+          "old": "    walk(good, bad, \"\")\n",
+          "new": "    walk(good, bad, \"\")\n    found.extend(late)\n"
+        }
+      ],
+      "expect": "first is the earliest difference of any kind, in reading order"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "the bad run walked instead of the good run",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "        for key, node in mine.items():\n            path = prefix + _segment(key)\n            other = theirs.get(key)\n            if other is None:\n                found.append((\"missing\", path))\n                continue\n            if node.output != other.output:\n                found.append((\"changed\", path))\n            walk(node.children, other.children, path + \"/\")\n        for key in theirs:\n            if key not in mine:\n                found.append((\"extra\", prefix + _segment(key)))\n",
+          "new": "        for key, other in theirs.items():\n            path = prefix + _segment(key)\n            node = mine.get(key)\n            if node is None:\n                found.append((\"extra\", path))\n                continue\n            if node.output != other.output:\n                found.append((\"changed\", path))\n            walk(node.children, other.children, path + \"/\")\n        for key in mine:\n            if key not in theirs:\n                found.append((\"missing\", prefix + _segment(key)))\n"
+        }
+      ],
+      "expect": "first is the earliest difference of any kind, in reading order"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "a changed node listed after its descendants",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "            if node.output != other.output:\n                found.append((\"changed\", path))\n            walk(node.children, other.children, path + \"/\")\n",
+          "new": "            walk(node.children, other.children, path + \"/\")\n            if node.output != other.output:\n                found.append((\"changed\", path))\n"
+        }
+      ],
+      "expect": "steps are matched by name and occurrence"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "lists sorted by path",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "        extra=[path for kind, path in found if kind == \"extra\"],\n",
+          "new": "        extra=sorted(path for kind, path in found if kind == \"extra\"),\n"
+        }
+      ],
+      "expect": "steps are matched by name and occurrence"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "extra nodes listed before the good run's nodes at their level",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "        mine, theirs = _by_occurrence(good_nodes), _by_occurrence(bad_nodes)\n",
+          "new": "        mine, theirs = _by_occurrence(good_nodes), _by_occurrence(bad_nodes)\n        for key in theirs:\n            if key not in mine:\n                found.append((\"extra\", prefix + _segment(key)))\n"
+        },
+        {
+          "file": "rundiff.py",
+          "old": "        for key in theirs:\n            if key not in mine:\n                found.append((\"extra\", prefix + _segment(key)))\n\n    walk(",
+          "new": "\n    walk("
+        }
+      ],
+      "expect": "steps are matched by name and occurrence"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "extras merged in at their place in the bad run",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "        mine, theirs = _by_occurrence(good_nodes), _by_occurrence(bad_nodes)\n        for key, node in mine.items():\n            path = prefix + _segment(key)\n            other = theirs.get(key)\n            if other is None:\n                found.append((\"missing\", path))\n                continue\n            if node.output != other.output:\n                found.append((\"changed\", path))\n            walk(node.children, other.children, path + \"/\")\n        for key in theirs:\n            if key not in mine:\n                found.append((\"extra\", prefix + _segment(key)))\n",
+          "new": "        mine, theirs = _by_occurrence(good_nodes), _by_occurrence(bad_nodes)\n        merged = list(mine)\n        bad_keys = list(theirs)\n        for idx, key in enumerate(bad_keys):\n            if key in mine:\n                continue\n            prev = bad_keys[idx - 1] if idx else None\n            merged.insert(merged.index(prev) + 1 if prev in merged else 0, key)\n        for key in merged:\n            path = prefix + _segment(key)\n            if key not in theirs:\n                found.append((\"missing\", path))\n                continue\n            if key not in mine:\n                found.append((\"extra\", path))\n                continue\n            node, other = mine[key], theirs[key]\n            if node.output != other.output:\n                found.append((\"changed\", path))\n            walk(node.children, other.children, path + \"/\")\n"
+        }
+      ],
+      "expect": "a node only the bad run has comes after the good run's nodes at its level"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "'' and None compared as equal",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "            if node.output != other.output:\n",
+          "new": "            if (node.output or \"\") != (other.output or \"\"):\n"
+        }
+      ],
+      "expect": "an empty output is still an output"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "first taken as the smallest path",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "first=found[0][1] if found else None,",
+          "new": "first=min(path for _, path in found) if found else None,"
+        }
+      ],
+      "expect": "steps are matched by name and occurrence"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "every sibling compared before any child",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "            if node.output != other.output:\n                found.append((\"changed\", path))\n            walk(node.children, other.children, path + \"/\")\n        for key in theirs:\n            if key not in mine:\n                found.append((\"extra\", prefix + _segment(key)))\n",
+          "new": "            if node.output != other.output:\n                found.append((\"changed\", path))\n            later.append((node, other, path))\n        for key in theirs:\n            if key not in mine:\n                found.append((\"extra\", prefix + _segment(key)))\n        for node, other, path in later:\n            walk(node.children, other.children, path + \"/\")\n"
+        },
+        {
+          "file": "rundiff.py",
+          "old": "        mine, theirs = _by_occurrence(good_nodes), _by_occurrence(bad_nodes)\n",
+          "new": "        mine, theirs = _by_occurrence(good_nodes), _by_occurrence(bad_nodes)\n        later = []\n"
+        }
+      ],
+      "expect": "steps are matched by name and occurrence"
+    },
+    {
+      "test": "test_run_diff",
+      "name": "one occurrence counter shared by both runs' siblings",
+      "edits": [
+        {
+          "file": "rundiff.py",
+          "old": "        mine, theirs = _by_occurrence(good_nodes), _by_occurrence(bad_nodes)\n",
+          "new": "        seen: dict = {}\n        mine, theirs = _by_occurrence(good_nodes, seen), _by_occurrence(bad_nodes, seen)\n"
+        },
+        {
+          "file": "rundiff.py",
+          "old": "def _by_occurrence(nodes: Sequence[TraceNode]) -> dict[tuple[str, int], TraceNode]:\n    seen: dict[str, int] = {}\n",
+          "new": "def _by_occurrence(nodes: Sequence[TraceNode], seen) -> dict[tuple[str, int], TraceNode]:\n"
+        }
+      ],
+      "expect": "identical runs have no differences"
+    }
+  ]
+}
