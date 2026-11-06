@@ -1,0 +1,114 @@
+{
+  "lesson": "phases/14-agent-engineering/18-agno-and-mastra-runtimes",
+  "title": "Production Agent Runtimes — Fast Instantiation and Typed Workflows",
+  "format": "staged-brownfield",
+  "service": "AgnoMastra: an Agno-shaped stateless request handler with a fresh agent per request, Mastra-shaped typed tools and workflows, composite storage, a Little's-law capacity planner, an HTTP/1.1 chunked streaming backend and a structural schema checker for nested workflows",
+  "sources": {
+    "docs/en.md": "825b6ee75ecab014886579c42bbae112c977eb6b51b91d570c412faa3933ec79",
+    "code/main.py": "0a1fc627ebbd64250ffaefc2f76122387aca357a74e8dfb5010615fe937ca4f1",
+    "code/main.ts": "9271bc9530f9929bf72598d42bd882a47dfa9fd9ba84ff2bf063113190a9debd"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network and no LLM: every model is a deterministic function the tests supply",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_runtime_handlers",
+      "kind": "debug",
+      "lesson_anchor": "Agno: stateless session-scoped FastAPI backend, each request starts a fresh agent, session state lives in a DB, ~2μs instantiation; Mastra: Tools (Zod-typed; code/main.ts checkSchema walks the schema's fields, each one checked for presence, then type), Workflows; code/main.py main() passing one agent to every agno_request_handler call, MastraAgent.run, MastraWorkflow.run",
+      "planted_bugs": [
+        "AgnoApp.__init__ builds one Agent and handle() reuses it for every request (as code/main.py main() passes one agent to every agno_request_handler call), so its memory piles up across requests and session s2 sees session s1",
+        "MastraAgent.run records the schema error but has no continue, so the tool still runs; the AttributeError surfaces inside the test's search tool, two calls away",
+        "check_input walks the caller's args instead of the schema, so a call that leaves out a required field passes the check and the tool runs, while the docstring asks for 'missing field <key>' and the tool not called; it shows only after the continue is fixed, as a TypeError raised where run calls the test's search tool with no arguments, after check_input, where the cause is, has already returned None. The fix has to keep the schema's order field by field (presence, then type) and tell a None value from a missing field",
+        "Agent.__init__ deep-copies the whole tool registry, so instantiation grows with the registry; with one shared agent it is paid once, and it shows only after every request builds its own agent"
+      ],
+      "timing_assert": "300 requests on an app with 1000 tools under 0.05 s. Measured on this machine (Python 3.12, other agents running): deep copy 0.83-1.57 s, 1.96 s under the checker's heaviest load; shared registry 0.14-0.61 ms; a shallow dict copy per agent 1.0-1.2 ms, which the timing cannot catch, so the registry identity check does",
+      "overfix_guard": "every request must run on a distinct Agent object, which rules out keeping one agent on the app with its memory reset per run, re-caching it to pass the timing, or caching one agent per session; every agent must hold the app's registry object itself, which rules out a shallow copy per agent; Workflow.run already deep-copies each step's output in the starter, and the workflow trace assertions (steps that change the payload in place must not rewrite earlier entries) stay as a guard: dropping that copy along with the registry's deep copy, or making it shallow so nested lists still change, fails there"
+    },
+    {
+      "part": 2,
+      "test": "test_composite_storage",
+      "kind": "model and persistence",
+      "lesson_anchor": "Mastra composite storage: memory, workflows, observability to different backends; ClickHouse recommended for observability at scale",
+      "storage": "composite: SQLite for memory, one JSON snapshot file per run id, an append-only NDJSON observability log",
+      "exactness": "snapshots compared with a type- and key-order-aware comparison (True vs 1, 2.0 vs 2, 2**64 + 1, -0.0, dict key order), and every snapshot file must parse as JSON; run ids with slashes, '..', a near-collision and 349 characters; messages with \\r\\n; events with ns integer timestamps and a \\u2028 inside an attribute; across a close and reopen",
+      "traps": [
+        "sort_keys in the snapshot",
+        "run id used as the file name (FileNotFoundError, or a file outside workflows/)",
+        "slashes replaced with underscores, colliding nightly/2026-11-02 with nightly_2026-11-02",
+        "percent-encoded or base64 file names, too long for the 349-character backfill run id",
+        "snapshots pickled instead of stored as JSON",
+        "runs() ordered by file name",
+        "ASCII-escaped log instead of readable UTF-8",
+        "log read with str.splitlines, which splits on \\u2028",
+        "log truncated on reopen",
+        "empty run id accepted",
+        "inserts never committed, lost at close"
+      ],
+      "clarifying_questions": ["slashes in run ids", "run id length", "keeping old snapshots", "everything in SQLite", "atomic writes"]
+    },
+    {
+      "part": 3,
+      "test": "test_capacity_plan",
+      "kind": "core algorithm",
+      "lesson_anchor": "Where this pattern goes wrong: Perf-for-perf's-sake (overhead is not the bottleneck); Exercise 3 (does Agno's 2μs matter to your workload?); the speed targets matter with thousands of short-lived agents per second",
+      "algorithm": "Little's law per stage (in_flight = rate x service time, utilization = in_flight / workers), bottleneck with a stated tie rule, max sustainable rate, and the end-to-end share saved by a faster stage; all exact with Fraction",
+      "traps": [
+        "bottleneck taken as the slowest stage or the one with the most requests in flight (a 2000 req/s fan-in where one-worker instantiation is the bottleneck)",
+        "Greek mu U+03BC and micro sign U+00B5",
+        "int(float(s) * 10**9) truncates 2.05 s; round() accepts 1.5ns",
+        "utilization exactly 1 counted as sustainable",
+        "workers_needed = ceil(in_flight) when in_flight is an integer",
+        "a tie broken by stage order instead of the longer service time",
+        "float utilization (0.1125 != Fraction(9, 80))",
+        "saving measured against the new total",
+        "max_rate derived from the current rate, dividing by zero at rate 0",
+        "zero service time, a negative rate or a '+' sign accepted"
+      ],
+      "clarifying_questions": ["rate unit", "rate 0", "queueing delay", "float or exact"]
+    },
+    {
+      "part": 4,
+      "test": "test_streaming_backend",
+      "kind": "streaming",
+      "lesson_anchor": "Agno production path: stateless session-scoped FastAPI backend; Mastra server adapters (Express, Hono, Fastify, Koa); Build It: run an agent, stream the output, persist session",
+      "wire_format": "HTTP/1.1 chunked transfer encoding as raw bytes (hex size CRLF data CRLF, last chunk 0 CRLF CRLF), decided by the test's own chunk parser",
+      "traps": [
+        "chunk size in characters instead of UTF-8 bytes",
+        "chunk size in decimal",
+        "chunk size written with hex() as 0x11",
+        "an empty token sent as a chunk ends the response early",
+        "whitespace-only tokens skipped as if empty",
+        "one lock for every session",
+        "no lock, or a new lock for every request",
+        "history read before the session lock",
+        "the reply buffered until the model finishes",
+        "lock acquired without try/finally, so aclose() leaves the session locked",
+        "the user turn stored before the reply completes",
+        "turns stored after the last chunk, lost when the client closes right after reading it"
+      ],
+      "clarifying_questions": ["client disconnect", "client closes after the last chunk", "empty tokens", "start order", "Content-Length"]
+    },
+    {
+      "part": 5,
+      "test": "test_flow_schemas",
+      "kind": "recursive structure",
+      "lesson_anchor": "Mastra's three primitives: Agents, Tools (Zod-typed), Workflows; workflow steps pass each output to the next step",
+      "traps": [
+        "integer and number assignability reversed",
+        "an optional output given to a required input",
+        "an optional input field treated as required",
+        "a union destination split before a union source",
+        "a union source accepted when any member fits",
+        "array items not compared",
+        "strict objects not rejecting extra fields",
+        "nested flows unwrapped one level only",
+        "a nested flow's output taken from its first step",
+        "outer links checked before the links inside a nested flow, or the links inside it before the link into it",
+        "structure (empty or self-containing flows) checked only along the way, or emptiness only at the top",
+        "a reused sub-flow rejected as a cycle by a global visited set"
+      ],
+      "clarifying_questions": ["top-level optional", "extra fields in non-strict objects", "reusing a flow", "which mismatch to report"]
+    }
+  ],
+  "deviations": "Part 1 keeps the suggested shared-instance bug as an app that builds one Agent in __init__ and reuses it, the shape of code/main.py main(). The workflow trace, which the lesson's MastraWorkflow.run aliases, is already deep-copied in the starter: shared mutable objects are planted defects in 14/14 and 14/20 (and in 13/06), so here those assertions only guard the copy. The third defect comes from Mastra's Zod-typed tools instead: check_input walks the args rather than the schema that code/main.ts checkSchema walks. Part 3 adds latency_saving, so the 'does 2μs matter' question has a number. Part 5 reports the first mismatch with a JSON-path-like path and qualified leaf step names, and checks structure before links. The Mastra Model Router is not used anywhere, to avoid 13/21."
+}

@@ -1,0 +1,960 @@
+{
+  "package": "agnomastra",
+  "tests": [
+    "test_runtime_handlers",
+    "test_composite_storage",
+    "test_capacity_plan",
+    "test_streaming_backend",
+    "test_flow_schemas"
+  ],
+  "layers": [
+    {
+      "test": "test_runtime_handlers",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a request sees its own session's history and nothing else"
+        },
+        {
+          "name": "build a fresh agent per request",
+          "edits": [
+            {
+              "file": "agno.py",
+              "old": "        self.agent = Agent(spec, self.registry, model)\n",
+              "new": ""
+            },
+            {
+              "file": "agno.py",
+              "old": "        reply = self.agent.run(self.sessions.history(session_id), prompt)\n",
+              "new": "        agent = Agent(self.spec, self.registry, self.model)\n        reply = agent.run(self.sessions.history(session_id), prompt)\n"
+            }
+          ],
+          "expect": "AttributeError"
+        },
+        {
+          "name": "+ skip the call that breaks the schema",
+          "edits": [
+            {
+              "file": "mastra.py",
+              "old": "                trace.append((tool_id, f\"error: {problem}\"))\n",
+              "new": "                trace.append((tool_id, f\"error: {problem}\"))\n                continue\n"
+            }
+          ],
+          "expect": "TypeError"
+        },
+        {
+          "name": "+ check every field the schema lists",
+          "edits": [
+            {
+              "file": "mastra.py",
+              "old": "    for key, value in args.items():\n        if key not in schema:\n            continue\n        got = _TYPE_NAMES.get(type(value), type(value).__name__)\n        if got != schema[key]:\n            return f\"field {key}: expected {schema[key]}, got {got}\"\n    return None\n",
+              "new": "    for key, expected in schema.items():\n        if key not in args:\n            return f\"missing field {key}\"\n        got = _TYPE_NAMES.get(type(args[key]), type(args[key]).__name__)\n        if got != expected:\n            return f\"field {key}: expected {expected}, got {got}\"\n    return None\n"
+            }
+          ],
+          "expect": "creating an agent should not cost more with a bigger tool registry"
+        },
+        {
+          "name": "+ share the registry",
+          "edits": [
+            {
+              "file": "agno.py",
+              "old": "        self.tools = copy.deepcopy(tools)\n",
+              "new": "        self.tools = tools\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_runtime_handlers",
+      "name": "one cached agent per app, memory reset on every run",
+      "edits": [
+        {
+          "file": "agno.py",
+          "old": "        agent = Agent(self.spec, self.registry, self.model)\n",
+          "new": "        agent = self.__dict__.setdefault(\"_agent\", Agent(self.spec, self.registry, self.model))\n"
+        },
+        {
+          "file": "agno.py",
+          "old": "        self.memory.extend(history)\n",
+          "new": "        self.memory = list(self.spec.instructions)\n        self.memory.extend(history)\n"
+        }
+      ],
+      "expect": "every request runs on a fresh agent"
+    },
+    {
+      "test": "test_runtime_handlers",
+      "name": "shallow copy of each step's output",
+      "edits": [
+        {
+          "file": "mastra.py",
+          "old": "copy.deepcopy(current)",
+          "new": "copy.copy(current)"
+        }
+      ],
+      "expect": "each trace entry keeps its step's output as it was when the step returned"
+    },
+    {
+      "test": "test_runtime_handlers",
+      "name": "one agent per session",
+      "edits": [
+        {
+          "file": "agno.py",
+          "old": "        agent = Agent(self.spec, self.registry, self.model)\n",
+          "new": "        agent = self.__dict__.setdefault(\"_agents\", {}).setdefault(session_id, Agent(self.spec, self.registry, self.model))\n"
+        }
+      ],
+      "expect": "a request sees its own session's history and nothing else"
+    },
+    {
+      "test": "test_runtime_handlers",
+      "name": "a shallow copy of the registry for every agent",
+      "edits": [
+        {
+          "file": "agno.py",
+          "old": "        self.tools = tools\n",
+          "new": "        self.tools = dict(tools)\n"
+        }
+      ],
+      "expect": "agents share the app's registry instead of copying it"
+    },
+    {
+      "test": "test_runtime_handlers",
+      "name": "tool errors caught instead of skipping the call",
+      "edits": [
+        {
+          "file": "mastra.py",
+          "old": "                trace.append((tool_id, f\"error: {problem}\"))\n                continue\n            trace.append((tool_id, tool.execute(**args)))",
+          "new": "                trace.append((tool_id, f\"error: {problem}\"))\n            try:\n                trace.append((tool_id, tool.execute(**args)))\n            except Exception as exc:\n                trace.append((tool_id, f\"error: {exc}\"))"
+        }
+      ],
+      "expect": "a call that breaks the input schema is recorded, not executed"
+    },
+    {
+      "test": "test_runtime_handlers",
+      "name": "missing fields left to the tool, its TypeError caught",
+      "edits": [
+        {
+          "file": "mastra.py",
+          "old": "    for key, expected in schema.items():\n        if key not in args:\n            return f\"missing field {key}\"\n        got = _TYPE_NAMES.get(type(args[key]), type(args[key]).__name__)\n        if got != expected:\n            return f\"field {key}: expected {expected}, got {got}\"\n    return None\n",
+          "new": "    for key, value in args.items():\n        if key not in schema:\n            continue\n        got = _TYPE_NAMES.get(type(value), type(value).__name__)\n        if got != schema[key]:\n            return f\"field {key}: expected {schema[key]}, got {got}\"\n    return None\n"
+        },
+        {
+          "file": "mastra.py",
+          "old": "            trace.append((tool_id, tool.execute(**args)))\n",
+          "new": "            try:\n                trace.append((tool_id, tool.execute(**args)))\n            except TypeError as exc:\n                trace.append((tool_id, f\"error: {exc}\"))\n"
+        }
+      ],
+      "expect": "a call that breaks the input schema is recorded, not executed"
+    },
+    {
+      "test": "test_runtime_handlers",
+      "name": "only an empty call counted as missing a field",
+      "edits": [
+        {
+          "file": "mastra.py",
+          "old": "    for key, expected in schema.items():\n        if key not in args:\n            return f\"missing field {key}\"\n        got = _TYPE_NAMES.get(type(args[key]), type(args[key]).__name__)\n        if got != expected:\n            return f\"field {key}: expected {expected}, got {got}\"\n    return None\n",
+          "new": "    if schema and not args:\n        return f\"missing field {next(iter(schema))}\"\n    for key, value in args.items():\n        if key not in schema:\n            continue\n        got = _TYPE_NAMES.get(type(value), type(value).__name__)\n        if got != schema[key]:\n            return f\"field {key}: expected {schema[key]}, got {got}\"\n    return None\n"
+        }
+      ],
+      "expect": "the first problem in the schema's order is reported"
+    },
+    {
+      "test": "test_runtime_handlers",
+      "name": "a missing-field pass added after the type checks",
+      "edits": [
+        {
+          "file": "mastra.py",
+          "old": "    for key, expected in schema.items():\n        if key not in args:\n            return f\"missing field {key}\"\n        got = _TYPE_NAMES.get(type(args[key]), type(args[key]).__name__)\n        if got != expected:\n            return f\"field {key}: expected {expected}, got {got}\"\n    return None\n",
+          "new": "    for key, value in args.items():\n        if key not in schema:\n            continue\n        got = _TYPE_NAMES.get(type(value), type(value).__name__)\n        if got != schema[key]:\n            return f\"field {key}: expected {schema[key]}, got {got}\"\n    for key in schema:\n        if key not in args:\n            return f\"missing field {key}\"\n    return None\n"
+        }
+      ],
+      "expect": "the first problem in the schema's order is reported"
+    },
+    {
+      "test": "test_runtime_handlers",
+      "name": "a missing-field pass added before the type checks",
+      "edits": [
+        {
+          "file": "mastra.py",
+          "old": "    for key, expected in schema.items():\n        if key not in args:\n            return f\"missing field {key}\"\n        got = _TYPE_NAMES.get(type(args[key]), type(args[key]).__name__)\n        if got != expected:\n            return f\"field {key}: expected {expected}, got {got}\"\n    return None\n",
+          "new": "    for key in schema:\n        if key not in args:\n            return f\"missing field {key}\"\n    for key, value in args.items():\n        if key not in schema:\n            continue\n        got = _TYPE_NAMES.get(type(value), type(value).__name__)\n        if got != schema[key]:\n            return f\"field {key}: expected {schema[key]}, got {got}\"\n    return None\n"
+        }
+      ],
+      "expect": "the first problem in the schema's order is reported"
+    },
+    {
+      "test": "test_runtime_handlers",
+      "name": "missing fields found with a sorted set difference",
+      "edits": [
+        {
+          "file": "mastra.py",
+          "old": "    for key, expected in schema.items():\n        if key not in args:\n            return f\"missing field {key}\"\n        got = _TYPE_NAMES.get(type(args[key]), type(args[key]).__name__)\n        if got != expected:\n            return f\"field {key}: expected {expected}, got {got}\"\n    return None\n",
+          "new": "    missing = sorted(set(schema) - set(args))\n    if missing:\n        return f\"missing field {missing[0]}\"\n    for key, expected in schema.items():\n        got = _TYPE_NAMES.get(type(args[key]), type(args[key]).__name__)\n        if got != expected:\n            return f\"field {key}: expected {expected}, got {got}\"\n    return None\n"
+        }
+      ],
+      "expect": "a call that breaks the input schema is recorded, not executed"
+    },
+    {
+      "test": "test_runtime_handlers",
+      "name": "a field set to None read as missing",
+      "edits": [
+        {
+          "file": "mastra.py",
+          "old": "        if key not in args:\n            return f\"missing field {key}\"\n",
+          "new": "        if args.get(key) is None:\n            return f\"missing field {key}\"\n"
+        }
+      ],
+      "expect": "None is a null value, not a missing field, and True is not a number"
+    },
+    {
+      "test": "test_runtime_handlers",
+      "name": "a falsy value read as missing",
+      "edits": [
+        {
+          "file": "mastra.py",
+          "old": "        if key not in args:\n            return f\"missing field {key}\"\n",
+          "new": "        if not args.get(key):\n            return f\"missing field {key}\"\n"
+        }
+      ],
+      "expect": "a call that breaks the input schema is recorded, not executed"
+    },
+    {
+      "test": "test_runtime_handlers",
+      "name": "types checked with isinstance, so True passes as a number",
+      "edits": [
+        {
+          "file": "mastra.py",
+          "old": "        if got != expected:\n",
+          "new": "        if not isinstance(args[key], {\"string\": str, \"number\": (int, float), \"boolean\": bool}[expected]):\n"
+        }
+      ],
+      "expect": "None is a null value, not a missing field, and True is not a number"
+    },
+    {
+      "test": "test_runtime_handlers",
+      "name": "the trace's deep copy removed along with the registry's",
+      "edits": [
+        {
+          "file": "mastra.py",
+          "old": "copy.deepcopy(current)",
+          "new": "current"
+        }
+      ],
+      "expect": "each trace entry keeps its step's output as it was when the step returned"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "snapshot written with sort_keys",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "text = json.dumps(dataclasses.asdict(snapshot), ensure_ascii=False)",
+          "new": "text = json.dumps(dataclasses.asdict(snapshot), ensure_ascii=False, sort_keys=True)"
+        }
+      ],
+      "expect": "a snapshot round-trips exactly"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "log read with str.splitlines",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "lines = self._log.read_text(encoding=\"utf-8\").split(\"\\n\")",
+          "new": "lines = self._log.read_text(encoding=\"utf-8\").splitlines()"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "log written as ASCII escapes",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "line = json.dumps(dataclasses.asdict(event), ensure_ascii=False) + \"\\n\"",
+          "new": "line = json.dumps(dataclasses.asdict(event)) + \"\\n\""
+        }
+      ],
+      "expect": "the log is readable UTF-8 text"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "slashes in run ids replaced with underscores",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "return self._workflows / (hashlib.sha256(run_id.encode(\"utf-8\")).hexdigest() + \".json\")",
+          "new": "return self._workflows / (run_id.replace(\"/\", \"_\") + \".json\")"
+        }
+      ],
+      "expect": "OSError"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "slashes replaced with underscores, long ids cut to 200 characters",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "return self._workflows / (hashlib.sha256(run_id.encode(\"utf-8\")).hexdigest() + \".json\")",
+          "new": "return self._workflows / (run_id.replace(\"/\", \"_\")[:200] + \".json\")"
+        }
+      ],
+      "expect": "every run id keeps its own snapshot"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "run id used as the file name",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "return self._workflows / (hashlib.sha256(run_id.encode(\"utf-8\")).hexdigest() + \".json\")",
+          "new": "return self._workflows / (run_id + \".json\")"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "log truncated when the store opens",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "        self._log = self.root / \"observability.log\"\n",
+          "new": "        self._log = self.root / \"observability.log\"\n        self._log.write_text(\"\", encoding=\"utf-8\")\n"
+        }
+      ],
+      "expect": "a reopened store keeps every record"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "runs listed in file-name order",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "        return sorted(\n            json.loads(path.read_text(encoding=\"utf-8\"))[\"run_id\"]\n            for path in self._workflows.glob(\"*.json\")\n        )",
+          "new": "        return [\n            json.loads(path.read_text(encoding=\"utf-8\"))[\"run_id\"]\n            for path in sorted(self._workflows.glob(\"*.json\"))\n        ]"
+        }
+      ],
+      "expect": "runs() lists run ids in sorted order"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "inserts never committed",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "        with self._db:\n            self._db.execute(\n                \"INSERT",
+          "new": "        if True:\n            self._db.execute(\n                \"INSERT"
+        }
+      ],
+      "expect": "a session's messages read back exactly, in order"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "log opened with \"w\" for every record",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "with open(self._log, \"a\", encoding=\"utf-8\", newline=\"\\n\") as log:",
+          "new": "with open(self._log, \"w\", encoding=\"utf-8\", newline=\"\\n\") as log:"
+        }
+      ],
+      "expect": "a reopened store keeps every record"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "events written with sort_keys",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "line = json.dumps(dataclasses.asdict(event), ensure_ascii=False)",
+          "new": "line = json.dumps(dataclasses.asdict(event), ensure_ascii=False, sort_keys=True)"
+        }
+      ],
+      "expect": "a reopened store keeps every record"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "percent-encoded run id as the file name",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "return self._workflows / (hashlib.sha256(run_id.encode(\"utf-8\")).hexdigest() + \".json\")",
+          "new": "import urllib.parse\n        return self._workflows / (urllib.parse.quote(run_id, safe=\"\") + \".json\")"
+        }
+      ],
+      "expect": "OSError"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "base64 run id as the file name",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "return self._workflows / (hashlib.sha256(run_id.encode(\"utf-8\")).hexdigest() + \".json\")",
+          "new": "import base64\n        return self._workflows / (base64.urlsafe_b64encode(run_id.encode()).decode() + \".json\")"
+        }
+      ],
+      "expect": "OSError"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "snapshots pickled instead of JSON",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "        text = json.dumps(dataclasses.asdict(snapshot), ensure_ascii=False)\n        self._snapshot_path(snapshot.run_id).write_text(text, encoding=\"utf-8\")",
+          "new": "        import pickle\n        self._snapshot_path(snapshot.run_id).write_bytes(pickle.dumps(snapshot))"
+        },
+        {
+          "file": "storage.py",
+          "old": "        return Snapshot(**json.loads(path.read_text(encoding=\"utf-8\")))",
+          "new": "        import pickle\n        return pickle.loads(path.read_bytes())"
+        },
+        {
+          "file": "storage.py",
+          "old": "            json.loads(path.read_text(encoding=\"utf-8\"))[\"run_id\"]",
+          "new": "            __import__(\"pickle\").loads(path.read_bytes()).run_id"
+        }
+      ],
+      "expect": "every snapshot file is a JSON document"
+    },
+    {
+      "test": "test_composite_storage",
+      "name": "empty run id accepted",
+      "edits": [
+        {
+          "file": "storage.py",
+          "old": "        if not snapshot.run_id:\n            raise ValueError(\"run_id must not be empty\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "micro sign not accepted",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "|\\u00b5s|ms|s)",
+          "new": "|ms|s)"
+        }
+      ],
+      "expect": "unknown duration"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "float parse truncated to int",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "    value = Decimal(match[1]) * NS_PER[match[2]]\n",
+          "new": "    return int(float(match[1]) * NS_PER[match[2]])\n    value = 0\n"
+        }
+      ],
+      "expect": "durations parse to exact nanoseconds"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "float parse rounded",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "    value = Decimal(match[1]) * NS_PER[match[2]]\n",
+          "new": "    return round(float(match[1]) * NS_PER[match[2]])\n    value = 0\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "100% utilization counted as sustainable",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "all(load.utilization < 1 for load in loads)",
+          "new": "all(load.utilization <= 1 for load in loads)"
+        }
+      ],
+      "expect": "a stage at exactly 100% utilization cannot keep up"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "workers_needed = ceil(in_flight)",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "math.floor(in_flight) + 1",
+          "new": "math.ceil(in_flight)"
+        }
+      ],
+      "expect": "workers_needed keeps utilization below 1"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "tie goes to the first stage",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "key=lambda i: (-loads[i].utilization, -loads[i].service_ns, i)",
+          "new": "key=lambda i: (-loads[i].utilization, i)"
+        }
+      ],
+      "expect": "a tie goes to the longer service time"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "utilization as a float",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "                in_flight / stage.workers,\n",
+          "new": "                float(in_flight) / stage.workers,\n"
+        }
+      ],
+      "expect": "every number in the plan is exact"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "saving measured against the new total",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "    return Fraction(times[name] - parse_duration(service_time), total)",
+          "new": "    return Fraction(times[name] - parse_duration(service_time), total - times[name] + parse_duration(service_time))"
+        }
+      ],
+      "expect": "the share of end-to-end time saved"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "bottleneck = the slowest stage",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "key=lambda i: (-loads[i].utilization, -loads[i].service_ns, i)",
+          "new": "key=lambda i: (-loads[i].service_ns, i)"
+        }
+      ],
+      "expect": "the bottleneck is the busiest stage, not the slowest one"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "bottleneck = the stage with the most requests in flight",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "key=lambda i: (-loads[i].utilization, -loads[i].service_ns, i)",
+          "new": "key=lambda i: (-loads[i].in_flight, -loads[i].service_ns, i)"
+        }
+      ],
+      "expect": "the bottleneck is the busiest stage, not the slowest one"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "Decimal truncated without the whole-nanosecond check",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "    if value != value.to_integral_value():\n        raise ValueError(f\"{text!r} is not a whole number of nanoseconds\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "a plus sign accepted",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "_DURATION = re.compile(r\"(\\d+",
+          "new": "_DURATION = re.compile(r\"\\+?(\\d+"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "max_rate derived from the current rate",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "max_rate=min(Fraction(s.workers * 10**9, l.service_ns) for s, l in zip(stages, loads)),",
+          "new": "max_rate=rate / max(load.utilization for load in loads),"
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "zero service time accepted",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "        if service_ns == 0:\n            raise ValueError(f\"{stage.name}: service time must be positive\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_capacity_plan",
+      "name": "negative rate accepted",
+      "edits": [
+        {
+          "file": "capacity.py",
+          "old": "    if rate < 0:\n        raise ValueError(\"rate must not be negative\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_streaming_backend",
+      "name": "chunk size counts characters",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "yield b\"%x\\r\\n\" % len(data) + data",
+          "new": "yield b\"%x\\r\\n\" % len(token) + data"
+        }
+      ],
+      "expect": "chunk data is followed by CRLF"
+    },
+    {
+      "test": "test_streaming_backend",
+      "name": "chunk size in decimal",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "yield b\"%x\\r\\n\" % len(data) + data",
+          "new": "yield b\"%d\\r\\n\" % len(data) + data"
+        }
+      ],
+      "expect": "chunk data is followed by CRLF"
+    },
+    {
+      "test": "test_streaming_backend",
+      "name": "empty tokens sent as chunks",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "                    if not data:\n                        continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "the last chunk is 0 CRLF CRLF and nothing follows"
+    },
+    {
+      "test": "test_streaming_backend",
+      "name": "one lock for every session",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "self._locks.setdefault(session_id, asyncio.Lock())",
+          "new": "self._locks.setdefault(\"*\", asyncio.Lock())"
+        }
+      ],
+      "expect": "different sessions run in parallel"
+    },
+    {
+      "test": "test_streaming_backend",
+      "name": "no lock",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        async with lock:\n",
+          "new": "        if lock:\n"
+        }
+      ],
+      "expect": "requests in one session run one at a time"
+    },
+    {
+      "test": "test_streaming_backend",
+      "name": "history read before waiting for the session",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        async with lock:\n            yield HEADERS\n            messages = self.store.history(session_id) + [f\"user: {prompt}\"]\n",
+          "new": "        messages = self.store.history(session_id) + [f\"user: {prompt}\"]\n        async with lock:\n            yield HEADERS\n"
+        }
+      ],
+      "expect": "a queued request sees the turn before it"
+    },
+    {
+      "test": "test_streaming_backend",
+      "name": "reply buffered until the model finishes",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "                    yield b\"%x\\r\\n\" % len(data) + data + b\"\\r\\n\"\n",
+          "new": ""
+        },
+        {
+          "file": "server.py",
+          "old": "            self.store.append(session_id, f\"user: {prompt}\")\n",
+          "new": "            for token in reply:\n                yield b\"%x\\r\\n\" % len(token.encode()) + token.encode() + b\"\\r\\n\"\n            self.store.append(session_id, f\"user: {prompt}\")\n"
+        }
+      ],
+      "expect": "the first chunk goes out before the model finishes"
+    },
+    {
+      "test": "test_streaming_backend",
+      "name": "lock acquired without try/finally",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "        async with lock:\n",
+          "new": "        await lock.acquire()\n        if True:\n"
+        },
+        {
+          "file": "server.py",
+          "old": "            yield b\"0\\r\\n\\r\\n\"\n",
+          "new": "            yield b\"0\\r\\n\\r\\n\"\n            lock.release()\n"
+        }
+      ],
+      "expect": "an abandoned response frees its session"
+    },
+    {
+      "test": "test_streaming_backend",
+      "name": "user turn stored before the reply",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            messages = self.store.history(session_id) + [f\"user: {prompt}\"]\n",
+          "new": "            messages = self.store.history(session_id) + [f\"user: {prompt}\"]\n            self.store.append(session_id, f\"user: {prompt}\")\n"
+        },
+        {
+          "file": "server.py",
+          "old": "            self.store.append(session_id, f\"user: {prompt}\")\n            self.store.append(session_id, f\"assistant",
+          "new": "            self.store.append(session_id, f\"assistant"
+        }
+      ],
+      "expect": "an abandoned response stores no turn"
+    },
+    {
+      "test": "test_streaming_backend",
+      "name": "turns stored after the last chunk",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "            self.store.append(session_id, f\"user: {prompt}\")\n            self.store.append(session_id, f\"assistant: {''.join(reply)}\")\n            yield b\"0\\r\\n\\r\\n\"\n",
+          "new": "            yield b\"0\\r\\n\\r\\n\"\n            self.store.append(session_id, f\"user: {prompt}\")\n            self.store.append(session_id, f\"assistant: {''.join(reply)}\")\n"
+        }
+      ],
+      "expect": "the turn is stored by the time the last chunk goes out"
+    },
+    {
+      "test": "test_streaming_backend",
+      "name": "chunk size written with hex()",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "yield b\"%x\\r\\n\" % len(data) + data + b\"\\r\\n\"",
+          "new": "yield hex(len(data)).encode() + b\"\\r\\n\" + data + b\"\\r\\n\""
+        }
+      ],
+      "expect": "the chunk size is hex digits only"
+    },
+    {
+      "test": "test_streaming_backend",
+      "name": "whitespace-only tokens skipped",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "                    if not data:\n",
+          "new": "                    if not data.strip():\n"
+        }
+      ],
+      "expect": "one chunk per non-empty token"
+    },
+    {
+      "test": "test_streaming_backend",
+      "name": "a new lock for every request",
+      "edits": [
+        {
+          "file": "server.py",
+          "old": "lock = self._locks.setdefault(session_id, asyncio.Lock())",
+          "new": "lock = asyncio.Lock()"
+        }
+      ],
+      "expect": "requests in one session run one at a time"
+    },
+    {
+      "test": "test_flow_schemas",
+      "name": "number fits integer instead",
+      "edits": [
+        {
+          "file": "schemas.py",
+          "old": "(sk, dk) == (\"integer\", \"number\")",
+          "new": "(sk, dk) == (\"number\", \"integer\")"
+        }
+      ],
+      "expect": "an integer fits a number"
+    },
+    {
+      "test": "test_flow_schemas",
+      "name": "optional src fits a required dst",
+      "edits": [
+        {
+          "file": "schemas.py",
+          "old": "        if dk != \"optional\":\n            return Mismatch(path, \"may be missing\")\n        return first_mismatch(src[\"optional\"], dst[\"optional\"], path)",
+          "new": "        return first_mismatch(src[\"optional\"], dst[\"optional\"] if dk == \"optional\" else dst, path)"
+        }
+      ],
+      "expect": "an optional value may be missing"
+    },
+    {
+      "test": "test_flow_schemas",
+      "name": "union dst checked before union src",
+      "edits": [
+        {
+          "file": "schemas.py",
+          "old": "    if sk == \"union\":\n        for member in src[\"union\"]:\n            found = first_mismatch(member, dst, path)\n            if found is not None:\n                return found\n        return None\n    if dk == \"union\":\n        if any(first_mismatch(src, member, path) is None for member in dst[\"union\"]):\n            return None\n        return Mismatch(path, \"no member of the union accepts it\")\n",
+          "new": "    if dk == \"union\":\n        if any(first_mismatch(src, member, path) is None for member in dst[\"union\"]):\n            return None\n        return Mismatch(path, \"no member of the union accepts it\")\n    if sk == \"union\":\n        for member in src[\"union\"]:\n            found = first_mismatch(member, dst, path)\n            if found is not None:\n                return found\n        return None\n"
+        }
+      ],
+      "expect": "a union fits a union that accepts each of its members"
+    },
+    {
+      "test": "test_flow_schemas",
+      "name": "a union src fits when any member fits",
+      "edits": [
+        {
+          "file": "schemas.py",
+          "old": "        for member in src[\"union\"]:\n            found = first_mismatch(member, dst, path)\n            if found is not None:\n                return found\n        return None",
+          "new": "        if any(first_mismatch(member, dst, path) is None for member in src[\"union\"]):\n            return None\n        return Mismatch(path, \"no member fits\")"
+        }
+      ],
+      "expect": "every member of a union must fit"
+    },
+    {
+      "test": "test_flow_schemas",
+      "name": "array items not compared",
+      "edits": [
+        {
+          "file": "schemas.py",
+          "old": "        return first_mismatch(src[\"array\"], dst[\"array\"], path + \"[]\")",
+          "new": "        return None"
+        }
+      ],
+      "expect": "report the path of the first mismatch"
+    },
+    {
+      "test": "test_flow_schemas",
+      "name": "strict ignored",
+      "edits": [
+        {
+          "file": "schemas.py",
+          "old": "        if dst.get(\"strict\"):",
+          "new": "        if False:"
+        }
+      ],
+      "expect": "a strict object rejects extra fields"
+    },
+    {
+      "test": "test_flow_schemas",
+      "name": "nested flow unwrapped one level only",
+      "edits": [
+        {
+          "file": "schemas.py",
+          "old": "        while isinstance(step, Flow):\n            prefix, step",
+          "new": "        if isinstance(step, Flow):\n            prefix, step"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_flow_schemas",
+      "name": "outer links checked before inner ones",
+      "edits": [
+        {
+          "file": "schemas.py",
+          "old": "            if isinstance(step, Flow):\n                found = visit(step, inner)\n                if found is not None:\n                    return found\n        return None",
+          "new": "        for step in current.steps:\n            if isinstance(step, Flow):\n                found = visit(step, inner)\n                if found is not None:\n                    return found\n        return None"
+        }
+      ],
+      "expect": "links are checked in the order data crosses them"
+    },
+    {
+      "test": "test_flow_schemas",
+      "name": "structure checked only along the way",
+      "edits": [
+        {
+          "file": "schemas.py",
+          "old": "    validate(flow, frozenset())\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_flow_schemas",
+      "name": "optional consumer fields treated as required",
+      "edits": [
+        {
+          "file": "schemas.py",
+          "old": "                if _kind(want) == \"optional\":\n                    continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "an optional field may be left out"
+    },
+    {
+      "test": "test_flow_schemas",
+      "name": "a reused flow rejected as a cycle",
+      "edits": [
+        {
+          "file": "schemas.py",
+          "old": "    def validate(current: Flow, open_flows: frozenset[int]) -> None:\n        if id(current) in open_flows:\n            raise ValueError(f\"flow {current.name!r} contains itself\")\n",
+          "new": "    seen: set[int] = set()\n\n    def validate(current: Flow, open_flows: frozenset[int]) -> None:\n        if id(current) in seen:\n            raise ValueError(f\"flow {current.name!r} contains itself\")\n        seen.add(id(current))\n"
+        }
+      ],
+      "expect": "contains itself"
+    },
+    {
+      "test": "test_flow_schemas",
+      "name": "nested flow's output taken from its first step",
+      "edits": [
+        {
+          "file": "schemas.py",
+          "old": "leaf(current.steps[i - 1], inner, -1)",
+          "new": "leaf(current.steps[i - 1], inner, 0)"
+        }
+      ],
+      "expect": "the link out of a nested flow starts at its last step"
+    },
+    {
+      "test": "test_flow_schemas",
+      "name": "links inside a nested flow checked before the link into it",
+      "edits": [
+        {
+          "file": "schemas.py",
+          "old": "            if i > 0:\n                producer, out_step = leaf(current.steps[i - 1], inner, -1)\n                consumer, in_step = leaf(step, inner, 0)\n                mismatch = first_mismatch(out_step.output, in_step.input)\n                if mismatch is not None:\n                    return Break(producer, consumer, mismatch)\n            if isinstance(step, Flow):\n                found = visit(step, inner)\n                if found is not None:\n                    return found\n",
+          "new": "            if isinstance(step, Flow):\n                found = visit(step, inner)\n                if found is not None:\n                    return found\n            if i > 0:\n                producer, out_step = leaf(current.steps[i - 1], inner, -1)\n                consumer, in_step = leaf(step, inner, 0)\n                mismatch = first_mismatch(out_step.output, in_step.input)\n                if mismatch is not None:\n                    return Break(producer, consumer, mismatch)\n"
+        }
+      ],
+      "expect": "the link into a nested flow comes before the links inside it"
+    },
+    {
+      "test": "test_flow_schemas",
+      "name": "empty flows checked only at the top",
+      "edits": [
+        {
+          "file": "schemas.py",
+          "old": "        if not current.steps:\n",
+          "new": "        if not current.steps and not open_flows:\n"
+        }
+      ],
+      "expect": "IndexError"
+    }
+  ]
+}
