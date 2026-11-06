@@ -1,0 +1,1858 @@
+{
+  "package": "actorrt",
+  "tests": [
+    "test_runtime_delivery",
+    "test_journal_recovery",
+    "test_group_chat",
+    "test_link_frames",
+    "test_spawn_tree"
+  ],
+  "layers": [
+    {
+      "test": "test_runtime_delivery",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "the message whose handler raised is the one dead-lettered"
+        },
+        {
+          "name": "send only queues; run_until_idle delivers",
+          "edits": [
+            {
+              "file": "runtime.py",
+              "old": "        self._subscriptions: list[tuple[str, str]] = []\n        self._handling = False\n",
+              "new": "        self._subscriptions: list[tuple[str, str]] = []\n"
+            },
+            {
+              "file": "runtime.py",
+              "old": "        actor = self.actors.get(recipient)\n        if self._handling and actor is not None:\n            actor.receive(message, self)\n        else:\n            self._queue.append(message)\n",
+              "new": "        self._queue.append(message)\n"
+            },
+            {
+              "file": "runtime.py",
+              "old": "            self._handling = True\n            try:\n                actor.receive(message, self)\n            except Exception as e:\n                self.dead_letters.append((message, f\"{type(e).__name__}: {e}\"))\n            finally:\n                self._handling = False\n",
+              "new": "            try:\n                actor.receive(message, self)\n            except Exception as e:\n                self.dead_letters.append((message, f\"{type(e).__name__}: {e}\"))\n"
+            }
+          ],
+          "expect": "a handler that raises sends nothing"
+        },
+        {
+          "name": "+ a handler's sends wait until it returns",
+          "edits": [
+            {
+              "file": "runtime.py",
+              "old": "        self._subscriptions: list[tuple[str, str]] = []\n",
+              "new": "        self._subscriptions: list[tuple[str, str]] = []\n        self._outbox: list[Message] | None = None\n"
+            },
+            {
+              "file": "runtime.py",
+              "old": "        self._next_mid += 1\n        self._queue.append(message)\n        return message.mid\n",
+              "new": "        self._next_mid += 1\n        if self._outbox is not None:\n            self._outbox.append(message)\n        else:\n            self._queue.append(message)\n        return message.mid\n"
+            },
+            {
+              "file": "runtime.py",
+              "old": "            try:\n                actor.receive(message, self)\n            except Exception as e:\n                self.dead_letters.append((message, f\"{type(e).__name__}: {e}\"))\n",
+              "new": "            self._outbox = []\n            try:\n                actor.receive(message, self)\n            except Exception as e:\n                self.dead_letters.append((message, f\"{type(e).__name__}: {e}\"))\n                continue\n            finally:\n                sent, self._outbox = self._outbox, None\n            self._queue.extend(sent)\n"
+            }
+          ],
+          "expect": "the checklist decides only once every verdict is in"
+        },
+        {
+          "name": "+ the checklist decides once every snippet has its verdict",
+          "edits": [
+            {
+              "file": "review.py",
+              "old": "            if all(r[\"ok\"] for r in self.results.values()):\n                self.consensus = True\n            if len(self.results) == 3:\n",
+              "new": "            if len(self.results) == len(self.snippets):\n"
+            }
+          ],
+          "expect": "publishing must not slow down as subscriptions grow"
+        },
+        {
+          "name": "+ subscribers indexed by topic",
+          "edits": [
+            {
+              "file": "runtime.py",
+              "old": "self._subscriptions: list[tuple[str, str]] = []",
+              "new": "self._subscriptions: dict[str, dict[str, None]] = {}"
+            },
+            {
+              "file": "runtime.py",
+              "old": "        if (topic, name) not in self._subscriptions:\n            self._subscriptions.append((topic, name))\n",
+              "new": "        self._subscriptions.setdefault(topic, {})[name] = None\n"
+            },
+            {
+              "file": "runtime.py",
+              "old": "for t, name in self._subscriptions if t == topic]",
+              "new": "for name in self._subscriptions.get(topic, ())]"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_runtime_delivery",
+      "name": "a handler's send handed to the recipient at once, its failure caught at the send",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        if self._outbox is not None:\n            self._outbox.append(message)\n        else:\n            self._enqueue(message)\n        return message.mid\n",
+          "new": "        actor = self.actors.get(recipient)\n        if self._outbox is not None and actor is not None:\n            try:\n                actor.receive(message, self)\n            except Exception as e:\n                self._dead_letter(message, f\"{type(e).__name__}: {e}\")\n        elif self._outbox is not None:\n            self._outbox.append(message)\n        else:\n            self._enqueue(message)\n        return message.mid\n"
+        }
+      ],
+      "expect": "a message sent from a handler waits in the inbox for its turn"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "the recipient's failure dead-lettered at the send and raised on into the sender",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        if self._outbox is not None:\n            self._outbox.append(message)\n        else:\n            self._enqueue(message)\n        return message.mid\n",
+          "new": "        actor = self.actors.get(recipient)\n        if self._outbox is not None and actor is not None:\n            try:\n                actor.receive(message, self)\n            except Exception as e:\n                self._dead_letter(message, f\"{type(e).__name__}: {e}\")\n                raise\n        elif self._outbox is not None:\n            self._outbox.append(message)\n        else:\n            self._enqueue(message)\n        return message.mid\n"
+        }
+      ],
+      "expect": "the message whose handler raised is the one dead-lettered"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "a handler's send handed to the recipient at once, its failure swallowed",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        if self._outbox is not None:\n            self._outbox.append(message)\n        else:\n            self._enqueue(message)\n        return message.mid\n",
+          "new": "        actor = self.actors.get(recipient)\n        if self._outbox is not None and actor is not None:\n            try:\n                actor.receive(message, self)\n            except Exception:\n                pass\n        elif self._outbox is not None:\n            self._outbox.append(message)\n        else:\n            self._enqueue(message)\n        return message.mid\n"
+        }
+      ],
+      "expect": "the message whose handler raised is the one dead-lettered"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "a handler's send delivered at once through the runtime's own delivery, outbox and all",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        if self._outbox is not None:\n            self._outbox.append(message)\n",
+          "new": "        if self._outbox is not None:\n            self._deliver(message)\n"
+        },
+        {
+          "file": "runtime.py",
+          "old": "        self._outbox = []\n        try:\n            actor.receive(message, self)\n",
+          "new": "        outer, self._outbox = self._outbox, []\n        try:\n            actor.receive(message, self)\n"
+        },
+        {
+          "file": "runtime.py",
+          "old": "            sent, self._outbox = self._outbox, None\n",
+          "new": "            sent, self._outbox = self._outbox, outer\n"
+        }
+      ],
+      "expect": "a message sent from a handler waits in the inbox for its turn"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "the queue served newest first, so a reply goes before older mail",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            message = self._queue.popleft()\n",
+          "new": "            message = self._queue.pop()\n"
+        }
+      ],
+      "expect": "the reviewer's verdicts stay as it recorded them"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "a handler's messages put ahead of the mail already waiting",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        for queued in sent:\n            self._enqueue(queued)\n",
+          "new": "        for queued in sent:\n            self._enqueue(queued)\n        self._queue.rotate(len(sent))\n"
+        }
+      ],
+      "expect": "assert 2 == 1"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "the body queued without a copy, now that delivery waits for the queue",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "message = Message(sender, recipient, topic, copy.deepcopy(body), self._next_mid)",
+          "new": "message = Message(sender, recipient, topic, body, self._next_mid)"
+        }
+      ],
+      "expect": "a clean review leaves the dead-letter queue empty"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "the body copied when it is delivered, not when it is sent",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "message = Message(sender, recipient, topic, copy.deepcopy(body), self._next_mid)",
+          "new": "message = Message(sender, recipient, topic, body, self._next_mid)"
+        },
+        {
+          "file": "runtime.py",
+          "old": "        self._outbox = []\n        try:\n",
+          "new": "        self._outbox = []\n        message.body = copy.deepcopy(message.body)\n        try:\n"
+        }
+      ],
+      "expect": "a message carries its body as it was when it was sent"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "a shallow copy of the body",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "copy.deepcopy(body)",
+          "new": "copy.copy(body)"
+        }
+      ],
+      "expect": "the reviewer's verdicts stay as it recorded them"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "one copy per publish, shared by every subscriber",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        return [self.send(sender, name, topic, body) for name in self._subscribers.get(topic, ())]\n",
+          "new": "        shared = copy.deepcopy(body)\n        mids = []\n        for name in self._subscribers.get(topic, ()):\n            message = Message(sender, name, topic, shared, self._next_mid)\n            self._next_mid += 1\n            if self._outbox is not None:\n                self._outbox.append(message)\n            else:\n                self._enqueue(message)\n            mids.append(message.mid)\n        return mids\n"
+        }
+      ],
+      "expect": "a clean review leaves the dead-letter queue empty"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "the checklist copies what it receives, the runtime does not",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "message = Message(sender, recipient, topic, copy.deepcopy(body), self._next_mid)",
+          "new": "message = Message(sender, recipient, topic, body, self._next_mid)"
+        },
+        {
+          "file": "review.py",
+          "old": "from typing import Any\n",
+          "new": "import copy\nfrom typing import Any\n"
+        },
+        {
+          "file": "review.py",
+          "old": "            verdict = message.body\n",
+          "new": "            verdict = copy.deepcopy(message.body)\n"
+        }
+      ],
+      "expect": "a message carries its body as it was when it was sent"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "a failure drops every queued message from the same actor",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        except Exception as e:\n            self._dead_letter(message, f\"{type(e).__name__}: {e}\")\n            return\n",
+          "new": "        except Exception as e:\n            self._dead_letter(message, f\"{type(e).__name__}: {e}\")\n            self._queue = deque(m for m in self._queue if m.sender != actor.name)\n            return\n"
+        }
+      ],
+      "expect": "one actor crashing does not crash another"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "a failure drops the queued messages sent after the failed one",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        except Exception as e:\n            self._dead_letter(message, f\"{type(e).__name__}: {e}\")\n            return\n",
+          "new": "        except Exception as e:\n            self._dead_letter(message, f\"{type(e).__name__}: {e}\")\n            self._queue = deque(m for m in self._queue if m.mid < message.mid)\n            return\n"
+        }
+      ],
+      "expect": "one actor crashing does not crash another"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "the outbox reset only when the handler returns",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        except Exception as e:\n            self._dead_letter(message, f\"{type(e).__name__}: {e}\")\n            return\n        finally:\n            sent, self._outbox = self._outbox, None\n",
+          "new": "        except Exception as e:\n            self._dead_letter(message, f\"{type(e).__name__}: {e}\")\n            return\n        sent, self._outbox = self._outbox, None\n"
+        }
+      ],
+      "expect": "the runtime keeps delivering after a failure"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "a failed handler's messages queued anyway",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        finally:\n            sent, self._outbox = self._outbox, None\n        for queued in sent:\n            self._enqueue(queued)\n",
+          "new": "        finally:\n            sent, self._outbox = self._outbox, None\n            for queued in sent:\n                self._enqueue(queued)\n"
+        }
+      ],
+      "expect": "a handler that raises sends nothing"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "the failed message dropped instead of dead-lettered",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        except Exception as e:\n            self._dead_letter(message, f\"{type(e).__name__}: {e}\")\n            return\n",
+          "new": "        except Exception:\n            return\n"
+        }
+      ],
+      "expect": "the message whose handler raised is the one dead-lettered"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "the checklist still counts to three",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "            if len(self.results) == len(self.snippets):\n",
+          "new": "            if len(self.results) == 3:\n"
+        }
+      ],
+      "expect": "one failed snippet means no consensus"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "a failed verdict decides at once",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "            self.results[index] = verdict\n",
+          "new": "            self.results[index] = verdict\n            if not verdict[\"ok\"]:\n                self.consensus = False\n"
+        }
+      ],
+      "expect": "a verdict that never comes back leaves the checklist undecided"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "the consensus of all verdicts so far",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "            if len(self.results) == len(self.snippets):\n",
+          "new": "            if True:\n"
+        }
+      ],
+      "expect": "the checklist decides only once every verdict is in"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "subscribers kept in a set",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        self._subscribers.setdefault(topic, {})[name] = None\n",
+          "new": "        self._subscribers.setdefault(topic, set()).add(name)\n"
+        }
+      ],
+      "expect": "subscribers hear a topic once each, in the order they first subscribed"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "subscribers kept in a list",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        self._subscribers.setdefault(topic, {})[name] = None\n",
+          "new": "        self._subscribers.setdefault(topic, []).append(name)\n"
+        }
+      ],
+      "expect": "subscribers hear a topic once each, in the order they first subscribed"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "a fast publish, but subscribe still scans every subscription",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        self._subscribers.setdefault(topic, {})[name] = None\n",
+          "new": "        pairs = self.__dict__.setdefault(\"_pairs\", [])\n        if (topic, name) not in pairs:\n            pairs.append((topic, name))\n            self._subscribers.setdefault(topic, {})[name] = None\n"
+        }
+      ],
+      "expect": "publishing must not slow down as subscriptions grow"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "lengths counted in characters, text written as UTF-8",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "        self._append(b\"M\", message.mid, json.dumps(fields).encode(\"utf-8\"))\n",
+          "new": "        self._append(b\"M\", message.mid, json.dumps(fields, ensure_ascii=False))\n"
+        },
+        {
+          "file": "journal.py",
+          "old": "        self._append(b\"D\", mid, reason.encode(\"utf-8\"))\n",
+          "new": "        self._append(b\"D\", mid, reason)\n"
+        },
+        {
+          "file": "journal.py",
+          "old": "        self._file.write(HEADER.pack(kind, mid, len(payload)) + payload)\n",
+          "new": "        data = payload if isinstance(payload, bytes) else payload.encode(\"utf-8\")\n        self._file.write(HEADER.pack(kind, mid, len(payload)) + data)\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a little-endian header",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "HEADER = struct.Struct(\">cQI\")",
+          "new": "HEADER = struct.Struct(\"<cQI\")"
+        }
+      ],
+      "expect": "a record holds as many payload bytes as its header says"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "the mid in 4 bytes",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "HEADER = struct.Struct(\">cQI\")",
+          "new": "HEADER = struct.Struct(\">cII\")"
+        }
+      ],
+      "expect": "a record holds as many payload bytes as its header says"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "JSON written with sorted keys",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "json.dumps(fields)",
+          "new": "json.dumps(fields, sort_keys=True)"
+        }
+      ],
+      "expect": "what was queued and never handled is queued again, exactly as it was"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a message written as soon as it is sent, inside a handler too",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        if self._outbox is not None:\n            self._outbox.append(message)\n        else:\n            self._enqueue(message)\n        return message.mid\n",
+          "new": "        if self.journal is not None:\n            self.journal.queued(message)\n        if self._outbox is not None:\n            self._outbox.append(message)\n        else:\n            self._queue.append(message)\n        return message.mid\n"
+        },
+        {
+          "file": "runtime.py",
+          "old": "        self._queue.append(message)\n        if self.journal is not None:\n            self.journal.queued(message)\n",
+          "new": "        self._queue.append(message)\n"
+        }
+      ],
+      "expect": "the journal holds what was queued, handled and dead-lettered, in that order, as soon as it happens"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a message marked handled before its handler runs",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        self._outbox = []\n        try:\n",
+          "new": "        if self.journal is not None:\n            self.journal.handled(message.mid)\n        self._outbox = []\n        try:\n"
+        },
+        {
+          "file": "runtime.py",
+          "old": "        for queued in sent:\n            self._enqueue(queued)\n        if self.journal is not None:\n            self.journal.handled(message.mid)\n",
+          "new": "        for queued in sent:\n            self._enqueue(queued)\n"
+        }
+      ],
+      "expect": "the journal holds what was queued, handled and dead-lettered, in that order, as soon as it happens"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a message marked handled before the messages it sent are written",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        for queued in sent:\n            self._enqueue(queued)\n        if self.journal is not None:\n            self.journal.handled(message.mid)\n",
+          "new": "        if self.journal is not None:\n            self.journal.handled(message.mid)\n        for queued in sent:\n            self._enqueue(queued)\n"
+        }
+      ],
+      "expect": "the journal holds what was queued, handled and dead-lettered, in that order, as soon as it happens"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a failed message marked handled as well as dead",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        except Exception as e:\n            self._dead_letter(message, f\"{type(e).__name__}: {e}\")\n            return\n",
+          "new": "        except Exception as e:\n            self._dead_letter(message, f\"{type(e).__name__}: {e}\")\n            self.journal and self.journal.handled(message.mid)\n            return\n"
+        }
+      ],
+      "expect": "the journal holds what was queued, handled and dead-lettered, in that order, as soon as it happens"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "records left in the write buffer",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "        self._file.flush()\n",
+          "new": ""
+        }
+      ],
+      "expect": "the journal holds what was queued, handled and dead-lettered, in that order, as soon as it happens"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "the next mid from the pending messages",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "    return Recovered([messages[mid] for mid in sorted(pending)], dead, top + 1)\n",
+          "new": "    queued = [messages[mid] for mid in sorted(pending)]\n    return Recovered(queued, dead, max((m.mid for m in queued), default=0) + 1)\n"
+        }
+      ],
+      "expect": "mids keep counting across restarts"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "the next mid from the number of queued records",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "dead, top + 1)",
+          "new": "dead, len(messages) + 1)"
+        }
+      ],
+      "expect": "mids keep counting across restarts"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a torn record left in the file",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "        if end < len(data):\n            self._file.truncate(end)\n",
+          "new": ""
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "records read without checking that they are whole",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "    while len(data) - pos >= HEADER.size:\n        kind, mid, size = HEADER.unpack_from(data, pos)\n        end = pos + HEADER.size + size\n        if end > len(data):\n            break\n",
+          "new": "    while pos < len(data):\n        kind, mid, size = HEADER.unpack_from(data, pos)\n        end = pos + HEADER.size + size\n"
+        }
+      ],
+      "expect": "struct.error"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "pending messages sent again on restart",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            self._queue.extend(state.pending)\n            self.dead_letters.extend(state.dead_letters)\n            self._next_mid = state.next_mid\n",
+          "new": "            self.dead_letters.extend(state.dead_letters)\n            self._next_mid = state.next_mid\n            for m in state.pending:\n                self.send(m.sender, m.recipient, m.topic, m.body)\n"
+        }
+      ],
+      "expect": "what was queued and never handled is queued again, exactly as it was"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "dead letters not restored",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            self.dead_letters.extend(state.dead_letters)\n",
+          "new": ""
+        }
+      ],
+      "expect": "dead letters come back with their reasons"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a dead letter's reason written as JSON",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "        self._append(b\"D\", mid, reason.encode(\"utf-8\"))\n",
+          "new": "        self._append(b\"D\", mid, json.dumps(reason).encode(\"utf-8\"))\n"
+        },
+        {
+          "file": "journal.py",
+          "old": "            dead.append((messages[mid], payload.decode(\"utf-8\")))\n",
+          "new": "            dead.append((messages[mid], json.loads(payload)))\n"
+        }
+      ],
+      "expect": "the journal holds what was queued, handled and dead-lettered, in that order, as soon as it happens"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a message for an unknown actor dead-lettered but not written",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            self._dead_letter(message, f\"no actor {message.recipient!r}\")\n",
+          "new": "            self.dead_letters.append((message, f\"no actor {message.recipient!r}\"))\n"
+        }
+      ],
+      "expect": "the journal holds what was queued, handled and dead-lettered, in that order, as soon as it happens"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a dead-lettered message left pending on replay",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "            pending.pop(mid, None)\n            dead.append(",
+          "new": "            dead.append("
+        }
+      ],
+      "expect": "what was queued and never handled is queued again, exactly as it was"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "the runtime catches BaseException too",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        except Exception as e:\n",
+          "new": "        except BaseException as e:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "the journal opened for writing",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "open(path, \"a+b\")",
+          "new": "open(path, \"w+b\")"
+        }
+      ],
+      "expect": "what was queued and never handled is queued again, exactly as it was"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "the journal read from where append mode starts",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "        self._file.seek(0)\n",
+          "new": ""
+        }
+      ],
+      "expect": "what was queued and never handled is queued again, exactly as it was"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "a bad pick falls back to the first participant",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "            return self._after(last), \"unknown\"\n",
+          "new": "            return self.participants[0], \"unknown\"\n"
+        }
+      ],
+      "expect": "a bad pick falls back to whoever follows the last speaker"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "a bad pick falls back by turn number",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "            return self._after(last), \"unknown\"\n",
+          "new": "            return self.participants[len(self._selections) % len(self.participants)], \"unknown\"\n"
+        }
+      ],
+      "expect": "a bad pick falls back to whoever follows the last speaker"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "a bad pick falls back with a rotation of its own",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "            return self._after(last), \"unknown\"\n",
+          "new": "            self._fallbacks = getattr(self, \"_fallbacks\", -1) + 1\n            return self.participants[self._fallbacks % len(self.participants)], \"unknown\"\n"
+        }
+      ],
+      "expect": "a bad pick falls back to whoever follows the last speaker"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the selector's answer not stripped",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        choice = self.selector(list(self._messages), list(self.participants)).strip()\n",
+          "new": "        choice = self.selector(list(self._messages), list(self.participants))\n"
+        }
+      ],
+      "expect": "a bad pick falls back to whoever follows the last speaker"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "names matched without case",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        choice = self.selector(list(self._messages), list(self.participants)).strip()\n",
+          "new": "        choice = self.selector(list(self._messages), list(self.participants)).strip()\n        choice = {p.lower(): p for p in self.participants}.get(choice.lower(), choice)\n"
+        }
+      ],
+      "expect": "a bad pick falls back to whoever follows the last speaker"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the last speaker may always go again",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        if choice == last and not self.allow_repeated_speaker:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "a bad pick falls back to whoever follows the last speaker"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "allow_repeated_speaker ignored",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        if choice == last and not self.allow_repeated_speaker:\n",
+          "new": "        if choice == last:\n"
+        }
+      ],
+      "expect": "allow_repeated_speaker lets the selector pick the last speaker again"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the stop word found inside other words",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        self._stop = re.compile(rf\"\\b{re.escape(stop_word)}\\b\")\n",
+          "new": "        self._stop = re.compile(re.escape(stop_word))\n"
+        }
+      ],
+      "expect": "the rotation goes on until the chat holds max_messages messages, the task included"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the stop word matched in any case",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        self._stop = re.compile(rf\"\\b{re.escape(stop_word)}\\b\")\n",
+          "new": "        self._stop = re.compile(rf\"\\b{re.escape(stop_word)}\\b\", re.IGNORECASE)\n"
+        }
+      ],
+      "expect": "a stop word counts only as a whole word, in its own case"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the task checked for the stop word",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "            self._messages.append((\"user\", message.body))\n            self._next_turn(runtime)\n",
+          "new": "            self._messages.append((\"user\", message.body))\n            if self._stop.search(message.body):\n                self._stop_reason = \"stop_word\"\n                return\n            self._next_turn(runtime)\n"
+        }
+      ],
+      "expect": "the rotation goes on until the chat holds max_messages messages, the task included"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the stop word checked at the end of a round",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "            if self._stop.search(message.body):\n",
+          "new": "            if self._stop.search(message.body) and message.sender == self.participants[-1]:\n"
+        }
+      ],
+      "expect": "the chat stops right after the message with the stop word"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "max_messages counts only the participants' messages",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        if len(self._messages) >= self.max_messages:\n",
+          "new": "        if len(self._messages) - 1 >= self.max_messages:\n"
+        }
+      ],
+      "expect": "the rotation goes on until the chat holds max_messages messages, the task included"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "max_messages checked before the stop word",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "            if self._stop.search(message.body):\n                self._stop_reason = \"stop_word\"\n            else:\n                self._next_turn(runtime)\n",
+          "new": "            if len(self._messages) >= self.max_messages:\n                self._stop_reason = \"max_messages\"\n            elif self._stop.search(message.body):\n                self._stop_reason = \"stop_word\"\n            else:\n                self._next_turn(runtime)\n"
+        }
+      ],
+      "expect": "the stop word wins when both end the chat"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "a stalled chat has no stop reason",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "self._stop_reason or \"stalled\"",
+          "new": "self._stop_reason"
+        }
+      ],
+      "expect": "a participant that fails leaves the chat stalled"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "every said is taken, asked for or not",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        elif message.topic == \"said\" and message.sender == self._waiting:\n",
+          "new": "        elif message.topic == \"said\":\n"
+        }
+      ],
+      "expect": "the rotation goes on until the chat holds max_messages messages, the task included"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the speaker does not hear the latest message",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "[list(m) for m in self._messages]",
+          "new": "[list(m) for m in self._messages[:-1]]"
+        }
+      ],
+      "expect": "a speaker hears the conversation so far"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the conversation sent as tuples",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "[list(m) for m in self._messages]",
+          "new": "list(self._messages)"
+        }
+      ],
+      "expect": "a speaker hears the conversation so far"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the selector handed the manager's own lists",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        choice = self.selector(list(self._messages), list(self.participants)).strip()\n",
+          "new": "        choice = self.selector(self._messages, self.participants).strip()\n"
+        }
+      ],
+      "expect": "the selector sees the conversation so far and the participants in order"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the selector not shown the task",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        choice = self.selector(list(self._messages), list(self.participants)).strip()\n",
+          "new": "        choice = self.selector(list(self._messages[1:]), list(self.participants)).strip()\n"
+        }
+      ],
+      "expect": "the selector sees the conversation so far and the participants in order"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "the length counts characters",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "    ).encode(\"utf-8\")\n    return LENGTH.pack(len(payload)) + payload\n",
+          "new": "    )\n    return LENGTH.pack(len(payload)) + payload.encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "every item is one whole frame"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "non-ASCII text escaped",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "        ensure_ascii=False,\n",
+          "new": "        ensure_ascii=True,\n"
+        }
+      ],
+      "expect": "non-ASCII text travels as UTF-8"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "a little-endian length",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "LENGTH = struct.Struct(\">I\")",
+          "new": "LENGTH = struct.Struct(\"<I\")"
+        }
+      ],
+      "expect": "the stream ended inside a frame"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "the length counts its own four bytes",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "    return LENGTH.pack(len(payload)) + payload\n",
+          "new": "    return LENGTH.pack(len(payload) + LENGTH.size) + payload\n"
+        }
+      ],
+      "expect": "every item is one whole frame"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "a heartbeat read as a message",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "            if size:\n                yield _fields(payload)\n",
+          "new": "            yield _fields(payload)\n"
+        }
+      ],
+      "expect": "Expecting value"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "one frame taken per chunk",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "            if size:\n                yield _fields(payload)\n",
+          "new": "            if size:\n                yield _fields(payload)\n                return\n"
+        }
+      ],
+      "expect": "the stream ended inside a frame"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "each chunk replaces the buffer",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "        self._buffer += chunk\n",
+          "new": "        self._buffer = bytearray(chunk)\n"
+        }
+      ],
+      "expect": "the stream ended inside a frame"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "a chunk's frames delivered together, then the replies",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "            for fields in reader:\n                self.runtime.send(fields[\"sender\"], fields[\"recipient\"], fields[\"topic\"], fields[\"body\"])\n                self.runtime.run_until_idle()\n                for frame in self.take():\n                    yield frame\n",
+          "new": "            for fields in list(reader):\n                self.runtime.send(fields[\"sender\"], fields[\"recipient\"], fields[\"topic\"], fields[\"body\"])\n            self.runtime.run_until_idle()\n            for frame in self.take():\n                yield frame\n"
+        }
+      ],
+      "expect": "a reply goes out right after the frame that caused it"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "replies held until the stream ends",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "            for fields in reader:\n                self.runtime.send(fields[\"sender\"], fields[\"recipient\"], fields[\"topic\"], fields[\"body\"])\n                self.runtime.run_until_idle()\n                for frame in self.take():\n                    yield frame\n        reader.close()\n",
+          "new": "            for fields in reader:\n                self.runtime.send(fields[\"sender\"], fields[\"recipient\"], fields[\"topic\"], fields[\"body\"])\n                self.runtime.run_until_idle()\n        for frame in self.take():\n            yield frame\n        reader.close()\n"
+        }
+      ],
+      "expect": "a reply goes out right after the frame that caused it"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "frames already waiting not sent first",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "        for frame in self.take():\n            yield frame\n        reader = FrameReader()\n",
+          "new": "        reader = FrameReader()\n"
+        }
+      ],
+      "expect": "frames already waiting go out before anything is read"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "the frames waiting at the start sent as one item",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "        for frame in self.take():\n            yield frame\n        reader = FrameReader()\n",
+          "new": "        waiting = self.take()\n        if waiting:\n            yield b\"\".join(waiting)\n        reader = FrameReader()\n"
+        }
+      ],
+      "expect": "every item is one whole frame"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "a stream that ends inside a frame taken as finished",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "                    yield frame\n        reader.close()\n",
+          "new": "                    yield frame\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "payloads used as they parse",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "    fields = json.loads(payload.decode(\"utf-8\"))\n    if not isinstance(fields, dict) or \"body\" not in fields:\n        raise ValueError(\"a frame carries a JSON object with a body\")\n    for key in (\"sender\", \"recipient\", \"topic\"):\n        if not isinstance(fields.get(key), str):\n            raise ValueError(f\"a frame's {key} must be a string\")\n    return fields\n",
+          "new": "    return json.loads(payload.decode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "only the payload's type checked",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "    for key in (\"sender\", \"recipient\", \"topic\"):\n",
+          "new": "    for key in ():\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "every frame of a chunk read before the first is delivered",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "            for fields in reader:\n",
+          "new": "            for fields in list(reader):\n"
+        }
+      ],
+      "expect": "a broken frame is an error, after the frames before it are delivered"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "the other host's mid kept as this host's",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "                self.runtime.send(fields[\"sender\"], fields[\"recipient\"], fields[\"topic\"], fields[\"body\"])\n",
+          "new": "                self.runtime._queue.append(\n                    Message(fields[\"sender\"], fields[\"recipient\"], fields[\"topic\"], fields[\"body\"], fields[\"mid\"])\n                )\n"
+        }
+      ],
+      "expect": "a frame carries its mid on the host that sent it"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "a frame with an empty or null body taken for a heartbeat",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "            for fields in reader:\n",
+          "new": "            for fields in reader:\n                if not fields[\"body\"]:\n                    continue\n"
+        }
+      ],
+      "expect": "one reply frame per answered message"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "take() leaves the frames on the link",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "        self._out.clear()\n",
+          "new": ""
+        }
+      ],
+      "expect": "one reply frame per answered message"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "a parent stops before its children",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        def visit(node: str) -> None:\n            for child in reversed(self._children[node]):\n                visit(child)\n            if node not in self._stopped:\n                self._stopped.add(node)\n                order.append(node)\n                self.actors[node].on_stop(self)\n",
+          "new": "        def visit(node: str) -> None:\n            if node not in self._stopped:\n                self._stopped.add(node)\n                order.append(node)\n                self.actors[node].on_stop(self)\n            for child in reversed(self._children[node]):\n                visit(child)\n"
+        }
+      ],
+      "expect": "children stop before their parent, the youngest first"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "children stop oldest first",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            for child in reversed(self._children[node]):\n",
+          "new": "            for child in self._children[node]:\n"
+        }
+      ],
+      "expect": "children stop before their parent, the youngest first"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "the subtree stopped in reverse spawn order",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        visit(name)\n        return order\n",
+          "new": "        below: set[str] = set()\n\n        def collect(node: str) -> None:\n            below.add(node)\n            for child in self._children[node]:\n                collect(child)\n\n        collect(name)\n        for node in reversed(list(self.actors)):\n            if node in below and node not in self._stopped:\n                self._stopped.add(node)\n                order.append(node)\n                self.actors[node].on_stop(self)\n        return order\n"
+        }
+      ],
+      "expect": "children stop before their parent, the youngest first"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "only the direct children stop",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            for child in reversed(self._children[node]):\n",
+          "new": "            for child in reversed(self._children[node]) if node == name else []:\n"
+        }
+      ],
+      "expect": "children stop before their parent, the youngest first"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "a stopped actor removed from the runtime",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "                self.actors[node].on_stop(self)\n",
+          "new": "                self.actors.pop(node).on_stop(self)\n"
+        }
+      ],
+      "expect": "mail for a stopped actor is dead-lettered as stopped when its turn comes"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "the subtree's mail dead-lettered as soon as it stops",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        visit(name)\n        return order\n",
+          "new": "        visit(name)\n        for queued in [m for m in self._queue if m.recipient in self._stopped]:\n            self._queue.remove(queued)\n            self._dead_letter(queued, \"stopped\")\n        return order\n"
+        }
+      ],
+      "expect": "mail for a stopped actor is dead-lettered as stopped when its turn comes"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "mail for a stopped actor delivered anyway",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        if message.recipient in self._stopped:\n            self._dead_letter(message, \"stopped\")\n            return\n",
+          "new": ""
+        }
+      ],
+      "expect": "mail for a stopped actor is dead-lettered as stopped when its turn comes"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "mail from a stopped actor dropped",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        if message.recipient in self._stopped:\n            self._dead_letter(message, \"stopped\")\n            return\n",
+          "new": "        if message.sender in self._stopped:\n            return\n        if message.recipient in self._stopped:\n            self._dead_letter(message, \"stopped\")\n            return\n"
+        }
+      ],
+      "expect": "mail from actors that have stopped is still delivered"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "an actor that stops itself loses what it sent",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        finally:\n            sent, self._outbox = self._outbox, None\n        for queued in sent:\n            self._enqueue(queued)\n",
+          "new": "        finally:\n            sent, self._outbox = self._outbox, None\n        if message.recipient in self._stopped:\n            sent = []\n        for queued in sent:\n            self._enqueue(queued)\n"
+        }
+      ],
+      "expect": "mail from actors that have stopped is still delivered"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "on_stop runs again for an actor already stopped",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            if node not in self._stopped:\n                self._stopped.add(node)\n                order.append(node)\n                self.actors[node].on_stop(self)\n",
+          "new": "            self._stopped.add(node)\n            order.append(node)\n            self.actors[node].on_stop(self)\n"
+        }
+      ],
+      "expect": "stopping a stopped actor does nothing"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "stop() lists actors that had already stopped",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            if node not in self._stopped:\n                self._stopped.add(node)\n                order.append(node)\n                self.actors[node].on_stop(self)\n",
+          "new": "            order.append(node)\n            if node not in self._stopped:\n                self._stopped.add(node)\n                self.actors[node].on_stop(self)\n"
+        }
+      ],
+      "expect": "stopping a stopped actor does nothing"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "a stopped actor's name taken again",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        if actor.name in self.actors:\n",
+          "new": "        if actor.name in self.actors and actor.name not in self._stopped:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "a stopped parent can still spawn",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        if parent not in self.actors or parent in self._stopped:\n",
+          "new": "        if parent not in self.actors:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "spawn trusts its parent",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        if parent not in self.actors or parent in self._stopped:\n            raise ValueError(f\"no live actor {parent!r} to spawn under\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "stopping an unknown name does nothing",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        if name not in self.actors:\n            raise KeyError(name)\n",
+          "new": "        if name not in self.actors:\n            return []\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "the tree keeps stopped actors",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": " for n in names if n not in self._stopped}",
+          "new": " for n in names}"
+        }
+      ],
+      "expect": "the tree holds the live actors only"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "children listed by name",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "build(self._children[n])",
+          "new": "build(sorted(self._children[n]))"
+        }
+      ],
+      "expect": "actors in the order they started"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "the body copied when the handler returns, not when it sends",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "message = Message(sender, recipient, topic, copy.deepcopy(body), self._next_mid)",
+          "new": "message = Message(sender, recipient, topic, body, self._next_mid)"
+        },
+        {
+          "file": "runtime.py",
+          "old": "    def _enqueue(self, message: Message) -> None:\n        self._queue.append(message)\n",
+          "new": "    def _enqueue(self, message: Message) -> None:\n        message.body = copy.deepcopy(message.body)\n        self._queue.append(message)\n"
+        }
+      ],
+      "expect": "a message carries its body as it was when it was sent"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a record with no payload taken as the end of the journal",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "        if end > len(data):\n            break\n",
+          "new": "        if end > len(data) or size == 0:\n            break\n"
+        }
+      ],
+      "expect": "what was queued and never handled is queued again, exactly as it was"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a dead letter's reason written as latin-1",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "        self._append(b\"D\", mid, reason.encode(\"utf-8\"))\n",
+          "new": "        self._append(b\"D\", mid, reason.encode(\"latin-1\"))\n"
+        },
+        {
+          "file": "journal.py",
+          "old": "            dead.append((messages[mid], payload.decode(\"utf-8\")))\n",
+          "new": "            dead.append((messages[mid], payload.decode(\"latin-1\")))\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the last speaker left out of the selector's choices",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        choice = self.selector(list(self._messages), list(self.participants)).strip()\n",
+          "new": "        choice = self.selector(list(self._messages), [p for p in self.participants if p != last]).strip()\n"
+        }
+      ],
+      "expect": "the selector sees the conversation so far and the participants in order"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the stop word compared with whitespace-separated words",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "            if self._stop.search(message.body):\n",
+          "new": "            if self.stop_word in message.body.split():\n"
+        }
+      ],
+      "expect": "the chat stops right after the message with the stop word"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the chat stops only once it holds more than max_messages",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        if len(self._messages) >= self.max_messages:\n",
+          "new": "        if len(self._messages) > self.max_messages:\n"
+        }
+      ],
+      "expect": "the rotation goes on until the chat holds max_messages messages, the task included"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the first speaker taken from the rotation",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        choice = self.selector(list(self._messages), list(self.participants)).strip()\n",
+          "new": "        if last is None:\n            return self._after(None), \"rotation\"\n        choice = self.selector(list(self._messages), list(self.participants)).strip()\n"
+        }
+      ],
+      "expect": "a bad pick falls back to whoever follows the last speaker"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "a broken frame ends the stream quietly",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "            for fields in reader:\n                self.runtime.send(fields[\"sender\"], fields[\"recipient\"], fields[\"topic\"], fields[\"body\"])\n                self.runtime.run_until_idle()\n                for frame in self.take():\n                    yield frame\n",
+          "new": "            try:\n                for fields in reader:\n                    self.runtime.send(fields[\"sender\"], fields[\"recipient\"], fields[\"topic\"], fields[\"body\"])\n                    self.runtime.run_until_idle()\n                    for frame in self.take():\n                        yield frame\n            except ValueError:\n                return\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "an empty chunk taken for the end of the stream",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "        async for chunk in chunks:\n            reader.feed(chunk)\n",
+          "new": "        async for chunk in chunks:\n            if not chunk:\n                break\n            reader.feed(chunk)\n"
+        }
+      ],
+      "expect": "the stream ended inside a frame"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "the replies to one message sent as one item",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "                for frame in self.take():\n                    yield frame\n",
+          "new": "                frames = self.take()\n                if frames:\n                    yield b\"\".join(frames)\n"
+        }
+      ],
+      "expect": "every item is one whole frame"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "take() hands out the newest frame first",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "        frames = list(self._out)\n",
+          "new": "        frames = list(reversed(self._out))\n"
+        }
+      ],
+      "expect": "one reply frame per answered message"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "children stop in reverse name order",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            for child in reversed(self._children[node]):\n",
+          "new": "            for child in sorted(self._children[node], reverse=True):\n"
+        }
+      ],
+      "expect": "children stop before their parent, the youngest first"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "the whole stream read before the first delivery",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "        async for chunk in chunks:\n            reader.feed(chunk)\n            for fields in reader:\n                self.runtime.send(fields[\"sender\"], fields[\"recipient\"], fields[\"topic\"], fields[\"body\"])\n                self.runtime.run_until_idle()\n                for frame in self.take():\n                    yield frame\n",
+          "new": "        async for chunk in chunks:\n            reader.feed(chunk)\n        for fields in reader:\n            self.runtime.send(fields[\"sender\"], fields[\"recipient\"], fields[\"topic\"], fields[\"body\"])\n            self.runtime.run_until_idle()\n            for frame in self.take():\n                yield frame\n"
+        }
+      ],
+      "expect": "a reply goes out right after the frame that caused it"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "the M payload carries the mid as well",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "        fields = {\n            \"sender\": message.sender,\n",
+          "new": "        fields = {\n            \"mid\": message.mid,\n            \"sender\": message.sender,\n"
+        }
+      ],
+      "expect": "the journal holds what was queued, handled and dead-lettered, in that order, as soon as it happens"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "publish returns nothing",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        return [self.send(sender, name, topic, body) for name in self._subscribers.get(topic, ())]\n",
+          "new": "        [self.send(sender, name, topic, body) for name in self._subscribers.get(topic, ())]\n"
+        }
+      ],
+      "expect": "publish returns the mid of every message it sent"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a message for an unknown actor not counted against max_messages, as in the lesson code",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            handled += 1\n            self._deliver(message)\n",
+          "new": "            if self._deliver(message) is not False:\n                handled += 1\n"
+        },
+        {
+          "file": "runtime.py",
+          "old": "            self._dead_letter(message, f\"no actor {message.recipient!r}\")\n            return\n",
+          "new": "            self._dead_letter(message, f\"no actor {message.recipient!r}\")\n            return False\n"
+        }
+      ],
+      "expect": "the journal holds what was queued, handled and dead-lettered, in that order, as soon as it happens"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "the checklist decides once the highest index it has heard of is in",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "            if len(self.results) == len(self.snippets):\n",
+          "new": "            if len(self.results) == max(self.results) + 1:\n"
+        }
+      ],
+      "expect": "the checklist decides only once every verdict is in"
+    },
+    {
+      "test": "test_runtime_delivery",
+      "name": "a handler's messages committed newest first",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        for queued in sent:\n            self._enqueue(queued)\n",
+          "new": "        for queued in reversed(sent):\n            self._enqueue(queued)\n"
+        }
+      ],
+      "expect": "the reviewer's verdicts stay as it recorded them"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "the next mid from the last record in the journal",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "        top = max(top, mid)\n",
+          "new": "        top = mid\n"
+        }
+      ],
+      "expect": "mids keep counting across restarts"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "the journal opened with r+b, so a record after a torn tail lands past the old end",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "        self._file = open(path, \"a+b\")\n        self._file.seek(0)\n",
+          "new": "        if not os.path.exists(path):\n            open(path, \"wb\").close()\n        self._file = open(path, \"r+b\")\n"
+        }
+      ],
+      "expect": "every record is M, A or D"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "pending messages queued again through _enqueue, which writes their M records again",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            self._queue.extend(state.pending)\n",
+          "new": "            for restored in state.pending:\n                self._enqueue(restored)\n"
+        }
+      ],
+      "expect": "opening a journal adds nothing to it"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "dead letters restored through _dead_letter, which writes their D records again",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            self.dead_letters.extend(state.dead_letters)\n",
+          "new": "            for restored, reason in state.dead_letters:\n                self._dead_letter(restored, reason)\n"
+        }
+      ],
+      "expect": "opening a journal adds nothing to it"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a message for an unknown actor marked handled as well as dead",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            self._dead_letter(message, f\"no actor {message.recipient!r}\")\n            return\n",
+          "new": "            self._dead_letter(message, f\"no actor {message.recipient!r}\")\n            if self.journal is not None:\n                self.journal.handled(message.mid)\n            return\n"
+        }
+      ],
+      "expect": "the journal holds what was queued, handled and dead-lettered, in that order, as soon as it happens"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a record's payload taken as far as the file goes",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "        if end > len(data):\n            break\n",
+          "new": ""
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_journal_recovery",
+      "name": "a crash dead-letters the message on its way out",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        except Exception as e:\n            self._dead_letter(message, f\"{type(e).__name__}: {e}\")\n            return\n",
+          "new": "        except BaseException as e:\n            self._dead_letter(message, f\"{type(e).__name__}: {e}\")\n            if not isinstance(e, Exception):\n                raise\n            return\n"
+        }
+      ],
+      "expect": "a message whose handler never finished is queued again, without what it sent"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the selector's answer matched as a substring",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        if choice not in self.participants:\n            return self._after(last), \"unknown\"\n",
+          "new": "        named = [p for p in self.participants if p in choice]\n        if not named:\n            return self._after(last), \"unknown\"\n        choice = named[0]\n"
+        }
+      ],
+      "expect": "a bad pick falls back to whoever follows the last speaker"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "max_messages checked only after a participant's message",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "            self._messages.append((\"user\", message.body))\n            self._next_turn(runtime)\n",
+          "new": "            self._messages.append((\"user\", message.body))\n            self._turn(runtime)\n"
+        },
+        {
+          "file": "teams.py",
+          "old": "    def _next_turn(self, runtime: Runtime) -> None:\n        if len(self._messages) >= self.max_messages:\n            self._stop_reason = \"max_messages\"\n            return\n",
+          "new": "    def _next_turn(self, runtime: Runtime) -> None:\n        if len(self._messages) >= self.max_messages:\n            self._stop_reason = \"max_messages\"\n            return\n        self._turn(runtime)\n\n    def _turn(self, runtime: Runtime) -> None:\n"
+        }
+      ],
+      "expect": "the task counts toward max_messages"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "run() calls run_until_idle() once, so a chat stops at the runtime's max_messages",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        while self._stop_reason is None and not self.runtime.run_until_idle():\n            pass\n",
+          "new": "        self.runtime.run_until_idle()\n"
+        }
+      ],
+      "expect": "a chat stalls only when the runtime goes idle"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the stop word with a word boundary in front only",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        self._stop = re.compile(rf\"\\b{re.escape(stop_word)}\\b\")\n",
+          "new": "        self._stop = re.compile(rf\"\\b{re.escape(stop_word)}\")\n"
+        }
+      ],
+      "expect": "the rotation goes on until the chat holds max_messages messages, the task included"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the stop word with a word boundary behind only",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        self._stop = re.compile(rf\"\\b{re.escape(stop_word)}\\b\")\n",
+          "new": "        self._stop = re.compile(rf\"{re.escape(stop_word)}\\b\")\n"
+        }
+      ],
+      "expect": "the rotation goes on until the chat holds max_messages messages, the task included"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the stop word has to be the whole message",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "            if self._stop.search(message.body):\n",
+          "new": "            if message.body.strip() == self.stop_word:\n"
+        }
+      ],
+      "expect": "the chat stops right after the message with the stop word"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the stop word matched with re.match",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "            if self._stop.search(message.body):\n",
+          "new": "            if self._stop.match(message.body):\n"
+        }
+      ],
+      "expect": "the chat stops right after the message with the stop word"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "a repeat falls back to the first other participant",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "            return self._after(last), \"repeat\"\n",
+          "new": "            return next(p for p in self.participants if p != last), \"repeat\"\n"
+        }
+      ],
+      "expect": "a bad pick falls back to whoever follows the last speaker"
+    },
+    {
+      "test": "test_group_chat",
+      "name": "the selector shown the conversation as lists",
+      "edits": [
+        {
+          "file": "teams.py",
+          "old": "        choice = self.selector(list(self._messages), list(self.participants)).strip()\n",
+          "new": "        choice = self.selector([list(m) for m in self._messages], list(self.participants)).strip()\n"
+        }
+      ],
+      "expect": "the selector sees the conversation so far and the participants in order"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "frame fields checked for presence, not for type",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "        if not isinstance(fields.get(key), str):\n",
+          "new": "        if key not in fields:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "a stream that ends inside a length header taken as finished",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "        if self._buffer:\n            raise ValueError",
+          "new": "        if len(self._buffer) >= LENGTH.size:\n            raise ValueError"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "a broken frame skipped and its error raised when the stream ends",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "        reader = FrameReader()\n        async for chunk in chunks:\n            reader.feed(chunk)\n            for fields in reader:\n",
+          "new": "        reader = FrameReader()\n        errors = []\n\n        def frames():\n            while True:\n                try:\n                    for fields in reader:\n                        yield fields\n                    return\n                except ValueError as e:\n                    errors.append(e)\n\n        async for chunk in chunks:\n            reader.feed(chunk)\n            for fields in frames():\n"
+        },
+        {
+          "file": "transport.py",
+          "old": "                    yield frame\n        reader.close()\n",
+          "new": "                    yield frame\n        reader.close()\n        if errors:\n            raise errors[0]\n"
+        }
+      ],
+      "expect": "a broken frame is an error, after the frames before it are delivered"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "the frames written so far yielded before the arriving message is handled",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "                self.runtime.send(fields[\"sender\"], fields[\"recipient\"], fields[\"topic\"], fields[\"body\"])\n                self.runtime.run_until_idle()\n                for frame in self.take():\n                    yield frame\n        reader.close()\n",
+          "new": "                self.runtime.send(fields[\"sender\"], fields[\"recipient\"], fields[\"topic\"], fields[\"body\"])\n                for frame in self.take():\n                    yield frame\n                self.runtime.run_until_idle()\n        for frame in self.take():\n            yield frame\n        reader.close()\n"
+        }
+      ],
+      "expect": "a reply goes out right after the frame that caused it"
+    },
+    {
+      "test": "test_link_frames",
+      "name": "a heartbeat answered with a heartbeat",
+      "edits": [
+        {
+          "file": "transport.py",
+          "old": "            if size:\n                yield _fields(payload)\n",
+          "new": "            yield _fields(payload) if size else None\n"
+        },
+        {
+          "file": "transport.py",
+          "old": "            for fields in reader:\n                self.runtime.send(",
+          "new": "            for fields in reader:\n                if fields is None:\n                    yield LENGTH.pack(0)\n                    continue\n                self.runtime.send("
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "stopping an actor that has stopped raises KeyError",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        if name not in self.actors:\n            raise KeyError(name)\n",
+          "new": "        if name not in self.actors or name in self._stopped:\n            raise KeyError(name)\n"
+        }
+      ],
+      "expect": "KeyError: 'parse'"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "the subtree stopped in the reverse order of a stack walk",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        visit(name)\n        return order\n",
+          "new": "        stack, walked = [name], []\n        while stack:\n            node = stack.pop()\n            walked.append(node)\n            stack.extend(self._children[node])\n        for node in reversed(walked):\n            if node not in self._stopped:\n                self._stopped.add(node)\n                order.append(node)\n                self.actors[node].on_stop(self)\n        return order\n"
+        }
+      ],
+      "expect": "children stop before their parent, the youngest first"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "mail for a stopped actor dead-lettered with its name in the reason",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            self._dead_letter(message, \"stopped\")\n",
+          "new": "            self._dead_letter(message, f\"stopped {message.recipient!r}\")\n"
+        }
+      ],
+      "expect": "mail for a stopped actor is dead-lettered as stopped when its turn comes"
+    },
+    {
+      "test": "test_spawn_tree",
+      "name": "top-level actors listed by name",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        return build(self._roots)\n",
+          "new": "        return build(sorted(self._roots))\n"
+        }
+      ],
+      "expect": "actors in the order they started"
+    }
+  ]
+}

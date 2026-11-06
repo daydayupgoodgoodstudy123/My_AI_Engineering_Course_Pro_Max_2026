@@ -1,0 +1,135 @@
+{
+  "lesson": "phases/14-agent-engineering/14-autogen-actor-model",
+  "title": "The Actor Model for Agents — Async Messages and Typed Runtimes",
+  "format": "staged-brownfield",
+  "service": "ActorRT: a stdlib actor runtime after AutoGen v0.4 Core (send only queues, deep-copied messages, a per-handler outbox, a dead-letter queue, topic subscriptions), with the lesson's reviewer and checklist, a binary inbox journal, round-robin and selector group chats on the runtime, length-prefixed frames to actors on another host, and spawn trees with cascading stop",
+  "sources": {
+    "docs/en.md": "d711c64e9a5125ae7cb7b50dfd73abf765f3b3e0d6cef0992da9240fee934ad8",
+    "code/main.py": "93b16901d041a360502796b673c6e288b001397e03f2290556f2bbb59b5770fd"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_runtime_delivery",
+      "kind": "debug",
+      "lesson_anchor": "Actors (private state, inbox, handler; two actors cannot share memory); Why decoupling matters (v0.2's agent_a.chat(agent_b) blocks agent_a until agent_b returns, while v0.4's send(agent_b, msg) puts the message in agent_b's inbox and returns and the runtime delivers later; fault isolation: the runtime catches the failure in B's handler and dead-letters it); Core layer Topic and Key Terms: Topic (named publish-subscribe route); code/main.py Runtime.send, run_until_idle and ChecklistAgent; quiz Q3, Q9, Q11 and Q13",
+      "planted_bugs": [
+        "Runtime.send called inside a handler calls the recipient's receive at once, the v0.2 agent_a.chat(agent_b) way, instead of queuing: the reviewer's TypeError for a snippet that is not text runs up into the checklist's start handler and is dead-lettered against the start message, while the review itself never reaches the dead-letter queue and the snippets after it are never sent; it is raised in ReviewerAgent.receive and caught in run_until_idle, one handler away from the root cause in send",
+        "a handler's sends are queued at once, so a batch that fails after forwarding gamma still delivers it (quiz Q11.2)",
+        "ChecklistAgent declares consensus True while the verdicts that have arrived are ok, and waits for a hard-coded 3 (quiz Q9)",
+        "subscribe dedups against one list of (topic, name) pairs and publish scans every subscription"
+      ],
+      "timing_assert": "8000 subscriptions and 20000 publishes under 0.1 s; the list scan takes 1.3 to 3.4 s on this machine (1.3 to 1.6 s when it is quiet), the topic index 2.6 to 9.1 ms; an index for publish with subscribe still scanning the list takes 0.24 to 0.28 s",
+      "overfix_guard": "send only queues: a try/except around the direct call keeps the dead letter right but still runs the reviewer inside the checklist's handler (a run with max_messages=1 handles both reviews), and catching then re-raising or swallowing gets the dead letters wrong; delivery keeps the order of sending (a newest-first queue, or a handler's messages put ahead of the waiting mail, fails); the deep copy, which the starter already makes, stays guarded: taken when send() is called (the caller appends to its list afterwards and Batcher reuses its buffer, so copies at delivery or at commit fail), one per recipient (one shared copy per publish fails), deep (copy.copy fails) and not dropped once delivery waits for the queue (audit's KeyError: 'id'); dropping is per handler call (clearing the queue by sender or by mid loses the reviewer's queued verdicts and the alpha and beta of the call that returned); the outbox resets after a failure; the index keeps first-subscription order and dedups (set and list fail)"
+    },
+    {
+      "part": 2,
+      "test": "test_journal_recovery",
+      "kind": "model and persistence",
+      "lesson_anchor": "Why decoupling matters: Distribution-ready (inbox + transport); fault isolation and the dead-letter queue (Exercise 1); quiz Q15 (what a runtime needs to recover after a crash)",
+      "exactness": "pending messages and dead letters read back exactly after a crash without close: a body with key order, 2**64 + 1, 0.1 + 0.2, -0.0, True next to 1, nested empties, German and Japanese text and an emoji; mids keep counting across restarts",
+      "traps": [
+        "little-endian header, a 4-byte mid, or lengths counted in characters (the test parses the file with struct)",
+        "M written at send() inside a handler, so the dropped alpha (mid 5) reappears",
+        "A written before the handler runs, or before the messages it sent",
+        "BaseException caught, so a crash in a handler is swallowed",
+        "records left in the write buffer",
+        "next mid from the pending messages, from the number of M records, or from the last record (an A for an older message)",
+        "a torn tail not dropped (struct.error), a payload read as far as the file goes, or the tail dropped but not cut off before the next append (r+b leaves the write position past the cut)",
+        "restored messages sent again with new mids, or restored through the journaling enqueue and dead-letter paths so opening the journal writes M and D records again",
+        "dead letters not restored, a reason written as JSON or latin-1, a no-actor dead letter not written",
+        "sort_keys, the mid inside the M payload, w+b, no seek before reading an a+b file"
+      ],
+      "clarifying_questions": [
+        "flush or fsync",
+        "compaction",
+        "a corrupt record in the middle",
+        "a message handled twice after a crash",
+        "are restored messages new sends"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_group_chat",
+      "kind": "core algorithm",
+      "lesson_anchor": "Three API layers: AgentChat RoundRobinGroupChat and SelectorGroupChat; Topologies (fixed rotation; a selector picks who goes next based on conversation context); Exercise 2; quiz Q12 (APPROVE or max_turns, unknown names from the selector)",
+      "traps": [
+        "a bad pick falls back to participants[0], by turn number, or with a rotation counter of its own instead of after the last speaker",
+        "the selector's answer not stripped, matched without case, or searched for a name as a substring (\"the reviewer\")",
+        "repeats allowed by default, allow_repeated_speaker ignored, or the first turn taken from the rotation",
+        "the stop word as a substring, without case, or as a whitespace-separated token",
+        "the stop word checked once per round, or on the task",
+        "max_messages without the task, checked only after a participant's message (the task alone fills max_messages=1), past the limit, or winning over the stop word",
+        "a stalled chat without its reason, a said nobody asked for counted, or run() calling run_until_idle() once so a 60-message chat ends stalled at the runtime's 100-message cap",
+        "the selector handed the manager's own lists, the last speaker left out of its choices, or the task left out",
+        "the speak body without the latest message, or as tuples"
+      ],
+      "integration": "the team is a manager actor on the runtime; participants are scripted actors, one fails when its script runs out and the chat ends stalled with the failed speak in the dead-letter queue; a 60-message round robin takes 119 runtime messages, more than one run_until_idle() call handles",
+      "clarifying_questions": [
+        "does the selector pick the first speaker",
+        "an unknown name on the first turn",
+        "case of the selector's answer",
+        "does max_messages count the task",
+        "keep running after run_until_idle returns False",
+        "retry a failed participant",
+        "the stop word inside the task"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_link_frames",
+      "kind": "streaming",
+      "lesson_anchor": "Why decoupling matters: Distribution-ready (inbox + transport is the same abstraction whether the actor is in-process or on another host); Use It: custom actor runtime when you need a specific transport; Exercise 3",
+      "wire_format": "length-prefixed frames decided by the test's struct.unpack('>I') parser: a 4-byte big-endian length of the payload, then UTF-8 JSON with mid, sender, recipient, topic and body, non-ASCII as UTF-8; one frame per yielded item; a zero-length frame is a heartbeat",
+      "traps": [
+        "the length in characters, counting its own 4 bytes, or little-endian",
+        "non-ASCII escaped",
+        "a heartbeat parsed as a message, or an empty or null body taken for a heartbeat",
+        "one frame per chunk, the buffer replaced by each chunk, or an empty chunk taken for the end of the stream",
+        "a chunk's frames delivered together, the whole stream read first, or replies held to the end (probe of bytes read and verdicts given)",
+        "two frames of one delivery joined into one item, or the waiting frames sent as one item or after the first read",
+        "the other host's mid kept as this host's",
+        "broken frames as KeyError or TypeError, fields checked for presence but not for type (a null topic delivered), quietly ending the stream, a broken frame skipped and reported at the end (the frame after it delivered), an ending inside a frame or inside its length header ignored, or a whole chunk parsed before the first frame is delivered",
+        "take() keeping its frames or handing out the newest first"
+      ],
+      "clarifying_questions": [
+        "answer a heartbeat",
+        "frames for an unknown local actor",
+        "whose mid",
+        "skip or raise on a broken frame",
+        "compact JSON"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_spawn_tree",
+      "kind": "recursive structure",
+      "lesson_anchor": "Actors: a handler's effects include spawn new actor and stop self; Key Terms: Fault isolation ('let it crash'); the dead-letter queue",
+      "traps": [
+        "a parent stopped before its children, children oldest first, in reverse name order, in reverse global spawn order, as a reversed stack walk, or only the direct children",
+        "stopped actors deleted from the runtime (reason no actor, name reusable)",
+        "the subtree's queued mail dead-lettered at stop time instead of when its turn comes",
+        "mail for a stopped actor delivered, mail from it dropped, or the sends of a handler that stopped its own actor dropped",
+        "on_stop run twice, or stop() listing actors that had already stopped",
+        "a stopped name reused, a stopped or unknown parent accepted, an unknown stop ignored, or a second stop of a stopped actor raising KeyError",
+        "the tree listing stopped actors, or top-level actors or children sorted by name"
+      ],
+      "integration": "the tree grows through grow messages handled by each node, so spawn order differs from pre-order; nodes report their work and their stops to a monitor",
+      "clarifying_questions": [
+        "sibling order on stop",
+        "a spawn in a handler that then raises",
+        "reusing a stopped name",
+        "dead-letter at stop time or on delivery"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1 timing: the suggested list.pop(0) queue cannot meet the 8x margin on both sides. Measured on this machine, a bare pop loop over 60000 queued messages is only 37x slower than a deque (0.33 s against 8.8 ms) and 64x at 120000 (1.37 s), and the runtime's own per-message work would cut that to about 10x to 20x. The quadratic defect is the lesson's Topic instead: subscribe dedups against one list of pairs and publish scans every subscription. The starter's queue is a deque, as in the lesson code.",
+    "Part 1 symptom: the reviewer raises on a snippet that is not text, so with send delivering synchronously inside a handler the error surfaces as a dead letter against the checklist's start message, one handler away from send. The reviewer publishes each verdict on the reviews topic, heard by the checklist and an audit actor; the checklist sends {id, code} reviews, keeps verdicts by index, pops the id and sorts the issues, so the per-recipient deep copy, which the starter already makes, is guarded by audit's KeyError: 'id'. The main assertions are whom a dead letter is charged to and that one actor's failure leaves the other actors' work intact, plus a one-message run that leaves the reviews in the inbox; the order of handling is only a side check.",
+    "Part 2: the record header is binary (a kind byte, an 8-byte mid, a 4-byte length) and the payload depends on the kind (JSON for M, nothing for A, UTF-8 text for D), so the file differs from the Part 4 frames; the exactness also covers recovery itself: what is written when (M at commit, A after the handler's own messages, D on dead-lettering), a crash inside a handler simulated with a BaseException, a torn tail cut back, and the next mid taken from the whole journal.",
+    "Part 3: the team is itself the manager actor and talks to participants only with speak and said messages. The selector also picks the first turn, every turn records a reason (rotation, selector, unknown, repeat), and a chat that goes idle before it stops is stalled. The stop word and max_messages rules are this exam's, documented in teams.py; the lesson only describes a fixed rotation and a selector that picks the next speaker from context.",
+    "Part 4: a Link registers a RemoteActor stand-in for each actor on the other host, so the unchanged checklist and reviewer run across two hosts. serve() is an async generator; added a zero-length heartbeat frame, frames already waiting sent before the first read, mids of the receiving host, and an audit proxy on the far side so one delivery writes two frames.",
+    "Part 5: spawn, stop and tree are Runtime methods. The stop order is post-order with the most recently spawned child first, and the tree grows through messages so that spawn order differs from pre-order and a reverse-spawn-order stop fails."
+  ]
+}
