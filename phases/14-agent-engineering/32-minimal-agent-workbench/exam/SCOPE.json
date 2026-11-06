@@ -1,0 +1,159 @@
+{
+  "lesson": "phases/14-agent-engineering/32-minimal-agent-workbench",
+  "title": "The Minimal Agent Workbench",
+  "format": "staged-brownfield",
+  "service": "Workbench: the three-file minimal workbench (AGENTS.md router, agent_state.json, task_board.json) with the lesson's one-step builder turn and its definition of done, a JSON Lines board whose untouched lines keep their exact text, a picker for priorities, dependencies and the 24-hour stale-state gate, a JSON Patch line per turn for a watcher, and epics read from parent pointers",
+  "sources": {
+    "docs/en.md": "ed33899118e133a6201e503a96d5bd07e54e36616a4586979ea9e5bdc211e980",
+    "code/main.py": "c7bf4dd63148036bd235c692782b06df8897940cc315a15f13d380e337e1e4ed"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_turn_cycle",
+      "kind": "debug",
+      "lesson_anchor": "AGENTS.md definition of done (the acceptance command has exited 0); agent_state.json is the system of record, read every turn; task_board.json is the queue the agent pulls from when state is empty; code/main.py load_state (AgentState(**raw)) and run_one_turn; quiz Q9 (done without running verification), Q11 (TypeError on last_run), Q14 (a crash between the two writes); outputs/skill-minimal-workbench.md (tasks without acceptance become rubber stamps); AGENTS.md is a router, not a manual (deeper docs loaded only when relevant); original AGENTS_MD rule 3 load on demand",
+      "planted_bugs": [
+        "load_state is the lesson's AgentState(**raw), so the last_run and lease keys a newer workbench wrote raise TypeError: unexpected keyword argument 'last_run'; the docstring keeps unknown keys in extra for save_state to write back",
+        "with no active task the pick takes only todo tasks, so the builder task a dead session left in_progress is never taken back; the turn starts T-007 as well and the ValueError 'the builder has 2 tasks in progress: T-007, T-006' surfaces two calls away, in take_turn -> save_board -> check_board",
+        "the definition of done is all(exits.values()), which reads exit code 0 as false: a task whose commands all pass goes down the blocked branch and state.blockers[0] raises IndexError",
+        "after the exit-code fix, all() of no commands is True, so a task without acceptance commands is marked done; the docstring blocks it with '<id> has no acceptance command'",
+        "load_context eagerly enumerates and reads every workspace Markdown document to build a catalog, then selects this turn's explicitly requested context; unrelated files are read on every turn"
+      ],
+      "timing_assert": "20 ordinary context requests in a finite workspace with600 unrelated Markdown documents under0.03s; check_board on8000 normal finished tasks under0.06s remains a supplied-validator health guard",
+      "overfix_guard": "dropping unknown keys clears the TypeError but loses last_run (checked first); making last_run a known field, as quiz Q11's answer does, still raises on lease; a len(set(ids)) check that cannot name the repeated id, or a dict that lets a repeat overwrite, fails the merged-board check; taking back any in_progress task picks the reviewer's R-003; deleting the one-task-in-progress check still starts T-007 instead of taking back T-006; failures judged by code > 0 or code == 1 pass the login tests that a signal killed (exit -9); correct context_paths and read_document supplied; root first, stable normalized request order, no duplicate documents, fresh selected text on the next turn, unrequested non-UTF8 Markdown never read. check_board is correct from starter; its original assertions and wrong fixes guard the provided implementation.",
+      "timing_measured": {
+        "workload": "20 turn context loads, 600 unrelated Markdown files, root plus two requested docs",
+        "slow": [
+          0.6435631248168647,
+          0.6501359168905765,
+          0.6626500410493463
+        ],
+        "fast": [
+          0.0012819578405469656,
+          0.0011922090779989958,
+          0.0013151250313967466
+        ],
+        "limit": 0.03,
+        "slow_min_over_limit": 21.452104160562158,
+        "limit_over_fast_max": 22.811519272915127
+      }
+    },
+    {
+      "part": 2,
+      "test": "test_board_lines",
+      "kind": "model and persistence",
+      "lesson_anchor": "Exercise 3 (migrate task_board.json to JSON Lines so each task is a line and diffs are clean in version control); quiz Q16 (JSON Lines for clean diffs and fewer merge conflicts); the board is a file people and tools edit",
+      "storage": "JSON Lines: one json.dumps(task_to_doc(task)) per line with json's defaults, the lesson's keys first and unknown keys after them, every line ending in a newline; update rewrites only the line of the task that changed",
+      "exactness": "a board with quotes, a backslash, Chinese and a check mark in a goal, an empty goal and acceptance, a negative exit code, checks in their own order and unknown keys holding a list, an int and null loads back equal, from the same instance and a new one; after update, every other line, including a blank line and the hand-written line after it in compact style with its keys in another order and no checks, is byte-for-byte what it was and where it was (difflib.unified_diff with n=0 is the single hunk @@ -3 +3 @@)",
+      "traps": [
+        "lines written with dataclasses.asdict (a nested extra)",
+        "no newline after the last line",
+        "the empty string after the final newline parsed as a line",
+        "a blank line in the middle not skipped (splitlines without a check)",
+        "the board cached in memory",
+        "every line rewritten on update",
+        "the changed line moved to the end of the file",
+        "the line picked by the task's index in load(), which the blank line shifts",
+        "the line found by searching it for the id (R-001 mentions T-002)",
+        "the line found by its canonical id text (misses the hand-written line)",
+        "an unknown id ignored instead of KeyError",
+        "written before the new board is checked",
+        "only the new task checked, not the board it makes (a second builder task in progress)",
+        "load without check_board (two T-004 lines after a merge)"
+      ],
+      "clarifying_questions": [
+        "a line that is not valid JSON",
+        "update of an id that is not in the file",
+        "blank lines"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_pick_next",
+      "kind": "core algorithm",
+      "lesson_anchor": "Exercise 1 (last_run; refuse if older than 24 hours unless an operator confirms); Exercise 2 (priority; always pick the highest priority todo); task owners builder, reviewer, human; quiz Q8 (the lesson's pick ignores owner), Q10 (priority defaults to 0 for old boards; max keeps the first of a tie), Q11 (UTC-aware timestamps, a first run is not refused)",
+      "traps": [
+        "owner ignored (H-001)",
+        "blocked tasks picked (T-002)",
+        "a dependency in progress counted as met (T-003)",
+        "ties going to the later task (T-006)",
+        "ties broken by id (T-010 sits above T-006)",
+        "extra['priority'] without a default",
+        "dependencies validated only for the chosen task",
+        "waiting listing done dependencies",
+        "waiting listing a human todo (H-020)",
+        ">= or whole days at the 24-hour boundary",
+        ".replace(tzinfo=utc) relabelling +02:00 instead of converting it",
+        "a timestamp without an offset taken as UTC or left to raise TypeError",
+        "any confirmation accepted, so an old one lets later stale states through",
+        "a state that never ran refused",
+        "a stale state let through when there is nothing to start"
+      ],
+      "clarifying_questions": [
+        "which way priority sorts",
+        "tasks that depend on each other",
+        "confirming in advance",
+        "a stale state with nothing to start"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_turn_patches",
+      "kind": "streaming",
+      "lesson_anchor": "Build It (the script runs one turn and prints the diff; quiz notes the code never prints it); agent_state.json read every turn and written at the end; Re-run it to see the second turn pick up where the first left off",
+      "wire_format": "one RFC 6902 JSON Patch per turn as json.dumps(patch) + newline, only add, replace and remove, RFC 6901 pointers into {\"agent_state.json\": ..., \"task_board.json\": ...}; decided by the test's endswith/count check, json.loads per line and its own strict applier, compared with the files after every turn",
+      "traps": [
+        "pointer tokens not escaped, or '/' escaped before '~' (acceptance commands with tests/test_login.py and HEAD~1 are keys of checks)",
+        "null sent as remove",
+        "list items removed from the front",
+        "a changed list or the whole document replaced",
+        "every turn run before the first line (the probe reads the files when line 1 arrives)",
+        "each patch diffed against a fresh read before its turn, which drops the edits a person made between turns",
+        "a turn that changes nothing sends no line",
+        "the stream ending once a turn changes nothing",
+        "pretty-printed patches or a missing newline"
+      ],
+      "clarifying_questions": [
+        "a snapshot at the start",
+        "move, copy, test and '-'",
+        "ending the stream once nothing changes"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_epic_rollup",
+      "kind": "tree",
+      "lesson_anchor": "Three files is the floor, not the ceiling; the board says what is in flight, what is blocked and what is up next; epics as parent pointers so the board stays one task per line (Part 2)",
+      "traps": [
+        "children counted with their status on the board instead of their rolled-up status",
+        "in_progress checked before blocked",
+        "done children not counted as started",
+        "conflicts in the order the walk settles them",
+        "the highest-priority leaf anywhere on the board instead of depth first by sibling priority",
+        "siblings in board order",
+        "sibling ties in reverse board order (an explicit stack filled in ascending priority) or by id (T-110 sits after T-113)",
+        "blocked epics skipped",
+        "an epic returned as the next task",
+        "a missing parent read as a root",
+        "tasks on a loop of parents left out or recursed into forever",
+        "a loop of parents reported without naming a task"
+      ],
+      "clarifying_questions": [
+        "two parents",
+        "acceptance on an epic"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part1 stacks unknown state keys, crash-left in_progress recovery and two definition-of-done mistakes (exit code0 truthiness and an empty acceptance list). The recovery error surfaces two calls away in check_board; the validator itself is supplied correct.",
+    "The load_context service extension implements the source's tiny root router and load-on-demand deeper documentation. It returns AGENTS.md plus explicitly requested Markdown paths, normalized/stable-deduplicated by a correct helper, with fresh selected text each turn. Eager whole-workspace catalog reads are newly planted, not a claim the source main.py already has that loader. The workload uses600 ordinary unrelated docs and20 real file-reading context requests; no sleep, artificial helper delay, cross-turn cache or task-priority algorithm. The supplied linear check_board retains its8000 normal-task health assertion and duplicate-id guards.",
+    "The Part1 state/turn guards preserve unknown fields, name duplicate task ids through the correct supplied check_board, and reject taking another owner's in_progress task. Context path security and complete text I/O are supplied correctly; candidate work is selecting only requested documents while keeping later turns fresh.",
+    "Task gains checks (the exit code of each acceptance command from its last run) so the definition of done leaves evidence on the board, and the lesson's prose acceptance for T-002 ('docs/api.md mentions /signup constraints') becomes the command 'grep -q /signup docs/api.md' so every acceptance entry can run.",
+    "Part 2 avoids the U+2028, ensure_ascii and sort_keys traps, which this chapter already uses more than twice; its traps are about keeping untouched lines byte-for-byte and finding the right line.",
+    "Part 3 leaves 'take back your own in_progress task' to Part 1 so it is not tested twice. The operator confirmation is the last_run value the operator looked at, which is how a confirmation counts for one run only: the run writes a new last_run. Part 3 takes last_run as an argument because this version keeps it in AgentState.extra.",
+    "Part 4 diffs against the last document it sent, so edits made between turns reach the watcher; the '/' and '~' keys come from acceptance commands used as keys of checks.",
+    "Part 5 uses parent pointers in extra rather than nested subtasks, so the board stays one task per line. An epic is a task with children, so the plan's empty epic cannot occur; loops of parents take its place, next to a parent that is not on the board."
+  ]
+}

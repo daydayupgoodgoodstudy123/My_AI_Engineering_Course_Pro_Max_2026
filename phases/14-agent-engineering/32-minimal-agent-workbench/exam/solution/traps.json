@@ -1,0 +1,1241 @@
+{
+  "package": "workbench",
+  "tests": [
+    "test_turn_cycle",
+    "test_board_lines",
+    "test_pick_next",
+    "test_turn_patches",
+    "test_epic_rollup"
+  ],
+  "layers": [
+    {
+      "test": "test_turn_cycle",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "unexpected keyword argument 'last_run'"
+        },
+        {
+          "name": "keep unknown state keys",
+          "edits": [
+            {
+              "file": "files.py",
+              "old": "    return AgentState(**raw)\n",
+              "new": "    known = {key: raw[key] for key in STATE_KEYS if key in raw}\n    return AgentState(**known, extra={k: v for k, v in raw.items() if k not in STATE_KEYS})\n"
+            }
+          ],
+          "expect": "the builder has 2 tasks in progress: T-007, T-006"
+        },
+        {
+          "name": "+ take back the task left in progress",
+          "edits": [
+            {
+              "file": "turn.py",
+              "old": "        nxt = next((t for t in board if t.owner == \"builder\" and t.status == \"todo\"), None)\n",
+              "new": "        mine = [t for t in board if t.owner == \"builder\"]\n        nxt = next((t for t in mine if t.status == \"in_progress\"), None) or next(\n            (t for t in mine if t.status == \"todo\"), None\n        )\n"
+            }
+          ],
+          "expect": "IndexError"
+        },
+        {
+          "name": "+ exit code 0 means passed",
+          "edits": [
+            {
+              "file": "turn.py",
+              "old": "    if all(exits.values()):\n",
+              "new": "    if all(code == 0 for code in exits.values()):\n"
+            }
+          ],
+          "expect": "a task without acceptance commands is never done"
+        },
+        {
+          "name": "+ no acceptance command blocks the task",
+          "edits": [
+            {
+              "file": "turn.py",
+              "old": "    if all(code == 0 for code in exits.values()):\n",
+              "new": "    if active.acceptance and all(code == 0 for code in exits.values()):\n"
+            },
+            {
+              "file": "turn.py",
+              "old": "        state.blockers = [f\"{command} exited {code}\" for command, code in exits.items() if code]\n",
+              "new": "        state.blockers = [f\"{command} exited {code}\" for command, code in exits.items() if code] or [\n            f\"{active.id} has no acceptance command\"\n        ]\n"
+            }
+          ],
+          "expect": "load requested context without reading every unrelated workspace document"
+        },
+        {
+          "name": "+ read only requested context documents",
+          "edits": [
+            {
+              "file": "context.py",
+              "old": "    names=context_paths(requested_paths)\n    catalog={path.relative_to(root).as_posix():read_document(root,path.relative_to(root).as_posix()) for path in root.rglob('*.md')}\n    return [(name,catalog[name]) for name in names]\n",
+              "new": "    return [(name,read_document(root,name)) for name in context_paths(requested_paths)]\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_turn_cycle",
+      "name": "unknown state keys dropped instead of kept",
+      "edits": [
+        {
+          "file": "files.py",
+          "old": "    return AgentState(**known, extra={k: v for k, v in raw.items() if k not in STATE_KEYS})\n",
+          "new": "    return AgentState(**known)\n"
+        }
+      ],
+      "expect": "keys this version does not know survive a turn"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "any task in progress taken back, the reviewer's too",
+      "edits": [
+        {
+          "file": "turn.py",
+          "old": "        task = next((t for t in mine if t.status == \"in_progress\"), None)\n",
+          "new": "        task = next((t for t in board if t.status == \"in_progress\"), None)\n"
+        }
+      ],
+      "expect": "the builder first takes back its own task left in progress"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "in_progress and todo taken together in board order",
+      "edits": [
+        {
+          "file": "turn.py",
+          "old": "        task = next((t for t in mine if t.status == \"in_progress\"), None)\n",
+          "new": "        task = next((t for t in mine if t.status in (\"in_progress\", \"todo\")), None)\n"
+        }
+      ],
+      "expect": "the builder has 2 tasks in progress: T-007, T-006"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "only the first acceptance command runs",
+      "edits": [
+        {
+          "file": "turn.py",
+          "old": "    exits = {command: run(command) for command in active.acceptance}\n",
+          "new": "    exits = {command: run(command) for command in active.acceptance[:1]}\n"
+        }
+      ],
+      "expect": "every acceptance command runs and its exit code is recorded"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "stops at the first failing command",
+      "edits": [
+        {
+          "file": "turn.py",
+          "old": "    exits = {command: run(command) for command in active.acceptance}\n",
+          "new": "    exits = {}\n    for command in active.acceptance:\n        exits[command] = run(command)\n        if exits[command] != 0:\n            break\n"
+        }
+      ],
+      "expect": "every acceptance command runs and its exit code is recorded"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "a failing task stays in progress",
+      "edits": [
+        {
+          "file": "turn.py",
+          "old": "    active.status = \"blocked\" if failures else \"done\"\n",
+          "new": "    active.status = \"in_progress\" if failures else \"done\"\n"
+        }
+      ],
+      "expect": "a failing acceptance command blocks the task"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "blockers carried into the next task",
+      "edits": [
+        {
+          "file": "turn.py",
+          "old": "        state.blockers = []\n",
+          "new": ""
+        }
+      ],
+      "expect": "a new task starts with no blockers"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "faster id check that cannot name the repeat",
+      "edits": [
+        {
+          "file": "files.py",
+          "old": "        if task.id in seen:\n            raise ValueError(f\"task id {task.id} appears more than once\")\n        seen.add(task.id)\n",
+          "new": ""
+        },
+        {
+          "file": "files.py",
+          "old": "    working = [t.id for t in board",
+          "new": "    if len({t.id for t in board}) != len(board):\n        raise ValueError(\"task ids are not unique\")\n    working = [t.id for t in board"
+        }
+      ],
+      "expect": "name the repeated id"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "repeats left unchecked once ids live in a dict",
+      "edits": [
+        {
+          "file": "files.py",
+          "old": "        if task.id in seen:\n            raise ValueError(f\"task id {task.id} appears more than once\")\n        seen.add(task.id)\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "id list built once but still counted per task",
+      "edits": [
+        {
+          "file": "files.py",
+          "old": "    seen: set[str] = set()\n",
+          "new": "    ids = [t.id for t in board]\n"
+        },
+        {
+          "file": "files.py",
+          "old": "        if task.id in seen:\n",
+          "new": "        if ids.count(task.id) > 1:\n"
+        },
+        {
+          "file": "files.py",
+          "old": "        seen.add(task.id)\n",
+          "new": ""
+        }
+      ],
+      "expect": "checking a long board should be fast"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "last_run made a known state field, as in quiz Q11",
+      "edits": [
+        {
+          "file": "files.py",
+          "old": "    next_action: str = \"\"\n    extra: dict[str, Any] = field(default_factory=dict)\n",
+          "new": "    next_action: str = \"\"\n    last_run: str | None = None\n    extra: dict[str, Any] = field(default_factory=dict)\n"
+        },
+        {
+          "file": "files.py",
+          "old": "STATE_KEYS = (\"active_task_id\", \"touched_files\", \"assumptions\", \"blockers\", \"next_action\")",
+          "new": "STATE_KEYS = (\"active_task_id\", \"touched_files\", \"assumptions\", \"blockers\", \"next_action\", \"last_run\")"
+        },
+        {
+          "file": "files.py",
+          "old": "    known = {key: raw[key] for key in STATE_KEYS if key in raw}\n    return AgentState(**known, extra={k: v for k, v in raw.items() if k not in STATE_KEYS})\n",
+          "new": "    return AgentState(**raw)\n"
+        }
+      ],
+      "expect": "unexpected keyword argument 'lease'"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "the one-task-in-progress check removed instead of taking the task back",
+      "edits": [
+        {
+          "file": "turn.py",
+          "old": "        task = next((t for t in mine if t.status == \"in_progress\"), None)\n",
+          "new": "        task = None\n"
+        },
+        {
+          "file": "files.py",
+          "old": "    if len(working) > 1:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "the builder first takes back its own task left in progress"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "only positive exit codes count as failures",
+      "edits": [
+        {
+          "file": "turn.py",
+          "old": "if code != 0]",
+          "new": "if code > 0]"
+        }
+      ],
+      "expect": "a failing acceptance command blocks the task"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "only exit code 1 counts as a failure",
+      "edits": [
+        {
+          "file": "turn.py",
+          "old": "if code != 0]",
+          "new": "if code == 1]"
+        }
+      ],
+      "expect": "a failing acceptance command blocks the task"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "lines written with dataclasses.asdict",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "        text = \"\".join(json.dumps(task_to_doc(task)) + \"\\n\" for task in board)\n",
+          "new": "        text = \"\".join(json.dumps(__import__(\"dataclasses\").asdict(task)) + \"\\n\" for task in board)\n"
+        }
+      ],
+      "expect": "one task per line: the lesson's keys in order, then the task's other keys"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "lines joined without a final newline",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "        text = \"\".join(json.dumps(task_to_doc(task)) + \"\\n\" for task in board)\n",
+          "new": "        text = \"\\n\".join(json.dumps(task_to_doc(task)) for task in board)\n"
+        }
+      ],
+      "expect": "every line ends with a newline"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "the board kept in memory after save",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "        self.path.write_text(text, encoding=\"utf-8\")\n",
+          "new": "        self.path.write_text(text, encoding=\"utf-8\")\n        self._cached = list(board)\n"
+        },
+        {
+          "file": "lines.py",
+          "old": "        board = [task_from_doc(json.loads(line)) for line in self._lines() if line.strip()]\n        check_board(board)\n        return board\n",
+          "new": "        if getattr(self, \"_cached\", None) is not None:\n            return self._cached\n        board = [task_from_doc(json.loads(line)) for line in self._lines() if line.strip()]\n        check_board(board)\n        return board\n"
+        }
+      ],
+      "expect": "the file is read every time"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "the empty string after the last newline parsed as a line",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "for line in self._lines() if line.strip()]\n        check_board(board)\n        return board\n",
+          "new": "for line in self._lines()]\n        check_board(board)\n        return board\n"
+        }
+      ],
+      "expect": "Expecting value"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "update rewrites every line",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "        lines[position] = json.dumps(task_to_doc(task))\n        self.path.write_text(\"\\n\".join(lines), encoding=\"utf-8\")\n",
+          "new": "        self.save(board)\n"
+        }
+      ],
+      "expect": "changing one task rewrites that task's line and no other"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "the line found by searching it for the id",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "            if stored.id == task.id:\n",
+          "new": "            if task.id in line and position is None:\n"
+        }
+      ],
+      "expect": "task id T-002 appears more than once"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "the line found by its canonical id text",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "            if stored.id == task.id:\n",
+          "new": "            if f'\"id\": \"{task.id}\"' in line:\n"
+        }
+      ],
+      "expect": "KeyError: 'T-003'"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "an unknown id ignored",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "        if position is None:\n            raise KeyError(task.id)\n",
+          "new": "        if position is None:\n            return\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "written before the board is checked",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "        check_board(board)\n        lines[position] = json.dumps(task_to_doc(task))\n        self.path.write_text(\"\\n\".join(lines), encoding=\"utf-8\")\n",
+          "new": "        lines[position] = json.dumps(task_to_doc(task))\n        self.path.write_text(\"\\n\".join(lines), encoding=\"utf-8\")\n        check_board(board)\n"
+        }
+      ],
+      "expect": "a change that breaks the board writes nothing"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "load does not check the board",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "        board = [task_from_doc(json.loads(line)) for line in self._lines() if line.strip()]\n        check_board(board)\n",
+          "new": "        board = [task_from_doc(json.loads(line)) for line in self._lines() if line.strip()]\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "lines read with splitlines and blank lines kept",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "        board = [task_from_doc(json.loads(line)) for line in self._lines() if line.strip()]\n",
+          "new": "        board = [task_from_doc(json.loads(line)) for line in self.path.read_text(encoding=\"utf-8\").splitlines()]\n"
+        }
+      ],
+      "expect": "Expecting value"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "the line picked by the task's index in load()",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "        lines = self._lines()\n        board: list[Task] = []\n        position = None\n        for index, line in enumerate(lines):\n            if not line.strip():\n                continue\n            stored = task_from_doc(json.loads(line))\n            if stored.id == task.id:\n                position, stored = index, task\n            board.append(stored)\n        if position is None:\n            raise KeyError(task.id)\n        check_board(board)\n        lines[position] = json.dumps(task_to_doc(task))\n",
+          "new": "        board = self.load()\n        ids = [t.id for t in board]\n        if task.id not in ids:\n            raise KeyError(task.id)\n        position = ids.index(task.id)\n        board[position] = task\n        check_board(board)\n        lines = self._lines()\n        lines[position] = json.dumps(task_to_doc(task))\n"
+        }
+      ],
+      "expect": "a hand-written line becomes a normal line once its task changes"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "update checks only the new task",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "        check_board(board)\n        lines[position] = json.dumps(task_to_doc(task))\n",
+          "new": "        check_board([task])\n        lines[position] = json.dumps(task_to_doc(task))\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "update writes a second final newline",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "        self.path.write_text(\"\\n\".join(lines), encoding=\"utf-8\")\n",
+          "new": "        self.path.write_text(\"\\n\".join(lines) + \"\\n\", encoding=\"utf-8\")\n"
+        }
+      ],
+      "expect": "changing one task rewrites that task's line and no other"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "load sorts the tasks by id",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "        check_board(board)\n        return board\n",
+          "new": "        check_board(board)\n        return sorted(board, key=lambda t: t.id)\n"
+        }
+      ],
+      "expect": "a board round-trips exactly"
+    },
+    {
+      "test": "test_board_lines",
+      "name": "update moves the changed line to the end",
+      "edits": [
+        {
+          "file": "lines.py",
+          "old": "        lines[position] = json.dumps(task_to_doc(task))\n",
+          "new": "        del lines[position]\n        lines.insert(len(lines) - 1, json.dumps(task_to_doc(task)))\n"
+        }
+      ],
+      "expect": "changing one task rewrites that task's line and no other"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "owner ignored",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "        if task.owner != \"builder\" or task.status != \"todo\":\n",
+          "new": "        if task.status != \"todo\":\n"
+        }
+      ],
+      "expect": "the builder's highest-priority todo whose dependencies are done, board order on ties"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "any open task counts, blocked included",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "        if task.owner != \"builder\" or task.status != \"todo\":\n",
+          "new": "        if task.owner != \"builder\" or task.status == \"done\":\n"
+        }
+      ],
+      "expect": "the builder's highest-priority todo whose dependencies are done, board order on ties"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "ties go to the later task",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "task.extra.get(\"priority\", 0) > best.extra.get(\"priority\", 0):\n",
+          "new": "task.extra.get(\"priority\", 0) >= best.extra.get(\"priority\", 0):\n"
+        }
+      ],
+      "expect": "the builder's highest-priority todo whose dependencies are done, board order on ties"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "a dependency in progress counts as met",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "if by_id[dep].status != \"done\"]",
+          "new": "if by_id[dep].status not in (\"done\", \"in_progress\")]"
+        }
+      ],
+      "expect": "the builder's highest-priority todo whose dependencies are done, board order on ties"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "waiting lists every dependency",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "        if pending:\n            waiting[task.id] = pending\n",
+          "new": "        if pending:\n            waiting[task.id] = list(task.extra[\"depends_on\"])\n"
+        }
+      ],
+      "expect": "idle says what each builder todo is still waiting for"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "a dependency that is not on the board ignored",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "    for task in board:\n        for dep in task.extra.get(\"depends_on\", []):\n            if dep not in by_id:\n                raise ValueError(f\"{task.id} depends on {dep}, which is not on the board\")\n",
+          "new": ""
+        },
+        {
+          "file": "picker.py",
+          "old": "if by_id[dep].status != \"done\"]",
+          "new": "if dep in by_id and by_id[dep].status != \"done\"]"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "exactly 24 hours counted as stale",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "        if now - moment > STALE_AFTER and confirm != last_run:\n",
+          "new": "        if now - moment >= STALE_AFTER and confirm != last_run:\n"
+        }
+      ],
+      "expect": "exactly 24 hours old is not stale yet"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "age counted in whole days",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "        if now - moment > STALE_AFTER and confirm != last_run:\n",
+          "new": "        if (now - moment).days >= 1 and confirm != last_run:\n"
+        }
+      ],
+      "expect": "exactly 24 hours old is not stale yet"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "any confirmation lets a stale state through",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "and confirm != last_run:\n",
+          "new": "and confirm is None:\n"
+        }
+      ],
+      "expect": "a confirmation covers the state it named, not the next one"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "the offset relabelled as UTC instead of converted",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "        moment = datetime.fromisoformat(last_run)\n",
+          "new": "        moment = datetime.fromisoformat(last_run).replace(tzinfo=__import__(\"datetime\").timezone.utc)\n"
+        }
+      ],
+      "expect": "10:30 at UTC+2 is 24.5 hours before now"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "a timestamp without an offset taken as UTC",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "            raise ValueError(f\"last_run {last_run!r} has no UTC offset\")\n",
+          "new": "            moment = moment.replace(tzinfo=__import__(\"datetime\").timezone.utc)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "ties broken by id",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "        elif best is None or task.extra.get(\"priority\", 0) > best.extra.get(\"priority\", 0):\n",
+          "new": "        elif best is None or (-task.extra.get(\"priority\", 0), task.id) < (-best.extra.get(\"priority\", 0), best.id):\n"
+        }
+      ],
+      "expect": "board order on ties"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "extra['priority'] without a default",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "task.extra.get(\"priority\", 0) > best.extra.get(\"priority\", 0)",
+          "new": "task.extra[\"priority\"] > best.extra[\"priority\"]"
+        }
+      ],
+      "expect": "KeyError: 'priority'"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "dependencies checked only for the chosen task",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "    for task in board:\n        for dep in task.extra.get(\"depends_on\", []):\n            if dep not in by_id:\n                raise ValueError(f\"{task.id} depends on {dep}, which is not on the board\")\n",
+          "new": ""
+        },
+        {
+          "file": "picker.py",
+          "old": "if by_id[dep].status != \"done\"]",
+          "new": "if dep in by_id and by_id[dep].status != \"done\"]"
+        },
+        {
+          "file": "picker.py",
+          "old": "    if best is not None:\n        return Decision(\"start\", best.id)\n",
+          "new": "    if best is not None:\n        for dep in best.extra.get(\"depends_on\", []):\n            if dep not in by_id:\n                raise ValueError(dep)\n        return Decision(\"start\", best.id)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "owner checked after the waiting list",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "        if task.owner != \"builder\" or task.status != \"todo\":\n            continue\n        pending = [dep for dep in task.extra.get(\"depends_on\", []) if by_id[dep].status != \"done\"]\n        if pending:\n            waiting[task.id] = pending\n        elif best",
+          "new": "        if task.status != \"todo\":\n            continue\n        pending = [dep for dep in task.extra.get(\"depends_on\", []) if by_id[dep].status != \"done\"]\n        if pending:\n            waiting[task.id] = pending\n        elif task.owner != \"builder\":\n            continue\n        elif best"
+        }
+      ],
+      "expect": "idle says what each builder todo is still waiting for"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "sorted by priority and the last one taken",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "    if best is not None:\n        return Decision(\"start\", best.id)\n",
+          "new": "    ready = [t for t in board if t.owner == \"builder\" and t.status == \"todo\" and t.id not in waiting]\n    if ready:\n        return Decision(\"start\", sorted(ready, key=lambda t: t.extra.get(\"priority\", 0))[-1].id)\n"
+        }
+      ],
+      "expect": "board order on ties"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "a stale state refused only when there is a task to start",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "    if last_run is not None:\n        moment = datetime.fromisoformat(last_run)\n        if moment.tzinfo is None:\n            raise ValueError(f\"last_run {last_run!r} has no UTC offset\")\n        if now - moment > STALE_AFTER and confirm != last_run:\n            return Decision(\"refuse\")\n",
+          "new": "    stale = False\n    if last_run is not None:\n        moment = datetime.fromisoformat(last_run)\n        if moment.tzinfo is None:\n            raise ValueError(f\"last_run {last_run!r} has no UTC offset\")\n        stale = now - moment > STALE_AFTER and confirm != last_run\n"
+        },
+        {
+          "file": "picker.py",
+          "old": "    if best is not None:\n        return Decision(\"start\", best.id)\n",
+          "new": "    if best is not None:\n        if stale:\n            return Decision(\"refuse\")\n        return Decision(\"start\", best.id)\n"
+        }
+      ],
+      "expect": "a stale state is refused even when there is nothing to start"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "a timestamp without an offset left to raise TypeError",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "        if moment.tzinfo is None:\n            raise ValueError(f\"last_run {last_run!r} has no UTC offset\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "a state that never ran refused",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "    if last_run is not None:\n",
+          "new": "    if last_run is None:\n        return Decision(\"refuse\")\n    if last_run is not None:\n"
+        }
+      ],
+      "expect": "the builder's highest-priority todo whose dependencies are done"
+    },
+    {
+      "test": "test_pick_next",
+      "name": "age rounded to whole hours",
+      "edits": [
+        {
+          "file": "picker.py",
+          "old": "        if now - moment > STALE_AFTER and confirm != last_run:\n",
+          "new": "        if round((now - moment).total_seconds() / 3600) > 24 and confirm != last_run:\n"
+        }
+      ],
+      "expect": "a state more than 24 hours old needs an operator"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "keys not escaped",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "    return key.replace(\"~\", \"~0\").replace(\"/\", \"~1\")\n",
+          "new": "    return key\n"
+        }
+      ],
+      "expect": "one operation per changed value, in document order, on escaped JSON Pointers"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "slashes escaped before tildes",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "    return key.replace(\"~\", \"~0\").replace(\"/\", \"~1\")\n",
+          "new": "    return key.replace(\"/\", \"~1\").replace(\"~\", \"~0\")\n"
+        }
+      ],
+      "expect": "one operation per changed value, in document order, on escaped JSON Pointers"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "null treated as a removal",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "    elif type(before) is not type(after) or before != after:\n",
+          "new": "    elif after is None:\n        ops.append({\"op\": \"remove\", \"path\": path})\n    elif type(before) is not type(after) or before != after:\n"
+        }
+      ],
+      "expect": "one operation per changed value, in document order, on escaped JSON Pointers"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "list items removed from the front",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "        for index in range(len(before) - 1, shared - 1, -1):\n",
+          "new": "        for index in range(shared, len(before)):\n"
+        }
+      ],
+      "expect": "one operation per changed value, in document order, on escaped JSON Pointers"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "a changed list replaced whole",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "    elif isinstance(before, list) and isinstance(after, list):\n",
+          "new": "    elif isinstance(before, list) and isinstance(after, list) and before == after:\n"
+        }
+      ],
+      "expect": "one operation per changed value, in document order, on escaped JSON Pointers"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "the whole document replaced when anything changed",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "    ops: list[dict[str, Any]] = []\n    _compare(before, after, \"\", ops)\n    return ops\n",
+          "new": "    return [] if before == after else [{\"op\": \"replace\", \"path\": \"\", \"value\": after}]\n"
+        }
+      ],
+      "expect": "one operation per changed value, in document order, on escaped JSON Pointers"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "every turn run before the first line",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "    sent = workbench_document(root)\n    for _ in range(turns):\n        take_turn(root, run)\n        current = workbench_document(root)\n        yield json.dumps(diff(sent, current)) + \"\\n\"\n        sent = current\n",
+          "new": "    sent = workbench_document(root)\n    lines = []\n    for _ in range(turns):\n        take_turn(root, run)\n        current = workbench_document(root)\n        lines.append(json.dumps(diff(sent, current)) + \"\\n\")\n        sent = current\n    yield from lines\n"
+        }
+      ],
+      "expect": "yield each patch as soon as its turn ends"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "each patch taken against a fresh read before the turn",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "        take_turn(root, run)\n        current = workbench_document(root)\n",
+          "new": "        sent = workbench_document(root)\n        take_turn(root, run)\n        current = workbench_document(root)\n"
+        }
+      ],
+      "expect": "patch 5 brings the watcher up to date"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "a turn that changes nothing sends nothing",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "        yield json.dumps(diff(sent, current)) + \"\\n\"\n",
+          "new": "        if diff(sent, current):\n            yield json.dumps(diff(sent, current)) + \"\\n\"\n"
+        }
+      ],
+      "expect": "a turn that changes nothing still sends []"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "patches pretty-printed",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "        yield json.dumps(diff(sent, current)) + \"\\n\"\n",
+          "new": "        yield json.dumps(diff(sent, current), indent=2) + \"\\n\"\n"
+        }
+      ],
+      "expect": "one patch per line"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "no newline after a patch",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "        yield json.dumps(diff(sent, current)) + \"\\n\"\n",
+          "new": "        yield json.dumps(diff(sent, current))\n"
+        }
+      ],
+      "expect": "one patch per line"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "extra list items removed at one index",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "        for index in range(len(before) - 1, shared - 1, -1):\n            ops.append({\"op\": \"remove\", \"path\": f\"{path}/{index}\"})\n",
+          "new": "        for index in range(shared, len(before)):\n            ops.append({\"op\": \"remove\", \"path\": f\"{path}/{shared}\"})\n"
+        }
+      ],
+      "expect": "one operation per changed value, in document order, on escaped JSON Pointers"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "added keys in sorted order",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "        for key, value in after.items():\n            if key not in before:",
+          "new": "        for key, value in sorted(after.items()):\n            if key not in before:"
+        }
+      ],
+      "expect": "one operation per changed value, in document order, on escaped JSON Pointers"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "the sent document read again after the line is yielded",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "        yield json.dumps(diff(sent, current)) + \"\\n\"\n        sent = current\n",
+          "new": "        yield json.dumps(diff(sent, current)) + \"\\n\"\n        sent = workbench_document(root)\n"
+        }
+      ],
+      "expect": "patch 5 brings the watcher up to date"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "the stream ends after the first empty patch",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "        yield json.dumps(diff(sent, current)) + \"\\n\"\n        sent = current\n",
+          "new": "        patch = diff(sent, current)\n        yield json.dumps(patch) + \"\\n\"\n        sent = current\n        if not patch:\n            return\n"
+        }
+      ],
+      "expect": "a turn that changes nothing still sends []"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "documents built from the returned objects with asdict",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "        take_turn(root, run)\n        current = workbench_document(root)\n",
+          "new": "        state, board = take_turn(root, run)\n        from dataclasses import asdict\n        current = {STATE_FILE: asdict(state), BOARD_FILE: [asdict(t) for t in board]}\n"
+        }
+      ],
+      "expect": "patch 1 brings the watcher up to date"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "appended items added at '-'",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "            ops.append({\"op\": \"add\", \"path\": f\"{path}/{index}\", \"value\": after[index]})\n",
+          "new": "            ops.append({\"op\": \"add\", \"path\": f\"{path}/-\", \"value\": after[index]})\n"
+        }
+      ],
+      "expect": "one operation per changed value, in document order, on escaped JSON Pointers"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "the next turn run before a line is yielded",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "    sent = workbench_document(root)\n    for _ in range(turns):\n        take_turn(root, run)\n        current = workbench_document(root)\n        yield json.dumps(diff(sent, current)) + \"\\n\"\n        sent = current\n",
+          "new": "    sent = workbench_document(root)\n    pending = None\n    for _ in range(turns):\n        take_turn(root, run)\n        current = workbench_document(root)\n        line = json.dumps(diff(sent, current)) + \"\\n\"\n        sent = current\n        if pending is not None:\n            yield pending\n        pending = line\n    if pending is not None:\n        yield pending\n"
+        }
+      ],
+      "expect": "yield each patch as soon as its turn ends"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "only '/' escaped",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "    return key.replace(\"~\", \"~0\").replace(\"/\", \"~1\")\n",
+          "new": "    return key.replace(\"/\", \"~1\")\n"
+        }
+      ],
+      "expect": "one operation per changed value, in document order, on escaped JSON Pointers"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "only '~' escaped",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "    return key.replace(\"~\", \"~0\").replace(\"/\", \"~1\")\n",
+          "new": "    return key.replace(\"~\", \"~0\")\n"
+        }
+      ],
+      "expect": "one operation per changed value, in document order, on escaped JSON Pointers"
+    },
+    {
+      "test": "test_turn_patches",
+      "name": "removed keys sent before the compared ones",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "        for key, value in before.items():\n            child = f\"{path}/{_token(key)}\"\n            if key in after:\n                _compare(value, after[key], child, ops)\n            else:\n                ops.append({\"op\": \"remove\", \"path\": child})\n",
+          "new": "        for key in before:\n            if key not in after:\n                ops.append({\"op\": \"remove\", \"path\": f\"{path}/{_token(key)}\"})\n        for key, value in before.items():\n            if key in after:\n                _compare(value, after[key], f\"{path}/{_token(key)}\", ops)\n"
+        }
+      ],
+      "expect": "one operation per changed value, in document order, on escaped JSON Pointers"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "children counted with their status on the board",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "        below = [settle(kid) for kid in kids]\n",
+          "new": "        below = [settle(kid) and kid.status for kid in kids]\n"
+        }
+      ],
+      "expect": "an epic is done when everything under it is, blocked when anything is, in progress once work started"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "in progress checked before blocked",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "        elif \"blocked\" in below:\n            result = \"blocked\"\n        elif \"in_progress\" in below or \"done\" in below:\n            result = \"in_progress\"\n",
+          "new": "        elif \"in_progress\" in below or \"done\" in below:\n            result = \"in_progress\"\n        elif \"blocked\" in below:\n            result = \"blocked\"\n"
+        }
+      ],
+      "expect": "an epic is done when everything under it is, blocked when anything is, in progress once work started"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "done children do not count as started",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "        elif \"in_progress\" in below or \"done\" in below:\n",
+          "new": "        elif \"in_progress\" in below:\n"
+        }
+      ],
+      "expect": "an epic is done when everything under it is, blocked when anything is, in progress once work started"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "conflicts in the order the walk settles them",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "    rolled: dict[str, str] = {}\n",
+          "new": "    rolled: dict[str, str] = {}\n    settled: list[tuple[str, str, str]] = []\n"
+        },
+        {
+          "file": "epics.py",
+          "old": "        rolled[task.id] = result\n        return result\n",
+          "new": "        rolled[task.id] = result\n        if task.status != result:\n            settled.append((task.id, task.status, result))\n        return result\n"
+        },
+        {
+          "file": "epics.py",
+          "old": "        conflicts=[\n            (task.id, task.status, rolled[task.id])\n            for task in board\n            if children[task.id] and task.status != rolled[task.id]\n        ],\n",
+          "new": "        conflicts=settled,\n"
+        }
+      ],
+      "expect": "every epic whose own status disagrees, in board order"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "the highest-priority leaf anywhere on the board",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "        next_leaf=walk(roots),\n",
+          "new": "        next_leaf=max(\n            (t.id for t in board if not children[t.id] and t.owner == \"builder\" and t.status == \"todo\"),\n            key=lambda i: by_id[i].extra.get(\"priority\", 0),\n            default=None,\n        ),\n"
+        }
+      ],
+      "expect": "depth first, the most important branch first, even when it is blocked"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "blocked epics skipped",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "                found = walk(children[task.id])\n",
+          "new": "                found = None if rolled[task.id] == \"blocked\" else walk(children[task.id])\n"
+        }
+      ],
+      "expect": "depth first, the most important branch first, even when it is blocked"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "siblings taken in board order",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "        for task in sorted(tasks, key=lambda t: -t.extra.get(\"priority\", 0)):\n",
+          "new": "        for task in tasks:\n"
+        }
+      ],
+      "expect": "depth first, the most important branch first, even when it is blocked"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "an epic itself returned as the next task",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "            if children[task.id]:\n                found = walk(children[task.id])\n                if found is not None:\n                    return found\n            elif task.owner == \"builder\" and task.status == \"todo\":\n                return task.id\n",
+          "new": "            if task.owner == \"builder\" and task.status == \"todo\":\n                return task.id\n            if children[task.id]:\n                found = walk(children[task.id])\n                if found is not None:\n                    return found\n"
+        }
+      ],
+      "expect": "depth first, the most important branch first, even when it is blocked"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "a missing parent read as a root",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "            raise ValueError(f\"{task.id}: parent {parent} is not on the board\")\n",
+          "new": "            roots.append(task)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "tasks in a loop of parents keep their own status",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "    stranded = [task.id for task in board if task.id not in rolled]\n    if stranded:\n        raise ValueError(f\"{stranded[0]}: its chain of parents comes back round\")\n",
+          "new": "    for task in board:\n        rolled.setdefault(task.id, task.status)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "explicit stack filled in ascending priority, so ties come out reversed",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "        for task in sorted(tasks, key=lambda t: -t.extra.get(\"priority\", 0)):\n            if children[task.id]:\n                found = walk(children[task.id])\n                if found is not None:\n                    return found\n            elif task.owner == \"builder\" and task.status == \"todo\":\n                return task.id\n        return None\n",
+          "new": "        stack = sorted(tasks, key=lambda t: t.extra.get(\"priority\", 0))\n        while stack:\n            task = stack.pop()\n            if children[task.id]:\n                stack.extend(sorted(children[task.id], key=lambda t: t.extra.get(\"priority\", 0)))\n            elif task.owner == \"builder\" and task.status == \"todo\":\n                return task.id\n        return None\n"
+        }
+      ],
+      "expect": "board order on ties"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "sibling ties broken by id",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "        for task in sorted(tasks, key=lambda t: -t.extra.get(\"priority\", 0)):\n",
+          "new": "        for task in sorted(tasks, key=lambda t: (-t.extra.get(\"priority\", 0), t.id)):\n"
+        }
+      ],
+      "expect": "board order on ties"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "a loop of parents reported without naming a task",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "        raise ValueError(f\"{stranded[0]}: its chain of parents comes back round\")\n",
+          "new": "        raise ValueError(\"the parents form a loop\")\n"
+        }
+      ],
+      "expect": "name a task on the loop of parents"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "epics marked done on the board skipped",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "                found = walk(children[task.id])\n",
+          "new": "                found = None if task.status == \"done\" else walk(children[task.id])\n"
+        }
+      ],
+      "expect": "depth first, the most important branch first"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "an epic's own status counted with its children",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "        below = [settle(kid) for kid in kids]\n",
+          "new": "        below = [settle(kid) for kid in kids] + [task.status]\n"
+        }
+      ],
+      "expect": "an epic is done when everything under it is"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "the missing-parent error names only the parent",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "            raise ValueError(f\"{task.id}: parent {parent} is not on the board\")\n",
+          "new": "            raise ValueError(f\"parent {parent} is not on the board\")\n"
+        }
+      ],
+      "expect": "name the task whose parent is missing"
+    },
+    {
+      "test": "test_epic_rollup",
+      "name": "every owner's todo leaf counts",
+      "edits": [
+        {
+          "file": "epics.py",
+          "old": "            elif task.owner == \"builder\" and task.status == \"todo\":\n",
+          "new": "            elif task.status == \"todo\":\n"
+        }
+      ],
+      "expect": "only the builder's leaves are next"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "on-demand context drops every explicitly requested deep document",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "for name in context_paths(requested_paths)]",
+          "new": "for name in context_paths([])]"
+        }
+      ],
+      "expect": "a tiny router loads root and explicitly requested documents once in request order"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "sort requested context instead of preserving first request order",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "for name in context_paths(requested_paths)]",
+          "new": "for name in sorted(context_paths(requested_paths))]"
+        }
+      ],
+      "expect": "a tiny router loads root and explicitly requested documents once in request order"
+    },
+    {
+      "test": "test_turn_cycle",
+      "name": "cache context text across turns and miss a changed selected document",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "    return [(name,read_document(root,name)) for name in context_paths(requested_paths)]\n",
+          "new": "    cache=getattr(load_context,'cache',{})\n    key=(str(root),tuple(requested_paths))\n    if key not in cache:cache[key]=[(name,read_document(root,name)) for name in context_paths(requested_paths)]\n    load_context.cache=cache\n    return cache[key]\n"
+        }
+      ],
+      "expect": "each turn sees fresh selected documentation rather than a cached catalog"
+    }
+  ]
+}
