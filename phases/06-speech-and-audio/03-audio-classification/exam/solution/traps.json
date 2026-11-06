@@ -1,0 +1,175 @@
+{
+  "package": "cliptag",
+  "tests": [
+    "test_feature_pipeline",
+    "test_bank_roundtrip",
+    "test_classify_and_evaluate",
+    "test_stream_labels",
+    "test_ontology_rollup"
+  ],
+  "layers": [
+    {
+      "test": "test_feature_pipeline",
+      "steps": [
+        {"name": "as shipped", "edits": [], "expect": "IndexError"},
+        {
+          "name": "fix frame_signal",
+          "edits": [{"file": "features.py",
+                     "old": "    n = 1 + max(0, (len(signal) - frame_len) // hop)\n",
+                     "new": "    if len(signal) < frame_len:\n        return []\n    n = 1 + (len(signal) - frame_len) // hop\n"}],
+          "expect": "IndexError"
+        },
+        {
+          "name": "+ empty check",
+          "edits": [{"file": "features.py",
+                     "old": "    n = len(frames[0])\n",
+                     "new": "    if not frames:\n        raise ValueError('no frames')\n    n = len(frames[0])\n"}],
+          "expect": "pool the mean, then the population variance, over time"
+        },
+        {
+          "name": "+ divide by t",
+          "edits": [{"file": "features.py", "old": "/ (t - 1)\n", "new": "/ t\n"}],
+          "expect": "summarize should be fast on long clips"
+        },
+        {
+          "name": "+ mean computed once",
+          "edits": [{"file": "features.py",
+                     "old": "sum((f[i] - sum(g[i] for g in frames) / t) ** 2 for f in frames)",
+                     "new": "sum((f[i] - mean[i]) ** 2 for f in frames)"}],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_feature_pipeline",
+      "name": "one-pass E[x^2]-E[x]^2 variance",
+      "edits": [{"file": "features.py",
+                 "old": "    var = [sum((v - m) ** 2 for v in col) / t for col, m in zip(columns, mean)]\n",
+                 "new": "    var = [sum(v * v for v in col) / t - m * m for col, m in zip(columns, mean)]\n"}],
+      "expect": "variance must stay accurate when features carry a large offset"
+    },
+    {
+      "test": "test_bank_roundtrip",
+      "name": "no commit after insert",
+      "edits": [{"file": "bank.py",
+                 "old": "        with self._db:\n            self._db.execute(\n                \"INSERT",
+                 "new": "        if True:\n            self._db.execute(\n                \"INSERT"}],
+      "expect": "a reopened bank sees earlier clips, in insertion order"
+    },
+    {
+      "test": "test_bank_roundtrip",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [{"file": "bank.py", "old": "CREATE TABLE IF NOT EXISTS", "new": "CREATE TABLE"}],
+      "expect": "table clips already exists"
+    },
+    {
+      "test": "test_bank_roundtrip",
+      "name": "split enforced only by a CHECK constraint",
+      "edits": [
+        {"file": "bank.py",
+         "old": "        if split not in SPLITS:\n            raise ValueError(f\"split must be one of {SPLITS}, got {split!r}\")\n",
+         "new": ""},
+        {"file": "bank.py",
+         "old": "    split TEXT NOT NULL,\n",
+         "new": "    split TEXT NOT NULL CHECK (split IN ('train', 'eval')),\n"}
+      ],
+      "expect": "IntegrityError"
+    },
+    {
+      "test": "test_bank_roundtrip",
+      "name": "features stored as float32",
+      "edits": [{"file": "bank.py",
+                 "old": "json.loads(features))",
+                 "new": "[__import__('struct').unpack('f', __import__('struct').pack('f', v))[0] for v in json.loads(features)])"}],
+      "expect": "a clip must round-trip exactly"
+    },
+    {
+      "test": "test_bank_roundtrip",
+      "name": "features returned as a tuple",
+      "edits": [{"file": "bank.py", "old": "json.loads(features))", "new": "tuple(json.loads(features)))"}],
+      "expect": "a clip must round-trip exactly"
+    },
+    {
+      "test": "test_classify_and_evaluate",
+      "name": "similarity sorted ascending",
+      "edits": [{"file": "classify.py", "old": "key=lambda item: (-item[0], item[1])", "new": "key=lambda item: (item[0], item[1])"}],
+      "expect": "the most similar clips decide"
+    },
+    {
+      "test": "test_classify_and_evaluate",
+      "name": "searches every split",
+      "edits": [{"file": "classify.py", "old": "train = bank.clips(split=\"train\")", "new": "train = bank.clips()"}],
+      "expect": "classify only searches the train split"
+    },
+    {
+      "test": "test_classify_and_evaluate",
+      "name": "Counter.most_common tie-break, as in the lesson code",
+      "edits": [{"file": "classify.py",
+                 "old": "    return min(votes, key=lambda label: (-votes[label][0], -votes[label][1], label))",
+                 "new": "    from collections import Counter\n    return Counter(label for _, _, label in ranked[:k]).most_common(1)[0][0]"}],
+      "expect": "a 2-2 vote goes to the larger summed similarity"
+    },
+    {
+      "test": "test_classify_and_evaluate",
+      "name": "metrics over predicted labels only",
+      "edits": [{"file": "classify.py", "old": "for label in sorted(set(gold)):", "new": "for label in sorted(set(pred)):"}],
+      "expect": "recall is reported per class"
+    },
+    {
+      "test": "test_stream_labels",
+      "name": "no newline between events",
+      "edits": [{"file": "stream.py", "old": "yield json.dumps(event) + \"\\n\"", "new": "yield json.dumps(event)"}],
+      "expect": "Extra data"
+    },
+    {
+      "test": "test_stream_labels",
+      "name": "blank line between events",
+      "edits": [{"file": "stream.py", "old": "yield json.dumps(event) + \"\\n\"", "new": "yield json.dumps(event) + \"\\n\\n\""}],
+      "expect": "Expecting value"
+    },
+    {
+      "test": "test_stream_labels",
+      "name": "reads the whole stream before labeling",
+      "edits": [{"file": "stream.py",
+                 "old": "    async for chunk in chunks:\n        buffer.extend(chunk)\n",
+                 "new": "    everything = [s async for chunk in chunks for s in chunk]\n    for chunk in [everything]:\n        buffer.extend(chunk)\n"}],
+      "expect": "emit each window as soon as it is complete"
+    },
+    {
+      "test": "test_stream_labels",
+      "name": "windows restart at every chunk",
+      "edits": [{"file": "stream.py", "old": "        buffer.extend(chunk)\n", "new": "        buffer = list(chunk)\n"}],
+      "expect": "same events whatever the chunking"
+    },
+    {
+      "test": "test_ontology_rollup",
+      "name": "recursion handles dict children only",
+      "edits": [{"file": "taxonomy.py",
+                 "old": "        yield from node.items()\n    elif isinstance(node, list):",
+                 "new": "        yield from node.items()\n    elif False:"}],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_ontology_rollup",
+      "name": "no self-containment check",
+      "edits": [{"file": "taxonomy.py", "old": "        if name in path:\n", "new": "        if False:\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_ontology_rollup",
+      "name": "unknown labels ignored",
+      "edits": [{"file": "taxonomy.py", "old": "    if unknown:\n", "new": "    if False:\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_ontology_rollup",
+      "name": "a class's own score ignored",
+      "edits": [{"file": "taxonomy.py",
+                 "old": "        best = scores.get(name)\n",
+                 "new": "        best = scores.get(name) if not children else None\n"}],
+      "expect": "a class keeps its own score when it beats its children"
+    }
+  ]
+}
