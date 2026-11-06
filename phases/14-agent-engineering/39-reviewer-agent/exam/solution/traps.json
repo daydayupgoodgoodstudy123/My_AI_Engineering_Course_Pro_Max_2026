@@ -1,0 +1,1425 @@
+{
+  "package": "reviewer",
+  "tests": [
+    "test_rubric_review",
+    "test_report_history",
+    "test_reconcile_reviewers",
+    "test_build_review_rounds",
+    "test_comment_threads"
+  ],
+  "layers": [
+    {
+      "test": "test_rubric_review",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "problem fit counts the distinct goal keywords found in touched paths"
+        },
+        {
+          "name": "fix score_problem_fit: count distinct keywords",
+          "edits": [
+            {
+              "file": "rubric.py",
+              "old": "    files = inputs.diff_summary.get(\"touched\", [])\n    keywords = [w for w in inputs.goal.lower().split() if len(w) > 4]\n    hits = sum(k in f.lower() for k in keywords for f in files)\n    return DimensionScore(\"problem_fit\", min(2, hits), f\"goal keywords found in touched paths: {hits}\")\n",
+              "new": "    paths = [f.lower() for f in inputs.diff_summary.get(\"touched\", [])]\n    found = {w for w in inputs.goal.lower().split() if len(w) > 4 and any(w in p for p in paths)}\n    return DimensionScore(\"problem_fit\", min(2, len(found)), f\"goal keywords found in touched paths: {len(found)}\")\n"
+            }
+          ],
+          "expect": "a dimension at 0 is a hard fail, however high the total"
+        },
+        {
+          "name": "+ any dimension at 0 is a hard fail",
+          "edits": [
+            {
+              "file": "rubric.py",
+              "old": "    if total < 5:\n        verdict = \"hard_fail\"\n",
+              "new": "    if any(d.score == 0 for d in dims) or total < 5:\n        verdict = \"hard_fail\"\n"
+            }
+          ],
+          "expect": "an off-scope write a human approved is a contract grown deliberately"
+        },
+        {
+          "name": "+ off-scope paths a human approved score 2",
+          "edits": [
+            {
+              "file": "rubric.py",
+              "old": "    warnings = [f for f in findings if f.get(\"code\") == \"scope.off_scope\"]\n",
+              "new": "    approved = inputs.state.get(\"approved_scope\") or []\n    warnings = [f for f in findings if f.get(\"code\") == \"scope.off_scope\" and f.get(\"path\") not in approved]\n"
+            }
+          ],
+          "expect": "reading the board and the reports must not review the tasks again"
+        },
+        {
+          "name": "+ submit reviews once and the queue keeps the report",
+          "edits": [
+            {
+              "file": "rubric.py",
+              "old": "        self._tasks: dict[str, ReviewerInputs] = {}\n",
+              "new": "        self._reports: dict[str, ReviewReport] = {}\n"
+            },
+            {
+              "file": "rubric.py",
+              "old": "        self._tasks[inputs.task_id] = inputs\n        return self.report(inputs.task_id)\n",
+              "new": "        self._reports[inputs.task_id] = review(inputs, self._scorers)\n        return self._reports[inputs.task_id]\n"
+            },
+            {
+              "file": "rubric.py",
+              "old": "        return review(self._tasks[task_id], self._scorers)\n",
+              "new": "        return self._reports[task_id]\n"
+            },
+            {
+              "file": "rubric.py",
+              "old": "            for task_id in self._tasks\n",
+              "new": "            for task_id in self._reports\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_rubric_review",
+      "name": "every failed command scores 0",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "return DimensionScore(\"verification_quality\", 1, \"mixed exit codes in feedback\")",
+          "new": "return DimensionScore(\"verification_quality\", 0, \"mixed exit codes in feedback\")"
+        }
+      ],
+      "expect": "a failed command among passing ones scores 1"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "over-fix: an open task always scores 0",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "return DimensionScore(\"handoff_readiness\", 1, \"active task not closed in state\")",
+          "new": "return DimensionScore(\"handoff_readiness\", 0, \"active task not closed in state\")"
+        }
+      ],
+      "expect": "an open task with a next_action scores 1"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "keywords kept in a list, as in the lesson: a goal word written twice counts twice",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    keywords = {w for w in inputs.goal.lower().split() if len(w) > 4}\n",
+          "new": "    keywords = [w for w in inputs.goal.lower().split() if len(w) > 4]\n"
+        }
+      ],
+      "expect": "problem fit counts the distinct goal keywords found in touched paths"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "paths compared as written, not lowercased",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    paths = [f.lower() for f in inputs.diff_summary.get(\"touched\", [])]\n",
+          "new": "    paths = list(inputs.diff_summary.get(\"touched\", []))\n"
+        }
+      ],
+      "expect": "touched paths are compared lowercased"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "the board sorted by task id",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "            for r in self._reports.values()\n",
+          "new": "            for r in sorted(self._reports.values(), key=lambda r: r.task_id)\n"
+        }
+      ],
+      "expect": "the board lists tasks in the order they were first submitted"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "the report cached on first read; submit returns a review of its own",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "        self._reports: dict[str, ReviewReport] = {}\n",
+          "new": "        self._reports: dict[str, ReviewReport] = {}\n        self._inputs: dict[str, ReviewerInputs] = {}\n"
+        },
+        {
+          "file": "rubric.py",
+          "old": "        report = review(inputs, self._scorers)\n        self._reports[inputs.task_id] = report\n        return report\n",
+          "new": "        self._inputs[inputs.task_id] = inputs\n        self._reports.pop(inputs.task_id, None)\n        return review(inputs, self._scorers)\n"
+        },
+        {
+          "file": "rubric.py",
+          "old": "        return self._reports[task_id]\n",
+          "new": "        if task_id not in self._reports:\n            self._reports[task_id] = review(self._inputs[task_id], self._scorers)\n        return self._reports[task_id]\n"
+        },
+        {
+          "file": "rubric.py",
+          "old": "            for r in self._reports.values()\n",
+          "new": "            for r in (self.report(t) for t in self._inputs)\n"
+        }
+      ],
+      "expect": "reading the board and the reports must not review the tasks again"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "submit reviews twice: one report kept, another returned",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "        report = review(inputs, self._scorers)\n        self._reports[inputs.task_id] = report\n        return report\n",
+          "new": "        self._reports[inputs.task_id] = review(inputs, self._scorers)\n        return review(inputs, self._scorers)\n"
+        }
+      ],
+      "expect": "every scorer runs once per submitted task"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "the kept report reviewed again when the artifacts have changed",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "        report = review(inputs, self._scorers)\n        self._reports[inputs.task_id] = report\n        return report\n",
+          "new": "        report = review(inputs, self._scorers)\n        self._reports[inputs.task_id] = report\n        self._seen = getattr(self, \"_seen\", {})\n        self._seen[inputs.task_id] = (inputs, repr(inputs))\n        return report\n"
+        },
+        {
+          "file": "rubric.py",
+          "old": "        return self._reports[task_id]\n",
+          "new": "        inputs, then = self._seen[task_id]\n        if repr(inputs) != then:\n            self._reports[task_id] = review(inputs, self._scorers)\n            self._seen[task_id] = (inputs, repr(inputs))\n        return self._reports[task_id]\n"
+        }
+      ],
+      "expect": "a kept report is a record of one review"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "reports cached by task id: a second submit keeps the first report",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "        report = review(inputs, self._scorers)\n        self._reports[inputs.task_id] = report\n        return report\n",
+          "new": "        if inputs.task_id not in self._reports:\n            self._reports[inputs.task_id] = review(inputs, self._scorers)\n        return self._reports[inputs.task_id]\n"
+        }
+      ],
+      "expect": "a task submitted again is reviewed again"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "reports kept in a list: a task submitted again gets a second board row",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "        self._reports: dict[str, ReviewReport] = {}\n",
+          "new": "        self._reports: list[ReviewReport] = []\n"
+        },
+        {
+          "file": "rubric.py",
+          "old": "        self._reports[inputs.task_id] = report\n",
+          "new": "        self._reports.append(report)\n"
+        },
+        {
+          "file": "rubric.py",
+          "old": "        return self._reports[task_id]\n",
+          "new": "        for r in reversed(self._reports):\n            if r.task_id == task_id:\n                return r\n        raise KeyError(task_id)\n"
+        },
+        {
+          "file": "rubric.py",
+          "old": "            for r in self._reports.values()\n",
+          "new": "            for r in self._reports\n"
+        }
+      ],
+      "expect": "the board has one row per task, in the order tasks were first submitted"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "a task submitted again moves to the end of the board",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "        self._reports[inputs.task_id] = report\n",
+          "new": "        self._reports.pop(inputs.task_id, None)\n        self._reports[inputs.task_id] = report\n"
+        }
+      ],
+      "expect": "the board has one row per task, in the order tasks were first submitted"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "next_action checked with `is None`: an empty string counts as a plan",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    if not inputs.state.get(\"next_action\"):\n",
+          "new": "    if inputs.state.get(\"next_action\") is None:\n"
+        }
+      ],
+      "expect": "an open task with no next_action cannot be handed off"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "touched files counted instead of keywords",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    found = sorted(k for k in keywords if any(k in p for p in paths))\n",
+          "new": "    found = [p for p in paths if any(k in p for k in keywords)]\n"
+        }
+      ],
+      "expect": "problem fit counts the distinct goal keywords found in touched paths"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "a dimension at 0 made a soft fail instead of a hard fail",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    if any(d.score == 0 for d in dims) or total < 5:\n        verdict = \"hard_fail\"\n    elif total >= 7:\n",
+          "new": "    if total < 5:\n        verdict = \"hard_fail\"\n    elif total >= 7 and all(d.score > 0 for d in dims):\n"
+        }
+      ],
+      "expect": "a dimension at 0 is a hard fail, however high the total"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "the zero check added after the pass branch: a 0 only fails a total of 5 or 6",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    if any(d.score == 0 for d in dims) or total < 5:\n        verdict = \"hard_fail\"\n    elif total >= 7:\n        verdict = \"pass\"\n",
+          "new": "    if total < 5:\n        verdict = \"hard_fail\"\n    elif total >= 7:\n        verdict = \"pass\"\n    elif any(d.score == 0 for d in dims):\n        verdict = \"hard_fail\"\n"
+        }
+      ],
+      "expect": "a dimension at 0 is a hard fail, however high the total"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "over-fix: a dimension at 0 zeroes the total",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    total = sum(d.score for d in dims)\n",
+          "new": "    total = 0 if any(d.score == 0 for d in dims) else sum(d.score for d in dims)\n"
+        }
+      ],
+      "expect": "a dimension at 0 is a hard fail, however high the total"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "the gate's passed: false taken as the reviewer's hard fail",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    if any(d.score == 0 for d in dims) or total < 5:\n",
+          "new": "    if inputs.verdict.get(\"passed\") is False or total < 5:\n"
+        }
+      ],
+      "expect": "no feedback at all means nothing was verified"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "a blocking gate finding taken as the reviewer's hard fail",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    if any(d.score == 0 for d in dims) or total < 5:\n",
+          "new": "    if any(f.get(\"severity\") == \"block\" for f in inputs.verdict.get(\"findings\", [])) or total < 5:\n"
+        }
+      ],
+      "expect": "no feedback at all means nothing was verified"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "only a forbidden write (scope_discipline at 0) hard-fails",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    if any(d.score == 0 for d in dims) or total < 5:\n",
+          "new": "    if any(d.score == 0 for d in dims if d.name == \"scope_discipline\") or total < 5:\n"
+        }
+      ],
+      "expect": "no feedback at all means nothing was verified"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "an approval of any path clears every off-scope warning",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    unapproved = [f for f in findings if f.get(\"code\") == \"scope.off_scope\" and f.get(\"path\") not in approved]\n",
+          "new": "    unapproved = [] if approved else [f for f in findings if f.get(\"code\") == \"scope.off_scope\"]\n"
+        }
+      ],
+      "expect": "an approval covers the path it names, not the other off-scope writes"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "one approved off-scope path is enough (any instead of every)",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    unapproved = [f for f in findings if f.get(\"code\") == \"scope.off_scope\" and f.get(\"path\") not in approved]\n",
+          "new": "    unapproved = [f for f in findings if f.get(\"code\") == \"scope.off_scope\"]\n    if any(f.get(\"path\") in approved for f in unapproved):\n        unapproved = []\n"
+        }
+      ],
+      "expect": "an approval covers the path it names, not the other off-scope writes"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "approvals counted against the warnings instead of matched by path",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    unapproved = [f for f in findings if f.get(\"code\") == \"scope.off_scope\" and f.get(\"path\") not in approved]\n",
+          "new": "    unapproved = [f for f in findings if f.get(\"code\") == \"scope.off_scope\"]\n    if len(approved) >= len(unapproved):\n        unapproved = []\n"
+        }
+      ],
+      "expect": "an approval covers the path it names, not the other off-scope writes"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "approved findings dropped before the forbidden check: an approved forbidden write scores 2",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    findings = inputs.verdict.get(\"findings\", [])\n    if any(f.get(\"code\") == \"scope.forbidden\" for f in findings):\n",
+          "new": "    approved = inputs.state.get(\"approved_scope\") or []\n    findings = [f for f in inputs.verdict.get(\"findings\", []) if f.get(\"path\") not in approved]\n    if any(f.get(\"code\") == \"scope.forbidden\" for f in findings):\n"
+        },
+        {
+          "file": "rubric.py",
+          "old": "    approved = inputs.state.get(\"approved_scope\") or []\n    unapproved = [f for f in findings if f.get(\"code\") == \"scope.off_scope\" and f.get(\"path\") not in approved]\n",
+          "new": "    unapproved = [f for f in findings if f.get(\"code\") == \"scope.off_scope\"]\n"
+        }
+      ],
+      "expect": "no approval makes up for a forbidden write"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "approvals checked before the forbidden write: every scope finding approved scores 2",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    findings = inputs.verdict.get(\"findings\", [])\n    if any(f.get(\"code\") == \"scope.forbidden\" for f in findings):\n",
+          "new": "    findings = inputs.verdict.get(\"findings\", [])\n    scope = [f for f in findings if str(f.get(\"code\", \"\")).startswith(\"scope.\")]\n    if scope and all(f.get(\"path\") in (inputs.state.get(\"approved_scope\") or []) for f in scope):\n        return DimensionScore(\"scope_discipline\", 2, \"every scope finding approved\")\n    if any(f.get(\"code\") == \"scope.forbidden\" for f in findings):\n"
+        }
+      ],
+      "expect": "no approval makes up for a forbidden write"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "approved_scope read with state[...]: the lesson's T-002 has none",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    approved = inputs.state.get(\"approved_scope\") or []\n",
+          "new": "    approved = inputs.state[\"approved_scope\"]\n"
+        }
+      ],
+      "expect": "KeyError: 'approved_scope'"
+    },
+    {
+      "test": "test_rubric_review",
+      "name": "score_handoff in the lesson's order: an open task scores 1 before next_action is read",
+      "edits": [
+        {
+          "file": "rubric.py",
+          "old": "    if not inputs.state.get(\"next_action\"):\n        return DimensionScore(\"handoff_readiness\", 0, \"no next_action recorded\")\n    if inputs.state.get(\"active_task_id\"):\n        return DimensionScore(\"handoff_readiness\", 1, \"active task not closed in state\")\n    return DimensionScore(\"handoff_readiness\", 2, \"next_action set, task closed\")\n",
+          "new": "    if inputs.state.get(\"active_task_id\"):\n        return DimensionScore(\"handoff_readiness\", 1, \"active task not closed in state\")\n    if inputs.state.get(\"next_action\"):\n        return DimensionScore(\"handoff_readiness\", 2, \"next_action set, task closed\")\n    return DimensionScore(\"handoff_readiness\", 0, \"no next_action recorded\")\n"
+        }
+      ],
+      "expect": "an open task with no next_action cannot be handed off"
+    },
+    {
+      "test": "test_report_history",
+      "name": "the digest taken over a pretty-printed copy of the body",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "        digest = hashlib.sha256(body).hexdigest()\n",
+          "new": "        digest = hashlib.sha256(json.dumps(json.loads(body), indent=2).encode()).hexdigest()\n"
+        }
+      ],
+      "expect": "an object is named by the SHA-256 of its bytes"
+    },
+    {
+      "test": "test_report_history",
+      "name": "dimensions rebuilt in rubric order on load (the sixth one is lost)",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "from .rubric import DimensionScore, ReviewReport\n",
+          "new": "from .rubric import RUBRIC, DimensionScore, ReviewReport\n"
+        },
+        {
+          "file": "reports.py",
+          "old": "        dims = [DimensionScore(d[\"name\"], d[\"score\"], d[\"note\"]) for d in data[\"dimensions\"]]\n",
+          "new": "        by_name = {d[\"name\"]: d for d in data[\"dimensions\"]}\n        dims = [DimensionScore(n, by_name[n][\"score\"], by_name[n][\"note\"]) for n in RUBRIC if n in by_name]\n"
+        }
+      ],
+      "expect": "a report reads back exactly as it was recorded"
+    },
+    {
+      "test": "test_report_history",
+      "name": "recording the same report again is a conflict too",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "            if recorded[attempt - 1] != digest:\n",
+          "new": "            if True:\n"
+        }
+      ],
+      "expect": "ReportConflict"
+    },
+    {
+      "test": "test_report_history",
+      "name": "a recorded attempt overwritten (last write wins)",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "            if recorded[attempt - 1] != digest:\n                raise ReportConflict(f\"{report.task_id} attempt {attempt} is already recorded with another report\")\n            return digest\n",
+          "new": "            recorded[attempt - 1] = digest\n            return digest\n"
+        }
+      ],
+      "expect": "a recorded attempt never changes"
+    },
+    {
+      "test": "test_report_history",
+      "name": "a gap in the attempt numbers accepted",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "        if type(attempt) is not int or attempt != len(recorded) + 1:\n",
+          "new": "        if type(attempt) is not int or attempt < 1:\n"
+        }
+      ],
+      "expect": "a task's attempts are numbered 1, 2, 3, ... with no gaps"
+    },
+    {
+      "test": "test_report_history",
+      "name": "a score checked with `in (0, 1, 2)`: 2.0 and True get through",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "            if type(dim.score) is not int or not 0 <= dim.score <= 2:\n",
+          "new": "            if dim.score not in (0, 1, 2):\n"
+        }
+      ],
+      "expect": "a score is an int from 0 to 2"
+    },
+    {
+      "test": "test_report_history",
+      "name": "the attempt number written into the body",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "        body = _body(report)\n",
+          "new": "        body = _body(report)[:-1] + f', \"attempt\": {attempt}}}'.encode()\n"
+        }
+      ],
+      "expect": "a second review that found the same thing is attempt 2, with the same body"
+    },
+    {
+      "test": "test_report_history",
+      "name": "one attempt counter for all tasks",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "        if type(attempt) is not int or attempt != len(recorded) + 1:\n",
+          "new": "        if type(attempt) is not int or attempt != sum(map(len, self._digests.values())) + 1:\n"
+        }
+      ],
+      "expect": "ValueError: the next attempt of T-002"
+    },
+    {
+      "test": "test_report_history",
+      "name": "re-recording an attempt appends another index line",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "            return digest\n        if type(attempt) is not int",
+          "new": "            with self._index.open(\"a\", encoding=\"utf-8\") as index:\n                index.write(json.dumps({\"task\": report.task_id, \"attempt\": attempt, \"sha256\": digest}) + \"\\n\")\n            return digest\n        if type(attempt) is not int"
+        }
+      ],
+      "expect": "the index gets one line per recorded attempt"
+    },
+    {
+      "test": "test_report_history",
+      "name": "the object written before the attempt is checked",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "        digest = hashlib.sha256(body).hexdigest()\n",
+          "new": "        digest = hashlib.sha256(body).hexdigest()\n        (self._objects / f\"{digest}.json\").write_bytes(body)\n"
+        }
+      ],
+      "expect": "a rejected record writes nothing"
+    },
+    {
+      "test": "test_report_history",
+      "name": "load reads the task's latest object, whatever the attempt",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "{recorded[attempt - 1]}.json",
+          "new": "{recorded[-1]}.json"
+        }
+      ],
+      "expect": "each attempt reads back its own report"
+    },
+    {
+      "test": "test_report_history",
+      "name": "the index not read when the store is opened again",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "        if self._index.exists():\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "a store opened again sees every recorded attempt"
+    },
+    {
+      "test": "test_report_history",
+      "name": "a score checked with isinstance(score, int): True gets through",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "            if type(dim.score) is not int or not 0 <= dim.score <= 2:\n",
+          "new": "            if not isinstance(dim.score, int) or not 0 <= dim.score <= 2:\n"
+        }
+      ],
+      "expect": "a score is an int from 0 to 2"
+    },
+    {
+      "test": "test_report_history",
+      "name": "the type checked but not the range: 3 gets through",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "            if type(dim.score) is not int or not 0 <= dim.score <= 2:\n",
+          "new": "            if type(dim.score) is not int:\n"
+        }
+      ],
+      "expect": "a score is an int from 0 to 2"
+    },
+    {
+      "test": "test_report_history",
+      "name": "dimensions read back as a tuple",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "        return ReviewReport(data[\"task_id\"], data[\"total\"], data[\"verdict\"], dims)\n",
+          "new": "        return ReviewReport(data[\"task_id\"], data[\"total\"], data[\"verdict\"], tuple(dims))\n"
+        }
+      ],
+      "expect": "a report reads back exactly as it was recorded"
+    },
+    {
+      "test": "test_report_history",
+      "name": "the verdict recomputed from the thresholds on load",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "        return ReviewReport(data[\"task_id\"], data[\"total\"], data[\"verdict\"], dims)\n",
+          "new": "        total = sum(d.score for d in dims)\n        verdict = \"hard_fail\" if any(d.score == 0 for d in dims) or total < 5 else (\"pass\" if total >= 7 else \"soft_fail\")\n        return ReviewReport(data[\"task_id\"], total, verdict, dims)\n"
+        }
+      ],
+      "expect": "a report reads back exactly as it was recorded"
+    },
+    {
+      "test": "test_report_history",
+      "name": "notes stripped on load",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "        dims = [DimensionScore(d[\"name\"], d[\"score\"], d[\"note\"]) for d in data[\"dimensions\"]]\n",
+          "new": "        dims = [DimensionScore(d[\"name\"], d[\"score\"], d[\"note\"].strip()) for d in data[\"dimensions\"]]\n"
+        }
+      ],
+      "expect": "a report reads back exactly as it was recorded"
+    },
+    {
+      "test": "test_report_history",
+      "name": "no lower bound on a recorded attempt: attempt 0 is a retry of recorded[-1]",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "        if type(attempt) is int and 1 <= attempt <= len(recorded):\n",
+          "new": "        if type(attempt) is int and attempt <= len(recorded) and recorded:\n"
+        }
+      ],
+      "expect": "a task's attempts are numbered from 1"
+    },
+    {
+      "test": "test_report_history",
+      "name": "no lower bound in load: attempt 0 reads recorded[-1]",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "        if type(attempt) is not int or not 1 <= attempt <= len(recorded):\n            raise KeyError(",
+          "new": "        if type(attempt) is not int or not attempt <= len(recorded):\n            raise KeyError("
+        }
+      ],
+      "expect": "unknown attempts raise KeyError, attempt 0 included"
+    },
+    {
+      "test": "test_report_history",
+      "name": "the index rewritten instead of appended",
+      "edits": [
+        {
+          "file": "reports.py",
+          "old": "        with self._index.open(\"a\", encoding=\"utf-8\") as index:\n",
+          "new": "        with self._index.open(\"w\", encoding=\"utf-8\") as index:\n"
+        }
+      ],
+      "expect": "the index gets one line per recorded attempt"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "opinions paired by position",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "    opinions: dict[str, Opinion] = {}\n    for opinion in draft.opinions:\n",
+          "new": "    return dict(zip(rubric, draft.opinions))\n    opinions: dict[str, Opinion] = {}\n    for opinion in draft.opinions:\n"
+        }
+      ],
+      "expect": "each dimension pairs the two reviewers' opinions on it"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "citations compared without case",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "            if opinion.evidence and all(c in known for c in opinion.evidence):\n",
+          "new": "            if opinion.evidence and all(c.lower() in {k.lower() for k in known} for c in opinion.evidence):\n"
+        }
+      ],
+      "expect": "a citation must name something in the artifacts, exactly: paths are case-sensitive"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "a state entry counts as evidence only when it is set",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "    known |= {f\"state:{key}\" for key in inputs.state}\n",
+          "new": "    known |= {f\"state:{key}\" for key, value in inputs.state.items() if value}\n"
+        }
+      ],
+      "expect": "a citation must name something in the artifacts"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "a feedback record cited by its command (two runs share it)",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "    known |= {f\"feedback:{rec['command_id']}\" for rec in inputs.feedback if \"command_id\" in rec}\n",
+          "new": "    known |= {f\"feedback:{rec.get('command_id', rec['command'])}\" for rec in inputs.feedback}\n    known |= {f\"feedback:{rec['command']}\" for rec in inputs.feedback}\n"
+        }
+      ],
+      "expect": "an opinion is supported only when it cites something and every citation is in the artifacts"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "one citation in the artifacts is enough (any)",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "all(c in known for c in opinion.evidence)",
+          "new": "any(c in known for c in opinion.evidence)"
+        }
+      ],
+      "expect": "an opinion is supported only when it cites something and every citation is in the artifacts"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "an opinion that cites nothing counts as supported (all of nothing is True)",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "            if opinion.evidence and all(",
+          "new": "            if all("
+        }
+      ],
+      "expect": "an opinion is supported only when it cites something and every citation is in the artifacts"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "only the opinions the cap lowered listed as unsupported",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "                scores[name] = min(opinion.score, 1)\n                unsupported.append((reviewer, name))\n",
+          "new": "                scores[name] = min(opinion.score, 1)\n                if opinion.score > 1:\n                    unsupported.append((reviewer, name))\n"
+        }
+      ],
+      "expect": "an opinion is supported only when it cites something and every citation is in the artifacts"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "unsupported listed dimension by dimension, the two reviewers interleaved",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "    return Reconciled(ReviewReport(inputs.task_id, total, verdict, dims), escalate, unsupported)\n",
+          "new": "    unsupported.sort(key=lambda item: list(rubric).index(item[1]))\n    return Reconciled(ReviewReport(inputs.task_id, total, verdict, dims), escalate, unsupported)\n"
+        }
+      ],
+      "expect": "an opinion is supported only when it cites something and every citation is in the artifacts"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "the mean rounded with round() (1.5 becomes 2)",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "(a[name] + b[name]) // 2",
+          "new": "round((a[name] + b[name]) / 2)"
+        }
+      ],
+      "expect": "a dimension scores the mean of the two counted scores, rounded down"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "the higher score wins",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "(a[name] + b[name]) // 2",
+          "new": "max(a[name], b[name])"
+        }
+      ],
+      "expect": "a dimension scores the mean of the two counted scores, rounded down"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "the lower score wins",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "(a[name] + b[name]) // 2",
+          "new": "min(a[name], b[name])"
+        }
+      ],
+      "expect": "an escalated dimension still scores the mean, rounded down"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "a total of exactly 7 not a pass",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "    elif total < 7:\n",
+          "new": "    elif total <= 7:\n"
+        }
+      ],
+      "expect": "a total of exactly 7 passes"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "a total of exactly 5 a hard fail",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "or total < 5:",
+          "new": "or total <= 5:"
+        }
+      ],
+      "expect": "a total of exactly 5 is a soft fail"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "a difference of 1 escalates",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "        if abs(a[name] - b[name]) > 1:\n",
+          "new": "        if abs(a[name] - b[name]) >= 1:\n"
+        }
+      ],
+      "expect": "a difference of 1 is not an escalation"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "an escalated dimension scored 0",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "            escalate.append(name)\n",
+          "new": "            escalate.append(name)\n            dims[-1] = DimensionScore(name, 0, note)\n"
+        }
+      ],
+      "expect": "an escalated dimension still scores the mean, rounded down"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "an escalation turns the verdict into a hard fail",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "    if any(d.score == 0 for d in dims) or total < 5:\n",
+          "new": "    if any(d.score == 0 for d in dims) or total < 5 or escalate:\n"
+        }
+      ],
+      "expect": "escalation does not change the verdict"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "escalation compares the raw scores, before the evidence cap",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "        if abs(a[name] - b[name]) > 1:\n",
+          "new": "        if abs(drafts[0][1][name].score - drafts[1][1][name].score) > 1:\n"
+        }
+      ],
+      "expect": "escalation compares the counted scores, after the evidence cap"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "escalation only when both opinions are supported",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "        if abs(a[name] - b[name]) > 1:\n",
+          "new": "        if abs(a[name] - b[name]) > 1 and not any(dim == name for _, dim in unsupported):\n"
+        }
+      ],
+      "expect": "a dimension escalates when the two counted scores differ by more than 1"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "a 0 only fails the run when the total is below 5",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "    if any(d.score == 0 for d in dims) or total < 5:\n",
+          "new": "    if total < 5:\n"
+        }
+      ],
+      "expect": "any dimension at 0 is a hard fail, whatever the total"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "a second opinion on a dimension replaces the first",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "        if opinion.dimension in opinions:\n            raise ValueError(f\"{draft.reviewer} scores {opinion.dimension} twice\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "each reviewer scores every rubric dimension exactly once"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "dimensions outside the rubric ignored",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "    if missing or unknown:\n",
+          "new": "    if missing:\n"
+        }
+      ],
+      "expect": "each reviewer scores every rubric dimension exactly once"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "a draft checked by its length only",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "    opinions: dict[str, Opinion] = {}\n    for opinion in draft.opinions:\n",
+          "new": "    if len(draft.opinions) != len(rubric):\n        raise ValueError(f\"{draft.reviewer} must score {len(rubric)} dimensions\")\n    return {opinion.dimension: opinion for opinion in draft.opinions}\n    opinions: dict[str, Opinion] = {}\n    for opinion in draft.opinions:\n"
+        }
+      ],
+      "expect": "KeyError: 'handoff_readiness'"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "unsupported listed in each draft's own order",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "        for name in rubric:\n            opinion = opinions[name]\n",
+          "new": "        for name in opinions:\n            opinion = opinions[name]\n"
+        }
+      ],
+      "expect": "an opinion is supported only when it cites something and every citation is in the artifacts"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "an unsupported score counts as 0",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "                scores[name] = min(opinion.score, 1)\n",
+          "new": "                scores[name] = 0\n"
+        }
+      ],
+      "expect": "a difference of 1 is not an escalation"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "an unsupported score loses a point instead of being capped at 1",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "                scores[name] = min(opinion.score, 1)\n",
+          "new": "                scores[name] = max(opinion.score - 1, 0)\n"
+        }
+      ],
+      "expect": "an unsupported score counts as at most 1"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "a feedback record cited by its id or by its command",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "    known |= {f\"finding:{f['code']}\" for f in inputs.verdict.get(\"findings\", [])}\n",
+          "new": "    known |= {f\"finding:{f['code']}\" for f in inputs.verdict.get(\"findings\", [])}\n    known |= {f\"feedback:{rec['command']}\" for rec in inputs.feedback if \"command\" in rec}\n"
+        }
+      ],
+      "expect": "an opinion is supported only when it cites something and every citation is in the artifacts"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "a hard fail whenever one reviewer's counted score is 0",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "    if any(d.score == 0 for d in dims) or total < 5:\n",
+          "new": "    if any(a[n] == 0 or b[n] == 0 for n in rubric) or total < 5:\n"
+        }
+      ],
+      "expect": "escalation does not change the verdict"
+    },
+    {
+      "test": "test_reconcile_reviewers",
+      "name": "the mean rounded up",
+      "edits": [
+        {
+          "file": "reconcile.py",
+          "old": "        dims.append(DimensionScore(name, (a[name] + b[name]) // 2, note))\n",
+          "new": "        dims.append(DimensionScore(name, -(-(a[name] + b[name]) // 2), note))\n"
+        }
+      ],
+      "expect": "a dimension scores the mean of the two counted scores, rounded down"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "the reviewer reads the live workspace",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "        last = await review(n, MappingProxyType(frozen))\n",
+          "new": "        last = await review(n, workspace)\n"
+        }
+      ],
+      "expect": "the reviewer reads the workspace as it was when the builder's turn returned"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "a read-only view of the live workspace",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "        last = await review(n, MappingProxyType(frozen))\n",
+          "new": "        last = await review(n, MappingProxyType(workspace))\n"
+        }
+      ],
+      "expect": "the reviewer reads the workspace as it was when the builder's turn returned"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "a copy the reviewer can write to",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "        last = await review(n, MappingProxyType(frozen))\n",
+          "new": "        last = await review(n, dict(frozen))\n"
+        }
+      ],
+      "expect": "the reviewer cannot write to the snapshot"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "changed measured from the workspace before round 1 every round",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "        before = frozen\n",
+          "new": ""
+        }
+      ],
+      "expect": "one CSV record per round: round, changed, total, verdict, next"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "changed left in workspace order",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "        changed = sorted(p for p in frozen.keys() | before.keys() if frozen.get(p) != before.get(p))\n",
+          "new": "        changed = [p for p in {**before, **frozen} if frozen.get(p) != before.get(p)]\n"
+        }
+      ],
+      "expect": "one CSV record per round: round, changed, total, verdict, next"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "records held back until the loop ends",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "    last: ReviewReport | None = None\n",
+          "new": "    last: ReviewReport | None = None\n    held: list[str] = []\n"
+        },
+        {
+          "file": "rounds.py",
+          "old": "        yield _record((n, \";\".join(changed), last.total, last.verdict, then))\n        if then != \"build\":\n            return\n",
+          "new": "        held.append(_record((n, \";\".join(changed), last.total, last.verdict, then)))\n        if then != \"build\":\n            break\n    for line in held:\n        yield line\n"
+        }
+      ],
+      "expect": "each round's record goes out before the next builder turn starts"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "the builder never gets the report",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "        await build(n, workspace, last)\n",
+          "new": "        await build(n, workspace, None)\n"
+        }
+      ],
+      "expect": "the next builder turn gets the latest report"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "a pass does not end the loop",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "        if then != \"build\":\n            return\n",
+          "new": "        if then == \"human\":\n            return\n"
+        }
+      ],
+      "expect": "a pass ends the loop"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "the cap checked before the verdict: a pass in the last round goes to a human",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "        if last.verdict == \"pass\":\n            then = \"done\"\n        elif last.verdict == \"hard_fail\" or n == max_rounds:\n            then = \"human\"\n",
+          "new": "        if last.verdict == \"hard_fail\" or n == max_rounds:\n            then = \"human\"\n        elif last.verdict == \"pass\":\n            then = \"done\"\n"
+        }
+      ],
+      "expect": "one CSV record per round: round, changed, total, verdict, next"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "a hard fail starts another builder turn",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "        elif last.verdict == \"hard_fail\" or n == max_rounds:\n",
+          "new": "        elif n == max_rounds:\n"
+        }
+      ],
+      "expect": "a hard fail halts the loop for a human"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "the last round that does not pass says build",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "        elif last.verdict == \"hard_fail\" or n == max_rounds:\n",
+          "new": "        elif last.verdict == \"hard_fail\":\n"
+        }
+      ],
+      "expect": "when the last round does not pass, a human takes over"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "one round more than max_rounds",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "    for n in range(1, max_rounds + 1):\n",
+          "new": "    for n in range(1, max_rounds + 2):\n"
+        },
+        {
+          "file": "rounds.py",
+          "old": "        elif last.verdict == \"hard_fail\" or n == max_rounds:\n",
+          "new": "        elif last.verdict == \"hard_fail\" or n > max_rounds:\n"
+        }
+      ],
+      "expect": "when the last round does not pass, a human takes over"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "changed taken from the live workspace after the review",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "        changed = sorted(p for p in frozen.keys() | before.keys() if frozen.get(p) != before.get(p))\n        last = await review(n, MappingProxyType(frozen))\n",
+          "new": "        last = await review(n, MappingProxyType(frozen))\n        changed = sorted(p for p in workspace.keys() | before.keys() if workspace.get(p) != before.get(p))\n"
+        }
+      ],
+      "expect": "a write that lands during the review is a change of the next round"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "the previous snapshot taken from the live workspace after the review",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "        before = frozen\n",
+          "new": "        before = dict(workspace)\n"
+        }
+      ],
+      "expect": "one CSV record per round: round, changed, total, verdict, next"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "deleted paths left out of changed",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "        changed = sorted(p for p in frozen.keys() | before.keys() if frozen.get(p) != before.get(p))\n",
+          "new": "        changed = sorted(p for p in frozen if frozen.get(p) != before.get(p))\n"
+        }
+      ],
+      "expect": "one CSV record per round: round, changed, total, verdict, next"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "round 1 measured against an empty workspace",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "    before = dict(workspace)\n",
+          "new": "    before = {}\n"
+        }
+      ],
+      "expect": "one CSV record per round: round, changed, total, verdict, next"
+    },
+    {
+      "test": "test_build_review_rounds",
+      "name": "the snapshot taken before the builder's turn",
+      "edits": [
+        {
+          "file": "rounds.py",
+          "old": "        await build(n, workspace, last)\n        frozen = dict(workspace)\n",
+          "new": "        frozen = dict(workspace)\n        await build(n, workspace, last)\n"
+        }
+      ],
+      "expect": "the reviewer reads the workspace as it was when the builder's turn returned"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "only direct replies to a finding are read",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "    for comment in comments:\n        top = comment\n",
+          "new": "    for comment in comments:\n        if comment.parent in by_id and by_id[comment.parent].parent is not None:\n            continue\n        top = comment\n"
+        }
+      ],
+      "expect": "a reply at any depth belongs to its finding's thread"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "replies read in one pass, parents first",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "    members: dict[str, list[Comment]] = {}\n    for comment in comments:\n        top = comment\n",
+          "new": "    members: dict[str, list[Comment]] = {}\n    earlier: dict[str, Comment] = {}\n    for comment in comments:\n        earlier[comment.id] = comment\n        top = comment\n"
+        },
+        {
+          "file": "threads.py",
+          "old": "            parent = by_id.get(top.parent)\n",
+          "new": "            parent = earlier.get(top.parent)\n"
+        }
+      ],
+      "expect": "which is not in the review"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "a resolved thread stays resolved",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "        resolved = last_resolve is not None and all(c.at < last_resolve for c in later)\n",
+          "new": "        resolved = last_resolve is not None\n"
+        }
+      ],
+      "expect": "only the reviewer resolves a thread, and anything posted after the resolve reopens it"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "the builder's resolve counts",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "        resolves = [c.at for c in thread if c.resolve and c.author == \"reviewer\"]\n",
+          "new": "        resolves = [c.at for c in thread if c.resolve]\n"
+        },
+        {
+          "file": "threads.py",
+          "old": "        later = [c for c in thread if not (c.resolve and c.author == \"reviewer\")]\n",
+          "new": "        later = [c for c in thread if not c.resolve]\n"
+        }
+      ],
+      "expect": "only the reviewer resolves a thread, and anything posted after the resolve reopens it"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "self_resolved lists every thread the builder ever marked, resolved ones too",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "            c.resolve and c.author == \"builder\" and (last_resolve is None or c.at >= last_resolve)\n",
+          "new": "            c.resolve and c.author == \"builder\"\n"
+        },
+        {
+          "file": "threads.py",
+          "old": "marked and not resolved))",
+          "new": "marked))"
+        }
+      ],
+      "expect": "threads the builder marked resolved are reported, and stay open"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "self_resolved: any open thread the builder ever marked, before the reviewer's resolve too",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "            c.resolve and c.author == \"builder\" and (last_resolve is None or c.at >= last_resolve)\n",
+          "new": "            c.resolve and c.author == \"builder\"\n"
+        }
+      ],
+      "expect": "threads the builder marked resolved are reported, and stay open"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "threads left in input order",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "    rows.sort(key=lambda row: (row[0], row[1]))\n",
+          "new": ""
+        }
+      ],
+      "expect": "threads are listed by the time of their finding"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "dimensions without an open thread left out of the counts",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "    open_by_dimension = {name: 0 for name in rubric}\n    for _, _, state, _ in rows:\n        if state.status == \"open\":\n            open_by_dimension[state.dimension] += 1\n",
+          "new": "    open_by_dimension: dict[str, int] = {}\n    for _, _, state, _ in rows:\n        if state.status == \"open\":\n            open_by_dimension[state.dimension] = open_by_dimension.get(state.dimension, 0) + 1\n"
+        }
+      ],
+      "expect": "open threads are counted for every rubric dimension, in rubric order"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "a finding outside the rubric skipped",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "            raise ValueError(f\"finding {finding_id!r} is about {finding.dimension!r}, which is not a rubric dimension\")\n",
+          "new": "            continue\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "only the builder's later comments reopen",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "        later = [c for c in thread if not (c.resolve and c.author == \"reviewer\")]\n",
+          "new": "        later = [c for c in thread if c.author == \"builder\"]\n"
+        }
+      ],
+      "expect": "a later reply reopens the thread, the reviewer's own too, and the reviewer's latest resolve closes it again"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "the reviewer's first resolve instead of the latest",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "        last_resolve = max(resolves) if resolves else None\n",
+          "new": "        last_resolve = min(resolves) if resolves else None\n"
+        }
+      ],
+      "expect": "a later reply reopens the thread, the reviewer's own too, and the reviewer's latest resolve closes it again"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "the resolve last in input order instead of the latest by time",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "        last_resolve = max(resolves) if resolves else None\n",
+          "new": "        last_resolve = resolves[-1] if resolves else None\n"
+        }
+      ],
+      "expect": "a later reply reopens the thread, the reviewer's own too, and the reviewer's latest resolve closes it again"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "self_resolved in the findings' input order",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "        [state.finding for _, _, state, self_marked in rows if self_marked],\n",
+          "new": "        [state.finding for _, _, state, self_marked in sorted(rows, key=lambda row: row[1]) if self_marked],\n"
+        }
+      ],
+      "expect": "threads the builder marked resolved are reported, and stay open"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "replies counted without the finding",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "            len(thread),\n",
+          "new": "            len(thread) - 1,\n"
+        }
+      ],
+      "expect": "a reply at any depth belongs to its finding's thread"
+    },
+    {
+      "test": "test_comment_threads",
+      "name": "the error names the missing parent instead of the reply",
+      "edits": [
+        {
+          "file": "threads.py",
+          "old": "                raise ValueError(f\"comment {top.id!r} answers {top.parent!r}, which is not in the review\")\n",
+          "new": "                raise ValueError(f\"{top.parent!r} is not in the review\")\n"
+        }
+      ],
+      "expect": "Regex pattern"
+    }
+  ]
+}

@@ -1,0 +1,128 @@
+{
+  "lesson": "phases/14-agent-engineering/39-reviewer-agent",
+  "title": "Reviewer Agent: Separate Builder from Marker",
+  "format": "staged-brownfield",
+  "service": "Reviewer: the lesson's five-dimension reviewer rubric, whose scope dimension also reads the off-scope paths a human approved adding to the contract, with a sign-off queue that keeps each review, an append-only content-addressed report history, evidence-capped reconciliation of two reviewers, builder/reviewer rounds over frozen snapshots streamed as CSV, and review comment threads that only the reviewer can resolve",
+  "sources": {
+    "docs/en.md": "363be9d97da5499c7fbfe8381559490ce77bbb1af46c45f33f01b5999e0086f1",
+    "code/main.py": "c9bf123ea7f9268ef44040ca94056cf3b391341111946e9970070544d1caa751"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_rubric_review",
+      "kind": "debug",
+      "lesson_anchor": "Reviewer rubric (five dimensions scored 0 to 2, total out of 10, below 7 soft fail, below 5 hard fail; Scope discipline: were edits confined to the contract or was the contract grown deliberately?); Key Terms (hard fail: total below 5 or any dimension at 0); Reviewer rubric versus verification gate (the gate checks deterministic facts, the reviewer judges; both are required); Build It (one scoring function per dimension; real implementations would call an LLM); Report -> Human Sign-Off; code/main.py score_problem_fit, score_scope_discipline (gate findings only), score_handoff, review (has_zero), and the T-001 / T-002 demo cases; Phase 14 · 36 (Use It: a scope violation triggers an interrupt that asks the human whether the contract needs to grow or the agent needs to back off; forbidden_files must not be touched even by accident); Phase 14 · 38's gate (a forbidden write is a block finding, an off-scope write a warning)",
+      "planted_bugs": [
+        "score_problem_fit sums (keyword, file) pairs, so signup in app/signup.py and tests/test_signup.py scores 2 and T-001 totals 10; the docstring counts distinct keywords, and the lesson's per-keyword any() still counts a goal word written twice",
+        "review() takes the verdict from the total alone (below 5 hard_fail, below 7 soft_fail), as the lesson's rubric section words it, and misses the Key Terms rule, also in its docstring, that any dimension at 0 is a hard fail: a builder that also edited scripts/release.sh (gate finding scope.forbidden, scope_discipline 0, the other four dimensions at 2) totals 8 and passes. Every score is right; the verdict is wrong",
+        "score_scope_discipline reads only the gate's findings, as code/main.py does, and never the state's approved_scope, the off-scope paths a human approved adding to the contract after the gate flagged them; the docstring, after the rubric's 'or was the contract grown deliberately?', scores 2 when every off-scope path was approved, 1 otherwise, and 0 for a forbidden write whatever was approved. It surfaces one call away, in review()'s total and verdict: a task whose contract the human grew to docs/api.md totals 6 and soft-fails instead of totalling 7 and passing. The gate's off-scope finding is right; the reviewer misses the approvals that came after it",
+        "SignOffQueue keeps the inputs and report() reviews them again on every read, and board() calls report() three times per task for total, verdict and the zero-scored dimensions; with every scorer a model call, reading the board and 20 reports makes 400 calls"
+      ],
+      "timing_assert": "board() plus 20 report() reads under 0.05 s with each scorer call taking 2 ms; measured with the venv's Python 3.12 while other agents kept the load average at 9-10 on 10 cores: starter 1.0-1.18 s (20-23x the limit; the 400 sleeps alone take 0.8 s), reference 0.01-0.05 ms; with eight extra busy processes: starter 1.50-1.62 s, reference 0.01-0.02 ms. Caching the report on first read still takes 100 calls inside the timed block (about 0.25 s)",
+      "overfix_guard": "a dimension at 0 is a hard fail and the total stays the sum of the scores (zeroing the total, making it a soft fail, or checking for a zero only after the pass branch fails); the verdict comes from the reviewer's own scores, not the gate's (a hard fail on passed: false, on a block finding, or on scope_discipline alone lets the run with no feedback, whose gate passed, through at 7); mixed exit codes stay 1 (turning every failure into 0 fails); score_handoff ships correct and two assertions guard it: an open task with no next_action stays 0 (an `is None` check, or the lesson's order with the open task checked first, gives 1) and an open task with a next_action stays 1 (turning every open task into 0 fails); an approval covers only the path it names (an approval of any path clearing every warning, one approved path among two off-scope ones, or as many approvals as warnings all leave README.md unapproved and fail); no approval makes up for a forbidden write (filtering the findings by approval before the forbidden check, or checking that every scope finding is approved first, turns the approved scripts/release.sh into 2); a state without approved_scope has no approvals (reading it with [] raises KeyError on the lesson's T-002); every scorer runs exactly once per submit (reviewing twice in submit fails); a kept report is a record of one review: it does not change when the artifacts change later (re-reviewing changed inputs fails), and submitting the task again reviews it again (a cache keyed by task id fails); the board keeps one row per task in first-submit order (sorting by id, a list that appends a row per submit, or moving a resubmitted task to the end fails); kept reports equal a fresh review in SCORERS order with their notes; problem fit compares paths lowercased; approvals are whole paths, and the test data has no prefix, glob or case-only approval, so startswith, fnmatch or lower() also pass"
+    },
+    {
+      "part": 2,
+      "test": "test_report_history",
+      "kind": "model and persistence",
+      "lesson_anchor": "Build It (review_report.json with the scores, the total and a verdict); Ship It and the skill (outputs/review/<task_id>.json as the canonical report path); The reviewer cannot edit the diff (a report is a record); Exercise 1 (a sixth, domain-specific dimension)",
+      "exactness": "Content-addressed files: root/objects/<sha256>.json holds a report body named by the SHA-256 of its bytes, root/index.jsonl gets one {task, attempt, sha256} line per recorded attempt. A report reads back equal to the one recorded across a reopen: a sixth dimension in second place kept in place, the reviewer's own verdict (soft_fail at 8 of 12) not recomputed, notes with quotes, an arrow, a newline, a tab and trailing spaces, scores as ints; scores that are 2.0, True or 3 are rejected at record time",
+      "traps": [
+        "digest taken over a different serialization than the stored bytes",
+        "dimensions rebuilt from the module's RUBRIC on load (the sixth dimension is lost)",
+        "re-recording the same report treated as a conflict, or appending a second index line",
+        "a recorded attempt overwritten instead of ReportConflict",
+        "a gap in attempt numbers accepted, or one attempt counter for all tasks",
+        "attempt 0 taken through recorded[-1]: record treats it as a retry of the latest attempt, load returns the latest report",
+        "the attempt number written into the body, so equal reports no longer share an object",
+        "the object written before the attempt is checked, so a rejected record leaves an object behind",
+        "the index not read on reopen, or load returning the task's latest report for every attempt",
+        "a score checked with 'in (0, 1, 2)' (2.0 and True get through), isinstance(score, int) (True gets through), or by type only (3 gets through)"
+      ],
+      "clarifying_questions": [
+        "body format",
+        "recording an attempt again",
+        "sharing objects across tasks",
+        "checking the total"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_reconcile_reviewers",
+      "kind": "core algorithm",
+      "lesson_anchor": "Reviewer rubric and verdict thresholds; The reviewer is a separate role; Production patterns: bias mitigation (rotate judges across model families) and calibration; skill hard reject: every score must point at a file or trace entry; Key Terms: confidence floor (surface uncertainty to a human)",
+      "traps": [
+        "opinions paired by position instead of by dimension",
+        "citations matched without case, a state entry counted only when its value is set, a feedback record cited by its command (two runs share it), a finding the gate never raised",
+        "any() instead of all(), and an opinion that cites nothing counted as supported because all([]) is True",
+        "an unsupported score set to 0 or lowered by one instead of capped at 1",
+        "only the opinions the cap lowered listed as unsupported, or the list interleaved by dimension or kept in draft order",
+        "the mean rounded with round() (1.5 becomes 2), or the higher or the lower score taken",
+        "escalation on raw scores, at a difference of 1, or only when both opinions are supported",
+        "escalation that zeroes the dimension or turns the verdict into a hard fail",
+        "exactly 7 not a pass, exactly 5 a hard fail, a 0 ignored when the total is 7",
+        "missing, unknown or duplicate dimensions not rejected, including a duplicate plus a missing one (same length)"
+      ],
+      "clarifying_questions": [
+        "evidence for a 0",
+        "case of the prefix",
+        "state entries with empty values",
+        "verdict after an escalation"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_build_review_rounds",
+      "kind": "streaming",
+      "lesson_anchor": "The reviewer cannot edit the diff (it reads the diff and writes a report; if the report says fix this, the next builder turn does the fix); The reviewer is a separate role (no write access to the diff); Key Terms: soft fail (builder gets findings to address), hard fail (halt and surface to human)",
+      "wire_format": "CSV, decided by the test's csv.reader over each yielded string and over their join: one csv.writer record per string with its line break, the header round,changed,total,verdict,next first, then one record per round; changed is the sorted ';'-joined paths that differ from the previous round's snapshot; next is build, done or human",
+      "traps": [
+        "the reviewer handed the live workspace, or a read-only view of it, so a format-on-save hook that lands during the review shows up",
+        "a writable copy, so the reviewer's write does not raise TypeError",
+        "changed measured from the first workspace every round, left in workspace order, or missing deleted files",
+        "changed taken from the live workspace after the review, so a hook's write to a file the builder did not touch in that turn shows up a round early",
+        "records held back until the loop ends (the builder counts the records it has seen when its turn starts)",
+        "the builder not handed the latest report",
+        "a pass that does not end the loop, a pass in the last round sent to a human",
+        "a hard fail that starts another builder turn, the last round saying build, one round more than max_rounds"
+      ],
+      "clarifying_questions": [
+        "writes after the turn returns",
+        "another turn after a hard fail",
+        "an empty changed field",
+        "a pass in the last round"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_comment_threads",
+      "kind": "tree",
+      "lesson_anchor": "The reviewer cannot edit the diff and the builder does the fix (only the reviewer closes a finding); Use It: a reviewer subagent posts the rubric scores as a PR comment; OpenAI Agents SDK handoffs: the reviewer hands back a list of findings or goes up to a human; Exercise 5 (a back-and-forth that must not loop)",
+      "traps": [
+        "only direct replies to a finding read, so a resolve four levels down and a reopening reply two levels down are missed",
+        "replies read in one pass with parents first, on input where replies come before their parents",
+        "a resolved thread that stays resolved after a later reply, or reopened only by the builder's replies (the reviewer's own follow-up reopens it too)",
+        "the reviewer's first resolve, or the one that comes last in the input, taken instead of the latest",
+        "the builder's resolve counted as a resolution",
+        "self_resolved listing resolved threads, or a builder mark older than the reviewer's resolve",
+        "threads, or self_resolved, in input order",
+        "dimensions without an open thread left out of the counts",
+        "a finding outside the rubric skipped instead of ValueError"
+      ],
+      "clarifying_questions": [
+        "a reply in the same second as the resolve",
+        "the builder resolving",
+        "input order"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1 plants one of the three suggested scorer defects (problem fit). The handoff defect, an open task without next_action scoring 1, is not planted: lesson 41's Part 1 already plants the same bug (handoff_quality grading a packet without next_action as partial, after lesson 40's rule), so score_handoff ships correct and its two assertions stay as guards. Its place goes to the second half of the rubric's scope question, 'or was the contract grown deliberately?': the state records the off-scope paths a human approved adding to the contract (lesson 36: a scope violation asks the human whether the contract grows or the agent backs off), the gate raises one off-scope finding per path, and score_scope_discipline, as in code/main.py, never reads the approvals. Approvals are whole paths compared exactly, so the pack stays out of prefix boundaries and lesson 36's glob dialect, and who may approve is not tested (Part 5 already tests that only the reviewer resolves). This is not lesson 31's failure_report defect, which judges allowed files against the wrong, hard-coded allow-list: here the gate's off-scope finding is right, and the reviewer misses the list a human approved afterwards. Nor is it lesson 33's normalize defect, which compares approved package names with the wrong normalization. The third suggested defect, score_verification's empty feedback log slipping through all([]), is not planted: lesson 32's Part 1 already plants all() of no commands marking a task done, and this pack's Part 3 tests all([]) on an opinion that cites nothing, which is the chapter's limit of two for one trap kind. Its place goes to review()'s verdict, which follows the rubric section's totals and misses the Key Terms rule that any dimension at 0 is a hard fail; score_verification ships correct, and its no-feedback and mixed-exit assertions stay as guards. The timing defect moved. Calling each scorer three times inside review() costs 3x, and a 3x constant factor cannot be both 8 times over a wall-clock limit and 8 times under it. The same root cause, scorer results that are not kept, now sits in SignOffQueue, the human sign-off step of the lesson's diagram: the queue keeps the inputs and every read reviews again, and board() reads three times per task for total, verdict and the zero-scored dimensions. The timed block reads finished reports, so the waste grows with every read. A deterministic count (each scorer once per submit) covers the suggested 'one call per scorer' rule, and the suggested order guard is the check that kept reports equal a fresh review in SCORERS order, notes included.",
+    "Part 2 interprets 'write-only' as write-once: the history only grows, a recorded attempt never changes, and a retry of the same report is a no-op. The exactness traps are the rubric's own: a sixth dimension (lesson exercise 1) kept in its place, the reviewer's verdict kept as written, int scores. Stripped notes, sort_keys and string-ordered attempt numbers are already used elsewhere in the chapter, so notes are tested exactly but not listed as traps.",
+    "Part 3 adds state:<key> to the suggested citation kinds (file path, feedback record id, finding code), so the assumptions and handoff dimensions can cite their evidence. The reconciled score is the mean of the two counted scores rounded down, which keeps escalation from changing any score: with the lower score the escalated 2-vs-0 dimension would be 0 anyway.",
+    "Part 4 follows the lesson's Key Terms instead of the suggestion that both soft and hard fails trigger another builder turn: a soft fail gives the builder its findings, a hard fail halts for a human. A next column (build, done, human) carries the final conclusion, including the cap; the suggested builder_files column is named changed and holds the snapshot diff, so a hook's late write is reported in the round whose review first sees it.",
+    "Part 5 counts threads per dimension and reports builder self-resolutions as suggested. Ties between a reply and a resolve in the same second are left to a clarifying question; deep-recursion and orphan traps are not used because chapter 14 lessons 02, 08, 16 and 37 already have them (an unknown parent still raises ValueError)."
+  ]
+}
