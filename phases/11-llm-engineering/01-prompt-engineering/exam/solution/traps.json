@@ -1,0 +1,469 @@
+{
+  "package": "promptbench",
+  "tests": [
+    "test_prompt_builders",
+    "test_template_bank_roundtrip",
+    "test_score_and_compare",
+    "test_stream_scores",
+    "test_pattern_scorecard"
+  ],
+  "layers": [
+    {
+      "test": "test_prompt_builders",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "bind template variables by their declared names"
+        },
+        {
+          "name": "bind declared names by key",
+          "edits": [
+            {
+              "file": "prompts.py",
+              "old": "return {name: value for name, value in zip(pattern.variables, variables.values())}",
+              "new": "return {name: variables[name] for name in pattern.variables}"
+            }
+          ],
+          "expect": "conversation retains assistant turns and empty content in order"
+        },
+        {
+          "name": "+ retain every conversation turn",
+          "edits": [
+            {
+              "file": "prompts.py",
+              "old": "messages.extend({\"role\": role, \"content\": content} for role, content in turns if role == \"user\")",
+              "new": "messages.extend({\"role\": role, \"content\": content} for role, content in turns)"
+            }
+          ],
+          "expect": "an empty system override is intentional"
+        },
+        {
+          "name": "+ default the system only for None",
+          "edits": [
+            {
+              "file": "prompts.py",
+              "old": "return system_override or f\"You are an AI assistant using {pattern.name}.\"",
+              "new": "return system_override if system_override is not None else f\"You are an AI assistant using {pattern.name}.\""
+            }
+          ],
+          "expect": "wide template rendering should stay responsive"
+        },
+        {
+          "name": "+ render parsed fragments once",
+          "edits": [
+            {
+              "file": "prompts.py",
+              "old": "    parts = fragments(template)\n    names = dict.fromkeys(field for _, field in parts if field is not None)\n    for name in names:\n        parts = [(literal + str(values[name]), None) if field == name else (literal, field)\n                 for literal, field in parts]\n    return \"\".join(literal for literal, _ in parts)",
+              "new": "    output = []\n    for literal, field in fragments(template):\n        output.append(literal)\n        if field is not None:\n            output.append(str(values[field]))\n    return \"\".join(output)"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_prompt_builders",
+      "name": "format inserted variable values a second time",
+      "edits": [
+        {
+          "file": "prompts.py",
+          "old": "output.append(str(values[field]))",
+          "new": "output.append(str(values[field]).format_map(values))"
+        }
+      ],
+      "expect": "inserted values and escaped braces remain literal"
+    },
+    {
+      "test": "test_template_bank_roundtrip",
+      "name": "normalize content newlines when reading",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "payload.decode(\"utf-8\")",
+          "new": "(self.objects / row[\"digest\"]).read_text(encoding=\"utf-8\")"
+        }
+      ],
+      "expect": "a revision round-trips exactly"
+    },
+    {
+      "test": "test_template_bank_roundtrip",
+      "name": "leave the manifest only in memory",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "        os.replace(temporary, self.manifest)",
+          "new": "        # Manifest is not installed."
+        }
+      ],
+      "expect": "reopened versions keep insertion order and independent metadata"
+    },
+    {
+      "test": "test_template_bank_roundtrip",
+      "name": "hash template name as part of content identity",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "digest = hashlib.sha256(payload).hexdigest()",
+          "new": "digest = hashlib.sha256(pattern.name.encode(\"utf-8\") + payload).hexdigest()"
+        }
+      ],
+      "expect": "the digest identifies exact template bytes"
+    },
+    {
+      "test": "test_template_bank_roundtrip",
+      "name": "collapse empty stored override to None",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "row[\"digest\"], row[\"system_override\"])",
+          "new": "row[\"digest\"], row[\"system_override\"] or None)"
+        }
+      ],
+      "expect": "a revision round-trips exactly"
+    },
+    {
+      "test": "test_template_bank_roundtrip",
+      "name": "sort revisions by pattern name instead of insertion",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "for row in self._records]",
+          "new": "for row in sorted(self._records, key=lambda row: row[\"name\"])]"
+        }
+      ],
+      "expect": "reopened versions keep insertion order and independent metadata"
+    },
+    {
+      "test": "test_score_and_compare",
+      "name": "divide every composite by four criteria",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "round(sum(enabled) / len(enabled), 3) if enabled else 0.0",
+          "new": "round(sum(enabled) / 4, 3) if enabled else 0.0"
+        }
+      ],
+      "expect": "only enabled compliance components enter the composite"
+    },
+    {
+      "test": "test_score_and_compare",
+      "name": "match required keywords case sensitively",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "word.lower() in lowered",
+          "new": "word in response_text"
+        }
+      ],
+      "expect": "score every enabled rubric component independently"
+    },
+    {
+      "test": "test_score_and_compare",
+      "name": "accept only JSON arrays and objects",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "                json.loads(response_text)\n                scores[\"format_valid\"] = True",
+          "new": "                parsed = json.loads(response_text)\n                scores[\"format_valid\"] = isinstance(parsed, (dict, list))"
+        }
+      ],
+      "expect": "JSON format accepts any complete JSON value"
+    },
+    {
+      "test": "test_score_and_compare",
+      "name": "accept a one-item numbered list",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "len(re.findall(r\"^\\d+\\.\", response_text, re.MULTILINE)) >= 2",
+          "new": "len(re.findall(r\"^\\d+\\.\", response_text, re.MULTILINE)) >= 1"
+        }
+      ],
+      "expect": "a numbered list needs at least two entries"
+    },
+    {
+      "test": "test_score_and_compare",
+      "name": "break model ties alphabetically",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "ranked = sorted(comparison.items(), key=lambda pair: pair[1][\"scores\"][\"composite_score\"], reverse=True)",
+          "new": "ranked = sorted(comparison.items(), key=lambda pair: (-pair[1][\"scores\"][\"composite_score\"], pair[0]))"
+        }
+      ],
+      "expect": "equal model scores retain replay order"
+    },
+    {
+      "test": "test_stream_scores",
+      "name": "join CSV fields with commas by hand",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    csv.writer(buffer, lineterminator=\"\\r\\n\").writerow(values)\n    return buffer.getvalue()",
+          "new": "    return \",\".join(str(value) for value in values) + \"\\n\""
+        }
+      ],
+      "expect": "CSV keeps every replay field and model order"
+    },
+    {
+      "test": "test_stream_scores",
+      "name": "eagerly consume every case before emitting case rows",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        async for case in cases:",
+          "new": "        for case in [case async for case in cases]:"
+        }
+      ],
+      "expect": "emit case rows before fetching another case"
+    },
+    {
+      "test": "test_stream_scores",
+      "name": "sort CSV models alphabetically",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "for model, result in comparison.items():",
+          "new": "for model, result in sorted(comparison.items()):"
+        }
+      ],
+      "expect": "CSV keeps every replay field and model order"
+    },
+    {
+      "test": "test_stream_scores",
+      "name": "defer source cleanup until loop shutdown",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            await close()",
+          "new": "            pass"
+        }
+      ],
+      "expect": "close the replay source before returning from client close"
+    },
+    {
+      "test": "test_pattern_scorecard",
+      "name": "fill missing criterion observations with zero",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "values = [float(result[\"scores\"][name]) for _, result in rows if name in result[\"scores\"]]",
+          "new": "values = [float(result[\"scores\"].get(name, 0.0)) for _, result in rows]"
+        }
+      ],
+      "expect": "criterion means use observed coverage, not the total case count"
+    },
+    {
+      "test": "test_pattern_scorecard",
+      "name": "drop observed zero-valued criteria",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "if name in result[\"scores\"]]",
+          "new": "if name in result[\"scores\"] and result[\"scores\"][name]]"
+        }
+      ],
+      "expect": "criterion means use observed coverage, not the total case count"
+    },
+    {
+      "test": "test_pattern_scorecard",
+      "name": "choose alphabetical weakest criterion on ties",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "available = [name for name in CRITERIA if components[name][\"count\"]]",
+          "new": "available = sorted(name for name in CRITERIA if components[name][\"count\"])"
+        }
+      ],
+      "expect": "weakest ties follow declared criterion order"
+    },
+    {
+      "test": "test_pattern_scorecard",
+      "name": "ignore duplicate observations",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "            if key in seen:",
+          "new": "            if False:"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_template_bank_roundtrip",
+      "name": "sort declared variables in persisted metadata",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "\"variables\": list(pattern.variables)",
+          "new": "\"variables\": sorted(pattern.variables)"
+        }
+      ],
+      "expect": "declared variable order survives reopening"
+    },
+    {
+      "test": "test_template_bank_roundtrip",
+      "name": "round persisted temperature to three decimals",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "\"temperature\": pattern.temperature",
+          "new": "\"temperature\": round(pattern.temperature, 3)"
+        }
+      ],
+      "expect": "reopened versions keep insertion order and independent metadata"
+    },
+    {
+      "test": "test_template_bank_roundtrip",
+      "name": "trust the content-addressed filename without verifying bytes",
+      "edits": [
+        {
+          "file": "bank.py",
+          "old": "if hashlib.sha256(payload).hexdigest() != row[\"digest\"]:",
+          "new": "if False:"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_score_and_compare",
+      "name": "match required keywords as whole whitespace words",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "word.lower() in lowered",
+          "new": "word.lower() in lowered.split()"
+        }
+      ],
+      "expect": "required keywords use case-insensitive substring matching"
+    },
+    {
+      "test": "test_score_and_compare",
+      "name": "match forbidden phrases as whole whitespace words",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "phrase.lower() in lowered",
+          "new": "phrase.lower() in lowered.split()"
+        }
+      ],
+      "expect": "forbidden phrases use case-insensitive substring matching"
+    },
+    {
+      "test": "test_score_and_compare",
+      "name": "recognize only conventional dash and star bullets",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "line.startswith((\"-\", \"*\", \"1\"))",
+          "new": "line.startswith((\"-\", \"*\"))"
+        }
+      ],
+      "expect": "bullet detection retains the source Python prefix heuristic"
+    },
+    {
+      "test": "test_stream_scores",
+      "name": "emit CSV models in score ranking order",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "comparison, _ = compare_models",
+          "new": "comparison, ranked = compare_models"
+        },
+        {
+          "file": "stream.py",
+          "old": "for model, result in comparison.items():",
+          "new": "for model, result in ranked:"
+        }
+      ],
+      "expect": "CSV model order is independent of score ranking"
+    },
+    {
+      "test": "test_stream_scores",
+      "name": "strip response whitespace before writing CSV",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "case[\"results\"][model][\"response\"], result",
+          "new": "case[\"results\"][model][\"response\"].strip(), result"
+        }
+      ],
+      "expect": "CSV preserves bare CR, CRLF and surrounding whitespace"
+    },
+    {
+      "test": "test_stream_scores",
+      "name": "normalize response line endings before writing CSV",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "case[\"results\"][model][\"response\"], result",
+          "new": "case[\"results\"][model][\"response\"].replace(\"\\r\\n\", \"\\n\").replace(\"\\r\", \"\\n\"), result"
+        }
+      ],
+      "expect": "CSV preserves bare CR, CRLF and surrounding whitespace"
+    },
+    {
+      "test": "test_pattern_scorecard",
+      "name": "average token counts instead of totaling them",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "\"tokens\": sum(result[\"tokens\"] for _, result in rows)",
+          "new": "\"tokens\": sum(result[\"tokens\"] for _, result in rows) / len(rows)"
+        }
+      ],
+      "expect": "criterion means use observed coverage, not the total case count"
+    },
+    {
+      "test": "test_pattern_scorecard",
+      "name": "sort scorecard case ids alphabetically",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "\"case_ids\": [case for case, _ in rows]",
+          "new": "\"case_ids\": sorted(case for case, _ in rows)"
+        }
+      ],
+      "expect": "criterion means use observed coverage, not the total case count"
+    },
+    {
+      "test": "test_stream_scores",
+      "name": "project each replay case using an empty scoring rubric",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "compare_models(case[\"results\"], case[\"criteria\"])",
+          "new": "compare_models(case[\"results\"], {})"
+        }
+      ],
+      "expect": "CSV keeps every replay field and model order"
+    },
+    {
+      "test": "test_stream_scores",
+      "name": "write the total case token usage into every model CSV row",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "result[\"tokens\"], result[\"latency_ms\"]",
+          "new": "sum(item[\"tokens\"] for item in comparison.values()), result[\"latency_ms\"]"
+        }
+      ],
+      "expect": "CSV keeps every replay field and model order"
+    },
+    {
+      "test": "test_stream_scores",
+      "name": "convert original API millisecond latency into seconds in score rows",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "result[\"tokens\"], result[\"latency_ms\"]",
+          "new": "result[\"tokens\"], result[\"latency_ms\"] / 1000"
+        }
+      ],
+      "expect": "CSV keeps every replay field and model order"
+    }
+  ]
+}
