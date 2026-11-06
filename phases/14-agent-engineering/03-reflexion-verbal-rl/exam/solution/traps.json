@@ -1,0 +1,1935 @@
+{
+  "package": "reflexion",
+  "tests": [
+    "test_reflexion_loop",
+    "test_learnings_file",
+    "test_judge_and_trials",
+    "test_learning_curve",
+    "test_scoped_recall"
+  ],
+  "layers": [
+    {
+      "test": "test_reflexion_loop",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "reflexion should converge on a reachable target"
+        },
+        {
+          "name": "fix the direction of the reflection",
+          "edits": [
+            {
+              "file": "puzzle.py",
+              "old": "        if delta > 0:\n            return f\"tried {attempt}: sum {total} is {delta} short; pick larger values\"\n        return f\"tried {attempt}: sum {total} overshoots by {-delta}; pick smaller values\"\n",
+              "new": "        if delta < 0:\n            return f\"tried {attempt}: sum {total} is {-delta} short; pick larger values\"\n        return f\"tried {attempt}: sum {total} overshoots by {delta}; pick smaller values\"\n"
+            }
+          ],
+          "expect": "a small buffer still converges: the actor reads the newest reflection"
+        },
+        {
+          "name": "+ a full buffer drops the oldest entry",
+          "edits": [
+            {
+              "file": "memory.py",
+              "old": "            kept.pop()\n",
+              "new": "            kept.pop(0)\n"
+            }
+          ],
+          "expect": "an external failure teaches nothing"
+        },
+        {
+          "name": "+ an outage stores nothing",
+          "edits": [
+            {
+              "file": "puzzle.py",
+              "old": "        except ToolDown as error:\n            text = f\"tried {attempt}: the check failed ({error}); wait for the checker next time\"\n            memory.add(Reflection(n, PUZZLE_CLASS, text))\n            results.append(TrialResult(n, attempt, False, None, text))\n            continue\n",
+              "new": "        except ToolDown:\n            results.append(TrialResult(n, attempt, False, None, None))\n            continue\n"
+            }
+          ],
+          "expect": "adding to a big buffer should stay fast"
+        },
+        {
+          "name": "+ entries keyed by their normalized text",
+          "edits": [
+            {
+              "file": "memory.py",
+              "old": "        self._items: list[Reflection] = []\n",
+              "new": "        self._items: dict[str, Reflection] = {}\n"
+            },
+            {
+              "file": "memory.py",
+              "old": "        key = normalize(reflection.text)\n        kept = []\n        for old in self._items:\n            if normalize(old.text) == key:\n                reflection = replace(reflection, failures=old.failures + reflection.failures)\n            else:\n                kept.append(old)\n        kept.append(reflection)\n        if len(kept) > self.max_len:\n            kept.pop(0)\n        self._items = kept\n",
+              "new": "        key = normalize(reflection.text)\n        old = self._items.pop(key, None)\n        if old is not None:\n            reflection = replace(reflection, failures=old.failures + reflection.failures)\n        self._items[key] = reflection\n        if len(self._items) > self.max_len:\n            del self._items[next(iter(self._items))]\n"
+            },
+            {
+              "file": "memory.py",
+              "old": "        return list(self._items)\n",
+              "new": "        return list(self._items.values())\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_reflexion_loop",
+      "name": "direction fixed in the Actor, which now reads 'overshoots' as 'raise' (overfix)",
+      "edits": [
+        {
+          "file": "puzzle.py",
+          "old": "        if delta < 0:\n            return f\"tried {attempt}: sum {total} is {-delta} short; pick larger values\"\n        return f\"tried {attempt}: sum {total} overshoots by {delta}; pick smaller values\"\n",
+          "new": "        if delta > 0:\n            return f\"tried {attempt}: sum {total} is {delta} short; pick larger values\"\n        return f\"tried {attempt}: sum {total} overshoots by {-delta}; pick smaller values\"\n"
+        },
+        {
+          "file": "puzzle.py",
+          "old": "        gap = int(match.group(4)) if match.group(4) else -int(match.group(5))\n",
+          "new": "        gap = -int(match.group(4)) if match.group(4) else int(match.group(5))\n"
+        }
+      ],
+      "expect": "each miss gets a one-line diagnosis; the success gets none"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "direction fixed by flipping the scalar check to target - sum (overfix)",
+      "edits": [
+        {
+          "file": "puzzle.py",
+          "old": "        if delta < 0:\n            return f\"tried {attempt}: sum {total} is {-delta} short; pick larger values\"\n        return f\"tried {attempt}: sum {total} overshoots by {delta}; pick smaller values\"\n",
+          "new": "        if delta > 0:\n            return f\"tried {attempt}: sum {total} is {delta} short; pick larger values\"\n        return f\"tried {attempt}: sum {total} overshoots by {-delta}; pick smaller values\"\n"
+        },
+        {
+          "file": "puzzle.py",
+          "old": "    return sum(attempt) - target\n",
+          "new": "    return target - sum(attempt)\n"
+        }
+      ],
+      "expect": "reflexion should converge on a reachable target"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "only the condition flipped, so the reflection says '-14 short'",
+      "edits": [
+        {
+          "file": "puzzle.py",
+          "old": "        if delta < 0:\n            return f\"tried {attempt}: sum {total} is {-delta} short; pick larger values\"\n        return f\"tried {attempt}: sum {total} overshoots by {delta}; pick smaller values\"\n",
+          "new": "        if delta < 0:\n            return f\"tried {attempt}: sum {total} is {delta} short; pick larger values\"\n        return f\"tried {attempt}: sum {total} overshoots by {-delta}; pick smaller values\"\n"
+        }
+      ],
+      "expect": "reflexion should converge on a reachable target"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "dict.popitem() to drop the oldest entry (it drops the newest)",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "            del self._items[next(iter(self._items))]\n",
+          "new": "            self._items.popitem()\n"
+        }
+      ],
+      "expect": "a small buffer still converges: the actor reads the newest reflection"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "a full buffer trimmed at max_len - 1",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        if len(self._items) > self.max_len:\n",
+          "new": "        if len(self._items) >= self.max_len:\n"
+        }
+      ],
+      "expect": "a full buffer drops its oldest reflection"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "a duplicate is ignored, so the old trial and slot stay (speed fix gone wrong)",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        key = normalize(reflection.text)\n        old = self._items.pop(key, None)\n        if old is not None:\n            reflection = replace(reflection, failures=old.failures + reflection.failures)\n        self._items[key] = reflection\n        if len(self._items) > self.max_len:\n            del self._items[next(iter(self._items))]\n",
+          "new": "        key = normalize(reflection.text)\n        if key in self._items:\n            return\n        self._items[key] = reflection\n        if len(self._items) > self.max_len:\n            del self._items[next(iter(self._items))]\n"
+        }
+      ],
+      "expect": "a lesson learned again moves to the newest slot"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "a duplicate overwrites its dict slot in place, so it keeps its old position",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        old = self._items.pop(key, None)\n",
+          "new": "        old = self._items.get(key)\n"
+        }
+      ],
+      "expect": "a lesson learned again moves to the newest slot"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "a duplicate replaces the stored one without adding up failures",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        if old is not None:\n            reflection = replace(reflection, failures=old.failures + reflection.failures)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a lesson learned again moves to the newest slot"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "a duplicate refreshes the trial but keeps the old wording and ttl",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "            reflection = replace(reflection, failures=old.failures + reflection.failures)\n",
+          "new": "            reflection = replace(old, trial=reflection.trial, failures=old.failures + reflection.failures)\n"
+        }
+      ],
+      "expect": "a lesson learned again moves to the newest slot"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "normalize only case-folds (cheaper, but spacing now matters)",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "    return \" \".join(text.casefold().split())\n",
+          "new": "    return text.casefold().strip()\n"
+        }
+      ],
+      "expect": "a lesson learned again moves to the newest slot"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "normalize only collapses whitespace (case now matters)",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "    return \" \".join(text.casefold().split())\n",
+          "new": "    return \" \".join(text.split())\n"
+        }
+      ],
+      "expect": "a lesson learned again moves to the newest slot"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "entries keyed by text and trial, so nothing is ever a duplicate",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        key = normalize(reflection.text)\n",
+          "new": "        key = (normalize(reflection.text), reflection.trial)\n"
+        }
+      ],
+      "expect": "a lesson learned again moves to the newest slot"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "an outage skipped without recording the trial",
+      "edits": [
+        {
+          "file": "puzzle.py",
+          "old": "        except ToolDown:\n            results.append(TrialResult(n, attempt, False, None, None))\n            continue\n",
+          "new": "        except ToolDown:\n            continue\n"
+        }
+      ],
+      "expect": "an external failure teaches nothing"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "an outage retried inside the same trial until the tool answers",
+      "edits": [
+        {
+          "file": "puzzle.py",
+          "old": "        try:\n            delta = check(attempt, target)\n        except ToolDown:\n            results.append(TrialResult(n, attempt, False, None, None))\n            continue\n",
+          "new": "        while True:\n            try:\n                delta = check(attempt, target)\n                break\n            except ToolDown:\n                pass\n"
+        }
+      ],
+      "expect": "an external failure teaches nothing"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "an outage keeps no reflection in memory but reports one on the trial",
+      "edits": [
+        {
+          "file": "puzzle.py",
+          "old": "            results.append(TrialResult(n, attempt, False, None, None))\n",
+          "new": "            results.append(TrialResult(n, attempt, False, None, \"the checker was down\"))\n"
+        }
+      ],
+      "expect": "an external failure teaches nothing"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "always a three-backtick fence",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "        fence = \"`\" * max(3, longest + 1)\n",
+          "new": "        fence = \"```\"\n"
+        }
+      ],
+      "expect": "the layout in the module docstring"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "fence as long as the longest backtick run, not one longer",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "        fence = \"`\" * max(3, longest + 1)\n",
+          "new": "        fence = \"`\" * max(3, longest)\n"
+        }
+      ],
+      "expect": "the layout in the module docstring"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "only backtick runs at the start of a line counted",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "BACKTICKS.findall(reflection.text)",
+          "new": "re.findall(r\"^`+\", reflection.text, re.M)"
+        }
+      ],
+      "expect": "the layout in the module docstring"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "fence one longer than the longest run, with no minimum of three",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "        fence = \"`\" * max(3, longest + 1)\n",
+          "new": "        fence = \"`\" * (longest + 1)\n"
+        }
+      ],
+      "expect": "the layout in the module docstring"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "no blank line between the heading and the fence",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "f\" failures {reflection.failures})\\n\\n{fence}",
+          "new": "f\" failures {reflection.failures})\\n{fence}"
+        }
+      ],
+      "expect": "the layout in the module docstring"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "no blank line between entries",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "        f.write(\"\\n\".join([HEADER, *entries]))\n",
+          "new": "        f.write(\"\".join([HEADER, *entries]))\n"
+        }
+      ],
+      "expect": "the layout in the module docstring"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "no line break after the closing fence",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "{reflection.text}\\n{fence}\\n\"\n",
+          "new": "{reflection.text}\\n{fence}\"\n"
+        }
+      ],
+      "expect": "the layout in the module docstring"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "the text stripped before it is written",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "\\n{reflection.text}\\n",
+          "new": "\\n{reflection.text.strip()}\\n"
+        }
+      ],
+      "expect": "a reflection must round-trip exactly"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "the file opened for appending",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "with open(path, \"w\", encoding=\"utf-8\", newline=\"\") as f:",
+          "new": "with open(path, \"a\", encoding=\"utf-8\", newline=\"\") as f:"
+        }
+      ],
+      "expect": "a reflection must round-trip exactly"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "each entry checked only as it is written, after the file was truncated",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "    entries = []\n    for reflection in reflections:\n        _check(reflection)\n        longest = max((len(run) for run in BACKTICKS.findall(reflection.text)), default=0)\n        fence = \"`\" * max(3, longest + 1)\n        entries.append(\n            f\"## {reflection.task_class} (trial {reflection.trial}, ttl {reflection.ttl},\"\n            f\" failures {reflection.failures})\\n\\n{fence}\\n{reflection.text}\\n{fence}\\n\"\n        )\n    with open(path, \"w\", encoding=\"utf-8\", newline=\"\") as f:\n        f.write(\"\\n\".join([HEADER, *entries]))\n",
+          "new": "    with open(path, \"w\", encoding=\"utf-8\", newline=\"\") as f:\n        f.write(HEADER)\n        for reflection in reflections:\n            _check(reflection)\n            longest = max((len(run) for run in BACKTICKS.findall(reflection.text)), default=0)\n            fence = \"`\" * max(3, longest + 1)\n            f.write(\n                f\"\\n## {reflection.task_class} (trial {reflection.trial}, ttl {reflection.ttl},\"\n                f\" failures {reflection.failures})\\n\\n{fence}\\n{reflection.text}\\n{fence}\\n\"\n            )\n"
+        }
+      ],
+      "expect": "a refused write leaves the file as it was"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "task class not checked",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "    if not TASK_CLASS_PATH.fullmatch(reflection.task_class):\n        raise ValueError(f\"not a task class: {reflection.task_class!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a broken entry is an error, not a silent skip"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "task class checked with re.match, which accepts any valid prefix",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "    if not TASK_CLASS_PATH.fullmatch(reflection.task_class):",
+          "new": "    if not TASK_CLASS_PATH.match(reflection.task_class):"
+        }
+      ],
+      "expect": "a broken entry is an error, not a silent skip"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "a trial, ttl or failures of 0 accepted",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "        if getattr(reflection, name) < 1:",
+          "new": "        if getattr(reflection, name) < 0:"
+        }
+      ],
+      "expect": "a broken entry is an error, not a silent skip"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "a whitespace-only text accepted",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "    if not reflection.text.strip():",
+          "new": "    if not reflection.text:"
+        }
+      ],
+      "expect": "only what reads back is written"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "a missing file raises FileNotFoundError",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "    try:\n        with open(path, encoding=\"utf-8\", newline=\"\") as f:\n            lines = f.read().split(\"\\n\")\n    except FileNotFoundError:\n        return []\n",
+          "new": "    with open(path, encoding=\"utf-8\", newline=\"\") as f:\n        lines = f.read().split(\"\\n\")\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "a fence closed by any line that starts with three backticks",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "            while end < len(lines) and lines[end] != line:\n",
+          "new": "            while end < len(lines) and not lines[end].startswith(\"```\"):\n"
+        }
+      ],
+      "expect": "a reflection must round-trip exactly"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "a fence closed by any fence line, whatever its length",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "            while end < len(lines) and lines[end] != line:\n",
+          "new": "            while end < len(lines) and not FENCE.fullmatch(lines[end]):\n"
+        }
+      ],
+      "expect": "the fence is never closed"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "fences tracked only after the first heading, so the header's example is read as an entry",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "        if FENCE.fullmatch(line):\n",
+          "new": "        if FENCE.fullmatch(line) and heading is not None:\n"
+        }
+      ],
+      "expect": "a reflection must round-trip exactly"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "every line stripped of trailing whitespace on read",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "            lines = f.read().split(\"\\n\")\n",
+          "new": "            lines = [ln.rstrip() for ln in f.read().split(\"\\n\")]\n"
+        }
+      ],
+      "expect": "a reflection must round-trip exactly"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "the text stripped of blank lines at its ends on read",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "\"\\n\".join(lines[i + 1 : end])",
+          "new": "\"\\n\".join(lines[i + 1 : end]).strip(\"\\n\")"
+        }
+      ],
+      "expect": "a reflection must round-trip exactly"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "every text line dedented on read",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "\"\\n\".join(lines[i + 1 : end])",
+          "new": "\"\\n\".join(ln.lstrip() for ln in lines[i + 1 : end])"
+        }
+      ],
+      "expect": "a reflection must round-trip exactly"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "the numbers in the heading read back as strings",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "            heading = (match[1], int(match[2]), int(match[3]), int(match[4]))\n",
+          "new": "            heading = (match[1], match[2], match[3], match[4])\n"
+        },
+        {
+          "file": "learnings.py",
+          "old": "                _check(reflection)\n                found.append(reflection)\n",
+          "new": "                found.append(reflection)\n"
+        }
+      ],
+      "expect": "a reflection must round-trip exactly"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "a '## ' line that is not a valid heading skipped as a note",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "            if match is None:\n                raise ValueError(f\"line {i + 1}: not an entry heading: {line!r}\")\n            heading = (",
+          "new": "            if match is None:\n                i += 1\n                continue\n            heading = ("
+        }
+      ],
+      "expect": "a broken entry is an error, not a silent skip"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "a heading right after another heading replaces it",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "            if heading is not None:\n                raise ValueError(f\"line {i + 1}: the entry before this heading has no text\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a broken entry is an error, not a silent skip"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "a fence left open runs to the end of the file",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "            if end == len(lines):\n                raise ValueError(f\"line {i + 1}: the fence is never closed\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a broken entry is an error, not a silent skip"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "a last heading with no text dropped",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "    if heading is not None:\n        raise ValueError(\"the last entry has no text\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a broken entry is an error, not a silent skip"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "entries read back without the checks write_learnings applies",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "                _check(reflection)\n                found.append(reflection)\n",
+          "new": "                found.append(reflection)\n"
+        }
+      ],
+      "expect": "a broken entry is an error, not a silent skip"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "exactly one blank line required between a heading and its fence",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "            heading = (match[1], int(match[2]), int(match[3]), int(match[4]))\n",
+          "new": "            heading = (match[1], int(match[2]), int(match[3]), int(match[4]))\n            if i + 2 >= len(lines) or lines[i + 1] != \"\" or not FENCE.fullmatch(lines[i + 2]):\n                raise ValueError(f\"line {i + 1}: expected a blank line, then the fence\")\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "a scalar False read as 'no scalar'",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    if trial.scalar is not None:",
+          "new": "    if trial.scalar:"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "the rails checked before the scalar",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    if trial.scalar is not None:\n        return Verdict(trial.scalar, \"scalar\")\n",
+          "new": ""
+        },
+        {
+          "file": "judge.py",
+          "old": "    if len(actions) > max_steps:\n        return Verdict(False, \"inefficient\")\n",
+          "new": "    if len(actions) > max_steps:\n        return Verdict(False, \"inefficient\")\n    if trial.scalar is not None:\n        return Verdict(trial.scalar, \"scalar\")\n"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "stuck means any repeated action, not two in a row",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    if any(a == b for a, b in zip(actions, actions[1:])):",
+          "new": "    if len(set(actions)) < len(actions):"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "inefficient at exactly max_steps",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    if len(actions) > max_steps:",
+          "new": "    if len(actions) >= max_steps:"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "a self-score equal to pass_score fails",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "trial.self_score >= pass_score",
+          "new": "trial.self_score > pass_score"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "a self-score of 0.0 read as 'no self-score'",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    if trial.self_score is not None:",
+          "new": "    if trial.self_score:"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "the scalar checked before an external failure",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    if trial.error is not None:\n        return Verdict(False, \"external\")\n    if trial.scalar is not None:\n        return Verdict(trial.scalar, \"scalar\")\n",
+          "new": "    if trial.scalar is not None:\n        return Verdict(trial.scalar, \"scalar\")\n    if trial.error is not None:\n        return Verdict(False, \"external\")\n"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "an external failure checked after the rails",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    if trial.error is not None:\n        return Verdict(False, \"external\")\n",
+          "new": ""
+        },
+        {
+          "file": "judge.py",
+          "old": "    if len(actions) > max_steps:\n        return Verdict(False, \"inefficient\")\n",
+          "new": "    if len(actions) > max_steps:\n        return Verdict(False, \"inefficient\")\n    if trial.error is not None:\n        return Verdict(False, \"external\")\n"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "inefficient checked before stuck",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    if any(a == b for a, b in zip(actions, actions[1:])):\n        return Verdict(False, \"stuck\")\n    if len(actions) > max_steps:\n        return Verdict(False, \"inefficient\")\n",
+          "new": "    if len(actions) > max_steps:\n        return Verdict(False, \"inefficient\")\n    if any(a == b for a, b in zip(actions, actions[1:])):\n        return Verdict(False, \"stuck\")\n"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "no signal at all counted as a success",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    return Verdict(False, \"none\")\n",
+          "new": "    return Verdict(True, \"none\")\n"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "the scalar and the self-score must both pass",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "        return Verdict(trial.scalar, \"scalar\")\n",
+          "new": "        return Verdict(trial.scalar and (trial.self_score is None or trial.self_score >= pass_score), \"scalar\")\n"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "a missing self-score read as 0",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    if trial.self_score is not None:\n        return Verdict(trial.self_score >= pass_score, \"self\")\n    return Verdict(False, \"none\")\n",
+          "new": "    return Verdict((trial.self_score or 0.0) >= pass_score, \"self\")\n"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "ttl counted as in the quiz, now - trial < ttl",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        return [r for r in self._items.values() if r.trial < now <= r.trial + r.ttl]\n",
+          "new": "        return [r for r in self._items.values() if r.trial < now and now - r.trial < r.ttl]\n"
+        }
+      ],
+      "expect": "a reflection from trial t with ttl n is seen by trials t+1 through t+n"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "a reflection seen by its own trial",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        return [r for r in self._items.values() if r.trial < now <= r.trial + r.ttl]\n",
+          "new": "        return [r for r in self._items.values() if r.trial <= now <= r.trial + r.ttl]\n"
+        }
+      ],
+      "expect": "a reflection from trial t with ttl n is seen by trials t+1 through t+n"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "later trials' reflections shown to an earlier trial",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        return [r for r in self._items.values() if r.trial < now <= r.trial + r.ttl]\n",
+          "new": "        return [r for r in self._items.values() if now <= r.trial + r.ttl]\n"
+        }
+      ],
+      "expect": "a reflection from trial t with ttl n is seen by trials t+1 through t+n"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "the default ttl used instead of each reflection's",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        return [r for r in self._items.values() if r.trial < now <= r.trial + r.ttl]\n",
+          "new": "        return [r for r in self._items.values() if r.trial < now <= r.trial + DEFAULT_TTL]\n"
+        }
+      ],
+      "expect": "a reflection from trial t with ttl n is seen by trials t+1 through t+n"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "a reflection seen one trial too long",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        return [r for r in self._items.values() if r.trial < now <= r.trial + r.ttl]\n",
+          "new": "        return [r for r in self._items.values() if r.trial < now <= r.trial + r.ttl + 1]\n"
+        }
+      ],
+      "expect": "a reflection from trial t with ttl n is seen by trials t+1 through t+n"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "visible reflections listed newest first",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        return [r for r in self._items.values() if r.trial < now <= r.trial + r.ttl]\n",
+          "new": "        return [r for r in reversed(self._items.values()) if r.trial < now <= r.trial + r.ttl]\n"
+        }
+      ],
+      "expect": "trial n sees what memory.visible(n) shows"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "act sees every stored reflection, expired or not",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "        trial = act(n, memory.visible(n))\n",
+          "new": "        trial = act(n, memory.reflections())\n"
+        }
+      ],
+      "expect": "trial n sees what memory.visible(n) shows"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "act sees what the previous trial would have seen",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "        trial = act(n, memory.visible(n))\n",
+          "new": "        trial = act(n, memory.visible(n - 1))\n"
+        }
+      ],
+      "expect": "trial n sees what memory.visible(n) shows"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "every failure reflected on, an outage too",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "        if worth_reflecting(verdict):\n",
+          "new": "        if True:\n"
+        }
+      ],
+      "expect": "trial n sees what memory.visible(n) shows"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "an outage treated as worth reflecting on",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "verdict.source not in (\"external\", \"none\")",
+          "new": "verdict.source != \"none\""
+        }
+      ],
+      "expect": "trial n sees what memory.visible(n) shows"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "a trial with no signal treated as worth reflecting on",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "verdict.source not in (\"external\", \"none\")",
+          "new": "verdict.source != \"external\""
+        }
+      ],
+      "expect": "without a signal there is nothing to reflect on"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "the reflection written before the success check, so a success is reflected on too",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "        if verdict.success:\n            break\n        if worth_reflecting(verdict):\n            memory.add(Reflection(n, task_class, reflect(trial, verdict), ttl))\n",
+          "new": "        if verdict.source not in (\"external\", \"none\"):\n            memory.add(Reflection(n, task_class, reflect(trial, verdict), ttl))\n        if verdict.success:\n            break\n"
+        }
+      ],
+      "expect": "each lesson is stored with its trial and the run's ttl"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "the run goes on after a success",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "        if verdict.success:\n            break\n        if worth_reflecting",
+          "new": "        if worth_reflecting"
+        }
+      ],
+      "expect": "one verdict per trial"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "trials numbered from 1 instead of start",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    for n in range(start, start + max_trials):\n",
+          "new": "    for n in range(1, max_trials + 1):\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "one trial fewer than max_trials",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    for n in range(start, start + max_trials):\n",
+          "new": "    for n in range(start, start + max_trials - 1):\n"
+        }
+      ],
+      "expect": "every trial counts, and an outage is never reflected on"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "the run's ttl not passed on to the reflection",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "            memory.add(Reflection(n, task_class, reflect(trial, verdict), ttl))\n",
+          "new": "            memory.add(Reflection(n, task_class, reflect(trial, verdict)))\n"
+        }
+      ],
+      "expect": "trial n sees what memory.visible(n) shows"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "the reflection numbered by its place in this run",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "            memory.add(Reflection(n, task_class, reflect(trial, verdict), ttl))\n",
+          "new": "            memory.add(Reflection(n - start + 1, task_class, reflect(trial, verdict), ttl))\n"
+        }
+      ],
+      "expect": "trial n sees what memory.visible(n) shows"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "an outage retried without counting it",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    for n in range(start, start + max_trials):\n        trial = act(n, memory.visible(n))\n        verdict = judge(trial, max_steps, pass_score)\n        verdicts.append(verdict)\n",
+          "new": "    n, counted = start, 0\n    while counted < max_trials:\n        trial = act(n, memory.visible(n))\n        verdict = judge(trial, max_steps, pass_score)\n        verdicts.append(verdict)\n        n += 1\n        counted += verdict.source != \"external\"\n"
+        },
+        {
+          "file": "judge.py",
+          "old": "            memory.add(Reflection(n, task_class, reflect(trial, verdict), ttl))\n",
+          "new": "            memory.add(Reflection(n - 1, task_class, reflect(trial, verdict), ttl))\n"
+        }
+      ],
+      "expect": "each trial calls act once"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "the tasks serialized behind one lock",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "    queue: asyncio.Queue = asyncio.Queue()\n",
+          "new": "    queue: asyncio.Queue = asyncio.Queue()\n    lock = asyncio.Lock()\n"
+        },
+        {
+          "file": "curve.py",
+          "old": "        memory = EpisodicMemory()\n        try:\n",
+          "new": "        memory = EpisodicMemory()\n        await lock.acquire()\n        try:\n"
+        },
+        {
+          "file": "curve.py",
+          "old": "        else:\n            queue.put_nowait(None)\n",
+          "new": "        else:\n            queue.put_nowait(None)\n        finally:\n            lock.release()\n"
+        }
+      ],
+      "expect": "one row per trial, in the order trials finish"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "every task run to the end before any row is written",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "        while finished < len(runners):\n            item = await queue.get()\n",
+          "new": "        await asyncio.gather(*runners)\n        while finished < len(runners):\n            item = queue.get_nowait()\n"
+        }
+      ],
+      "expect": "a row comes out as soon as its trial finishes"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "the queue polled every 5 ms",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "            item = await queue.get()\n",
+          "new": "            while queue.empty():\n                await asyncio.sleep(0.005)\n            item = queue.get_nowait()\n"
+        }
+      ],
+      "expect": "a row comes out as soon as its trial finishes"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "one memory shared by every task",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "    async def run(task: str) -> None:\n        memory = EpisodicMemory()\n",
+          "new": "    memory = EpisodicMemory()\n\n    async def run(task: str) -> None:\n"
+        }
+      ],
+      "expect": "every task learns from its own trials only"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "a fresh memory for every trial",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "        memory = EpisodicMemory()\n        try:\n            for n in range(1, max_trials + 1):\n",
+          "new": "        try:\n            for n in range(1, max_trials + 1):\n                memory = EpisodicMemory()\n"
+        }
+      ],
+      "expect": "every task learns from its own trials only"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "every stored reflection shown, ttl ignored",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "await attempt(task, n, memory.visible(n))",
+          "new": "await attempt(task, n, memory.reflections())"
+        }
+      ],
+      "expect": "every task learns from its own trials only"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "an outage reflected on",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "                if worth_reflecting(verdict):\n",
+          "new": "                if not verdict.success:\n"
+        }
+      ],
+      "expect": "every task learns from its own trials only"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "rows joined with commas by hand",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "    out = io.StringIO()\n    csv.writer(out).writerow(values)\n    return out.getvalue()\n",
+          "new": "    return \",\".join(str(v) for v in values) + \"\\r\\n\"\n"
+        }
+      ],
+      "expect": "one row per trial, in the order trials finish"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "every field wrapped in double quotes by hand",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "    out = io.StringIO()\n    csv.writer(out).writerow(values)\n    return out.getvalue()\n",
+          "new": "    return \",\".join(f'\"{v}\"' for v in values) + \"\\r\\n\"\n"
+        }
+      ],
+      "expect": "one row per trial, in the order trials finish"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "no line ending after a record",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "    return out.getvalue()\n",
+          "new": "    return out.getvalue().rstrip(\"\\r\\n\")\n"
+        }
+      ],
+      "expect": "each string is exactly one CSV record"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "success written as True or False",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "1 if verdict.success else 0",
+          "new": "verdict.success"
+        }
+      ],
+      "expect": "one row per trial, in the order trials finish"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "the rate counted over the rows so far",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "    solved = finished = 0\n",
+          "new": "    solved = finished = written = 0\n"
+        },
+        {
+          "file": "curve.py",
+          "old": "            rate = f\"{solved / len(names):.4f}\"\n",
+          "new": "            written += 1\n            rate = f\"{solved / written:.4f}\"\n"
+        }
+      ],
+      "expect": "one row per trial, in the order trials finish"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "the rate with two decimals",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "{solved / len(names):.4f}",
+          "new": "{solved / len(names):.2f}"
+        }
+      ],
+      "expect": "one row per trial, in the order trials finish"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "the rate written as a plain float",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "{solved / len(names):.4f}",
+          "new": "{solved / len(names)}"
+        }
+      ],
+      "expect": "one row per trial, in the order trials finish"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "no header row",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "    yield _record(FIELDS)\n",
+          "new": ""
+        }
+      ],
+      "expect": "the header comes first"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "the last trial of a task that never succeeds left out",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "            for n in range(1, max_trials + 1):\n",
+          "new": "            for n in range(1, max_trials):\n"
+        }
+      ],
+      "expect": "one row per trial, in the order trials finish"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "an outage left out of the curve",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "                queue.put_nowait((task, n, verdict))\n",
+          "new": "                if verdict.source != \"external\":\n                    queue.put_nowait((task, n, verdict))\n"
+        }
+      ],
+      "expect": "one row per trial, in the order trials finish"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "the evaluator column says pass or fail",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": ", verdict.source, rate))",
+          "new": ", \"pass\" if verdict.success else \"fail\", rate))"
+        }
+      ],
+      "expect": "one row per trial, in the order trials finish"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "the runners left running when the reader stops",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "    finally:\n        for runner in runners:\n            runner.cancel()\n",
+          "new": "    finally:\n        pass\n"
+        }
+      ],
+      "expect": "closing the stream stops the tasks still running"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "duplicate task names accepted",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "    if len(set(names)) != len(names):\n        raise ValueError(\"task names must be unique\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a task name is a row key, so it must be unique"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "ancestors found by string prefix",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "        for depth in range(len(parts), 0, -1):\n            scope = \"/\".join(parts[:depth])\n",
+          "new": "        scopes = sorted((c for c in self._attached if task_class.startswith(c)), key=len, reverse=True)\n        for scope in scopes:\n            depth = scope.count(\"/\") + 1\n"
+        }
+      ],
+      "expect": "ancestors are whole path segments"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "no total cap",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "                if len(recalled) == total:\n                    return recalled\n",
+          "new": ""
+        }
+      ],
+      "expect": "nearest level first, at most per_level from each level and total in all"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "no per-level cap",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "            for reflection in level[:per_level]:\n",
+          "new": "            for reflection in level:\n"
+        }
+      ],
+      "expect": "nearest level first, at most per_level from each level and total in all"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "the total checked only before each level",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "            for reflection in level[:per_level]:\n                if len(recalled) == total:\n                    return recalled\n",
+          "new": "            if len(recalled) >= total:\n                return recalled\n            for reflection in level[:per_level]:\n"
+        }
+      ],
+      "expect": "nearest level first, at most per_level from each level and total in all"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "a level in the order its reflections were attached",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "            level = sorted(self._attached[scope], key=lambda r: -r.trial)\n",
+          "new": "            level = list(self._attached[scope])\n"
+        }
+      ],
+      "expect": "nearest level first, at most per_level from each level and total in all"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "a level oldest first",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "            level = sorted(self._attached[scope], key=lambda r: -r.trial)\n",
+          "new": "            level = sorted(self._attached[scope], key=lambda r: r.trial)\n"
+        }
+      ],
+      "expect": "nearest level first, at most per_level from each level and total in all"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "a level in reverse order of attachment",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "            level = sorted(self._attached[scope], key=lambda r: -r.trial)\n",
+          "new": "            level = list(reversed(self._attached[scope]))\n"
+        }
+      ],
+      "expect": "nearest level first, at most per_level from each level and total in all"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "a level sorted by trial and then reversed, which reverses ties too",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "            level = sorted(self._attached[scope], key=lambda r: -r.trial)\n",
+          "new": "            level = sorted(self._attached[scope], key=lambda r: r.trial)[::-1]\n"
+        }
+      ],
+      "expect": "within a level the newest trial first, ties in the order attached"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "the root level first",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "        for depth in range(len(parts), 0, -1):\n",
+          "new": "        for depth in range(1, len(parts) + 1):\n"
+        }
+      ],
+      "expect": "nearest level first, at most per_level from each level and total in all"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "every single-failure reflection marked suspicious",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "depth == 1 and reflection.failures == 1",
+          "new": "reflection.failures == 1"
+        }
+      ],
+      "expect": "nearest level first, at most per_level from each level and total in all"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "every root reflection marked suspicious",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "depth == 1 and reflection.failures == 1",
+          "new": "depth == 1"
+        }
+      ],
+      "expect": "nearest level first, at most per_level from each level and total in all"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "suspicious judged at the queried class instead of the root",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "depth == 1 and reflection.failures == 1",
+          "new": "depth == len(parts) and reflection.failures == 1"
+        }
+      ],
+      "expect": "nearest level first, at most per_level from each level and total in all"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "a class also sees what is attached below it",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "        return recalled\n\n    def _known",
+          "new": "        for scope in self._attached:\n            if scope.startswith(task_class + \"/\"):\n                for reflection in self._attached[scope][:per_level]:\n                    if len(recalled) < total:\n                        recalled.append(Recalled(scope, reflection, False))\n        return recalled\n\n    def _known"
+        }
+      ],
+      "expect": "a class does not see what is below it"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "an unknown class recalls nothing",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "        self._known(task_class)\n        recalled",
+          "new": "        if task_class not in self._attached:\n            return []\n        recalled"
+        }
+      ],
+      "expect": "an unknown task class is an error"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "only declared classes known, not their prefixes",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "            parts = task_class.split(\"/\")\n            for depth in range(1, len(parts) + 1):\n                self._attached.setdefault(\"/\".join(parts[:depth]), [])\n",
+          "new": "            self._attached.setdefault(task_class, [])\n"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "any class under a known parent accepted",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "        if task_class not in self._attached:\n            raise KeyError",
+          "new": "        if task_class not in self._attached and task_class.rpartition(\"/\")[0] in self._attached:\n            self._attached[task_class] = []\n        if task_class not in self._attached:\n            raise KeyError"
+        }
+      ],
+      "expect": "an unknown task class is an error"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "a reflection attached to an unknown class kept",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "        self._known(reflection.task_class).append(reflection)\n",
+          "new": "        self._attached.setdefault(reflection.task_class, []).append(reflection)\n"
+        }
+      ],
+      "expect": "attach to a known class"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "declared classes not checked",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "            if not TASK_CLASS_PATH.fullmatch(task_class):\n                raise ValueError(f\"not a task class: {task_class!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "a declared class must be a task-class path"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "declared classes checked with re.match",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "            if not TASK_CLASS_PATH.fullmatch(task_class):",
+          "new": "            if not TASK_CLASS_PATH.match(task_class):"
+        }
+      ],
+      "expect": "a declared class must be a task-class path"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "an unknown class raises ValueError",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "            raise KeyError(f\"unknown task class: {task_class!r}\")",
+          "new": "            raise ValueError(f\"unknown task class: {task_class!r}\")"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "a reader that splits the file on '\\n## '",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "    try:\n        with open(path, encoding=\"utf-8\", newline=\"\") as f:\n            lines = f.read().split(\"\\n\")\n    except FileNotFoundError:\n        return []\n    found: list[Reflection] = []\n",
+          "new": "    try:\n        with open(path, encoding=\"utf-8\", newline=\"\") as f:\n            text = f.read()\n    except FileNotFoundError:\n        return []\n    entries = []\n    for chunk in text.split(\"\\n## \")[1:]:\n        head, _, rest = chunk.partition(\"\\n\")\n        match = HEADING.fullmatch(\"## \" + head)\n        if match is None:\n            raise ValueError(f\"not an entry heading: {head!r}\")\n        body = rest.lstrip(\"\\n\").split(\"\\n\")\n        end = body.index(body[0], 1) if body[0] in body[1:] else len(body)\n        entries.append(Reflection(int(match[2]), match[1], \"\\n\".join(body[1:end]), int(match[3]), int(match[4])))\n    return entries\n    found: list[Reflection] = []\n    lines: list[str] = []\n    heading = None\n"
+        }
+      ],
+      "expect": "a reflection must round-trip exactly"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "a reader that pairs the headings with the fenced blocks in order",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "    try:\n        with open(path, encoding=\"utf-8\", newline=\"\") as f:\n            lines = f.read().split(\"\\n\")\n    except FileNotFoundError:\n        return []\n    found: list[Reflection] = []\n",
+          "new": "    try:\n        with open(path, encoding=\"utf-8\", newline=\"\") as f:\n            lines = f.read().split(\"\\n\")\n    except FileNotFoundError:\n        return []\n    headings, texts, i = [], [], 0\n    while i < len(lines):\n        if FENCE.fullmatch(lines[i]):\n            end = lines.index(lines[i], i + 1)\n            texts.append(\"\\n\".join(lines[i + 1 : end]))\n            i = end + 1\n            continue\n        match = HEADING.fullmatch(lines[i])\n        if match:\n            headings.append(match)\n        i += 1\n    return [Reflection(int(m[2]), m[1], t, int(m[3]), int(m[4])) for m, t in zip(headings, texts)]\n    found: list[Reflection] = []\n    lines: list[str] = []\n    heading = None\n"
+        }
+      ],
+      "expect": "a reflection must round-trip exactly"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "a reader that matches whole entries with one regular expression",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "    try:\n        with open(path, encoding=\"utf-8\", newline=\"\") as f:\n            lines = f.read().split(\"\\n\")\n    except FileNotFoundError:\n        return []\n    found: list[Reflection] = []\n",
+          "new": "    try:\n        with open(path, encoding=\"utf-8\", newline=\"\") as f:\n            text = f.read()\n    except FileNotFoundError:\n        return []\n    entry = re.compile(r\"^## (\\S+) \\(trial (\\d+), ttl (\\d+), failures (\\d+)\\)\\n\\n(`{3,})\\n(.*?)\\n\\5$\", re.M | re.S)\n    return [Reflection(int(m[2]), m[1], m[6], int(m[3]), int(m[4])) for m in entry.finditer(text)]\n    found: list[Reflection] = []\n    lines: list[str] = []\n    heading = None\n"
+        }
+      ],
+      "expect": "the header and the notes between entries are for people, not reflections"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "the run judges with the default max_steps and pass_score",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "        verdict = judge(trial, max_steps, pass_score)\n",
+          "new": "        verdict = judge(trial)\n"
+        }
+      ],
+      "expect": "the run judges with its own max_steps and pass_score"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "the trials run in lockstep rounds: trial n of every task, then trial n + 1",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "    queue: asyncio.Queue = asyncio.Queue()\n\n    async def run(task: str) -> None:\n        memory = EpisodicMemory()\n        try:\n            for n in range(1, max_trials + 1):\n                trial = await attempt(task, n, memory.visible(n))\n                verdict = judge(trial)\n                if worth_reflecting(verdict):\n                    memory.add(Reflection(n, task_class, reflect(trial, verdict), ttl))\n                queue.put_nowait((task, n, verdict))\n                if verdict.success:\n                    break\n        except Exception as error:  # hand it to the reader, which raises it\n            queue.put_nowait(error)\n        else:\n            queue.put_nowait(None)\n\n    runners = [asyncio.create_task(run(task)) for task in names]\n    solved = finished = 0\n    try:\n        while finished < len(runners):\n            item = await queue.get()\n            if item is None:\n                finished += 1\n                continue\n            if isinstance(item, Exception):\n                raise item\n            task, n, verdict = item\n            solved += verdict.success\n            rate = f\"{solved / len(names):.4f}\"\n            yield _record((task, n, 1 if verdict.success else 0, verdict.source, rate))\n    finally:\n        for runner in runners:\n            runner.cancel()\n",
+          "new": "    memories = {task: EpisodicMemory() for task in names}\n    active, solved = list(names), 0\n    for n in range(1, max_trials + 1):\n        queue: asyncio.Queue = asyncio.Queue()\n\n        async def one(task: str, n: int = n) -> None:\n            queue.put_nowait((task, await attempt(task, n, memories[task].visible(n))))\n\n        runners = [asyncio.create_task(one(task)) for task in active]\n        try:\n            for _ in runners:\n                task, trial = await queue.get()\n                verdict = judge(trial)\n                if worth_reflecting(verdict):\n                    memories[task].add(Reflection(n, task_class, reflect(trial, verdict), ttl))\n                solved += verdict.success\n                if verdict.success:\n                    active.remove(task)\n                yield _record((task, n, 1 if verdict.success else 0, verdict.source, f\"{solved / len(names):.4f}\"))\n        finally:\n            for runner in runners:\n                runner.cancel()\n"
+        }
+      ],
+      "expect": "one row per trial, in the order trials finish"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "everything recalled sorted by trial, whatever its level",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "                if len(recalled) == total:\n                    return recalled\n",
+          "new": "                if len(recalled) == total:\n                    return sorted(recalled, key=lambda r: -r.reflection.trial)\n"
+        },
+        {
+          "file": "scope.py",
+          "old": "        return recalled\n\n    def _known",
+          "new": "        return sorted(recalled, key=lambda r: -r.reflection.trial)\n\n    def _known"
+        }
+      ],
+      "expect": "nearest level first, at most per_level from each level and total in all"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "a list plus a dict of list positions, which go stale when an entry is removed",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        self._items: dict[str, Reflection] = {}\n",
+          "new": "        self._items: list[Reflection] = []\n        self._index: dict[str, int] = {}\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "        key = normalize(reflection.text)\n        old = self._items.pop(key, None)\n        if old is not None:\n            reflection = replace(reflection, failures=old.failures + reflection.failures)\n        self._items[key] = reflection\n        if len(self._items) > self.max_len:\n            del self._items[next(iter(self._items))]\n",
+          "new": "        key = normalize(reflection.text)\n        if key in self._index:\n            old = self._items.pop(self._index[key])\n            reflection = replace(reflection, failures=old.failures + reflection.failures)\n        self._index[key] = len(self._items)\n        self._items.append(reflection)\n        if len(self._items) > self.max_len:\n            del self._index[normalize(self._items.pop(0).text)]\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "        return list(self._items.values())\n",
+          "new": "        return list(self._items)\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "for r in self._items.values() if r.trial < now",
+          "new": "for r in self._items if r.trial < now"
+        }
+      ],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "a repeated lesson counts one more failure instead of adding both counts",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "failures=old.failures + reflection.failures)",
+          "new": "failures=old.failures + 1)"
+        }
+      ],
+      "expect": "a lesson learned again moves to the newest slot"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "the task class in a heading not checked on read",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "def _check(reflection: Reflection) -> None:\n    if not TASK_CLASS_PATH.fullmatch(reflection.task_class):\n",
+          "new": "def _check(reflection: Reflection) -> None:\n    if not TASK_CLASS_PATH.fullmatch(reflection.task_class) and False:\n"
+        },
+        {
+          "file": "learnings.py",
+          "old": "    entries = []\n    for reflection in reflections:\n        _check(reflection)\n",
+          "new": "    entries = []\n    for reflection in reflections:\n        _check(reflection)\n        if not TASK_CLASS_PATH.fullmatch(reflection.task_class):\n            raise ValueError(f\"not a task class: {reflection.task_class!r}\")\n"
+        }
+      ],
+      "expect": "a broken entry is an error, not a silent skip"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "inefficient counts distinct actions",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    if len(actions) > max_steps:",
+          "new": "    if len(set(actions)) > max_steps:"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "every exception from the check treated as an outage",
+      "edits": [
+        {
+          "file": "puzzle.py",
+          "old": "        except ToolDown:\n",
+          "new": "        except Exception:\n"
+        }
+      ],
+      "expect": "a bug in the checker is not an outage"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "room made before the duplicate is removed, so a lesson learned again on a full buffer pushes the oldest out",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        key = normalize(reflection.text)\n        old = self._items.pop(key, None)\n        if old is not None:\n            reflection = replace(reflection, failures=old.failures + reflection.failures)\n        self._items[key] = reflection\n        if len(self._items) > self.max_len:\n            del self._items[next(iter(self._items))]\n",
+          "new": "        key = normalize(reflection.text)\n        if len(self._items) >= self.max_len:\n            del self._items[next(iter(self._items))]\n        old = self._items.pop(key, None)\n        if old is not None:\n            reflection = replace(reflection, failures=old.failures + reflection.failures)\n        self._items[key] = reflection\n"
+        }
+      ],
+      "expect": "a lesson learned again on a full buffer pushes nothing out"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "normalized keys cached next to each entry, but the list still rebuilt on every add",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        self._items: dict[str, Reflection] = {}\n",
+          "new": "        self._items: list[tuple[str, Reflection]] = []\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "        key = normalize(reflection.text)\n        old = self._items.pop(key, None)\n        if old is not None:\n            reflection = replace(reflection, failures=old.failures + reflection.failures)\n        self._items[key] = reflection\n        if len(self._items) > self.max_len:\n            del self._items[next(iter(self._items))]\n",
+          "new": "        key = normalize(reflection.text)\n        kept = []\n        for old_key, old in self._items:\n            if old_key == key:\n                reflection = replace(reflection, failures=old.failures + reflection.failures)\n            else:\n                kept.append((old_key, old))\n        kept.append((key, reflection))\n        if len(kept) > self.max_len:\n            kept.pop(0)\n        self._items = kept\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "        return list(self._items.values())\n",
+          "new": "        return [r for _, r in self._items]\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "for r in self._items.values() if r.trial < now",
+          "new": "for _, r in self._items if r.trial < now"
+        }
+      ],
+      "expect": "adding to a big buffer should stay fast"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "a heading matched with re.match, so text after its closing parenthesis is accepted",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "            match = HEADING.fullmatch(line)\n",
+          "new": "            match = HEADING.match(line)\n"
+        }
+      ],
+      "expect": "a broken entry is an error, not a silent skip"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "only the trial and the task class checked on read, not ttl, failures or the text",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "                _check(reflection)\n                found.append(reflection)\n",
+          "new": "                if reflection.trial < 1 or not TASK_CLASS_PATH.fullmatch(reflection.task_class):\n                    raise ValueError('bad entry')\n                found.append(reflection)\n"
+        }
+      ],
+      "expect": "a broken entry is an error, not a silent skip"
+    },
+    {
+      "test": "test_learnings_file",
+      "name": "one fence for the whole file, sized by the longest run in any text",
+      "edits": [
+        {
+          "file": "learnings.py",
+          "old": "    entries = []\n    for reflection in reflections:\n        _check(reflection)\n        longest = max((len(run) for run in BACKTICKS.findall(reflection.text)), default=0)\n",
+          "new": "    entries = []\n    every = \"\\n\".join(r.text for r in reflections)\n    for reflection in reflections:\n        _check(reflection)\n        longest = max((len(run) for run in BACKTICKS.findall(every)), default=0)\n"
+        }
+      ],
+      "expect": "the layout in the module docstring"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "stuck only when the first two actions repeat",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    if any(a == b for a, b in zip(actions, actions[1:])):\n",
+          "new": "    if len(actions) > 1 and actions[0] == actions[1]:\n"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "stuck checked over the pairs (0, 1), (2, 3) and so on",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    if any(a == b for a, b in zip(actions, actions[1:])):\n",
+          "new": "    if any(a == b for a, b in zip(actions[::2], actions[1::2])):\n"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "the rails checked only when there is a self-score",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    actions = trial.actions\n    if any(a == b for a, b in zip(actions, actions[1:])):\n        return Verdict(False, \"stuck\")\n    if len(actions) > max_steps:\n        return Verdict(False, \"inefficient\")\n    if trial.self_score is not None:\n        return Verdict(trial.self_score >= pass_score, \"self\")\n",
+          "new": "    actions = trial.actions\n    if trial.self_score is not None:\n        if any(a == b for a, b in zip(actions, actions[1:])):\n            return Verdict(False, \"stuck\")\n        if len(actions) > max_steps:\n            return Verdict(False, \"inefficient\")\n        return Verdict(trial.self_score >= pass_score, \"self\")\n"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "the rails only overturn a passing self-score",
+      "edits": [
+        {
+          "file": "judge.py",
+          "old": "    actions = trial.actions\n    if any(a == b for a, b in zip(actions, actions[1:])):\n        return Verdict(False, \"stuck\")\n    if len(actions) > max_steps:\n        return Verdict(False, \"inefficient\")\n    if trial.self_score is not None:\n        return Verdict(trial.self_score >= pass_score, \"self\")\n",
+          "new": "    actions = trial.actions\n    passed = trial.self_score is not None and trial.self_score >= pass_score\n    if (passed or trial.self_score is None) and any(a == b for a, b in zip(actions, actions[1:])):\n        return Verdict(False, \"stuck\")\n    if (passed or trial.self_score is None) and len(actions) > max_steps:\n        return Verdict(False, \"inefficient\")\n    if trial.self_score is not None:\n        return Verdict(trial.self_score >= pass_score, \"self\")\n"
+        }
+      ],
+      "expect": "scalar when available, self-evaluation when not, heuristics as safety rails"
+    },
+    {
+      "test": "test_judge_and_trials",
+      "name": "visible deletes expired reflections from memory",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        return [r for r in self._items.values() if r.trial < now <= r.trial + r.ttl]\n",
+          "new": "        self._items = {k: r for k, r in self._items.items() if now <= r.trial + r.ttl}\n        return [r for r in self._items.values() if r.trial < now]\n"
+        }
+      ],
+      "expect": "each lesson is stored with its trial and the run's ttl"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "a trial with no signal reflected on in the curve",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "                if worth_reflecting(verdict):\n",
+          "new": "                if not verdict.success and verdict.source != \"external\":\n"
+        }
+      ],
+      "expect": "every task learns from its own trials only"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "the runners cancelled after the loop instead of in finally",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "    try:\n        while finished < len(runners):\n",
+          "new": "    if True:\n        while finished < len(runners):\n"
+        },
+        {
+          "file": "curve.py",
+          "old": "    finally:\n        for runner in runners:\n            runner.cancel()\n",
+          "new": "        for runner in runners:\n            runner.cancel()\n"
+        }
+      ],
+      "expect": "closing the stream stops the tasks still running"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "the rate with four significant digits (:.4) instead of four decimals",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "            rate = f\"{solved / len(names):.4f}\"\n",
+          "new": "            rate = f\"{solved / len(names):.4}\"\n"
+        }
+      ],
+      "expect": "one row per trial, in the order trials finish"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "attempt given memory.visible(n - 1)",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "                trial = await attempt(task, n, memory.visible(n))\n",
+          "new": "                trial = await attempt(task, n, memory.visible(n - 1))\n"
+        }
+      ],
+      "expect": "every task learns from its own trials only"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "ties within a level broken by text",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "            level = sorted(self._attached[scope], key=lambda r: -r.trial)\n",
+          "new": "            level = sorted(self._attached[scope], key=lambda r: (-r.trial, r.text))\n"
+        }
+      ],
+      "expect": "within a level the newest trial first, ties in the order attached"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "ties within a level broken by more failures first",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "            level = sorted(self._attached[scope], key=lambda r: -r.trial)\n",
+          "new": "            level = sorted(self._attached[scope], key=lambda r: (-r.trial, -r.failures))\n"
+        }
+      ],
+      "expect": "within a level the newest trial first, ties in the order attached"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "the total checked with > instead of ==, so one extra comes through",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "                if len(recalled) == total:\n",
+          "new": "                if len(recalled) > total:\n"
+        }
+      ],
+      "expect": "nearest level first, at most per_level from each level and total in all"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "per_level taken in attach order before the level is sorted",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "            level = sorted(self._attached[scope], key=lambda r: -r.trial)\n            for reflection in level[:per_level]:\n",
+          "new": "            level = sorted(self._attached[scope][:per_level], key=lambda r: -r.trial)\n            for reflection in level:\n"
+        }
+      ],
+      "expect": "nearest level first, at most per_level from each level and total in all"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "suspicious only when a root lesson reaches a class below the root",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "depth == 1 and reflection.failures == 1))\n",
+          "new": "depth == 1 and reflection.failures == 1 and depth < len(parts)))\n"
+        }
+      ],
+      "expect": "a class does not see what is below it"
+    },
+    {
+      "test": "test_scoped_recall",
+      "name": "recall checks the path format first and raises ValueError",
+      "edits": [
+        {
+          "file": "scope.py",
+          "old": "        self._known(task_class)\n        recalled",
+          "new": "        if not TASK_CLASS_PATH.fullmatch(task_class):\n            raise ValueError(task_class)\n        self._known(task_class)\n        recalled"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_learning_curve",
+      "name": "the rate computed before this row's success is counted",
+      "edits": [
+        {
+          "file": "curve.py",
+          "old": "            solved += verdict.success\n            rate = f\"{solved / len(names):.4f}\"\n",
+          "new": "            rate = f\"{solved / len(names):.4f}\"\n            solved += verdict.success\n"
+        }
+      ],
+      "expect": "one row per trial, in the order trials finish"
+    },
+    {
+      "test": "test_reflexion_loop",
+      "name": "a deque(maxlen=...) appended to before the old copy is removed, so the append pushes the oldest out",
+      "edits": [
+        {
+          "file": "memory.py",
+          "old": "        self._items: dict[str, Reflection] = {}\n",
+          "new": "        from collections import deque\n        self._items = deque(maxlen=max_len)\n        self._keys: set[str] = set()\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "        key = normalize(reflection.text)\n        old = self._items.pop(key, None)\n        if old is not None:\n            reflection = replace(reflection, failures=old.failures + reflection.failures)\n        self._items[key] = reflection\n        if len(self._items) > self.max_len:\n            del self._items[next(iter(self._items))]\n",
+          "new": "        key = normalize(reflection.text)\n        old = next((r for r in self._items if normalize(r.text) == key), None) if key in self._keys else None\n        new = reflection if old is None else replace(reflection, failures=old.failures + reflection.failures)\n        if len(self._items) == self._items.maxlen:\n            self._keys.discard(normalize(self._items[0].text))\n        self._items.append(new)\n        if old is not None:\n            try:\n                self._items.remove(old)\n            except ValueError:\n                pass\n        self._keys.add(key)\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "        return list(self._items.values())\n",
+          "new": "        return list(self._items)\n"
+        },
+        {
+          "file": "memory.py",
+          "old": "for r in self._items.values() if r.trial < now",
+          "new": "for r in self._items if r.trial < now"
+        }
+      ],
+      "expect": "a lesson learned again on a full buffer pushes nothing out"
+    }
+  ]
+}

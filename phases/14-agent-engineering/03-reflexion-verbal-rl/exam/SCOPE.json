@@ -1,0 +1,129 @@
+{
+  "lesson": "phases/14-agent-engineering/03-reflexion-verbal-rl",
+  "title": "Reflexion: Verbal Reinforcement Learning",
+  "format": "staged-brownfield",
+  "service": "Reflexion: a verbal-RL harness with a scripted model: the lesson's toy puzzle loop with bounded, deduplicating episodic memory, a CLAUDE.md-style Markdown learnings file, the three evaluator types mixed into one verdict with a ttl-aware trial loop, a concurrent multi-task learning curve streamed as CSV, and task-class scopes for recalling reflections",
+  "sources": {
+    "docs/en.md": "9afabebcab9e1ce6d6ab3b2b0ceabd8b0aa308b25a73b8d6510fc2f2739f9b36",
+    "code/main.py": "6e3e0c338bcdecf5410de0a0194dec48fe41d9514e49432799c701472b725d1e",
+    "quiz/quiz.md": "4716b6b8454b630bd04ba50af571c29eeb9512d9d4ba7fdf3030ca865d9f6656",
+    "outputs/skill-reflexion-buffer.md": "54ddeacbb1f62add9387350f2d7fba8dda94f71ff484135a88ff4610c63defc3"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_reflexion_loop",
+      "kind": "debug",
+      "lesson_anchor": "The three components (Actor, Evaluator, Self-Reflector, episodic memory; the next trial starts fresh but sees the reflection); When it works and when it does not (external failures, superstition); 2026 pitfall: memory rot; code/main.py EpisodicMemory, SelfReflector and run_reflexion; quiz Q5 (the lesson's Actor only counts reflections)",
+      "planted_bugs": [
+        "SelfReflector.reflect writes the direction backwards (a sum 14 short becomes 'overshoots by 14; pick smaller values'); the Actor follows it down to [1, 1, 1], so the error surfaces in run_reflexion's attempts, one trial after the root cause",
+        "EpisodicMemory.add drops the newest entry when full (kept.pop()), so the buffer freezes on the first max_len reflections; with max_len=2 the Actor keeps rereading trial 2's reflection and repeats [9, 2, 3]",
+        "run_reflexion stores a reflection about a ToolDown outage; it becomes the newest reflection, the Actor cannot read it and starts over from [1, 2, 3]",
+        "EpisodicMemory.add renormalizes every stored reflection and rebuilds the list on every add, O(n) per add and O(n^2) per replay"
+      ],
+      "timing_assert": "3,700 add() calls replaying a long run (3,600 distinct lessons, 100 of them learned twice) into a 5,000-slot buffer under 0.1 s. Measured on this machine with the venv Python 3.12 at load average about 4.5: the renormalizing version 1.40-1.73 s, at least 14x the limit; the dict keyed by normalized text 1.1-1.3 ms, about 80x under. Between them, keys cached next to each entry with the list still rebuilt on every add take 0.24-0.29 s and fail; a set for membership with the list rebuilt only on a repeat (15-27 ms) and a parallel key list searched with in/index (about 22 ms) pass",
+      "overfix_guard": "the direction is fixed in reflect, not in the Actor or by flipping scalar_check (exact reflection texts and deltas); a re-learned lesson moves to the newest slot with its latest trial, wording and ttl and adds up failures, which catches dropping the duplicate, overwriting the dict slot in place, not adding failures, adding just one failure and refreshing only the trial; normalize keeps both case-folding and whitespace collapsing; a lesson learned again on a full buffer pushes nothing out, which catches making room before the duplicate is removed; a dropped lesson starts again from one failure; dict.popitem() (drops the newest), a list with a dict of stale positions and keys cached beside a list that is still rebuilt on every add are caught; an outage still uses up its trial and is not retried within it; only ToolDown is an outage, so a TypeError from the checker propagates"
+    },
+    {
+      "part": 2,
+      "test": "test_learnings_file",
+      "kind": "model and persistence",
+      "lesson_anchor": "Why this generalizes: Claude Code's CLAUDE.md, reflections captured as learnings; Use It: Claude Code's /memory and pro-workflow's /learn-rule externalize the episodic buffer as a markdown file; outputs/skill-reflexion-buffer.md (trial id, task class, ttl per reflection)",
+      "storage": "a Markdown learnings file: a fixed header that itself holds a fenced example heading, then one '## <task class> (trial N, ttl N, failures N)' heading per reflection with its text in a backtick fence one longer than the longest backtick run in the text",
+      "exactness": "read_learnings(write_learnings(...)) gives back the same Reflection objects, numbers as int, for 13 texts Markdown gets wrong: inline and fenced backticks, a bare ``` line, four-backtick lines, '- ' and '#' and '## <entry heading>' lines, two trailing spaces, four leading spaces, blank first and last lines, tabs, non-ASCII text; plus the exact bytes of a two-entry file",
+      "traps": [
+        "a fixed three-backtick fence, a fence as long as the longest run, runs counted only at line starts, no minimum of three",
+        "the header's fenced example read as an entry: headings found without tracking fences, headings paired with fenced blocks in order, the file split on '\\n## '",
+        "a fence closed by any line starting with ``` or by any backtick line",
+        "lines rstripped, the text stripped, lines dedented",
+        "a hand-edited file: other header text, two or no blank lines before the fence, a note after an entry, no final newline (a whole-entry regex that wants one blank line)",
+        "a malformed '## ' heading skipped as a note, text after the heading's closing parenthesis accepted (re.match), two headings in a row, an unclosed fence, a heading without text, trial 0, ttl 0 or a bad task class read back",
+        "the file truncated before every entry is checked, re.match for the task class, a whitespace-only text, numbers read back as strings, append mode, a missing file raising"
+      ],
+      "clarifying_questions": [
+        "JSON instead",
+        "backticks inside a reflection",
+        "notes between entries",
+        "a heading with a typo",
+        "a missing file",
+        "atomic writes"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_judge_and_trials",
+      "kind": "core algorithm",
+      "lesson_anchor": "Three evaluator types and the 2026 default mix (scalar when available, self-eval when not, heuristics as safety rails: the same action twice in a row is stuck, over 50 steps is inefficient); When it does not work (external failures; no reflection without a signal, from the skill's refusal rules); Exercise 2 (ttl on reflections) and the skill's trial-scoped ttl; quiz Q11",
+      "traps": [
+        "scalar False or self_score 0.0 treated as missing (truthiness instead of is not None)",
+        "the rails checked before the scalar, an outage checked after the scalar or the rails, inefficient before stuck",
+        "stuck as any repeated action, or found only in the first two actions or in the pairs (0, 1), (2, 3); the rails applied only to a passing self-score or only when there is one; inefficient at exactly max_steps or counted in distinct actions, a self-score equal to pass_score failing, no signal counted as a success, scalar and self-score both required",
+        "visible(now) with the quiz's now - trial < ttl, a trial seeing its own reflection, later trials' reflections shown to earlier ones, the default ttl instead of each reflection's, newest first, expired reflections deleted from memory",
+        "act given every stored reflection or visible(n - 1); outages or no-signal trials reflected on; a success reflected on or not ending the run; numbering from 1 instead of start; one trial too few; the run's ttl, max_steps or pass_score not passed on; an outage retried without counting it"
+      ],
+      "integration": "the same reflection written at trials 12 and 15 collapses through Part 1's dedup into one entry with trial 15 and two failures, which keeps it visible at trial 16",
+      "clarifying_questions": [
+        "a scalar pass with a repeated action",
+        "a repeated action with a failing or missing self-score",
+        "self_score equal to pass_score",
+        "whether an outage uses up a trial",
+        "no signal at all",
+        "deleting expired reflections"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_learning_curve",
+      "kind": "streaming",
+      "lesson_anchor": "Reflexion's learning curve over many tasks (the paper's success rate over trials on ALFWorld and HotpotQA); episodic memory is per task; Exercise 2's ttl; the lesson's HotpotQA results",
+      "wire_format": "CSV: the header task,trial,success,evaluator,cumulative_success_rate, then one record per finished trial in completion order, each string one record as csv.writer writes it; decided by the test's join and csv.reader parse, a probe that records how many trials had finished when each row arrived (must be 1 through 8), and a close after the first row that checks no new trial starts",
+      "traps": [
+        "every task run before any row (gather), a polling reader, tasks serialized behind one lock, lockstep rounds of trial n across all tasks",
+        "one memory shared by all tasks, a fresh memory per trial, ttl ignored, an outage or a trial with no signal reflected on",
+        "rows joined or quoted by hand (a comma and double quotes in the HotpotQA questions), no line ending",
+        "success as True/False, the rate over rows so far, two decimals or a plain float, no header",
+        "the last trial of a task that never succeeds or an outage left out of the curve, the evaluator column as pass/fail",
+        "running tasks left running when the reader closes the stream, duplicate task names accepted"
+      ],
+      "clarifying_questions": [
+        "parallel or concurrent",
+        "the rate's denominator",
+        "a solved task",
+        "line endings",
+        "a reader that stops early",
+        "attempt raising"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_scoped_recall",
+      "kind": "tree",
+      "lesson_anchor": "When it works: the task class is reproducible; Key Terms: episodic memory is a bounded buffer for one task class; the skill's scope policy (task-class by default, never escalate to agent scope automatically) and its cap of 6 reflections in the prompt; superstition: a narrative about a one-off failure",
+      "traps": [
+        "ancestors by string prefix (code/test above code/tests, support/billing above support/billing-disputes)",
+        "only the total cap, only the per-level cap, the total checked only before each level",
+        "a level in attach order, oldest first, reversed attach order, sorted and reversed (ties reversed), the root level first, everything sorted by trial across levels",
+        "suspicious for every single-failure reflection, for every root reflection, or judged at the queried class",
+        "a class seeing its descendants' reflections",
+        "unknown classes recalling nothing, only declared classes known (not their prefixes), any child of a known class accepted, attach to an unknown class kept, declared classes not checked or checked with re.match, ValueError instead of KeyError"
+      ],
+      "clarifying_questions": [
+        "code/test versus code/tests",
+        "a parent seeing its children",
+        "spare per-level slots",
+        "what the root is",
+        "the same sentence on a class and its parent"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1's Actor reads the newest reflection's text (what was tried and how far off) and moves at most 4 per trial, instead of counting reflections as the lesson's scripted Actor does. That makes every planted bug change behaviour: the reversed reflection and the frozen buffer both surface as non-convergence a trial or two later, and the stored outage makes the Actor start over.",
+    "Part 1's timing replays 3,700 writes (3,600 distinct lessons, 100 of them learned twice) instead of 20,000. At 20,000 the quadratic version would take well over the 3-second ceiling for a single slow run; 3,700 gives 1.4-1.7 s against a 0.1 s limit and about 1.2 ms for the fix. With few repeats, a version that is linear only when a lesson repeats lands well under the limit instead of next to it, so its result does not depend on the machine's load.",
+    "Reflection carries a fifth field, failures: how many failed trials taught it, added up when the same lesson is learned again. Part 2 stores it in the heading next to trial, task class and ttl, and Part 5 needs it for 'a root reflection from a single failure is suspicious'.",
+    "Part 2 keeps each text in a backtick fence one longer than the longest backtick run in it, so lines starting with '- ' or '#' are safe by construction. The traps are the fence rule, reading fences from the first line (the header itself holds a fenced example heading), exact whitespace, strict headings, and refusing a bad write before the file is truncated. A CRLF inside a text is not tested; it is a follow-up question.",
+    "Part 3's order is external, scalar, stuck, inefficient, self, none: the rails override a self-evaluated success but not a scalar, which is ground truth. A trial with no signal at all is source none and gets no reflection, from the skill's rule that reflection requires a signal. The ttl lives in EpisodicMemory.visible(now): a reflection from trial t with ttl n is seen by trials t+1 through t+n.",
+    "Part 4's rate is solved tasks over all tasks. The schedule makes a fast task's second trial finish before a slow task's first, so the paper-style lockstep rounds fail; the stream must also cancel its running tasks when the reader closes it, and task names must be unique.",
+    "Part 5 declares classes as paths and treats every prefix as declared; the root of a path is its top-level class (there is no agent-wide node above them). Unknown classes raise KeyError in recall and in attach."
+  ]
+}
