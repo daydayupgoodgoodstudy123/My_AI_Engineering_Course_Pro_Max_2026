@@ -1,0 +1,873 @@
+{
+  "package": "realrepo",
+  "tests": [
+    "test_measure_outcomes",
+    "test_outcome_store",
+    "test_paired_comparison",
+    "test_milestone_stream",
+    "test_change_impact"
+  ],
+  "layers": [
+    {
+      "test": "test_measure_outcomes",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "AttributeError"
+        },
+        {
+          "name": "load_feedback gives commands without results an empty dict",
+          "edits": [
+            {
+              "file": "artifacts.py",
+              "old": "                results=raw.get(\"results\"),\n",
+              "new": "                results=dict(raw.get(\"results\") or {}),\n"
+            }
+          ],
+          "expect": "an agent saying the tests passed is not evidence that they ran"
+        },
+        {
+          "name": "+ no fallback to the agent's claim",
+          "edits": [
+            {
+              "file": "outcomes.py",
+              "old": "    if not run.feedback:\n        return run.claims.get(\"tests_passed\") is True\n",
+              "new": ""
+            }
+          ],
+          "expect": "pytest exits 0 when it skips every test, but no test ran"
+        },
+        {
+          "name": "+ skipped results left out",
+          "edits": [
+            {
+              "file": "outcomes.py",
+              "old": "        for nodeid, result in record.results.items():\n            latest[nodeid] = result\n",
+              "new": "        for nodeid, result in record.results.items():\n            if result != \"skipped\":\n                latest[nodeid] = result\n"
+            }
+          ],
+          "expect": "without a next_action the packet is a status report, not a handoff"
+        },
+        {
+          "name": "+ no next_action grades missing",
+          "edits": [
+            {
+              "file": "outcomes.py",
+              "old": "    if packet is None:\n        return \"missing\"\n",
+              "new": "    if packet is None or not _filled(packet.get(\"next_action\")):\n        return \"missing\"\n"
+            }
+          ],
+          "expect": "acceptance should be fast on a full suite run"
+        },
+        {
+          "name": "+ every test's selectors indexed once",
+          "edits": [
+            {
+              "file": "outcomes.py",
+              "old": "from .nodeids import covers\n",
+              "new": "from .nodeids import ancestors\n"
+            },
+            {
+              "file": "outcomes.py",
+              "old": "    ran = latest_results(records)\n    for selector in acceptance:\n        covered = [result for nodeid, result in ran.items() if covers(selector, nodeid)]\n        if not covered or any(result != \"passed\" for result in covered):\n            return False\n    return True\n",
+              "new": "    passing: dict[str, bool] = {}\n    for nodeid, result in latest_results(records).items():\n        for selector in ancestors(nodeid):\n            passing[selector] = passing.get(selector, True) and result == \"passed\"\n    return all(passing.get(selector, False) for selector in acceptance)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_measure_outcomes",
+      "name": "speed-up that looks selectors up as exact node ids",
+      "edits": [
+        {
+          "file": "outcomes.py",
+          "old": "        for selector in ancestors(nodeid):\n            passing[selector] = passing.get(selector, True) and result == \"passed\"\n",
+          "new": "        passing[nodeid] = result == \"passed\"\n"
+        }
+      ],
+      "expect": "a test function covers its parametrized cases"
+    },
+    {
+      "test": "test_measure_outcomes",
+      "name": "speed-up that matches selectors with str.startswith",
+      "edits": [
+        {
+          "file": "outcomes.py",
+          "old": "    return all(passing.get(selector, False) for selector in acceptance)\n",
+          "new": "    ran = latest_results(records)\n    return all(\n        any(n.startswith(s) for n in ran) and all(r == \"passed\" for n, r in ran.items() if n.startswith(s))\n        for s in acceptance\n    )\n"
+        }
+      ],
+      "expect": "test_signup does not cover test_signup_happy_path"
+    },
+    {
+      "test": "test_measure_outcomes",
+      "name": "speed-up that indexes test modules only",
+      "edits": [
+        {
+          "file": "outcomes.py",
+          "old": "        for selector in ancestors(nodeid):\n            passing[selector] = passing.get(selector, True) and result == \"passed\"\n    return all(passing.get(selector, False) for selector in acceptance)\n",
+          "new": "        module = nodeid.partition(\"::\")[0]\n        passing[module] = passing.get(module, True) and result == \"passed\"\n    return all(passing.get(selector.partition(\"::\")[0], False) for selector in acceptance)\n"
+        }
+      ],
+      "expect": "a test ran, but not the one that proves the goal"
+    },
+    {
+      "test": "test_measure_outcomes",
+      "name": "a selector that covers no test that ran counts as met",
+      "edits": [
+        {
+          "file": "outcomes.py",
+          "old": "    return all(passing.get(selector, False) for selector in acceptance)\n",
+          "new": "    return all(passing.get(selector, True) for selector in acceptance)\n"
+        }
+      ],
+      "expect": "the lesson's prompt-only row"
+    },
+    {
+      "test": "test_measure_outcomes",
+      "name": "records with a non-zero exit code left out as well",
+      "edits": [
+        {
+          "file": "outcomes.py",
+          "old": "        if record.exit_code is None:\n",
+          "new": "        if record.exit_code != 0:\n"
+        }
+      ],
+      "expect": "a command that exits 1 still ran its tests"
+    },
+    {
+      "test": "test_measure_outcomes",
+      "name": "an empty list counted as a missing field",
+      "edits": [
+        {
+          "file": "outcomes.py",
+          "old": "    if value is None:\n        return False\n    if isinstance(value, str):\n        return bool(value.strip())\n    return True\n",
+          "new": "    return bool(value.strip()) if isinstance(value, str) else bool(value)\n"
+        }
+      ],
+      "expect": "the lesson's workbench row"
+    },
+    {
+      "test": "test_measure_outcomes",
+      "name": "any unfilled field grades the packet missing",
+      "edits": [
+        {
+          "file": "outcomes.py",
+          "old": "        return \"full packet\"\n    return \"partial\"\n",
+          "new": "        return \"full packet\"\n    return \"missing\"\n"
+        }
+      ],
+      "expect": "a handoff with a blank field is partial"
+    },
+    {
+      "test": "test_measure_outcomes",
+      "name": "records whose exit_code is None kept",
+      "edits": [
+        {
+          "file": "outcomes.py",
+          "old": "        if record.exit_code is None:\n            continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "a command that never exited proves nothing"
+    },
+    {
+      "test": "test_measure_outcomes",
+      "name": "speed-up whose index keeps each selector's last result only",
+      "edits": [
+        {
+          "file": "outcomes.py",
+          "old": "            passing[selector] = passing.get(selector, True) and result == \"passed\"\n",
+          "new": "            passing[selector] = result == \"passed\"\n"
+        }
+      ],
+      "expect": "every test a selector covers must pass"
+    },
+    {
+      "test": "test_measure_outcomes",
+      "name": "next_action checked for presence only",
+      "edits": [
+        {
+          "file": "outcomes.py",
+          "old": "    if packet is None or not _filled(packet.get(\"next_action\")):\n",
+          "new": "    if packet is None or \"next_action\" not in packet:\n"
+        }
+      ],
+      "expect": "a blank next_action is no next action"
+    },
+    {
+      "test": "test_measure_outcomes",
+      "name": "tests_actually_run from any finished record that reports results",
+      "edits": [
+        {
+          "file": "outcomes.py",
+          "old": "    return bool(latest_results(run.feedback))\n",
+          "new": "    return any(r.results for r in run.feedback if r.exit_code is not None)\n"
+        }
+      ],
+      "expect": "pytest exits 0 when it skips every test, but no test ran"
+    },
+    {
+      "test": "test_outcome_store",
+      "name": "flags stored as 0 and 1",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        rows = [(run_id, pipeline, name, json.dumps(getattr(outcome, name))) for name in OUTCOMES]\n",
+          "new": "        rows = [(run_id, pipeline, name, json.dumps(int(v) if isinstance(v := getattr(outcome, name), bool) else v)) for name in OUTCOMES]\n"
+        }
+      ],
+      "expect": "an outcome reads back as it went in: bools, an int, an empty list"
+    },
+    {
+      "test": "test_outcome_store",
+      "name": "file lists joined with ';'",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        rows = [(run_id, pipeline, name, json.dumps(getattr(outcome, name))) for name in OUTCOMES]\n",
+          "new": "        rows = [(run_id, pipeline, name, \";\".join(v) if isinstance(v := getattr(outcome, name), list) else json.dumps(v)) for name in OUTCOMES]\n"
+        },
+        {
+          "file": "store.py",
+          "old": "        return Outcome(**{name: json.loads(values[name]) for name in OUTCOMES})\n",
+          "new": "        return Outcome(**{name: (values[name].split(\";\") if values[name] else []) if name == \"files_outside_scope\" else json.loads(values[name]) for name in OUTCOMES})\n"
+        }
+      ],
+      "expect": "a reopened store reads back the same outcome, files in the order given"
+    },
+    {
+      "test": "test_outcome_store",
+      "name": "file lists sorted on the way out",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return Outcome(**{name: json.loads(values[name]) for name in OUTCOMES})\n",
+          "new": "        loaded = {name: json.loads(values[name]) for name in OUTCOMES}\n        loaded[\"files_outside_scope\"].sort()\n        return Outcome(**loaded)\n"
+        }
+      ],
+      "expect": "a reopened store reads back the same outcome, files in the order given"
+    },
+    {
+      "test": "test_outcome_store",
+      "name": "runs ordered by run id",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "\"SELECT run_id FROM outcomes GROUP BY run_id ORDER BY MIN(seq)\"",
+          "new": "\"SELECT run_id FROM outcomes GROUP BY run_id ORDER BY run_id\""
+        }
+      ],
+      "expect": "runs in the order they were first recorded"
+    },
+    {
+      "test": "test_outcome_store",
+      "name": "outcomes ordered by run id and pipeline",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "GROUP BY run_id, pipeline ORDER BY MIN(seq)",
+          "new": "GROUP BY run_id, pipeline ORDER BY run_id, pipeline"
+        }
+      ],
+      "expect": "outcomes in the order they were recorded"
+    },
+    {
+      "test": "test_outcome_store",
+      "name": "no commit after the inserts",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        with self._db:\n            self._db.executemany(",
+          "new": "        if True:\n            self._db.executemany("
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_outcome_store",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "CREATE TABLE IF NOT EXISTS",
+          "new": "CREATE TABLE"
+        }
+      ],
+      "expect": "table outcomes already exists"
+    },
+    {
+      "test": "test_outcome_store",
+      "name": "file lists read back as tuples",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return Outcome(**{name: json.loads(values[name]) for name in OUTCOMES})\n",
+          "new": "        return Outcome(**{name: (tuple(v) if isinstance(v := json.loads(values[name]), list) else v) for name in OUTCOMES})\n"
+        }
+      ],
+      "expect": "an outcome reads back as it went in"
+    },
+    {
+      "test": "test_outcome_store",
+      "name": "a total of 11 accepted",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": " or not 0 <= total <= 10:",
+          "new": " or total < 0:"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_outcome_store",
+      "name": "file lists stored one row per path",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    value TEXT NOT NULL,\n    UNIQUE (run_id, pipeline, outcome)\n",
+          "new": "    value TEXT NOT NULL\n"
+        },
+        {
+          "file": "store.py",
+          "old": "        rows = [(run_id, pipeline, name, json.dumps(getattr(outcome, name))) for name in OUTCOMES]\n",
+          "new": "        rows = [(run_id, pipeline, name, json.dumps(getattr(outcome, name))) for name in OUTCOMES if name != \"files_outside_scope\"]\n        rows += [(run_id, pipeline, \"files_outside_scope\", json.dumps(p)) for p in outcome.files_outside_scope]\n"
+        },
+        {
+          "file": "store.py",
+          "old": "        values = dict(\n            self._db.execute(\n                \"SELECT outcome, value FROM outcomes WHERE run_id = ? AND pipeline = ?\",\n                (run_id, pipeline),\n            )\n        )\n        if not values:\n            raise KeyError((run_id, pipeline))\n        return Outcome(**{name: json.loads(values[name]) for name in OUTCOMES})\n",
+          "new": "        values = {}\n        for name, value in self._db.execute(\n            \"SELECT outcome, value FROM outcomes WHERE run_id = ? AND pipeline = ? ORDER BY seq\", (run_id, pipeline)\n        ):\n            if name == \"files_outside_scope\":\n                values.setdefault(name, []).append(json.loads(value))\n            else:\n                values[name] = json.loads(value)\n        if not values:\n            raise KeyError((run_id, pipeline))\n        return Outcome(**values)\n"
+        }
+      ],
+      "expect": "required positional argument: 'files_outside_scope'"
+    },
+    {
+      "test": "test_paired_comparison",
+      "name": "runs paired by position",
+      "edits": [
+        {
+          "file": "compare.py",
+          "old": "    paired = [\n        (run_id, got[\"prompt-only\"], got[\"workbench-guided\"])\n        for run_id, got in by_run.items()\n        if len(got) == len(PIPELINES)\n    ]\n",
+          "new": "    paired = [\n        (run_id, po, wb)\n        for (run_id, po), wb in zip(\n            [(run_id, got[\"prompt-only\"]) for run_id, got in by_run.items() if \"prompt-only\" in got],\n            [got[\"workbench-guided\"] for got in by_run.values() if \"workbench-guided\" in got],\n        )\n    ]\n"
+        }
+      ],
+      "expect": "each run is compared with the same run of the other pipeline"
+    },
+    {
+      "test": "test_paired_comparison",
+      "name": "handoff levels compared as text",
+      "edits": [
+        {
+          "file": "compare.py",
+          "old": "            deltas.append(after - before)\n",
+          "new": "            deltas.append(after - before)\n            if name == \"handoff_quality\":\n                before, after = getattr(prompt_only, name), getattr(workbench, name)\n"
+        }
+      ],
+      "expect": "handoff levels rank missing < partial < full packet"
+    },
+    {
+      "test": "test_paired_comparison",
+      "name": "file lists compared as lists",
+      "edits": [
+        {
+          "file": "compare.py",
+          "old": "            deltas.append(after - before)\n",
+          "new": "            deltas.append(after - before)\n            if name == \"files_outside_scope\":\n                before, after = getattr(prompt_only, name), getattr(workbench, name)\n"
+        }
+      ],
+      "expect": "fewer files outside scope is better, counted in files"
+    },
+    {
+      "test": "test_paired_comparison",
+      "name": "more files outside scope counted as better",
+      "edits": [
+        {
+          "file": "compare.py",
+          "old": "FEWER_IS_BETTER = {\"files_outside_scope\"}\n",
+          "new": "FEWER_IS_BETTER = set()\n"
+        }
+      ],
+      "expect": "fewer files outside scope is better, counted in files"
+    },
+    {
+      "test": "test_paired_comparison",
+      "name": "difference of the two pipelines' medians",
+      "edits": [
+        {
+          "file": "compare.py",
+          "old": "        outcomes[name] = {**better, \"median_delta\": statistics.median(deltas)}\n",
+          "new": "        befores = [_number(name, getattr(po, name)) for _, po, _ in paired]\n        afters = [_number(name, getattr(wb, name)) for _, _, wb in paired]\n        outcomes[name] = {**better, \"median_delta\": statistics.median(afters) - statistics.median(befores)}\n"
+        }
+      ],
+      "expect": "median_delta is the median of the per-run differences"
+    },
+    {
+      "test": "test_paired_comparison",
+      "name": "mean instead of median",
+      "edits": [
+        {
+          "file": "compare.py",
+          "old": "statistics.median(deltas)",
+          "new": "statistics.mean(deltas)"
+        }
+      ],
+      "expect": "median_delta is the median of the per-run differences"
+    },
+    {
+      "test": "test_paired_comparison",
+      "name": "no_gain lists the runs where prompt-only did better somewhere",
+      "edits": [
+        {
+          "file": "compare.py",
+          "old": "                better[\"workbench\"] += 1\n                gained[run_id] = True\n",
+          "new": "                better[\"workbench\"] += 1\n"
+        },
+        {
+          "file": "compare.py",
+          "old": "                better[\"prompt_only\"] += 1\n",
+          "new": "                better[\"prompt_only\"] += 1\n                gained[run_id] = True\n"
+        },
+        {
+          "file": "compare.py",
+          "old": "if not gained[run_id]]",
+          "new": "if gained[run_id]]"
+        }
+      ],
+      "expect": "list every paired run where the workbench did better on nothing"
+    },
+    {
+      "test": "test_paired_comparison",
+      "name": "no paired run gives an empty report",
+      "edits": [
+        {
+          "file": "compare.py",
+          "old": "        raise ValueError(\"no run has both pipelines, so there is nothing to compare\")\n",
+          "new": "        return {\"n\": 0, \"unpaired\": list(by_run), \"outcomes\": {}, \"no_gain\": []}\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_paired_comparison",
+      "name": "the upper middle value taken as the median",
+      "edits": [
+        {
+          "file": "compare.py",
+          "old": "statistics.median(deltas)",
+          "new": "sorted(deltas)[len(deltas) // 2]"
+        }
+      ],
+      "expect": "median_delta is the median of the per-run differences"
+    },
+    {
+      "test": "test_paired_comparison",
+      "name": "differences taken prompt-only minus workbench",
+      "edits": [
+        {
+          "file": "compare.py",
+          "old": "            deltas.append(after - before)\n",
+          "new": "            deltas.append(before - after)\n"
+        }
+      ],
+      "expect": "median_delta is the median of the per-run differences"
+    },
+    {
+      "test": "test_paired_comparison",
+      "name": "each pipeline's paired runs zipped in arrival order",
+      "edits": [
+        {
+          "file": "compare.py",
+          "old": "    by_run: dict[str, dict[str, Outcome]] = {}\n",
+          "new": "    by_run: dict[str, dict[str, Outcome]] = {}\n    seen: dict[str, list] = {}\n"
+        },
+        {
+          "file": "compare.py",
+          "old": "        by_run.setdefault(run_id, {})[pipeline] = outcome\n",
+          "new": "        by_run.setdefault(run_id, {})[pipeline] = outcome\n        seen.setdefault(pipeline, []).append(run_id)\n"
+        },
+        {
+          "file": "compare.py",
+          "old": "    paired = [\n        (run_id, got[\"prompt-only\"], got[\"workbench-guided\"])\n        for run_id, got in by_run.items()\n        if len(got) == len(PIPELINES)\n    ]\n",
+          "new": "    both = {run_id for run_id, got in by_run.items() if len(got) == len(PIPELINES)}\n    po_ids = [r for r in seen.get(\"prompt-only\", []) if r in both]\n    wb_ids = [r for r in seen.get(\"workbench-guided\", []) if r in both]\n    paired = [(a, by_run[a][\"prompt-only\"], by_run[b][\"workbench-guided\"]) for a, b in zip(po_ids, wb_ids)]\n"
+        }
+      ],
+      "expect": "(workbench better, prompt-only better, tie) for every outcome"
+    },
+    {
+      "test": "test_paired_comparison",
+      "name": "no_gain lists only the runs that tie on everything",
+      "edits": [
+        {
+          "file": "compare.py",
+          "old": "        \"no_gain\": [run_id for run_id, _, _ in paired if not gained[run_id]],\n",
+          "new": "        \"no_gain\": [r for r, po, wb in paired if all(_number(n, getattr(po, n)) == _number(n, getattr(wb, n)) for n in OUTCOMES)],\n"
+        }
+      ],
+      "expect": "list every paired run where the workbench did better on nothing"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "runs read one after another",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    tasks = [asyncio.create_task(pump(pipeline, events)) for pipeline, events in runs.items()]\n",
+          "new": "    tasks = []\n    for pipeline, events in runs.items():\n        await pump(pipeline, events)\n"
+        },
+        {
+          "file": "timeline.py",
+          "old": "        running = len(tasks)\n",
+          "new": "        running = len(runs)\n"
+        }
+      ],
+      "expect": "the stream stalled"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "unreached milestones held until every run has ended",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "        running = len(tasks)\n",
+          "new": "        running = len(tasks)\n        ended: list[str] = []\n"
+        },
+        {
+          "file": "timeline.py",
+          "old": "            if event is end:\n                running -= 1\n                for milestone in MILESTONES:\n                    if milestone not in progress[pipeline].reached:\n                        yield _record(pipeline, milestone, \"\")\n                continue\n",
+          "new": "            if event is end:\n                running -= 1\n                ended.append(pipeline)\n                if not running:\n                    for done in ended:\n                        for milestone in MILESTONES:\n                            if milestone not in progress[done].reached:\n                                yield _record(done, milestone, \"\")\n                continue\n"
+        }
+      ],
+      "expect": "the stream stalled"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "times taken from the clock when the record goes out",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "                yield _record(pipeline, milestone, event[\"t_ms\"])\n",
+          "new": "                yield _record(pipeline, milestone, __import__(\"time\").monotonic_ns() // 1_000_000)\n"
+        }
+      ],
+      "expect": "milestones are timed by the run's own clock"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "acceptance read from the latest record, exit code ignored",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "            if \"acceptance_met\" not in self.reached and acceptance_met(\n                self.records, self.contract.acceptance\n            ):\n",
+          "new": "            if \"acceptance_met\" not in self.reached and all(\n                event[\"record\"].results.get(s) == \"passed\" for s in self.contract.acceptance\n            ):\n"
+        }
+      ],
+      "expect": "milestones are timed by the run's own clock and come from its finished commands"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "any change to an allowed .py file counts",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    return _code(event[\"before\"]) != _code(event[\"after\"])\n",
+          "new": "    return event[\"before\"] != event[\"after\"]\n"
+        }
+      ],
+      "expect": "a meaningful edit changes allowed code"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "whitespace-insensitive text comparison",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    return _code(event[\"before\"]) != _code(event[\"after\"])\n",
+          "new": "    return \"\".join(event[\"before\"].split()) != \"\".join(event[\"after\"].split())\n"
+        }
+      ],
+      "expect": "a meaningful edit changes allowed code"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "comments removed with a regex before comparing",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    return _code(event[\"before\"]) != _code(event[\"after\"])\n",
+          "new": "    strip = lambda text: \"\".join(__import__(\"re\").sub(r\"#.*\", \"\", text).split())\n    return strip(event[\"before\"]) != strip(event[\"after\"])\n"
+        }
+      ],
+      "expect": "a meaningful edit changes allowed code"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "edits to files the contract does not allow count",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    if path not in contract.allowed or not path.endswith(\".py\"):\n",
+          "new": "    if not path.endswith(\".py\"):\n"
+        }
+      ],
+      "expect": "a meaningful edit changes allowed code"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "the agent's claim counts as a test run",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "        elif kind == \"command\":\n",
+          "new": "        elif kind == \"claim\" and event.get(\"tests_passed\"):\n            if \"tests_run\" not in self.reached:\n                new.append(\"tests_run\")\n        elif kind == \"command\":\n"
+        }
+      ],
+      "expect": "a run that never ran a test reports both milestones as unreached when it ends"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "tokens compared with blank lines (NL) kept",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "            if tok.type not in (tokenize.COMMENT, tokenize.NL)\n",
+          "new": "            if tok.type != tokenize.COMMENT\n"
+        }
+      ],
+      "expect": "a meaningful edit changes allowed code"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "only whole-line comments removed",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    return _code(event[\"before\"]) != _code(event[\"after\"])\n",
+          "new": "    strip = lambda text: \"\".join(\"\".join(l.split()) for l in text.splitlines() if not l.lstrip().startswith(\"#\"))\n    return strip(event[\"before\"]) != strip(event[\"after\"])\n"
+        }
+      ],
+      "expect": "a meaningful edit changes allowed code"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "string tokens ignored like comments",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "            if tok.type not in (tokenize.COMMENT, tokenize.NL)\n",
+          "new": "            if tok.type not in (tokenize.COMMENT, tokenize.NL, tokenize.STRING)\n"
+        }
+      ],
+      "expect": "a meaningful edit changes allowed code"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "ast.dump with line and column attributes",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    return _code(event[\"before\"]) != _code(event[\"after\"])\n",
+          "new": "    import ast\n    dump = lambda text: ast.dump(ast.parse(text), include_attributes=True)\n    return dump(event[\"before\"]) != dump(event[\"after\"])\n"
+        }
+      ],
+      "expect": "a meaningful edit changes allowed code"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "runs read in turns",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    progress = {pipeline: _Progress(contract) for pipeline in runs}\n    tasks = [asyncio.create_task(pump(pipeline, events)) for pipeline, events in runs.items()]\n",
+          "new": "    progress = {pipeline: _Progress(contract) for pipeline in runs}\n    tasks = []\n    live = dict(runs)\n    yield _record(\"pipeline\", \"milestone\", \"t_ms\")\n    while live:\n        for pipeline in list(live):\n            try:\n                event = await live[pipeline].__anext__()\n            except StopAsyncIteration:\n                del live[pipeline]\n                for milestone in MILESTONES:\n                    if milestone not in progress[pipeline].reached:\n                        yield _record(pipeline, milestone, \"\")\n                continue\n            for milestone in progress[pipeline].advance(event):\n                yield _record(pipeline, milestone, event[\"t_ms\"])\n    return\n"
+        }
+      ],
+      "expect": "the stream stalled"
+    },
+    {
+      "test": "test_milestone_stream",
+      "name": "milestones that one event reaches reported in reverse",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "        self.reached.update(new)\n        return new\n",
+          "new": "        self.reached.update(new)\n        return new[::-1]\n"
+        }
+      ],
+      "expect": "an event that reaches two milestones reports them in MILESTONES order"
+    },
+    {
+      "test": "test_change_impact",
+      "name": "from a.b import c read as an attribute only",
+      "edits": [
+        {
+          "file": "impact.py",
+          "old": "            for alias in node.names:\n                if alias.name != \"*\":\n                    found |= _module([*parts, alias.name], files)\n",
+          "new": ""
+        }
+      ],
+      "expect": "every test that imports the change, directly or through other modules"
+    },
+    {
+      "test": "test_change_impact",
+      "name": "relative imports in an __init__.py resolved from its parent package",
+      "edits": [
+        {
+          "file": "impact.py",
+          "old": "    package = path.split(\"/\")[:-1]  # a module's package; for an __init__.py, the package it starts\n",
+          "new": "    package = path.split(\"/\")[:-2] if path.endswith(\"/__init__.py\") else path.split(\"/\")[:-1]\n"
+        }
+      ],
+      "expect": "every test that imports the change, directly or through other modules"
+    },
+    {
+      "test": "test_change_impact",
+      "name": "only top-level imports read",
+      "edits": [
+        {
+          "file": "impact.py",
+          "old": "    for node in ast.walk(ast.parse(text, filename=path)):\n",
+          "new": "    for node in ast.parse(text, filename=path).body:\n"
+        }
+      ],
+      "expect": "every test that imports the change, directly or through other modules"
+    },
+    {
+      "test": "test_change_impact",
+      "name": "direct importers only",
+      "edits": [
+        {
+          "file": "impact.py",
+          "old": "                reached.add(importer)\n                queue.append(importer)\n",
+          "new": "                reached.add(importer)\n"
+        }
+      ],
+      "expect": "every test that imports the change, directly or through other modules"
+    },
+    {
+      "test": "test_change_impact",
+      "name": "parent packages' __init__.py not run",
+      "edits": [
+        {
+          "file": "impact.py",
+          "old": "    for i in range(1, len(parts) + 1):\n",
+          "new": "    for i in range(len(parts), len(parts) + 1):\n"
+        }
+      ],
+      "expect": "importing lib.util runs lib/__init__.py too"
+    },
+    {
+      "test": "test_change_impact",
+      "name": "a changed test file left out",
+      "edits": [
+        {
+          "file": "impact.py",
+          "old": "    return sorted(path for path in reached if _is_test(path))\n",
+          "new": "    return sorted(path for path in reached if _is_test(path) and path not in changed)\n"
+        }
+      ],
+      "expect": "a changed test is affected itself"
+    },
+    {
+      "test": "test_change_impact",
+      "name": "the selector compared with the test file as written",
+      "edits": [
+        {
+          "file": "impact.py",
+          "old": "        covers(selector.partition(\"::\")[0], test) for selector in acceptance for test in affected\n",
+          "new": "        selector in affected for selector in acceptance\n"
+        }
+      ],
+      "expect": "a test inside an affected test file exercises the change"
+    },
+    {
+      "test": "test_change_impact",
+      "name": "relative imports resolved one package too high",
+      "edits": [
+        {
+          "file": "impact.py",
+          "old": "            base = package[: len(package) - node.level + 1] if node.level else []\n",
+          "new": "            base = package[: len(package) - node.level] if node.level else []\n"
+        }
+      ],
+      "expect": "every test that imports the change, directly or through other modules"
+    },
+    {
+      "test": "test_change_impact",
+      "name": "every relative import read as a single dot",
+      "edits": [
+        {
+          "file": "impact.py",
+          "old": "            base = package[: len(package) - node.level + 1] if node.level else []\n",
+          "new": "            base = package if node.level else []\n"
+        }
+      ],
+      "expect": "every test that imports the change, directly or through other modules"
+    },
+    {
+      "test": "test_change_impact",
+      "name": "edges followed from importer to imported",
+      "edits": [
+        {
+          "file": "impact.py",
+          "old": "                importers.setdefault(target, set()).add(path)\n",
+          "new": "                importers.setdefault(path, set()).add(target)\n"
+        }
+      ],
+      "expect": "every test that imports the change, directly or through other modules"
+    },
+    {
+      "test": "test_change_impact",
+      "name": "import x as y resolved by its local name",
+      "edits": [
+        {
+          "file": "impact.py",
+          "old": "                found |= _module(alias.name.split(\".\"), files)\n",
+          "new": "                found |= _module((alias.asname or alias.name).split(\".\"), files)\n"
+        }
+      ],
+      "expect": "every test that imports the change, directly or through other modules"
+    },
+    {
+      "test": "test_change_impact",
+      "name": "from X import Y resolved only as the submodule X.Y",
+      "edits": [
+        {
+          "file": "impact.py",
+          "old": "            found |= _module(parts, files)\n            for alias in node.names:\n",
+          "new": "            for alias in node.names:\n"
+        }
+      ],
+      "expect": "every test that imports the change, directly or through other modules"
+    },
+    {
+      "test": "test_change_impact",
+      "name": "a recursive walk without a visited set",
+      "edits": [
+        {
+          "file": "impact.py",
+          "old": "    reached = {path for path in changed if path.endswith(\".py\") and path in files}\n    queue = deque(reached)\n    while queue:\n        for importer in importers.get(queue.popleft(), ()):\n            if importer not in reached:\n                reached.add(importer)\n                queue.append(importer)\n",
+          "new": "    def walk(p):\n        out = {p}\n        for imp in importers.get(p, ()):\n            out |= walk(imp)\n        return out\n    reached = set()\n    for p in changed:\n        if p.endswith(\".py\") and p in files:\n            reached |= walk(p)\n"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_change_impact",
+      "name": "any module whose name starts with test counted as a test",
+      "edits": [
+        {
+          "file": "impact.py",
+          "old": "    return name.startswith(\"test_\") and name.endswith(\".py\")\n",
+          "new": "    return name.startswith(\"test\") and name.endswith(\".py\")\n"
+        }
+      ],
+      "expect": "every test that imports the change, directly or through other modules"
+    }
+  ]
+}

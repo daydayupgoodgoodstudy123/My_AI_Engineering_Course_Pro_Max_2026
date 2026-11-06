@@ -1,0 +1,128 @@
+{
+  "lesson": "phases/14-agent-engineering/41-workbench-for-real-repos",
+  "title": "The Workbench on a Real Repo",
+  "format": "staged-brownfield",
+  "service": "RealRepo: the lesson's before/after benchmark on its sample app. The five outcomes are measured from what each scripted run left behind (feedback records with per-test results, the diff, the handoff packet, the review), every repetition's outcomes are kept in SQLite, the two pipelines are compared run by run, a live timeline streams when each run reaches its milestones (time-to-first-meaningful-edit, first test run, acceptance) as CSV, and the repo's import graph decides which tests a change can affect",
+  "sources": {
+    "docs/en.md": "75d2298297ec8a23832dea06df7e12a448e1030b265465aac178dc914b881d27",
+    "code/main.py": "c03007c7507e2ab7134eadf5bf99b77834c0521f85442e71dd5bbf43a74eef1b"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no model and no network: both pipelines are scripted, and every run, event stream and repository snapshot is data the tests hand in",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_measure_outcomes",
+      "kind": "debug",
+      "lesson_anchor": "The five outcomes measured (tests_actually_run: most 'tests passed' claims are unverifiable; acceptance_met: the test that proves the goal must be the test that ran; files_outside_scope; handoff_quality; reviewer_total) and the lesson's table for the two runs; code/main.py run_prompt_only and run_workbench, which hard-code the outcomes instead of measuring them; the artifacts they read: lesson 37's feedback record and its null exit (no exit, no progress), lesson 40's seven handoff fields and its next_action rule, lesson 39's five 0-2 scores out of 10",
+      "planted_bugs": [
+        "load_feedback leaves results as None for a command that runs no tests (the init script, the verification gate), against FeedbackRecord's docstring; the AttributeError surfaces two calls later, in latest_results under measure -> tests_actually_run",
+        "tests_actually_run falls back to the agent's claim when a run has no feedback records, so the lesson's prompt-only run, which never runs a test but says tests_passed, counts as having run them",
+        "latest_results keeps 'skipped' results, against its docstring, so a pytest run that skipped the acceptance test (exit code 0, nothing ran) counts as tests_actually_run",
+        "handoff_quality grades a packet that has every field but next_action as partial; lesson 40 calls it a status report, not a handoff, so it is missing; a blank next_action is not filled in either, so a presence check is not enough"
+      ],
+      "timing_assert": "200 acceptance selectors (test functions) against a 2,000-result suite run (20 modules x 25 functions x 4 parametrized cases) under 0.15 s. acceptance_met checks every selector against every result through covers(), and covers() builds the node's ancestors with PurePosixPath(...).parents each time: 400,000 calls. Measured on this machine (Python 3.12.14, load average 4 to 9, other agents running): the starter with the other four bugs fixed 1.55-2.58 s over 12 runs in 6 processes and 1.60-2.52 s in three checker runs, at least 10x the limit; the reference, which indexes every result's ancestors once, median 8.3-10.4 ms and at most 17 ms over 300 runs, under 1/8 of the limit. Fixes that stay quadratic but drop the per-call cost pass clearly: lru_cache on ancestors 35-53 ms, a set of ancestors per result 14-29 ms, startswith with a boundary check 14-33 ms",
+      "overfix_guard": "a selector looked up as an exact node id (a test function must cover its parametrized cases, a module its tests); str.startswith without a boundary (test_signup would cover test_signup_happy_path); an index keyed by test module (a test selector would answer for its failing neighbours, and pytest -k happy would meet acceptance); an index that keeps each selector's last result only (sample_app holds a failing test); records with any non-zero exit skipped (a command that exits 1 still ran its tests); the shipped exit_code None check lost while rewriting latest_results (a pytest run the runner killed after it printed two passes, lesson 37: no exit, no progress); a selector that covers no test that ran counted as met (all() over nothing: the prompt-only row, a skipped acceptance test); an empty list counted as an unfilled handoff field (the workbench packet's failed_attempts: []); every unfilled field graded missing (a blank verdict_pointer is partial)"
+    },
+    {
+      "part": 2,
+      "test": "test_outcome_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "Build It: comparison.json and before-after-report.md carry the outcomes per pipeline; Exercise 4 (with a real model the outcomes get noisier, so the same task is repeated and every repetition kept); the skill's CI job that fails when workbench outcomes regress on a fixed task suite",
+      "storage": "SQLite, one row per outcome: (run, pipeline, outcome, value) with an autoincrement seq for recording order; the value is JSON text, so bool, int, str and list come back as the same types",
+      "exactness": "outcomes read back equal type for type (exact() tells True from 1 and a list from a tuple), before and after a close and reopen: True and False flags, reviewer_total 10 and 0, an empty files_outside_scope, a file list in the order given (not sorted) with a comma and a semicolon inside paths ('docs/notes, v2.md', 'docs/a;b.md'), handoff_quality 'missing' as a value; two repetitions of the same pipeline (r2 and r10) keep their own outcomes",
+      "traps": [
+        "flags stored as 0 and 1 (SQLite has no boolean, and 1 == True hides it from ==)",
+        "files stored one row per path, so an empty list leaves no row to rebuild the outcome from",
+        "files joined with ';' or ','",
+        "files sorted on the way in or out",
+        "runs ordered by run id ('r10' before 'r2') or left to an unordered SELECT DISTINCT",
+        "outcomes ordered by run and pipeline instead of recording order",
+        "an unknown pipeline, an impossible handoff level or a total of 11 accepted"
+      ],
+      "clarifying_questions": [
+        "the same run and pipeline twice",
+        "sorting the file list",
+        "run id format",
+        "a rejected outcome"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_paired_comparison",
+      "kind": "core algorithm",
+      "lesson_anchor": "The two pipelines (same task, same sample app, two runs); Read the before/after report and decide which surfaces gave the most leverage; the skill's hard rejects (a benchmark with only one pipeline; percentages without a denominator, always n / m; reports that hide false negatives); Exercise 3 (the false-negative pass)",
+      "algorithm": "pair runs by id and list the unpaired; per outcome count workbench better, prompt-only better and tie in the outcome's own units and direction (flags as 1 and 0, files by count with fewer better, handoff as an ordinal missing < partial < full packet, the reviewer total as it is); the median of the per-run differences; no_gain = the paired runs where the workbench did better on nothing",
+      "traps": [
+        "runs paired by position, so one unpaired run shifts every pair after it",
+        "the paired runs zipped in the order each pipeline's records arrive (r4's workbench record comes last, r7's right after r4's prompt-only)",
+        "unpaired runs counted",
+        "handoff levels compared as text ('partial' > 'full packet' > 'missing')",
+        "file lists compared as lists (lexicographic) or more files counted as better",
+        "the difference of the two pipelines' medians, or the mean, instead of the median of per-run differences",
+        "no_gain taken as the runs where prompt-only won something (misses the all-tie run)",
+        "no paired run answered with an empty report instead of ValueError"
+      ],
+      "integration": "the lesson's two scripted runs measured by Part 1, recorded three times in Part 2's store and compared from store.outcomes()",
+      "clarifying_questions": [
+        "runs with one pipeline",
+        "files by list or by count",
+        "median with an even count"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_milestone_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Exercise 1 (a sixth outcome, time-to-first-meaningful-edit, and how to measure it cleanly); the two pipelines' steps happen over time (init, scope, state, edit, acceptance through the feedback runner, gate); Part 1's rules for tests_actually_run and acceptance_met applied to the records so far",
+      "wire_format": "CSV, decided by the test's csv.reader over each yielded string and over their join: the header pipeline,milestone,t_ms, then one csv.writer record per milestone the moment a run reaches it (first_meaningful_edit, tests_run, acceptance_met), t_ms from the event, and an empty t_ms for each milestone a run never reached, written when that run's events end; every string ends with its line ending",
+      "traps": [
+        "runs read one after another or in turns (the workbench stream waits on an event the test sets only after the prompt-only run's last record; the test's 2 s limit reports a stall)",
+        "unreached milestones held until every run has ended",
+        "edits compared as text (the spacing edit), as text without whitespace or with whole-line comments dropped (the comment edit, which also adds a trailing comment), with '#...' removed by a regex (which also eats README.md#signup inside a string literal), or with blank-line tokens or ast line numbers kept (the spacing edit adds a blank line)",
+        "edits outside the contract counted (a real code change to sample_app/settings.py)",
+        "the agent's claim counted as a test run",
+        "a killed record (exit_code None) meeting acceptance",
+        "two milestones reached by one event reported out of MILESTONES order (a one-run stream whose first pytest run already meets acceptance)",
+        "times from the clock instead of the event's t_ms"
+      ],
+      "clarifying_questions": [
+        "docstring changes",
+        "a file that does not parse",
+        "which clock",
+        "order across runs"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_change_impact",
+      "kind": "graph",
+      "lesson_anchor": "The sample app (app.py and the test that imports it); acceptance_met: the test that proves the goal must be the test that ran, which here also means it must reach the code the change touched; the skill's rule that a project without an acceptance command gets no benchmark",
+      "traps": [
+        "from a.b import c read as an attribute only (from sample_app import validators, from . import errors, from .. import app)",
+        "relative imports in an __init__.py resolved from the parent package (from .routes import router)",
+        "only top-level statements read (errors.py imports validators inside a function to avoid the cycle)",
+        "import lib.util without lib/__init__.py, which imports config",
+        "direct importers only",
+        "the validators <-> errors cycle",
+        "a changed test file left out, or a README change affecting tests",
+        "a module named testing.py counted as a test (test files start with test_; the helper is reached from validators)",
+        "proves_change comparing the whole selector with the test file",
+        "a directory selector matched without a path boundary (not in the test data; the interviewer asks)"
+      ],
+      "clarifying_questions": [
+        "imports inside functions",
+        "third-party imports",
+        "conftest.py",
+        "deleted modules"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1 keeps the suggested acceptance-by-node-id idea, and plants the measurement's own defects as four stacked bugs: a None results field from load_feedback that surfaces two calls later, the fallback to the agent's claim, skipped results counted as tests that ran, and lesson 40's next_action rule. Records with exit_code None stay correct in the starter and are an overfix guard: lesson 40's exam already plants a None exit code in its Part 1. The suggested allowed/forbidden/soft split is dropped: the lesson calls README.md forbidden-zone bait, not a soft doc file, and lesson 36's exam already grades forbidden, off-scope and soft-off-scope files. files_outside_scope stays the lesson's single list of paths the contract does not allow.",
+    "The Part 1 timing defect moved. Re-running both pipelines and re-parsing the records for each of the report's five rows costs a constant 5x, which cannot be 8 times over a limit and 8 times under it. The slow path is now acceptance_met checking every selector against every result; the module-level and parametrized selectors from the suggested guard are the overfix checks.",
+    "Part 2 follows the suggestion (SQLite, one row per outcome, every repetition kept, types unchanged), but the pairing moved to Part 3, which pairs (run, pipeline, outcome) records itself; the store hands them back in recording order. Two traps are left out on purpose: a rejected outcome leaving some of its rows behind, and a second record for the same run and pipeline replacing the first. This chapter's exams already use both trap classes more than twice; the docstring still says a rejected outcome stores nothing, and the interviewer answers the duplicate question.",
+    "Part 4 is not the suggested concurrent run in isolated copies of the sample app: lesson 20's exam already streams isolated parallel episodes as CSV, with the same gate probe and cleanup traps. Part 4 is the lesson's Exercise 1 instead: time-to-first-meaningful-edit, measured live from both runs' event streams read at the same time, next to the first test run and acceptance. The output stays CSV.",
+    "Paths are written from the repo root that holds sample_app/; code/main.py mixes README.md and sample_app/... in the prompt-only run's touched list. Its unused FORBIDDEN set becomes the contract's forbidden list, and forbidden files count as outside scope, as in the lesson's table.",
+    "Part 5 follows the suggestion (import graph, relative imports, package __init__.py, a changed test file, a docs-only change) and adds proves_change, which reuses Part 1's selector rules."
+  ]
+}
