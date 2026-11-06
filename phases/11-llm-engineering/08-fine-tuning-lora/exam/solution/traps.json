@@ -1,0 +1,421 @@
+{
+  "package": "adapterforge",
+  "tests": [
+    "test_adapter_forward_and_merge",
+    "test_binary_adapter_archive",
+    "test_uniform_int4_blocks",
+    "test_incremental_module_frames",
+    "test_targeted_module_graph"
+  ],
+  "layers": [
+    {
+      "test": "test_adapter_forward_and_merge",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "ValueError"
+        },
+        {
+          "name": "preserve declared factor orientation",
+          "edits": [
+            {
+              "file": "service.py",
+              "old": "matrix(record[\"B\"]),matrix(record[\"A\"])",
+              "new": "matrix(record[\"A\"]),matrix(record[\"B\"])"
+            }
+          ],
+          "expect": "a rectangular row-vector adapter retains its declared alpha/rank residual and base bias"
+        },
+        {
+          "name": "+ preserve alpha/rank scaling",
+          "edits": [
+            {
+              "file": "service.py",
+              "old": "return adapter.alpha",
+              "new": "return adapter.alpha/adapter.rank"
+            }
+          ],
+          "expect": "merging an already merged adapter preserves the complete output"
+        },
+        {
+          "name": "+ merge each adapter at most once",
+          "edits": [
+            {
+              "file": "service.py",
+              "old": "        delta=matmul(self.adapter.A,self.adapter.B);scale=adapter_scale(self.adapter)",
+              "new": "        if self.merged:return\n        delta=matmul(self.adapter.A,self.adapter.B);scale=adapter_scale(self.adapter)"
+            }
+          ],
+          "expect": "wide adapter requests should stay responsive"
+        },
+        {
+          "name": "+ preserve factored forward evaluation",
+          "edits": [
+            {
+              "file": "service.py",
+              "old": "    delta=matmul(adapter.A,adapter.B)\n    residual=vecmat(vector,delta)",
+              "new": "    hidden=matmul((tuple(vector),),adapter.A)\n    residual=matmul(hidden,adapter.B)[0]"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_adapter_forward_and_merge",
+      "name": "omit the frozen base contribution",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "original=vecmat(vector,base);scale=adapter_scale(adapter)",
+          "new": "original=tuple(0.0 for _ in bias);scale=adapter_scale(adapter)"
+        }
+      ],
+      "expect": "a rectangular row-vector adapter retains its declared alpha/rank residual and base bias"
+    },
+    {
+      "test": "test_adapter_forward_and_merge",
+      "name": "drop the nonzero base bias",
+      "edits": [
+        {
+          "file": "service.py",
+          "old": "return tuple(y+b+scale*d for y,b,d in zip(original,bias,residual))",
+          "new": "return tuple(y+scale*d for y,b,d in zip(original,bias,residual))"
+        }
+      ],
+      "expect": "a rectangular row-vector adapter retains its declared alpha/rank residual and base bias"
+    },
+    {
+      "test": "test_binary_adapter_archive",
+      "name": "narrow factor coordinates to binary32",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "payload=struct.pack(\">\"+\"d\"*len(values),*values)",
+          "new": "values=[struct.unpack(\">f\",struct.pack(\">f\",v))[0] for v in values]\n    payload=struct.pack(\">\"+\"d\"*len(values),*values)"
+        }
+      ],
+      "expect": "archive reopening preserves module identity, distinct factor shapes and every binary64 bit"
+    },
+    {
+      "test": "test_binary_adapter_archive",
+      "name": "interchange input and output archive dimensions",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "\"input\":ni,\"rank\":nr,\"output\":no",
+          "new": "\"input\":no,\"rank\":nr,\"output\":ni"
+        }
+      ],
+      "expect": "archive reopening preserves module identity, distinct factor shapes and every binary64 bit"
+    },
+    {
+      "test": "test_binary_adapter_archive",
+      "name": "discard valid zero-initialized B artifacts",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "adapter=valid_adapter(adapter)\n    ni,nr,no",
+          "new": "adapter=valid_adapter(adapter)\n    if not any(v for row in adapter.B for v in row):raise ValueError(\"empty adapter\")\n    ni,nr,no"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_binary_adapter_archive",
+      "name": "accept trailing archive bytes",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    meta,payload=read_archive(raw);np=len(payload)",
+          "new": "    if len(raw)>=12:raw=raw[:12+sum(struct.unpack_from(\">II\",raw,4))]\n    meta,payload=read_archive(raw);np=len(payload)"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_uniform_int4_blocks",
+      "name": "use one shared tensor scale",
+      "edits": [
+        {
+          "file": "quant.py",
+          "old": "max(max(abs(x) for x in block)/7,1e-8)",
+          "new": "max(max(abs(x) for x in flat)/7,1e-8)"
+        }
+      ],
+      "expect": "each padded block retains its own absmax scale and original matrix extent"
+    },
+    {
+      "test": "test_uniform_int4_blocks",
+      "name": "truncate quantized values instead of declared rounding",
+      "edits": [
+        {
+          "file": "quant.py",
+          "old": "round(x/scale)",
+          "new": "int(x/scale)"
+        }
+      ],
+      "expect": "halfway values follow the declared ties-to-even teaching quantizer"
+    },
+    {
+      "test": "test_uniform_int4_blocks",
+      "name": "retain only unsigned nibble values",
+      "edits": [
+        {
+          "file": "quant.py",
+          "old": "codes.append(n-16 if n>=8 else n)",
+          "new": "codes.append(n)"
+        }
+      ],
+      "expect": "packed teaching codes retain signed values and high-nibble-first ordering"
+    },
+    {
+      "test": "test_uniform_int4_blocks",
+      "name": "pad a complete block unnecessarily",
+      "edits": [
+        {
+          "file": "quant.py",
+          "old": "pad=(-len(flat))%block_size",
+          "new": "pad=block_size-len(flat)%block_size"
+        }
+      ],
+      "expect": "a complete last block is retained when no padding was added"
+    },
+    {
+      "test": "test_incremental_module_frames",
+      "name": "reuse the first module artifact across the stream",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for adapter in source:\n        yield frame(adapter.path,encode_adapter(adapter))",
+          "new": "    first=None\n    async for adapter in source:\n        if first is None:first=adapter\n        yield frame(first.path,encode_adapter(first))"
+        }
+      ],
+      "expect": "each frame retains its own path, rank, factors and alpha including a valid zero B"
+    },
+    {
+      "test": "test_incremental_module_frames",
+      "name": "drop zero-initialized B from module reports",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        yield frame(adapter.path,encode_adapter(adapter))",
+          "new": "        if any(v for row in adapter.B for v in row):yield frame(adapter.path,encode_adapter(adapter))"
+        }
+      ],
+      "expect": "StopAsyncIteration"
+    },
+    {
+      "test": "test_incremental_module_frames",
+      "name": "read all future modules before reporting",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for adapter in source:\n        yield frame(adapter.path,encode_adapter(adapter))",
+          "new": "    adapters=[adapter async for adapter in source]\n    for adapter in adapters:\n        yield frame(adapter.path,encode_adapter(adapter))"
+        }
+      ],
+      "expect": "the completed first module is observable before a future module is pulled"
+    },
+    {
+      "test": "test_targeted_module_graph",
+      "name": "select containing substrings rather than exact targets",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "(path in targets or path.rsplit(\".\",1)[-1] in targets)",
+          "new": "any(target in path for target in targets)"
+        }
+      ],
+      "expect": "a selected physical module is wrapped once and every alias preserves shared identity"
+    },
+    {
+      "test": "test_targeted_module_graph",
+      "name": "count shared base storage once per path",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "if id(layer) not in seen_base:",
+          "new": "if True:"
+        }
+      ],
+      "expect": "parameter counts distinguish physical base and adapter storage from repeated module paths"
+    },
+    {
+      "test": "test_targeted_module_graph",
+      "name": "merge the same physical wrapper again for its alias",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "if isinstance(node,Wrapped) and id(node) not in merged:",
+          "new": "if isinstance(node,Wrapped):"
+        }
+      ],
+      "expect": "merging replaces every wrapper alias with the same once-updated frozen base"
+    },
+    {
+      "test": "test_binary_adapter_archive",
+      "name": "round persisted adapter coordinates to six display decimals",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    payload=struct.pack(\">\"+\"d\"*len(values),*values)",
+          "new": "    values=[round(v,6) for v in values]\n    payload=struct.pack(\">\"+\"d\"*len(values),*values)"
+        }
+      ],
+      "expect": "archive reopening preserves module identity, distinct factor shapes and every binary64 bit"
+    },
+    {
+      "test": "test_binary_adapter_archive",
+      "name": "decode factors while resetting the saved alpha to unity",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    alpha=values[0];cut=1+ni*nr",
+          "new": "    alpha=1.0;cut=1+ni*nr"
+        }
+      ],
+      "expect": "archive reopening preserves module identity, distinct factor shapes and every binary64 bit"
+    },
+    {
+      "test": "test_uniform_int4_blocks",
+      "name": "use signed maximum instead of absolute block maximum",
+      "edits": [
+        {
+          "file": "quant.py",
+          "old": "max(max(abs(x) for x in block)/7,1e-8)",
+          "new": "max(max(block)/7,1e-8)"
+        }
+      ],
+      "expect": "an all-negative block retains its own magnitude scale and signed coordinates"
+    },
+    {
+      "test": "test_uniform_int4_blocks",
+      "name": "divide the absolute block maximum by eight",
+      "edits": [
+        {
+          "file": "quant.py",
+          "old": "max(max(abs(x) for x in block)/7,1e-8)",
+          "new": "max(max(abs(x) for x in block)/8,1e-8)"
+        }
+      ],
+      "expect": "each padded block retains its own absmax scale and original matrix extent"
+    },
+    {
+      "test": "test_uniform_int4_blocks",
+      "name": "round halfway magnitudes away from zero",
+      "edits": [
+        {
+          "file": "quant.py",
+          "old": "round(x/scale)",
+          "new": "(int(abs(x/scale)+0.5)*(1 if x>=0 else -1))"
+        }
+      ],
+      "expect": "halfway values follow the declared ties-to-even teaching quantizer"
+    },
+    {
+      "test": "test_uniform_int4_blocks",
+      "name": "omit the finite scale floor on a zero block",
+      "edits": [
+        {
+          "file": "quant.py",
+          "old": "max(max(abs(x) for x in block)/7,1e-8)",
+          "new": "max(abs(x) for x in block)/7"
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_uniform_int4_blocks",
+      "name": "trim a zero-padding artifact with the empty minus-zero slice",
+      "edits": [
+        {
+          "file": "quant.py",
+          "old": "    flat=flat[:ni*no]",
+          "new": "    flat=flat[:-artifact.pad]"
+        }
+      ],
+      "expect": "a complete last block is retained when no padding was added"
+    },
+    {
+      "test": "test_incremental_module_frames",
+      "name": "retain preceding module frames in each subsequent publication",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for adapter in source:\n        yield frame(adapter.path,encode_adapter(adapter))",
+          "new": "    pending=b\"\"\n    async for adapter in source:\n        pending+=frame(adapter.path,encode_adapter(adapter))\n        yield pending"
+        }
+      ],
+      "expect": "each frame retains its own path, rank, factors and alpha including a valid zero B"
+    },
+    {
+      "test": "test_targeted_module_graph",
+      "name": "deduplicate distinct physical modules by their repeated leaf name",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "    wrappers={}",
+          "new": "    wrappers={};seen_leaf_names=set()"
+        },
+        {
+          "file": "tree.py",
+          "old": "            adapter=valid_adapter(factory(path,len(node.weight),len(node.weight[0]),rank,alpha))",
+          "new": "            leaf_name=path.rsplit(\".\",1)[-1]\n            if leaf_name in seen_leaf_names:continue\n            seen_leaf_names.add(leaf_name)\n            adapter=valid_adapter(factory(path,len(node.weight),len(node.weight[0]),rank,alpha))"
+        }
+      ],
+      "expect": "distinct physical modules with the same selected leaf name each retain their own adapter"
+    },
+    {
+      "test": "test_targeted_module_graph",
+      "name": "install selected wrappers only beneath a nonempty parent path",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "        if id(node) in wrappers:\n            parent=root;parts=path.split(\".\")",
+          "new": "        if id(node) in wrappers:\n            if \".\" not in path:continue\n            parent=root;parts=path.split(\".\")"
+        }
+      ],
+      "expect": "a direct root child and a nested matching leaf are both installed at their declared paths"
+    },
+    {
+      "test": "test_targeted_module_graph",
+      "name": "preserve an existing wrapper without freezing its physical base",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "        elif isinstance(node,Wrapped):node.base.frozen=True\n",
+          "new": ""
+        }
+      ],
+      "expect": "an existing wrapper keeps its original base and adapter identities while freezing its base"
+    },
+    {
+      "test": "test_targeted_module_graph",
+      "name": "freeze a supplied wrapper by replacing its unfrozen base with a clone",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "        elif isinstance(node,Wrapped):node.base.frozen=True",
+          "new": "        elif isinstance(node,Wrapped):\n            if not node.base.frozen:node.base=Linear(node.base.weight,node.base.bias,True)"
+        }
+      ],
+      "expect": "an existing wrapper keeps its original base and adapter identities while freezing its base"
+    },
+    {
+      "test": "test_targeted_module_graph",
+      "name": "freeze a supplied wrapper while reconstructing its existing adapter object",
+      "edits": [
+        {
+          "file": "tree.py",
+          "old": "        elif isinstance(node,Wrapped):node.base.frozen=True",
+          "new": "        elif isinstance(node,Wrapped):\n            if not node.base.frozen:node.adapter=Adapter(node.adapter.path,node.adapter.A,node.adapter.B,node.adapter.alpha)\n            node.base.frozen=True"
+        }
+      ],
+      "expect": "an existing wrapper keeps its original base and adapter identities while freezing its base"
+    }
+  ]
+}
