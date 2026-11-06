@@ -1,0 +1,192 @@
+{
+  "lesson": "phases/11-llm-engineering/05-context-engineering",
+  "title": "Context Engineering: Windows, Budgets, Memory, and Retrieval",
+  "format": "staged-brownfield",
+  "service": "ContextLoom: scored context preview, priority slot budgets, complete history compression, component revision replay, retrieved placement, SSE snapshots and supplied document digests",
+  "sources": {
+    "docs/en.md": "778ebedaa18baad1af5409b500b174f1809d215fcc20a48960e8ad6324eb50a6",
+    "code/main.py": "deb75f6752831c781421aed6bdac66b83305452cb05e090d8ab7ee11ae5ede48",
+    "code/main.ts": "a655dfe813462451f0e9cbf04c1b2c0392a1989c38acbd1536e0971041ca669c",
+    "code/main.讲解.md": "ca894a965fe17d47403b0b6ffdfa689b0ae5d4130d65c8c4b75fc707bd87279e"
+  },
+  "runtime": "Python3.10+, standard library, pytest; deterministic offline replay and summarizers; no numpy/tokenizer/model/network",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_context_preview_and_budget",
+      "kind": "debug",
+      "lesson_anchor": "main.py16-65 ContextBudget;264-290 paired filtering/optional-history-before-query;95-150 compression;讲解3.5/7.1 rolling summary and counting limitation",
+      "planted_bugs": [
+        "selected documents paired with unfiltered scores; ContextService.preview -> build_retrieved -> correct emit_scored_components/scored_values consumer raises ValueError beyond producer",
+        "slot replacement counts its old allocation as other occupied capacity",
+        "query allocated after optional history is displaced despite feasible compulsory prompt",
+        "each whole-exchange eviction rescans all retained rendered words"
+      ],
+      "timing_assert": {
+        "slow": [
+          0.6044352920725942,
+          0.5855353749357164,
+          0.5914596251677722
+        ],
+        "fast": [
+          0.0028176249470561743,
+          0.002778999973088503,
+          0.0027954168617725372
+        ],
+        "workload": {
+          "complete_exchanges": 1200,
+          "user_words": 25,
+          "assistant_words": 25,
+          "history_budget": 160,
+          "minimum_recent_exchanges": 2,
+          "summary_word_cap": 12,
+          "limit_seconds": 0.06,
+          "timed_work": "complete compress_history including input validation, every rolling-summary/provenance update and final render/accounting"
+        },
+        "slow_min_over_limit": 9.758922915595274,
+        "limit_over_fast_max": 21.29453036774372,
+        "evidence": "/tmp/exam-11-16-work/draft11-05/timing.json; executable /tmp/exam-11-16-work/final-probe05.py uses full isolated exam copies, external evidence only/not runtime dependencies"
+      },
+      "overfix_guard": "Whole recent exchanges, every evicted source id, current bounded summary, full output and complete render token count retained; no optional-context blanket removal; zero/empty and infeasible budgets handled.",
+      "given_helpers": [
+        "strict paired-array consumer (source zip would silently truncate/mispair, not IndexError)",
+        "deque eviction buffer",
+        "12word bounded rolling summary and append-only provenance accumulator",
+        "complete rendered role/header/summary word accounting and one source estimator application",
+        "correct cap/count primitives and infeasible final-history rejection"
+      ],
+      "accounting": "Slot budget uses additive per-component source estimates. History is one component: its rendered word total includes role labels, headers, summary and retained pairs, then int(total_words*1.3) once; no sum of separately rounded per-turn estimates.",
+      "deviation": "Source summaries accumulate unbounded and are absent from its threshold. Correct rolling-summary/rendered-count/final-rejection helpers explicitly repair these source limits. Candidate performance task is repeated retained-history scans only; all real rollups/provenance/final render remain in timed call. No completed zigzag in P1."
+    },
+    {
+      "part": 2,
+      "test": "test_component_revision_replay",
+      "kind": "model and persistence",
+      "lesson_anchor": "source ContextBudget named allocations; ConversationManager summaries vs live turns/provenance; docs context replay Exercise3",
+      "storage": "Append-only UTF8JSON component-revision lines plus compact ordered live-state checkpoint",
+      "exactness": "Exact text includingCRLF/Unicode/empty, role, integer revision/token estimate and ordered summary provenance round-trip; updates supersede live slot but preserve first position. Literal U+2028/NEL inside text are preserved; only actual LF separates log records.",
+      "traps": [
+        "return all revisions or sort live slots by key",
+        "ignore checkpoint or revive covered older log records",
+        "conflicting same revision or lost separate summary provenance"
+      ],
+      "clarifying_questions": [
+        "stale append",
+        "covered log",
+        "integer estimate/provenance"
+      ],
+      "deviation": "Source is in-memory; log/checkpoint is explicit engineering persistence extension. Correct component codec given. No transaction/fsync/crash durability/partial-line repair guarantee.",
+      "replay_contract": "Ignore covered older revisions; reject conflicting content equal in revision to current live state; not a complete historical-integrity audit.",
+      "integration_guards": [
+        "JSON Unicode separators inside text are not append-log delimiters",
+        "Every append strictly increases that component revision; an identical same-revision retry is rejected without changing committed log bytes."
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_retrieved_block_zigzag",
+      "kind": "core algorithm",
+      "lesson_anchor": "main.py68-80 reorder_lost_in_middle; main.ts82-96 stable score-only composition; docs lost-middle/Step3",
+      "algorithm": "Stable descending relevance rank -> odd ranks forward + even ranks reversed, within retrieved block only; preserve every selected component once",
+      "traps": [
+        "text/key/component hidden tiebreak under score ties",
+        "odd/even lose or repeat items",
+        "plain rank order puts secondbest next to first rather than opposite block end"
+      ],
+      "given_helpers": [
+        "repaired P1 scored pairing",
+        "repaired compulsory budget/reserve/fixed system-query layout; no completed placement policy"
+      ],
+      "clarifying_questions": [
+        "block vs wholeprompt",
+        "stable ties",
+        "identical text distinct components"
+      ],
+      "deviation": "Python source tuple sort has text tie behavior; exam deliberately uses declared stable input ties matching TS score-only sort. This heuristic is not empirical attention/quality evidence.",
+      "integration_guards": [
+        "Placement preserves the caller sequence and retains selected zero-score items; it is not another relevance filter."
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_context_revision_sse",
+      "kind": "streaming",
+      "lesson_anchor": "docs Exercise3 context replay; main.py ContextEngine.assemble yields complete budget report per query",
+      "wire_format": "SSE id/sessionrevision,event/context,data/singleJSONsnapshot,blankline delimiter; not NDJSON",
+      "algorithm": "Synchronous encode_revision applies the current Component through given ContextSession, explicitly projects complete coherent live contents/allocations/used/reserve/remaining/selected/session revision, and constructs the full SSE event. Complete pull-through publication and close are actually GIVEN in candidate/reference/reset.",
+      "traps": [
+        "snapshot omits unchanged or admitted empty slots, or selected ids no longer follow the live contents layout",
+        "generation reserve is mislabeled as remaining input capacity or budget fields refer to different applied states",
+        "component revision used for session event id or broken SSE delimiting"
+      ],
+      "clarifying_questions": [
+        "session id",
+        "one coherent state",
+        "empty/earlyclose"
+      ],
+      "deviation": "Local async completed-update replay is explicit adaptation of source synchronous replay/budget reports. No real model/token stream/network or implementation-specific API claim.",
+      "integration_guards": [
+        "Given driver cadence, source close and empty-source behavior remain covered by original assertions and the original collect-all wrong fix.",
+        "Previous-revision allocation substitution remains an explicit wrong-fix mapping in the actual GIVEN publication loop; it is not candidate primary work.",
+        "Snapshot reserve equals the session generation reserve; arithmetic consistency alone is insufficient.",
+        "Full contents/allocations preserve every admitted slot including empty text; selected contains only nonempty slots in that live layout order."
+      ],
+      "given_helpers": [
+        "ContextSession.apply produces a coherent admitted budget snapshot from the current completed update",
+        "complete encode_revisions async loop publishes encode_revision output before the next source pull",
+        "complete stream_revisions ownership wrapper closes encoder/source on exhaustion or early close"
+      ],
+      "replacement_validation": {
+        "status": "FORMAL_PRESCRIBED_CHECKER_WRITE_PASS",
+        "before_assertions": 63,
+        "before_wrong_fixes": 27,
+        "assertion_contract": "All original five tests and every original Assert AST are preserved; strengthening is additive only.",
+        "wrong_fixes": "25 canonical unchanged plus 2 explicit moved anchors retaining original behavior/test/expect; at least 3 additional actual domain mutants.",
+        "after_assertions": 65,
+        "after_wrong_fixes": 30,
+        "actual_full_five_runs": 8,
+        "new_domain_mutants": 3,
+        "initial_miss": "Dropping an admitted empty slot passed the original tests; initial log retained. Two additive original-P4 assertions cover complete context layout and exact empty slot/allocation/selected semantics. All 63 original Assert ASTs unchanged.",
+        "evidence": "/tmp/exam-11-16-work/draft11-05/p4-driver-replacement"
+      }
+    },
+    {
+      "part": 5,
+      "test": "test_bottom_up_document_digest",
+      "kind": "nested structure",
+      "lesson_anchor": "docs ContextCompressionStrategies recursive summarization, first summarize sections then summaries; 讲解3.5/7.1 nested/rolling summarization motivation",
+      "structure": "Given finite DocumentNode section/paragraph tree, pernode key/title/localbudget and ordered children",
+      "algorithm": "Postorder child digests -> newlinejoin -> current local checked summarizer; retain ordered full leaf source paths and fitting verbatim text",
+      "traps": [
+        "parent consumes raw child source text or runs before children",
+        "title-based merge/source identity conflates branches",
+        "summary applied to fitting leaf or wrong ancestor budget used"
+      ],
+      "given_helpers": [
+        "tree node declaration/shape checker",
+        "fit_digest preserves fitting text and checks callback result budget"
+      ],
+      "clarifying_questions": [
+        "parent input",
+        "full source path",
+        "short paragraphs"
+      ],
+      "deviation": "Source has no section tree algorithm. DocumentNode is an explicit natural teaching adapter for the recursive compression concept, with injected local deterministic summarizer. No semantic summary preservation or real LLM claim.",
+      "integration_guards": [
+        "Full leaf paths follow document child order even when keys have the opposite lexical order.",
+        "Fitting text remains exact and descendants use their own local budgets."
+      ]
+    }
+  ],
+  "boundaries": [
+    "P1 only pairing/budget/history repairs; P3 independent zigzag TODO remains unimplemented until Part3.",
+    "No coderpad context packing/compact_memory core or14memory paging/sleep/fusion/contextbatchplanner repeat.",
+    "P1 correct deque given, not another FIFO pop0 task. Rolling summary correctness given rather than extra hidden source bug.",
+    "P4 SSE retained as declared chapter format, not replaced by NDJSON.",
+    "Source code directory has main.py465/main.ts249/main.讲解.md400 and no code/tests; run_* are print demos. Coderpad test file is separate fixture wrapper, not source unit tests.",
+    "Source product/window/quality claims and historical lecture runs are not promoted into verified exam facts."
+  ],
+  "timed_session": "60minutes including2minuteopening+58minute parts(12+12+10+12+12);not human-calibrated",
+  "verification_boundary": "Local word-estimate budgets, deterministic rolling and tree summarizers, revisions and completed-update SSE only; no real tokenizer accuracy, LLM quality/attention benefit, application latency, production memory or crash durability established.",
+  "p4_driver_status": "FORMAL_PRESCRIBED_CHECKER_WRITE_PASS"
+}
