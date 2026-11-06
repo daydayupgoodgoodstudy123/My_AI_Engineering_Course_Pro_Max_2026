@@ -1,0 +1,1452 @@
+{
+  "package": "handoffs",
+  "tests": [
+    "test_runner",
+    "test_session_store",
+    "test_nested_handoff_history",
+    "test_trace_processors",
+    "test_handoff_graph"
+  ],
+  "layers": [
+    {
+      "test": "test_runner",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "'dict' object has no attribute 'split'"
+        },
+        {
+          "name": "fix _call_tool: non-string results become JSON text",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "from dataclasses import dataclass, field\n",
+              "new": "import json\nfrom dataclasses import dataclass, field\n"
+            },
+            {
+              "file": "runner.py",
+              "old": "            result = tool.fn(**args)\n            span.attributes[\"result\"] = preview(result)\n        return result\n",
+              "new": "            result = tool.fn(**args)\n            output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)\n            span.attributes[\"result\"] = preview(output)\n        return output\n"
+            }
+          ],
+          "expect": "the agent a run hands off to reads the whole conversation"
+        },
+        {
+          "name": "+ the target keeps the whole conversation",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "                        state.view = nest_handoff_history(state.view)\n                    else:\n                        state.view = [state.request]\n",
+              "new": "                        state.view = nest_handoff_history(state.view)\n"
+            }
+          ],
+          "expect": "OutputGuardrailTripwireTriggered: length_cap_60"
+        },
+        {
+          "name": "+ output guardrails of the agent that answered",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "            for guard in agent.output_guardrails:\n",
+              "new": "            for guard in current.output_guardrails:\n"
+            }
+          ],
+          "expect": "DID NOT RAISE"
+        },
+        {
+          "name": "+ one handoff too many raises HandoffLimitExceeded",
+          "edits": [
+            {
+              "file": "runner.py",
+              "old": "    FunctionTool,\n    InputGuardrailTripwireTriggered,\n",
+              "new": "    FunctionTool,\n    HandoffLimitExceeded,\n    InputGuardrailTripwireTriggered,\n"
+            },
+            {
+              "file": "runner.py",
+              "old": "                current = outcome\n            for guard in current.output_guardrails:\n",
+              "new": "                current = outcome\n            else:\n                raise HandoffLimitExceeded(f\"more than {self.max_handoffs} handoffs in one run\")\n            for guard in current.output_guardrails:\n"
+            }
+          ],
+          "expect": "screening 120 messages against 600 PII rules should be quick"
+        },
+        {
+          "name": "+ PII rules compiled once, in __init__",
+          "edits": [
+            {
+              "file": "guardrails.py",
+              "old": "        self.rules = list(rules)\n",
+              "new": "        self.rules = [(rule, re.compile(pattern)) for rule, pattern in rules]\n"
+            },
+            {
+              "file": "guardrails.py",
+              "old": "            if re.search(pattern, text):\n",
+              "new": "            if pattern.search(text):\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_runner",
+      "name": "the span preview made to take anything, the raw result left in the conversation",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)\n",
+          "new": "            output = result\n"
+        },
+        {
+          "file": "tracing.py",
+          "old": "    flat = \" \".join(text.split())\n",
+          "new": "    flat = \" \".join(str(text).split())\n"
+        }
+      ],
+      "expect": "a tool result that is not a string reaches the model as JSON"
+    },
+    {
+      "test": "test_runner",
+      "name": "str() of the result",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "json.dumps(result, ensure_ascii=False)",
+          "new": "str(result)"
+        }
+      ],
+      "expect": "a tool result that is not a string reaches the model as JSON"
+    },
+    {
+      "test": "test_runner",
+      "name": "every result JSON-encoded, strings too",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)\n",
+          "new": "            output = json.dumps(result, ensure_ascii=False)\n"
+        }
+      ],
+      "expect": "a string result reaches the model as it is"
+    },
+    {
+      "test": "test_runner",
+      "name": "the handoff recorded for the session but not shown to the target",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                    state.add(HandoffItem(agent.name, target.name))\n",
+          "new": "                    state.new_items.append(HandoffItem(agent.name, target.name))\n"
+        }
+      ],
+      "expect": "the handoff itself included"
+    },
+    {
+      "test": "test_runner",
+      "name": "the target given only this run's items",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                        state.view = nest_handoff_history(state.view)\n                return target\n",
+          "new": "                        state.view = nest_handoff_history(state.view)\n                    else:\n                        state.view = list(state.new_items)\n                return target\n"
+        }
+      ],
+      "expect": "the session's earlier items and the handoff itself included"
+    },
+    {
+      "test": "test_runner",
+      "name": "output guardrails of every agent the run went through",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            current, final = agent, \"\"\n",
+          "new": "            current, final = agent, \"\"\n            visited = [agent]\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "                current = outcome\n            else:\n",
+          "new": "                current = outcome\n                visited.append(current)\n            else:\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "            for guard in current.output_guardrails:\n",
+          "new": "            for guard in [g for seen in visited for g in seen.output_guardrails]:\n"
+        }
+      ],
+      "expect": "OutputGuardrailTripwireTriggered: length_cap_60"
+    },
+    {
+      "test": "test_runner",
+      "name": "output guardrails dropped",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            for guard in current.output_guardrails:\n                self._check(trace, root, \"output\", guard, final, OutputGuardrailTripwireTriggered)\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_runner",
+      "name": "handoff budget off by one",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            for _ in range(self.max_handoffs + 1):\n",
+          "new": "            for _ in range(self.max_handoffs):\n"
+        }
+      ],
+      "expect": "HandoffLimitExceeded: more than 2 handoffs in one run"
+    },
+    {
+      "test": "test_runner",
+      "name": "drift taken as a handoff back to an earlier agent, with no budget",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            for _ in range(self.max_handoffs + 1):\n",
+          "new": "            visited = [agent]\n            while True:\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "                current = outcome\n            else:\n                raise HandoffLimitExceeded(f\"more than {self.max_handoffs} handoffs in one run\")\n",
+          "new": "                if outcome in visited:\n                    raise HandoffLimitExceeded(f\"{outcome.name} got the conversation back\")\n                visited.append(outcome)\n                current = outcome\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_runner",
+      "name": "an empty answer taken for drift",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            else:\n                raise HandoffLimitExceeded(f\"more than {self.max_handoffs} handoffs in one run\")\n",
+          "new": "            if final == \"\":\n                raise HandoffLimitExceeded(f\"more than {self.max_handoffs} handoffs in one run\")\n"
+        }
+      ],
+      "expect": "HandoffLimitExceeded: more than 2 handoffs in one run"
+    },
+    {
+      "test": "test_runner",
+      "name": "every model call counted against max_handoffs, as in the lesson's loop",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            if state.turns == self.max_turns:\n                raise MaxTurnsExceeded(f\"{self.max_turns} model calls without a final answer\")\n",
+          "new": "            if state.turns > self.max_handoffs:\n                raise HandoffLimitExceeded(f\"{state.turns} turns, more than max_handoffs\")\n"
+        }
+      ],
+      "expect": "HandoffLimitExceeded: 2 turns, more than max_handoffs"
+    },
+    {
+      "test": "test_runner",
+      "name": "PII rules merged into one alternation",
+      "edits": [
+        {
+          "file": "guardrails.py",
+          "old": "        self.rules = [(rule, re.compile(pattern)) for rule, pattern in rules]\n",
+          "new": "        self.rules = [(rule, re.compile(pattern)) for rule, pattern in rules]\n        self._any = re.compile(\"|\".join(f\"(?P<r{i}>{p})\" for i, (_, p) in enumerate(rules)))\n"
+        },
+        {
+          "file": "guardrails.py",
+          "old": "        for rule, pattern in self.rules:\n            if pattern.search(text):\n                return False, f\"matches PII rule {rule}\"\n",
+          "new": "        match = self._any.search(text)\n        if match:\n            return False, f\"matches PII rule {self.rules[int(match.lastgroup[1:])][0]}\"\n"
+        }
+      ],
+      "expect": "the reason names the first rule that matches"
+    },
+    {
+      "test": "test_runner",
+      "name": "patterns cached with functools.lru_cache(maxsize=128)",
+      "edits": [
+        {
+          "file": "guardrails.py",
+          "old": "import re\n",
+          "new": "import functools\nimport re\n\n_compiled = functools.lru_cache(maxsize=128)(re.compile)\n"
+        },
+        {
+          "file": "guardrails.py",
+          "old": "        self.rules = [(rule, re.compile(pattern)) for rule, pattern in rules]\n",
+          "new": "        self.rules = list(rules)\n"
+        },
+        {
+          "file": "guardrails.py",
+          "old": "            if pattern.search(text):\n",
+          "new": "            if _compiled(pattern).search(text):\n"
+        }
+      ],
+      "expect": "screening 120 messages against 600 PII rules should be quick"
+    },
+    {
+      "test": "test_runner",
+      "name": "JSON only for dicts, str() for every other result",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)\n",
+          "new": "            output = json.dumps(result, ensure_ascii=False) if isinstance(result, dict) else str(result)\n"
+        }
+      ],
+      "expect": "a tool result that is not a string reaches the model as JSON"
+    },
+    {
+      "test": "test_runner",
+      "name": "JSON for dicts and lists, str() for the rest",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            output = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)\n",
+          "new": "            output = json.dumps(result, ensure_ascii=False) if isinstance(result, (dict, list)) else str(result)\n"
+        }
+      ],
+      "expect": "a tool result that is not a string reaches the model as JSON"
+    },
+    {
+      "test": "test_runner",
+      "name": "PII patterns matched at the start of the text only",
+      "edits": [
+        {
+          "file": "guardrails.py",
+          "old": "            if pattern.search(text):\n",
+          "new": "            if pattern.match(text):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_runner",
+      "name": "patterns compiled again on every check",
+      "edits": [
+        {
+          "file": "guardrails.py",
+          "old": "            if pattern.search(text):\n",
+          "new": "            if re.compile(pattern.pattern).search(text):\n"
+        }
+      ],
+      "expect": "screening 120 messages against 600 PII rules should be quick"
+    },
+    {
+      "test": "test_session_store",
+      "name": "tool arguments stored with sort_keys",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "json.dumps(dataclasses.asdict(item), ensure_ascii=False)",
+          "new": "json.dumps(dataclasses.asdict(item), ensure_ascii=False, sort_keys=True)"
+        }
+      ],
+      "expect": "items come back exactly as they were added, oldest first"
+    },
+    {
+      "test": "test_session_store",
+      "name": "items read back as plain dicts",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "    return KINDS[kind](**json.loads(body))\n",
+          "new": "    return json.loads(body)\n"
+        }
+      ],
+      "expect": "items come back exactly as they were added, oldest first"
+    },
+    {
+      "test": "test_session_store",
+      "name": "repeated items dropped by a UNIQUE constraint",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        body TEXT NOT NULL\n    )",
+          "new": "        body TEXT NOT NULL,\n        UNIQUE (session_id, kind, body)\n    )"
+        },
+        {
+          "file": "session.py",
+          "old": "\"INSERT INTO items",
+          "new": "\"INSERT OR IGNORE INTO items"
+        }
+      ],
+      "expect": "items come back exactly as they were added, oldest first"
+    },
+    {
+      "test": "test_session_store",
+      "name": "a UNIQUE key with INSERT OR REPLACE, so a repeated item replaces its earlier copy",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        body TEXT NOT NULL\n    )",
+          "new": "        body TEXT NOT NULL,\n        UNIQUE (session_id, kind, body)\n    )"
+        },
+        {
+          "file": "session.py",
+          "old": "\"INSERT INTO items",
+          "new": "\"INSERT OR REPLACE INTO items"
+        }
+      ],
+      "expect": "items come back exactly as they were added, oldest first"
+    },
+    {
+      "test": "test_session_store",
+      "name": "a limit takes the oldest items",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            rows = self._db.execute(\n                \"SELECT kind, body FROM items WHERE session_id = ? ORDER BY seq DESC LIMIT ?\",\n                (self.session_id, limit),\n            ).fetchall()[::-1]\n",
+          "new": "            rows = self._db.execute(\n                \"SELECT kind, body FROM items WHERE session_id = ? ORDER BY seq LIMIT ?\",\n                (self.session_id, limit),\n            ).fetchall()\n"
+        }
+      ],
+      "expect": "a limit keeps the latest items, oldest first"
+    },
+    {
+      "test": "test_session_store",
+      "name": "a limit returns the latest items newest first",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": ").fetchall()[::-1]\n",
+          "new": ").fetchall()\n"
+        }
+      ],
+      "expect": "a limit keeps the latest items, oldest first"
+    },
+    {
+      "test": "test_session_store",
+      "name": "the limit taken over every session's items before the session filter",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "                \"SELECT kind, body FROM items WHERE session_id = ? ORDER BY seq DESC LIMIT ?\",\n                (self.session_id, limit),\n            ).fetchall()[::-1]\n",
+          "new": "                \"SELECT kind, body FROM (SELECT * FROM items ORDER BY seq DESC LIMIT ?) WHERE session_id = ? ORDER BY seq\",\n                (limit, self.session_id),\n            ).fetchall()\n"
+        }
+      ],
+      "expect": "a limit keeps the latest items, oldest first"
+    },
+    {
+      "test": "test_session_store",
+      "name": "the limit applied with a negative slice",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            rows = self._db.execute(\n                \"SELECT kind, body FROM items WHERE session_id = ? ORDER BY seq DESC LIMIT ?\",\n                (self.session_id, limit),\n            ).fetchall()[::-1]\n",
+          "new": "            rows = self._db.execute(\n                \"SELECT kind, body FROM items WHERE session_id = ? ORDER BY seq\", (self.session_id,)\n            ).fetchall()[-limit:]\n"
+        }
+      ],
+      "expect": "limit=0 asks for no items"
+    },
+    {
+      "test": "test_session_store",
+      "name": "session id written into the SQL text",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "\"SELECT kind, body FROM items WHERE session_id = ? ORDER BY seq\", (self.session_id,)",
+          "new": "f\"SELECT kind, body FROM items WHERE session_id = '{self.session_id}' ORDER BY seq\""
+        }
+      ],
+      "expect": "OperationalError"
+    },
+    {
+      "test": "test_session_store",
+      "name": "the quote in the session id escaped with a backslash",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "\"SELECT kind, body FROM items WHERE session_id = ? ORDER BY seq\", (self.session_id,)",
+          "new": "\"SELECT kind, body FROM items WHERE session_id = '%s' ORDER BY seq\" % self.session_id.replace(\"'\", \"\\\\'\")"
+        }
+      ],
+      "expect": "OperationalError"
+    },
+    {
+      "test": "test_session_store",
+      "name": "session id put into the SQL text in double quotes",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "\"SELECT kind, body FROM items WHERE session_id = ? ORDER BY seq\", (self.session_id,)",
+          "new": "f'SELECT kind, body FROM items WHERE session_id = \"{self.session_id}\" ORDER BY seq'"
+        }
+      ],
+      "expect": "OperationalError"
+    },
+    {
+      "test": "test_session_store",
+      "name": "session id and limit written into the SQL text of the limit query",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "                \"SELECT kind, body FROM items WHERE session_id = ? ORDER BY seq DESC LIMIT ?\",\n                (self.session_id, limit),\n",
+          "new": "                f\"SELECT kind, body FROM items WHERE session_id = '{self.session_id}' ORDER BY seq DESC LIMIT {limit}\",\n"
+        }
+      ],
+      "expect": "OperationalError"
+    },
+    {
+      "test": "test_session_store",
+      "name": "session id written into the SQL text of pop_item",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            \"SELECT seq, kind, body FROM items WHERE session_id = ? ORDER BY seq DESC LIMIT 1\",\n            (self.session_id,),\n",
+          "new": "            f\"SELECT seq, kind, body FROM items WHERE session_id = '{self.session_id}' ORDER BY seq DESC LIMIT 1\",\n            (),\n"
+        }
+      ],
+      "expect": "OperationalError"
+    },
+    {
+      "test": "test_session_store",
+      "name": "session id written into the SQL text of clear_session",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            self._db.execute(\"DELETE FROM items WHERE session_id = ?\", (self.session_id,))\n",
+          "new": "            self._db.execute(f\"DELETE FROM items WHERE session_id = '{self.session_id}'\")\n"
+        }
+      ],
+      "expect": "OperationalError"
+    },
+    {
+      "test": "test_session_store",
+      "name": "quotes stripped from the session id, so o'brien and obrien share a session",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        self.session_id = session_id\n",
+          "new": "        self.session_id = session_id.replace(\"'\", \"\")\n"
+        }
+      ],
+      "expect": "a session only sees its own items"
+    },
+    {
+      "test": "test_session_store",
+      "name": "one transaction per item, so a failed batch keeps its first items",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        rows = [(self.session_id, *_dump(item)) for item in items]\n        with self._db:\n            self._db.executemany(\"INSERT INTO items (session_id, kind, body) VALUES (?, ?, ?)\", rows)\n",
+          "new": "        for item in items:\n            with self._db:\n                self._db.execute(\"INSERT INTO items (session_id, kind, body) VALUES (?, ?, ?)\", (self.session_id, *_dump(item)))\n"
+        }
+      ],
+      "expect": "a failed add_items stores none of its items"
+    },
+    {
+      "test": "test_session_store",
+      "name": "pop_item takes the latest item of any session",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            \"SELECT seq, kind, body FROM items WHERE session_id = ? ORDER BY seq DESC LIMIT 1\",\n            (self.session_id,),\n",
+          "new": "            \"SELECT seq, kind, body FROM items ORDER BY seq DESC LIMIT 1\",\n            (),\n"
+        }
+      ],
+      "expect": "pop_item removes this session's latest item and returns it"
+    },
+    {
+      "test": "test_session_store",
+      "name": "pop_item deletes without returning the item",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        return _load(row[1], row[2])\n",
+          "new": "        return None\n"
+        }
+      ],
+      "expect": "pop_item removes this session's latest item and returns it"
+    },
+    {
+      "test": "test_session_store",
+      "name": "pop_item deletes every copy of the item",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            self._db.execute(\"DELETE FROM items WHERE seq = ?\", (row[0],))\n",
+          "new": "            self._db.execute(\"DELETE FROM items WHERE session_id = ? AND body = ?\", (self.session_id, row[2]))\n"
+        }
+      ],
+      "expect": "pop_item removes exactly one item"
+    },
+    {
+      "test": "test_session_store",
+      "name": "pop_item deletes one row with the item's content, the oldest copy",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            self._db.execute(\"DELETE FROM items WHERE seq = ?\", (row[0],))\n",
+          "new": "            self._db.execute(\n                \"DELETE FROM items WHERE seq = (SELECT MIN(seq) FROM items WHERE session_id = ? AND kind = ? AND body = ?)\",\n                (self.session_id, row[1], row[2]),\n            )\n"
+        }
+      ],
+      "expect": "pop_item removes exactly one item, the latest"
+    },
+    {
+      "test": "test_session_store",
+      "name": "pop_item on an empty session raises",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        if row is None:\n            return None\n",
+          "new": "        if row is None:\n            raise KeyError(self.session_id)\n"
+        }
+      ],
+      "expect": "KeyError: 'nobody@example.com'"
+    },
+    {
+      "test": "test_session_store",
+      "name": "clear_session empties every session",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            self._db.execute(\"DELETE FROM items WHERE session_id = ?\", (self.session_id,))\n",
+          "new": "            self._db.execute(\"DELETE FROM items\")\n"
+        }
+      ],
+      "expect": "clear_session empties only its own session"
+    },
+    {
+      "test": "test_session_store",
+      "name": "limit=0 read as no limit",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        if limit is None:\n",
+          "new": "        if not limit:\n"
+        }
+      ],
+      "expect": "limit=0 asks for no items"
+    },
+    {
+      "test": "test_session_store",
+      "name": "text fields stripped on the way in",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "            return kind, json.dumps(dataclasses.asdict(item), ensure_ascii=False)\n",
+          "new": "            return kind, json.dumps({k: v.strip() if isinstance(v, str) else v for k, v in dataclasses.asdict(item).items()}, ensure_ascii=False)\n"
+        }
+      ],
+      "expect": "items come back exactly as they were added, oldest first"
+    },
+    {
+      "test": "test_session_store",
+      "name": "clear_session not committed",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        with self._db:\n            self._db.execute(\"DELETE FROM items WHERE session_id = ?\", (self.session_id,))\n",
+          "new": "        self._db.execute(\"DELETE FROM items WHERE session_id = ?\", (self.session_id,))\n"
+        }
+      ],
+      "expect": "a cleared session stays empty after a reopen"
+    },
+    {
+      "test": "test_session_store",
+      "name": "pop_item not committed, so the next writer waits for the lock",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        with self._db:\n            self._db.execute(\"DELETE FROM items WHERE seq = ?\", (row[0],))\n",
+          "new": "        self._db.execute(\"DELETE FROM items WHERE seq = ?\", (row[0],))\n"
+        }
+      ],
+      "expect": "database is locked"
+    },
+    {
+      "test": "test_session_store",
+      "name": "add_items not committed, so the next writer waits for the lock",
+      "edits": [
+        {
+          "file": "session.py",
+          "old": "        with self._db:\n            self._db.executemany(",
+          "new": "        if True:\n            self._db.executemany("
+        }
+      ],
+      "expect": "database is locked"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "summary put after the latest user message",
+      "edits": [
+        {
+          "file": "nesting.py",
+          "old": "    return summary + list(conversation[latest:])\n",
+          "new": "    return [conversation[latest]] + summary + list(conversation[latest + 1:])\n"
+        }
+      ],
+      "expect": "everything before the latest user message becomes one summary, and the latest turn stays as it is"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "the first user message taken for the latest",
+      "edits": [
+        {
+          "file": "nesting.py",
+          "old": "    latest = starts[-1]\n",
+          "new": "    latest = starts[0]\n"
+        }
+      ],
+      "expect": "everything before the latest user message becomes one summary, and the latest turn stays as it is"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "the latest user message found with list.index",
+      "edits": [
+        {
+          "file": "nesting.py",
+          "old": "    latest = starts[-1]\n",
+          "new": "    latest = conversation.index(conversation[starts[-1]])\n"
+        }
+      ],
+      "expect": "the latest user message, even when an earlier one says the same"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "the latest user message summarized as well",
+      "edits": [
+        {
+          "file": "nesting.py",
+          "old": "    for item in conversation[:latest]:\n",
+          "new": "    for item in conversation[: latest + 1]:\n"
+        }
+      ],
+      "expect": "everything before the latest user message becomes one summary, and the latest turn stays as it is"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "everything but the latest user message summarized",
+      "edits": [
+        {
+          "file": "nesting.py",
+          "old": "    for item in conversation[:latest]:\n",
+          "new": "    for item in conversation[:latest] + conversation[latest + 1:]:\n"
+        },
+        {
+          "file": "nesting.py",
+          "old": "    return summary + list(conversation[latest:])\n",
+          "new": "    return summary + [conversation[latest]]\n"
+        }
+      ],
+      "expect": "everything before the latest user message becomes one summary, and the latest turn stays as it is"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "arguments written as a Python dict",
+      "edits": [
+        {
+          "file": "nesting.py",
+          "old": "{json.dumps(item.args, ensure_ascii=False)}",
+          "new": "{item.args}"
+        }
+      ],
+      "expect": "everything before the latest user message becomes one summary, and the latest turn stays as it is"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "the conversation collapsed in place",
+      "edits": [
+        {
+          "file": "nesting.py",
+          "old": "    return summary + list(conversation[latest:])\n",
+          "new": "    conversation[:latest] = summary\n    return conversation\n"
+        }
+      ],
+      "expect": "the conversation passed in is not changed"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "an empty summary when nothing comes before",
+      "edits": [
+        {
+          "file": "nesting.py",
+          "old": "    summary = [HistorySummary(tuple(lines))] if lines else []\n",
+          "new": "    summary = [HistorySummary(tuple(lines))]\n"
+        }
+      ],
+      "expect": "nothing before the latest user message, no summary"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "an earlier summary summarized again, as one line",
+      "edits": [
+        {
+          "file": "nesting.py",
+          "old": "            lines.extend(item.lines)\n",
+          "new": "            lines.append(\"summary: \" + \" | \".join(item.lines))\n"
+        }
+      ],
+      "expect": "a summary is carried over, not summarized again"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "an earlier summary's lines put after the newer ones",
+      "edits": [
+        {
+          "file": "nesting.py",
+          "old": "    lines: list[str] = []\n    for item in conversation[:latest]:\n        if isinstance(item, HistorySummary):\n            lines.extend(item.lines)\n        else:\n            lines.append(summary_line(item))\n",
+          "new": "    lines: list[str] = []\n    carried: list[str] = []\n    for item in conversation[:latest]:\n        if isinstance(item, HistorySummary):\n            carried.extend(item.lines)\n        else:\n            lines.append(summary_line(item))\n    lines += carried\n"
+        }
+      ],
+      "expect": "an earlier summary's lines come first, then the newer items"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "the handoff budget counted over the whole conversation",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            if handoff is not None:\n                target = handoff.target\n",
+          "new": "            if handoff is not None:\n                if sum(isinstance(item, HandoffItem) for item in state.view) >= self.max_handoffs:\n                    raise HandoffLimitExceeded(f\"{self.max_handoffs} handoffs in the conversation\")\n                target = handoff.target\n"
+        }
+      ],
+      "expect": "HandoffLimitExceeded: 1 handoffs in the conversation"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "the session given what the last agent read",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "            session.add_items(state.new_items)\n",
+          "new": "            session.add_items(state.view)\n"
+        }
+      ],
+      "expect": "the session keeps every item; nesting only changes what the next agent reads"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "the handoff count kept on the Runner, never reset for the next run",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "        self.nest_handoff_history = nest_handoff_history\n",
+          "new": "        self.nest_handoff_history = nest_handoff_history\n        self.handoffs_made = 0\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "            for _ in range(self.max_handoffs + 1):\n",
+          "new": "            while True:\n"
+        },
+        {
+          "file": "runner.py",
+          "old": "                current = outcome\n            else:\n                raise HandoffLimitExceeded(f\"more than {self.max_handoffs} handoffs in one run\")\n",
+          "new": "                self.handoffs_made += 1\n                if self.handoffs_made > self.max_handoffs:\n                    raise HandoffLimitExceeded(f\"{self.handoffs_made} handoffs on this runner\")\n                current = outcome\n"
+        }
+      ],
+      "expect": "HandoffLimitExceeded: 2 handoffs on this runner"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "the nested view built from this run's items only",
+      "edits": [
+        {
+          "file": "runner.py",
+          "old": "                        state.view = nest_handoff_history(state.view)\n",
+          "new": "                        state.view = nest_handoff_history(state.new_items)\n"
+        }
+      ],
+      "expect": "the agent a nested handoff goes to reads the nested conversation"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "an answer summarized as assistant: instead of the agent's name",
+      "edits": [
+        {
+          "file": "nesting.py",
+          "old": "        return f\"{item.agent}: {item.text}\"\n",
+          "new": "        return f\"assistant: {item.text}\"\n"
+        }
+      ],
+      "expect": "everything before the latest user message becomes one summary"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "tool lines without the output",
+      "edits": [
+        {
+          "file": "nesting.py",
+          "old": " -> {item.output}\"",
+          "new": "\""
+        }
+      ],
+      "expect": "everything before the latest user message becomes one summary"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "the latest user message counted from the end of the list",
+      "edits": [
+        {
+          "file": "nesting.py",
+          "old": "    latest = starts[-1]\n",
+          "new": "    latest = next(i for i, item in enumerate(reversed(conversation)) if isinstance(item, UserMessage))\n"
+        }
+      ],
+      "expect": "everything before the latest user message becomes one summary"
+    },
+    {
+      "test": "test_nested_handoff_history",
+      "name": "an earlier summary dropped",
+      "edits": [
+        {
+          "file": "nesting.py",
+          "old": "            lines.extend(item.lines)\n",
+          "new": "            pass\n"
+        }
+      ],
+      "expect": "a summary is carried over, not summarized again"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "spans sent when they start",
+      "edits": [
+        {
+          "file": "tracing.py",
+          "old": "    def end(self, span: Span) -> None:\n        self.ended.append(span)\n        for processor in list(self._processors):\n            processor.on_span_end(span)\n",
+          "new": "    def end(self, span: Span) -> None:\n        self.ended.append(span)\n"
+        },
+        {
+          "file": "tracing.py",
+          "old": "        self.spans.append(span)\n        return span\n",
+          "new": "        self.spans.append(span)\n        for processor in list(self._processors):\n            processor.on_span_end(span)\n        return span\n"
+        }
+      ],
+      "expect": "a span is in the file as soon as it ends"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "spans sent once the run is over",
+      "edits": [
+        {
+          "file": "tracing.py",
+          "old": "    def end(self, span: Span) -> None:\n        self.ended.append(span)\n        for processor in list(self._processors):\n            processor.on_span_end(span)\n",
+          "new": "    def end(self, span: Span) -> None:\n        self.ended.append(span)\n        if span.parent_id is None:\n            for ended in self.ended:\n                for processor in list(self._processors):\n                    processor.on_span_end(ended)\n"
+        }
+      ],
+      "expect": "a span is in the file as soon as it ends"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "the processor list copied when a trace starts",
+      "edits": [
+        {
+          "file": "tracing.py",
+          "old": "        return Trace(f\"trace_{self._traces}\", self._processors)\n",
+          "new": "        return Trace(f\"trace_{self._traces}\", list(self._processors))\n"
+        }
+      ],
+      "expect": "a processor added during a run gets every span that ends after that"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "lines left in the file buffer",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "        self.stream.flush()\n",
+          "new": ""
+        }
+      ],
+      "expect": "a span is in the file as soon as it ends"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "pretty-printed records",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "json.dumps(record, ensure_ascii=False)",
+          "new": "json.dumps(record, ensure_ascii=False, indent=2)"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "trace_id left out of the record",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "            \"trace_id\": span.trace_id,\n",
+          "new": ""
+        }
+      ],
+      "expect": "one line per span, in the order the spans end, children before their parents"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "spans end only when their block succeeds",
+      "edits": [
+        {
+          "file": "tracing.py",
+          "old": "        try:\n            yield span\n        except BaseException as exc:\n            span.attributes[\"error\"] = type(exc).__name__\n            raise\n        finally:\n            self.end(span)\n",
+          "new": "        yield span\n        self.end(span)\n"
+        }
+      ],
+      "expect": "a run that trips a guardrail still exports its spans"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "processors called newest first",
+      "edits": [
+        {
+          "file": "tracing.py",
+          "old": "        for processor in list(self._processors):\n",
+          "new": "        for processor in reversed(self._processors):\n"
+        }
+      ],
+      "expect": "each span goes to every processor, in the order they were added"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "the slow processor called inline",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "            self._queue.put_nowait(span)\n",
+          "new": "            self.processor.on_span_end(span)\n"
+        }
+      ],
+      "expect": "a slow processor must not hold up the run"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "a full queue blocks the run",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "            self._queue.put_nowait(span)\n",
+          "new": "            self._queue.put(span)\n"
+        }
+      ],
+      "expect": "a slow processor must not hold up the run"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "a full queue waits 20 ms before it drops",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "            self._queue.put_nowait(span)\n",
+          "new": "            self._queue.put(span, timeout=0.02)\n"
+        }
+      ],
+      "expect": "a slow processor must not hold up the run"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "an unbounded queue",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "queue.Queue(maxsize=max_queue)",
+          "new": "queue.Queue()"
+        }
+      ],
+      "expect": "a span that finds max_queue spans waiting is dropped and counted"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "the span being handed over counted against max_queue",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "queue.Queue(maxsize=max_queue)",
+          "new": "queue.Queue(maxsize=max_queue - 1)"
+        }
+      ],
+      "expect": "a span that finds max_queue spans waiting is dropped and counted"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "the oldest waiting span dropped instead of the new one",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "        except queue.Full:\n            with self._lock:\n                self.dropped += 1\n",
+          "new": "        except queue.Full:\n            self._queue.get_nowait()\n            self._queue.put_nowait(span)\n            with self._lock:\n                self.dropped += 1\n"
+        }
+      ],
+      "expect": "queued spans reach the slow processor in order, before shutdown returns"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "a LIFO queue",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "queue.Queue(maxsize=max_queue)",
+          "new": "queue.LifoQueue(maxsize=max_queue)"
+        }
+      ],
+      "expect": "queued spans reach the slow processor in order, before shutdown returns"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "shutdown stops the worker before the queue is empty",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "        self._queue.put(_STOP)\n        self._worker.join()\n",
+          "new": "        self._stopping = True\n        self._worker.join()\n"
+        },
+        {
+          "file": "processors.py",
+          "old": "        while True:\n            span = self._queue.get()\n            if span is _STOP:\n                return\n            self.processor.on_span_end(span)\n",
+          "new": "        while not getattr(self, \"_stopping\", False):\n            try:\n                span = self._queue.get(timeout=0.01)\n            except queue.Empty:\n                continue\n            self.processor.on_span_end(span)\n"
+        }
+      ],
+      "expect": "queued spans reach the slow processor in order, before shutdown returns"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "shutdown returns without waiting for the worker",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "        self._queue.put(_STOP)\n        self._worker.join()\n",
+          "new": "        return\n"
+        }
+      ],
+      "expect": "queued spans reach the slow processor in order, before shutdown returns"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "a newline before each record instead of after it",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "        self.stream.write(json.dumps(record, ensure_ascii=False) + \"\\n\")\n",
+          "new": "        self.stream.write(\"\\n\" + json.dumps(record, ensure_ascii=False))\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "the processors fixed when each span starts",
+      "edits": [
+        {
+          "file": "tracing.py",
+          "old": "        self._processors = processors\n",
+          "new": "        self._processors = processors\n        self._targets: dict = {}\n"
+        },
+        {
+          "file": "tracing.py",
+          "old": "        self.spans.append(span)\n        return span\n",
+          "new": "        self.spans.append(span)\n        self._targets[span.span_id] = list(self._processors)\n        return span\n"
+        },
+        {
+          "file": "tracing.py",
+          "old": "        for processor in list(self._processors):\n            processor.on_span_end(span)\n",
+          "new": "        for processor in self._targets.pop(span.span_id):\n            processor.on_span_end(span)\n"
+        }
+      ],
+      "expect": "a processor added during a run gets every span that ends after that"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "one slot more than max_queue",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "queue.Queue(maxsize=max_queue)",
+          "new": "queue.Queue(maxsize=max_queue + 1)"
+        }
+      ],
+      "expect": "a span that finds max_queue spans waiting is dropped and counted"
+    },
+    {
+      "test": "test_trace_processors",
+      "name": "dropped spans counted but still queued",
+      "edits": [
+        {
+          "file": "processors.py",
+          "old": "        self._queue: queue.Queue = queue.Queue(maxsize=max_queue)\n",
+          "new": "        self._max = max_queue\n        self._queue: queue.Queue = queue.Queue()\n"
+        },
+        {
+          "file": "processors.py",
+          "old": "        try:\n            self._queue.put_nowait(span)\n        except queue.Full:\n            with self._lock:\n                self.dropped += 1\n",
+          "new": "        if self._queue.qsize() >= self._max:\n            with self._lock:\n                self.dropped += 1\n        self._queue.put_nowait(span)\n"
+        }
+      ],
+      "expect": "queued spans reach the slow processor in order, before shutdown returns"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "every agent of the app taken as reachable",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        return sorted(seen)\n",
+          "new": "        return sorted(self._agents)\n"
+        }
+      ],
+      "expect": "follow handoffs from the entry, cycles included, and nothing else"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "the entry left out unless a handoff leads back to it",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        seen = {self._agent(entry).name}\n        pending = [entry]\n",
+          "new": "        self._agent(entry)\n        seen = set()\n        pending = [entry]\n"
+        }
+      ],
+      "expect": "the entry itself counts as reachable"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "a recursive walk without a visited set",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        seen = {self._agent(entry).name}\n        pending = [entry]\n",
+          "new": "        def walk(name):\n            names = {name}\n            for handoff in self._agents[name].handoffs:\n                names |= walk(handoff.target.name)\n            return names\n\n        return sorted(walk(self._agent(entry).name))\n        seen = set()\n        pending = []\n"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "ties broken by handoff order",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "                    if target not in following or chain < following[target]:\n",
+          "new": "                    if target not in following:\n"
+        },
+        {
+          "file": "graph.py",
+          "old": "                return min(hits)\n",
+          "new": "                return hits[0]\n"
+        }
+      ],
+      "expect": "among shortest chains, the one that comes first name by name"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "each level sorted by agent name, first parent kept",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "                    if target not in following or chain < following[target]:\n",
+          "new": "                    if target not in following:\n"
+        },
+        {
+          "file": "graph.py",
+          "old": "            frontier = list(following)\n",
+          "new": "            frontier = sorted(following)\n"
+        }
+      ],
+      "expect": "chains are compared name by name from the entry"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "only an agent's first tool checked",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "if any(t.name == tool for t in self._agents[name].tools)]",
+          "new": "if self._agents[name].tools[:1] and self._agents[name].tools[0].name == tool]"
+        }
+      ],
+      "expect": "among shortest chains, the one that comes first name by name"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "only function tools counted",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "from .agents import Agent, BuiltinTool\n",
+          "new": "from .agents import Agent, BuiltinTool, FunctionTool\n"
+        },
+        {
+          "file": "graph.py",
+          "old": "if any(t.name == tool for t in self._agents[name].tools)]",
+          "new": "if any(isinstance(t, FunctionTool) and t.name == tool for t in self._agents[name].tools)]"
+        }
+      ],
+      "expect": "built-in tools are tools too"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "the search starts at the entry's handoffs",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "            hits = [best[name] for name in frontier if any(",
+          "new": "            hits = [best[name] for name in frontier if name != entry and any("
+        }
+      ],
+      "expect": "the entry itself may have the tool"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "every agent of the app audited",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        for name in self.reachable(entry):\n            agent = self._agents[name]\n",
+          "new": "        for name in sorted(self._agents):\n            agent = self._agents[name]\n"
+        }
+      ],
+      "expect": "the gaps of the agents a run from triage can reach, sorted"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "the entry's own input guardrails reported",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "            if name != entry:\n",
+          "new": "            if True:\n"
+        }
+      ],
+      "expect": "the gaps of the agents a run from triage can reach, sorted"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "the entry hard-coded as triage",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "            if name != entry:\n",
+          "new": "            if name != \"triage\":\n"
+        }
+      ],
+      "expect": "only the entry's input guardrails run"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "findings left in reachability order",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        return sorted(findings)\n",
+          "new": "        return findings\n"
+        }
+      ],
+      "expect": "the gaps of the agents a run from triage can reach, sorted"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "function tools reported as well",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "for t in agent.tools if isinstance(t, BuiltinTool)",
+          "new": "for t in agent.tools"
+        }
+      ],
+      "expect": "the gaps of the agents a run from triage can reach, sorted"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "two agents with one name merged",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "                if known is not agent:\n",
+          "new": "                if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "duplicate names checked only among the agents passed in",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        self._agents: dict[str, Agent] = {}\n",
+          "new": "        self._agents: dict[str, Agent] = {}\n        if len({a.name for a in agents}) != len(agents):\n            raise ValueError(\"two agents share a name\")\n"
+        },
+        {
+          "file": "graph.py",
+          "old": "                if known is not agent:\n                    raise ValueError(f\"two different agents are named {agent.name!r}\")\n                continue\n",
+          "new": "                continue\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "an unknown entry reaches only itself",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        seen = {self._agent(entry).name}\n        pending = [entry]\n",
+          "new": "        seen = {entry}\n        pending = [entry] if entry in self._agents else []\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "the graph built from the agents passed in only",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        pending = list(agents)\n        while pending:\n            agent = pending.pop()\n            known = self._agents.get(agent.name)\n            if known is not None:\n                if known is not agent:\n                    raise ValueError(f\"two different agents are named {agent.name!r}\")\n                continue\n            self._agents[agent.name] = agent\n            pending.extend(handoff.target for handoff in agent.handoffs)\n",
+          "new": "        for agent in agents:\n            if self._agents.setdefault(agent.name, agent) is not agent:\n                raise ValueError(f\"two different agents are named {agent.name!r}\")\n        for agent in agents:\n            for handoff in agent.handoffs:\n                known = self._agents.get(handoff.target.name)\n                if known is not None and known is not handoff.target:\n                    raise ValueError(f\"two different agents are named {handoff.target.name!r}\")\n"
+        }
+      ],
+      "expect": "KeyError: 'sales'"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "shortest chains compared by their last name only",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "                    if target not in following or chain < following[target]:\n",
+          "new": "                    if target not in following:\n"
+        },
+        {
+          "file": "graph.py",
+          "old": "                return min(hits)\n",
+          "new": "                return min(hits, key=lambda chain: chain[-1])\n"
+        }
+      ],
+      "expect": "among shortest chains, the one that comes first name by name"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "only agents without handoffs reported for a missing output guardrail",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "            if not agent.output_guardrails:\n",
+          "new": "            if not agent.handoffs and not agent.output_guardrails:\n"
+        }
+      ],
+      "expect": "the gaps of the agents a run from triage can reach, sorted"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "the entry never reported for a missing output guardrail",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "            if not agent.output_guardrails:\n",
+          "new": "            if name != entry and not agent.output_guardrails:\n"
+        }
+      ],
+      "expect": "the entry may give the final answer too"
+    },
+    {
+      "test": "test_handoff_graph",
+      "name": "path_to_tool answers None for an unknown entry",
+      "edits": [
+        {
+          "file": "graph.py",
+          "old": "        best = {self._agent(entry).name: [entry]}\n",
+          "new": "        if entry not in self._agents:\n            return None\n        best = {entry: [entry]}\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    }
+  ]
+}

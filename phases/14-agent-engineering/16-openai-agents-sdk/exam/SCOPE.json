@@ -1,0 +1,114 @@
+{
+  "lesson": "phases/14-agent-engineering/16-openai-agents-sdk",
+  "title": "OpenAI Agents SDK: Handoffs, Guardrails, Tracing",
+  "format": "staged-brownfield",
+  "service": "Handoffs: an Agents SDK-shaped runtime with handoffs as transfer_to_<agent> tools, input, output and tool guardrails, a SQLite session store, nest_handoff_history, trace processors (an NDJSON span log and a bounded background wrapper) and a handoff-graph audit",
+  "sources": {
+    "docs/en.md": "377b426042d5664c5c9cf36932d5ae56dc66c51236a1de60656ef110112eb76c",
+    "code/main.py": "d8bad409b357ee65fc13a42f495a63e904cfb638a7fb007823b89a90b9ee7459",
+    "quiz/quiz.md": "52e4989147adb75793df742ed2d1a98351c248d477aa66950cddee4b70970cc1"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network and no LLM: each agent's model is a function the tests supply",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_runner",
+      "kind": "debug",
+      "lesson_anchor": "Handoffs as tools (copy the conversation context); Guardrails (input: first agent only, output: last agent only); Where this pattern goes wrong: Handoff drift (add a hop counter); Exercise 1; code/main.py Runner.run; quiz Q6, Q9",
+      "planted_bugs": [
+        "_call_tool returns the tool's raw result; a dict surfaces as AttributeError inside tracing.preview, one call away, while the docstring says non-string results reach the model as JSON",
+        "without nesting, a handoff replaces the target's view with [state.request], so the target sees neither the session's earlier items, nor the lookup, nor the handoff",
+        "the output guardrails come from the entry agent instead of the agent that gave the final answer; triage's 60-character cap trips on billing's answer",
+        "the agent loop for _ in range(max_handoffs + 1) falls through when the last agent hands off again: the run returns '' and the output guardrails pass on it (quiz Q6) instead of raising HandoffLimitExceeded"
+      ],
+      "timing_assert": "120 runs through a PII input guardrail with 600 rules under 0.1 s. The starter calls re.search(pattern, text) per rule, and 600 rules used in turn miss re's 512-pattern cache on every call. Measured on this machine (Python 3.12): starter 1.24-1.35 s idle, 2.5-2.9 s with eight extra busy processes; compiled once in __init__ 4.4-8.7 ms idle, 5.1-10.9 ms under the same load. Python 3.10: 2.04 s and 6.7 ms; Python 3.14: 1.26 s and 5.2 ms",
+      "overfix_guard": "exactly max_handoffs handoffs succeed and a straight chain one longer raises (rules out an off-by-one budget and a drift check that only catches returns to an earlier agent); an agent that answers '' is not drift (quiz Q9: the caller cannot tell an empty answer from a handoff loop); three tool calls plus one handoff with max_handoffs=1 succeed (rules out counting model calls as hops, as the lesson's loop does); a string tool result reaches the model as it is (rules out json.dumps on everything) and a tuple result reaches it as the JSON [77] (rules out str() for everything but dicts or lists); the PII reason names the first rule in rule order (rules out merging the 600 rules into one alternation, where the leftmost match wins); functools.lru_cache(maxsize=128) and re.compile inside check stay slow, and pattern.match misses an ID that is not at the start; running every agent's output guardrails trips triage's cap, dropping them lets a card number through"
+    },
+    {
+      "part": 2,
+      "test": "test_session_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "Sessions: Session stores conversation history in a backend (SQLite, Redis, custom); Runner.run(agent, input, session=session) auto-loads and appends; outputs/skill-agents-sdk-scaffold.md (SQLite default)",
+      "exactness": "items come back as the same types with the same fields, compared with exact(), which keeps dict key order and tells 10 from 10.0 and True: tool arguments with unsorted nested keys, 0.1 + 0.2, 2**64 + 1, None, non-ASCII text and an emoji, a tool output ending in a newline, a repeated user message; across a close and reopen, and continued by the runner. The class docstring states how tool arguments are stored (json.dumps with the keys in insertion order, no sort_keys, read back with json.loads), so the JSON details are checked in passing; the repeated message belongs to the first designed trap",
+      "traps": [
+        "a repeated message dropped by a UNIQUE constraint with INSERT OR IGNORE, or cut down to its later copy by INSERT OR REPLACE; a pop_item that deletes by content, either every copy of 'Danke!' or the older one",
+        "a limit that takes the oldest items, returns the latest newest first, or is taken over every session's items before the session filter",
+        "the session id (an email with a quote) written into the SQL text of any query, in single or double quotes or with a backslash escape, or stripped of its quote so that o'brien and obrien share a session",
+        "in passing: tool arguments stored with sort_keys, items read back as plain dicts, or text stripped on the way in",
+        "in passing: limit=0 giving everything (a negative slice, or limit=0 read as no limit)",
+        "add_items that keeps the first items of a batch when a later one is not an item",
+        "pop_item that takes another session's latest item, does not return it, or raises on an empty session",
+        "clear_session that empties every session, or that a reopen undoes"
+      ],
+      "clarifying_questions": ["session id format", "stripping quotes from the session id", "a repeated message", "a non-item in a batch", "limit=0", "pop on an empty session", "several writer processes", "storing a HistorySummary"]
+    },
+    {
+      "part": 3,
+      "test": "test_nested_handoff_history",
+      "kind": "core algorithm",
+      "lesson_anchor": "Handoffs as tools, step 1 (or collapse it via nest_handoff_history beta); Exercise 2 (collapse prior messages into one summary before transferring); Exercise 1 (the budget counts handoffs per run); quiz Q17",
+      "traps": [
+        "the summary placed after the latest user message, the latest user message summarized too, or this turn's items summarized",
+        "the first user message taken for the latest, or the latest found with list.index (an earlier identical 'Thanks!')",
+        "an empty summary when nothing comes before",
+        "an earlier summary summarized again as one line (nesting stops being idempotent, and the second nested handoff of a run breaks), or its lines put after the newer ones",
+        "the conversation collapsed in place",
+        "arguments written with str() instead of JSON",
+        "the handoff budget counted over the whole conversation, session history included, or kept on the Runner across runs",
+        "the runner nesting only this run's new items instead of the conversation its agent reads",
+        "the session given the nested view instead of the run's items"
+      ],
+      "integration": "Runner(nest_handoff_history=True) over a list-backed session: the first turn has nothing to nest, the second turn's target reads one summary of the first run plus the second turn as it is, a third run with two nested handoffs carries the summary over unchanged",
+      "clarifying_questions": ["items after the latest user message", "an existing summary", "an empty summary", "the JSON of the arguments", "does nesting change the session", "budget per run or per conversation"]
+    },
+    {
+      "part": 4,
+      "test": "test_trace_processors",
+      "kind": "streaming",
+      "lesson_anchor": "Tracing (every LLM generation, tool call, handoff and guardrail emits a span; add_trace_processor(processor) fans spans to your own backend alongside OpenAI's); Exercise 4 (wire add_trace_processor to a JSON logger)",
+      "wire_format": "NDJSON, one object per span in the order spans end ({trace_id, span_id, parent_id, kind, name, attributes}), decided by the test's read_text().splitlines() and json.loads, read from disk while the run is still going",
+      "traps": [
+        "spans sent when they start, or once the run is over",
+        "lines left in the file buffer (the probe reads the file during a tool call)",
+        "the processor list copied when a trace starts, or when each span starts, so a processor added during a run misses spans that end later",
+        "pretty-printed records, a newline before each record instead of after it, or trace_id left out",
+        "a run that trips a guardrail exporting nothing for its run span",
+        "processors called newest first",
+        "the slow processor called inline, a blocking put, or a put that waits 20 ms before it drops",
+        "an unbounded queue, or one that counts a drop but keeps the span; max_queue off by one either way (the span being handed over counted, or a spare slot); the oldest waiting span dropped; a LIFO queue",
+        "shutdown that returns without waiting, or stops the worker before the queue is empty"
+      ],
+      "timing_assert": "a run with a backend that hangs on its first span under 0.1 s. Measured on this machine: the slow processor called inline 1.00-1.01 s; the reference 0.03-0.11 ms idle, a 14 ms worst case in 50 runs with eight extra busy processes. A put that waits 10 ms before it drops (60 ms for the six drops) passes this assertion; INTERVIEWER.md asks the interviewer to probe any put timeout",
+      "clarifying_questions": ["a processor that raises", "timestamps", "drop new or old", "the span being handed over", "shutdown waits", "export per trace"]
+    },
+    {
+      "part": 5,
+      "test": "test_handoff_graph",
+      "kind": "graph",
+      "lesson_anchor": "Agent (LLM + instructions + tools + handoffs); Guardrails (input: first agent only, output: last agent only, tool: per function tool); Where this pattern goes wrong: Handoff drift, Guardrail bypass (built-in tools need separate policy)",
+      "traps": [
+        "every agent of the app taken as reachable or audited (archive hands off to triage but nothing reaches archive)",
+        "the entry left out unless a handoff leads back to it",
+        "the graph built from the agents passed in only (a graph of triage alone must reach the same nine agents)",
+        "a recursive walk without a visited set (self-loop and cycles)",
+        "ties broken by handoff order, by sorting each level by agent name and keeping the first parent, or by the last name of the chain",
+        "only an agent's first tool checked, or only function tools counted",
+        "the search starting at the entry's handoffs",
+        "the entry's own input guardrails reported, or the entry hard-coded as triage",
+        "the entry left out of 'no output guardrail' (audit('accounts')), or only leaf agents reported",
+        "findings unsorted, or function tools reported",
+        "duplicate names merged, or checked only among the agents passed in",
+        "an unknown entry answered instead of KeyError, by reachable or by path_to_tool"
+      ],
+      "clarifying_questions": ["targets missing from the list", "duplicate names", "tie-break between equal chains", "built-in tools as tools", "the entry without an output guardrail"]
+    }
+  ],
+  "deviations": [
+    "Part 1: three of the four suggested defects are kept (drift returning '' with the output guardrails passing, the target getting only the last input, a non-string tool result failing in the span preview one call away). The fourth, a trace kept on the Runner, is left out: Part 4's records depend on one trace per run, and a defect taken straight from the lesson's 'output (last agent only)' took its place. The 'tool that raises ends the run' half of defect three is left out because the lesson does not say what a failing tool should do. The hop counter counts handoffs only and max_turns bounds model calls. Besides the suggested guard (three tool calls plus one handoff), the test pins the exact budget, a straight chain over it, an empty answer that is not drift (quiz Q9) and the PII reason in rule order. The timing case is 120 runs instead of 1,000, so the slow version stays near one second.",
+    "Part 1: guardrails are attached to agents, so 'input guardrails on the first agent only, output guardrails on the last' is the runner's rule rather than a Runner-level list as in code/main.py. Handoffs are tool calls named transfer_to_<agent>; the lesson code's separate 'handoff' reply kind is gone.",
+    "Part 2: SQLite as assigned. The designed traps belong to the session store itself: a repeated message kept as its own row (a UNIQUE constraint or a pop by content loses a copy), a limit that means the latest items, oldest first, and a session id with a quote that goes into every query as a parameter. The JSON round trip of tool arguments is not a designed trap, because lessons 18 and 34 already build Part 2 around key order and sort_keys: the class docstring states how arguments are stored (json.dumps in insertion order, no sort_keys, json.loads), and exact() and the sort_keys wrong fix check it in passing. limit=0 is checked in passing too, since a negative slice at 0 is already in lesson 37's Part 3 and lesson 40's Parts 1 and 4, and 'if limit:' reading 0 as no limit is the truthiness trap of lesson 24's Part 2 and lesson 32's Part 1. So is the atomic batch: validating and serializing before writing is already in the Part 2 of lessons 31 and 36. Missing commit and CREATE TABLE IF NOT EXISTS are not designed traps, because chapter 14 already uses the commit trap twice (lessons 07 and 09). pop_item and clear_session must touch only their own session. A reopen after clear_session is checked in passing, so an uncommitted clear does not slip through; an uncommitted add_items or pop_item already fails when the next connection writes ('database is locked' after sqlite3's 5-second timeout). The runner part uses agents that do not touch Part 1's defects, so this part does not depend on Part 1.",
+    "Part 3: the hop counter (Exercise 1) is Part 1's; Part 3 checks only that the budget is per run when the history comes from a session, so the counting is not tested twice. The A->B->A drift rule lives in Part 1 (the budget) and in Part 5 (cycles in the graph), not in a separate docstring rule. Tool guardrail scope moved to Part 5's audit: built-in tools run on the provider's side, the runner never sees their calls, so the gap is a configuration finding rather than a runtime check. A list-backed session in the test keeps this part independent of Part 2.",
+    "Part 4: NDJSON as assigned. Besides the suggested traps, the test adds a processor during a run ('from now on'), a run that trips a guardrail, and processor order per span. The bounded queue is tested deterministically: the scripted model waits until the worker holds the first span, so exactly three spans queue and six are dropped.",
+    "Part 5: as suggested (reachability, shortest path to a tool owner with chains compared name by name, reachable agents without an output guardrail), plus input guardrails that never run because only the entry's run, built-in tools that need their own policy, and duplicate names."
+  ]
+}
