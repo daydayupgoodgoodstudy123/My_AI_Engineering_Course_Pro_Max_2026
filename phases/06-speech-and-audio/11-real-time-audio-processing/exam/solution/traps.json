@@ -1,0 +1,648 @@
+{
+  "package": "rtloop",
+  "tests": [
+    "test_capture_path",
+    "test_trace_store",
+    "test_barge_in",
+    "test_stage_pipeline",
+    "test_processing_graph"
+  ],
+  "layers": [
+    {
+      "test": "test_capture_path",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "TypeError"
+        },
+        {
+          "name": "fix the wrap split in write",
+          "edits": [{"file": "ring.py", "old": "        first = min(len(samples), self.capacity - start - 1)\n", "new": "        first = min(len(samples), self.capacity - start)\n"}],
+          "expect": "a frame is 20 ms at any sample rate"
+        },
+        {
+          "name": "+ multiply before dividing in ms_to_samples",
+          "edits": [{"file": "capture.py", "old": "    return sample_rate // 1000 * ms\n", "new": "    return sample_rate * ms // 1000\n"}],
+          "expect": "every overwritten sample is counted"
+        },
+        {
+          "name": "+ count the evicted samples",
+          "edits": [{"file": "ring.py", "old": "            self.read(1)\n", "new": "            self.read(1)\n            self.dropped += 1\n"}],
+          "expect": "the audio callback should stay fast when the loop stalls"
+        },
+        {
+          "name": "+ evict in one step",
+          "edits": [{"file": "ring.py", "old": "        while self.level() and self.level() + len(samples) > self.capacity:\n            self.read(1)\n            self.dropped += 1\n", "new": "        overflow = self.level() + len(samples) - self.capacity\n        if overflow > 0:\n            self._read += overflow\n            self.dropped += overflow\n"}],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_capture_path",
+      "name": "zeros in the ring's storage silence the TypeError; the wrap is still off by one",
+      "edits": [
+        {"file": "ring.py", "old": "        self._buf: list[float | None] = [None] * capacity\n", "new": "        self._buf: list[float] = [0.0] * capacity\n"},
+        {"file": "ring.py", "old": "        first = min(n, self.capacity - start)\n", "new": "        first = min(n, self.capacity - start - 1)\n"}
+      ],
+      "expect": "each frame is the next 20 ms of the mic stream"
+    },
+    {
+      "test": "test_capture_path",
+      "name": "read split off by one at the wrap",
+      "edits": [
+        {"file": "ring.py", "old": "        start = self._read % self.capacity\n        first = min(n, self.capacity - start)\n", "new": "        start = self._read % self.capacity\n        first = min(n, self.capacity - start - 1)\n"}
+      ],
+      "expect": "each frame is the next 20 ms of the mic stream"
+    },
+    {
+      "test": "test_capture_path",
+      "name": "digital silence reported as -inf",
+      "edits": [
+        {"file": "meter.py", "old": "        return FLOOR_DBFS\n", "new": "        return -math.inf\n"}
+      ],
+      "expect": "a muted mic reads the floor"
+    },
+    {
+      "test": "test_capture_path",
+      "name": "peak level instead of RMS",
+      "edits": [
+        {"file": "meter.py", "old": "    level = rms(frame)\n", "new": "    level = max(abs(x) for x in frame)\n"}
+      ],
+      "expect": "a full-scale sine reads -3.01 dBFS"
+    },
+    {
+      "test": "test_capture_path",
+      "name": "sine-referenced dBFS (AES17 adds 3.01 dB, so a full-scale sine reads 0)",
+      "edits": [
+        {"file": "meter.py", "old": "    return 20.0 * math.log10(level)\n", "new": "    return 20.0 * math.log10(level) + 3.0103\n"}
+      ],
+      "expect": "a full-scale sine reads -3.01 dBFS"
+    },
+    {
+      "test": "test_capture_path",
+      "name": "a full ring refuses new samples and keeps the oldest",
+      "edits": [
+        {"file": "ring.py", "old": "        if overflow > 0:\n            self._read += overflow\n            self.dropped += overflow\n", "new": "        if overflow > 0:\n            self.dropped += overflow\n            samples = samples[: n - overflow]\n            n -= overflow\n"}
+      ],
+      "expect": "a full ring overwrites its oldest samples"
+    },
+    {
+      "test": "test_capture_path",
+      "name": "drops counted, but the reader is not moved past them and gets lapped",
+      "edits": [
+        {"file": "ring.py", "old": "        if overflow > 0:\n            self._read += overflow\n            self.dropped += overflow\n", "new": "        if overflow > 0:\n            self.dropped += overflow\n"}
+      ],
+      "expect": "a full ring overwrites its oldest samples"
+    },
+    {
+      "test": "test_capture_path",
+      "name": "samples per millisecond truncated before multiplying, with int() instead of //",
+      "edits": [
+        {"file": "capture.py", "old": "    return sample_rate * ms // 1000\n", "new": "    return int(sample_rate / 1000) * ms\n"}
+      ],
+      "expect": "a frame is 20 ms at any sample rate"
+    },
+    {
+      "test": "test_capture_path",
+      "name": "timestamps count only the samples delivered, not the ones dropped",
+      "edits": [
+        {"file": "capture.py", "old": "            t_ns = self.ring.position * 1_000_000_000 // self.sample_rate\n", "new": "            t_ns = (self.ring.position - self.ring.dropped) * 1_000_000_000 // self.sample_rate\n"}
+      ],
+      "expect": "after a stall the loop gets the newest audio, at its own capture time"
+    },
+    {
+      "test": "test_capture_path",
+      "name": "dropped counted once per overflowing write instead of per sample",
+      "edits": [
+        {"file": "ring.py", "old": "            self.dropped += overflow\n", "new": "            self.dropped += 1\n"}
+      ],
+      "expect": "every overwritten sample is counted"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "marks kept in REAL columns",
+      "edits": [
+        {"file": "traces.py", "old": "    speech_end INTEGER NOT NULL,\n    transcript INTEGER,\n    first_token INTEGER,\n    first_audio INTEGER,\n", "new": "    speech_end REAL NOT NULL,\n    transcript REAL,\n    first_token REAL,\n    first_audio REAL,\n"}
+      ],
+      "expect": "marks round-trip exactly, in integer nanoseconds"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "marks stored as float seconds and scaled back on read",
+      "edits": [
+        {"file": "traces.py", "old": "(session, number, *(marks.get(stage) for stage in STAGES)),", "new": "(session, number, *(marks[stage] / 1e9 if stage in marks else None for stage in STAGES)),"},
+        {"file": "traces.py", "old": "return {stage: value for stage, value in zip(STAGES, row) if value is not None}", "new": "return {stage: round(value * 1e9) for stage, value in zip(STAGES, row) if value is not None}"}
+      ],
+      "expect": "marks round-trip exactly, in integer nanoseconds"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "float marks accepted",
+      "edits": [
+        {"file": "traces.py", "old": "    if any(type(value) is not int for value in values):\n        raise ValueError(\"marks are integer nanoseconds\")\n", "new": ""}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "turns numbered across all sessions",
+      "edits": [
+        {"file": "traces.py", "old": "\"SELECT COUNT(*) + 1 FROM turns WHERE session = ?\", (session,)", "new": "\"SELECT COUNT(*) + 1 FROM turns\""}
+      ],
+      "expect": "turns are numbered within their session"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "turn numbers counted in memory, so they restart after a reopen",
+      "edits": [
+        {"file": "traces.py", "old": "        with self._db:\n            self._db.execute(SCHEMA)\n", "new": "        with self._db:\n            self._db.execute(SCHEMA)\n        self._counts: dict[str, int] = {}\n"},
+        {"file": "traces.py", "old": "        (number,) = self._db.execute(\n            \"SELECT COUNT(*) + 1 FROM turns WHERE session = ?\", (session,)\n        ).fetchone()\n", "new": "        number = self._counts.get(session, 0) + 1\n        self._counts[session] = number\n"}
+      ],
+      "expect": "UNIQUE constraint failed"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "equal marks rejected as going back in time",
+      "edits": [
+        {"file": "traces.py", "old": "if any(later < earlier for", "new": "if any(later <= earlier for"}
+      ],
+      "expect": "marks go back in time"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "a turn exactly on budget counted as slow",
+      "edits": [
+        {"file": "traces.py", "old": "WHERE first_audio - speech_end > ?", "new": "WHERE first_audio - speech_end >= ?"}
+      ],
+      "expect": "slow means over budget"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "slow turns sorted by session instead of recording order",
+      "edits": [
+        {"file": "traces.py", "old": "ORDER BY seq", "new": "ORDER BY session, number"}
+      ],
+      "expect": "in the order the turns were recorded"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "no commit after insert",
+      "edits": [
+        {"file": "traces.py", "old": "        with self._db:\n            self._db.execute(\n                \"INSERT", "new": "        if True:\n            self._db.execute(\n                \"INSERT"}
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "turn() fills the stages a turn never reached with None",
+      "edits": [
+        {"file": "traces.py", "old": "return {stage: value for stage, value in zip(STAGES, row) if value is not None}", "new": "return dict(zip(STAGES, row))"}
+      ],
+      "expect": "a turn cut off early keeps the marks it has"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "budget compared in whole milliseconds",
+      "edits": [
+        {"file": "traces.py", "old": "\"SELECT session, number FROM turns WHERE first_audio - speech_end > ? ORDER BY seq\",\n            (budget_ns,),", "new": "\"SELECT session, number FROM turns WHERE (first_audio - speech_end) / 1000000 > ? ORDER BY seq\",\n            (budget_ns // 1000000,),"}
+      ],
+      "expect": "slow means over budget"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "budget checked on float seconds of the absolute marks",
+      "edits": [
+        {"file": "traces.py", "old": "        rows = self._db.execute(\n            \"SELECT session, number FROM turns WHERE first_audio - speech_end > ? ORDER BY seq\",\n            (budget_ns,),\n        )\n        return [(session, number) for session, number in rows]", "new": "        rows = self._db.execute(\"SELECT session, number, speech_end, first_audio FROM turns ORDER BY seq\")\n        return [(s, n) for s, n, a, b in rows if b is not None and b / 1e9 - a / 1e9 > budget_ns / 1e9]"}
+      ],
+      "expect": "slow means over budget"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "a turn without first audio counted as slow",
+      "edits": [
+        {"file": "traces.py", "old": "WHERE first_audio - speech_end > ?", "new": "WHERE first_audio IS NULL OR first_audio - speech_end > ?"}
+      ],
+      "expect": "slow means over budget"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "unknown stage names ignored",
+      "edits": [
+        {"file": "traces.py", "old": "    if unknown:\n        raise ValueError(f\"unknown stages: {unknown}\")\n", "new": ""}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "stages checked for order only, so a turn may skip a stage or start late",
+      "edits": [
+        {"file": "traces.py", "old": "    if not present or present != list(STAGES[: len(present)]):\n", "new": "    if not present:\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_trace_store",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [
+        {"file": "traces.py", "old": "CREATE TABLE IF NOT EXISTS turns", "new": "CREATE TABLE turns"}
+      ],
+      "expect": "table turns already exists"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "the chunk in progress plays to its end after a barge-in",
+      "edits": [
+        {"file": "dialog.py", "old": "        if self._heard and self.played[-1][1] > t_ns:\n            start, _, text = self.played[-1]\n            self.played[-1] = (start, t_ns, text)\n", "new": ""}
+      ],
+      "expect": "a barge-in stops playback at once, even in the middle of a chunk"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "queued chunks survive the barge-in",
+      "edits": [
+        {"file": "dialog.py", "old": "        self._queue.clear()\n", "new": ""}
+      ],
+      "expect": "chunks of a cancelled reply never play"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "chunks accepted whichever reply they belong to",
+      "edits": [
+        {"file": "dialog.py", "old": "        if reply != self._active or self._done:\n", "new": "        if self._active is None or self._done:\n"}
+      ],
+      "expect": "chunks of a cancelled reply never play"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "speech frames counted without a reset on silence",
+      "edits": [
+        {"file": "dialog.py", "old": "        self._speech = self._speech + 1 if speech else 0\n", "new": "        self._speech = self._speech + 1 if speech else self._speech\n"}
+      ],
+      "expect": "isolated speech frames (echo, a cough) do not cut the assistant off"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "barge-in only while audio is playing",
+      "edits": [
+        {"file": "dialog.py", "old": "        if self._active is not None and self._speech >= self.barge_in_frames:\n", "new": "        if self.state == \"speaking\" and self._speech >= self.barge_in_frames:\n"}
+      ],
+      "expect": "talking over a reply that has not started yet cancels it too"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "a chunk plays as soon as it arrives",
+      "edits": [
+        {"file": "dialog.py", "old": "        start = max(t_ns, self._end)\n", "new": "        start = t_ns\n"}
+      ],
+      "expect": "chunks play back to back, in order"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "the floor goes back as soon as the reply is done",
+      "edits": [
+        {"file": "dialog.py", "old": "        if reply == self._active:\n            self._done = True\n            self._advance(t_ns)\n", "new": "        if reply == self._active:\n            self._done = True\n            self._finish()\n"}
+      ],
+      "expect": "a reply holds the floor until its last chunk has played"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "history records every chunk the reply produced",
+      "edits": [
+        {"file": "dialog.py", "old": "            self._heard.append(chunk[2])\n", "new": ""},
+        {"file": "dialog.py", "old": "        self._queue.append((start, self._end, text))\n", "new": "        self._queue.append((start, self._end, text))\n        self._heard.append(text)\n"}
+      ],
+      "expect": "the history keeps what the user heard"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "an empty history entry for a reply that never made a sound",
+      "edits": [
+        {"file": "dialog.py", "old": "        if self._heard:\n            self.history.append", "new": "        if True:\n            self.history.append"}
+      ],
+      "expect": "nothing for a reply that never made a sound"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "a user turn does not cut off the reply that holds the floor",
+      "edits": [
+        {"file": "dialog.py", "old": "        if self._active is not None:\n            self._cut(t_ns)\n        self.history.append((\"user\", text))\n", "new": "        self.history.append((\"user\", text))\n        self._heard = []\n        self._done = False\n"}
+      ],
+      "expect": "a new user turn cuts the reply off the same way"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "reply_done of a cancelled reply ends the reply that replaced it",
+      "edits": [
+        {"file": "dialog.py", "old": "        if reply == self._active:\n            self._done = True\n", "new": "        if self._active is not None:\n            self._done = True\n"}
+      ],
+      "expect": "a reply holds the floor until its last chunk has played"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "playback cut at the end of the third speech frame (t + 20 ms)",
+      "edits": [
+        {"file": "dialog.py", "old": "            self._cut(t_ns)\n\n    def _advance", "new": "            self._cut(t_ns + 20_000_000)\n\n    def _advance"}
+      ],
+      "expect": "a barge-in stops playback at once, even in the middle of a chunk"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "playback cut at the first of the speech frames",
+      "edits": [
+        {"file": "dialog.py", "old": "            self._cut(t_ns)\n\n    def _advance", "new": "            self._cut(t_ns - (self.barge_in_frames - 1) * 20_000_000)\n\n    def _advance"}
+      ],
+      "expect": "a barge-in stops playback at once, even in the middle of a chunk"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "barge-in waits for one speech frame more than barge_in_frames",
+      "edits": [
+        {"file": "dialog.py", "old": "self._speech >= self.barge_in_frames", "new": "self._speech > self.barge_in_frames"}
+      ],
+      "expect": "three speech frames in a row hand the floor to the user"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "the chunk cut short is left out of the history",
+      "edits": [
+        {"file": "dialog.py", "old": "            self.played[-1] = (start, t_ns, text)\n", "new": "            self.played[-1] = (start, t_ns, text)\n            self._heard.pop()\n"}
+      ],
+      "expect": "the history keeps what the user heard"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "heard chunks joined without spaces",
+      "edits": [
+        {"file": "dialog.py", "old": "\" \".join(self._heard)", "new": "\"\".join(self._heard)"}
+      ],
+      "expect": "the history keeps what the user heard"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "the floor comes back only after the moment the last chunk ends",
+      "edits": [
+        {"file": "dialog.py", "old": "and self._end <= t_ns:", "new": "and self._end < t_ns:"}
+      ],
+      "expect": "the floor comes back the moment the last chunk ends"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "the mic waits for room in the queue",
+      "edits": [
+        {"file": "pipeline.py", "old": "            if first.full():\n                first.get_nowait()\n                stats.dropped += 1\n            first.put_nowait(frame)\n", "new": "            await first.put(frame)\n"}
+      ],
+      "expect": "a slow consumer makes the mic drop its oldest frames instead of waiting"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "a full queue drops the newest frame instead of the oldest",
+      "edits": [
+        {"file": "pipeline.py", "old": "            if first.full():\n                first.get_nowait()\n                stats.dropped += 1\n            first.put_nowait(frame)\n", "new": "            if first.full():\n                stats.dropped += 1\n                continue\n            first.put_nowait(frame)\n"}
+      ],
+      "expect": "the newest frame always gets through, in order"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "unbounded queues between the stages",
+      "edits": [
+        {"file": "pipeline.py", "old": "    queues: list[asyncio.Queue] = [asyncio.Queue(maxsize) for _ in range(len(stages) + 1)]\n", "new": "    queues: list[asyncio.Queue] = [asyncio.Queue(maxsize)] + [asyncio.Queue() for _ in stages]\n"}
+      ],
+      "expect": "a full queue makes the stage in front of it wait"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "one failing frame ends the stage and the session",
+      "edits": [
+        {"file": "pipeline.py", "old": "            try:\n                item = await fn(item)\n            except Exception:\n                stats.errors += 1\n                continue\n", "new": "            item = await fn(item)\n"}
+      ],
+      "expect": "cannot decode frame 3"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "returns when the mic stream ends, losing the frames still on their way",
+      "edits": [
+        {"file": "pipeline.py", "old": "return_when=asyncio.FIRST_EXCEPTION", "new": "return_when=asyncio.FIRST_COMPLETED"}
+      ],
+      "expect": "the newest frame always gets through, in order"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "asyncio.gather alone: returns while a stage is still cleaning up",
+      "edits": [
+        {"file": "pipeline.py", "old": "    try:\n        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)\n        for task in done:\n            task.result()\n    finally:\n        for task in tasks:\n            task.cancel()\n        await asyncio.wait(tasks)\n", "new": "    await asyncio.gather(*tasks)\n"}
+      ],
+      "expect": "no stage task outlives run_pipeline"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "asyncio.gather, then every task cancelled a second time on the way out",
+      "edits": [
+        {"file": "pipeline.py", "old": "    try:\n        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)\n        for task in done:\n            task.result()\n    finally:\n        for task in tasks:\n            task.cancel()\n        await asyncio.wait(tasks)\n", "new": "    try:\n        await asyncio.gather(*tasks)\n    finally:\n        for task in tasks:\n            task.cancel()\n        await asyncio.gather(*tasks, return_exceptions=True)\n"}
+      ],
+      "expect": "the request in flight finishes its cleanup"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "tasks cancelled but not waited for",
+      "edits": [
+        {"file": "pipeline.py", "old": "            task.cancel()\n        await asyncio.wait(tasks)\n", "new": "            task.cancel()\n"}
+      ],
+      "expect": "no stage task outlives run_pipeline"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "the hang-up is swallowed and the stats returned",
+      "edits": [
+        {"file": "pipeline.py", "old": "    finally:\n        for task in tasks:\n", "new": "    except asyncio.CancelledError:\n        for task in tasks:\n"}
+      ],
+      "expect": "the cancellation propagates out of run_pipeline"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "a stage catches BaseException, so the hang-up is counted as a frame error",
+      "edits": [
+        {"file": "pipeline.py", "old": "            except Exception:\n                stats.errors += 1\n                continue\n", "new": "            except BaseException:\n                stats.errors += 1\n                continue\n"}
+      ],
+      "expect": "hanging up stops the pipeline"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "an error in the sink ends the session",
+      "edits": [
+        {"file": "pipeline.py", "old": "            try:\n                await sink(item)\n            except Exception:\n                stats.errors += 1\n            else:\n                stats.delivered += 1\n", "new": "            await sink(item)\n            stats.delivered += 1\n"}
+      ],
+      "expect": "audio device underrun"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "delivered counted before the sink has taken the frame",
+      "edits": [
+        {"file": "pipeline.py", "old": "            try:\n                await sink(item)\n            except Exception:\n                stats.errors += 1\n            else:\n                stats.delivered += 1\n", "new": "            stats.delivered += 1\n            try:\n                await sink(item)\n            except Exception:\n                stats.errors += 1\n"}
+      ],
+      "expect": "a stage or the sink that fails on one frame loses only that frame"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "a frame that fails is passed on as None",
+      "edits": [
+        {"file": "pipeline.py", "old": "            except Exception:\n                stats.errors += 1\n                continue\n", "new": "            except Exception:\n                stats.errors += 1\n                item = None\n"}
+      ],
+      "expect": "a stage or the sink that fails on one frame loses only that frame"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "the oldest frame dropped but not counted",
+      "edits": [
+        {"file": "pipeline.py", "old": "                first.get_nowait()\n                stats.dropped += 1\n", "new": "                first.get_nowait()\n"}
+      ],
+      "expect": "a slow consumer makes the mic drop its oldest frames instead of waiting"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "every task cancelled once, then gathered without return_exceptions",
+      "edits": [
+        {"file": "pipeline.py", "old": "            task.cancel()\n        await asyncio.wait(tasks)\n", "new": "            task.cancel()\n        await asyncio.gather(*tasks)\n"}
+      ],
+      "expect": "no stage task outlives run_pipeline"
+    },
+    {
+      "test": "test_stage_pipeline",
+      "name": "the cleanup waited for with a short timeout",
+      "edits": [
+        {"file": "pipeline.py", "old": "        await asyncio.wait(tasks)\n", "new": "        await asyncio.wait(tasks, timeout=0.001)\n"}
+      ],
+      "expect": "no stage task outlives run_pipeline"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "reference edges ordered like inputs, so the AEC loop is refused",
+      "edits": [
+        {"file": "graph.py", "old": "        for upstream in graph[name].get(\"inputs\", []):\n", "new": "        for upstream in [*graph[name].get(\"inputs\", []), *graph[name].get(\"reference\", [])]:\n"}
+      ],
+      "expect": "loop of inputs"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "one visited set, so a stage reached twice looks like a loop",
+      "edits": [
+        {"file": "graph.py", "old": "        if name in done:\n            return\n        if name in path:\n            loop = path[path.index(name) :] + [name]\n            raise ValueError(\"loop of inputs: \" + \" -> \".join(loop))\n", "new": "        if name in done or name in path:\n            raise ValueError(f\"loop of inputs at {name}\")\n"}
+      ],
+      "expect": "loop of inputs"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "the loop error lists every stage that could not be scheduled",
+      "edits": [
+        {"file": "graph.py", "old": "            loop = path[path.index(name) :] + [name]\n            raise ValueError(\"loop of inputs: \" + \" -> \".join(loop))\n", "new": "            stuck = [n for n in graph if n not in done]\n            raise ValueError(\"loop of inputs among: \" + \", \".join(stuck))\n"}
+      ],
+      "expect": "the error names the stages in the loop, not everything behind it"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "unknown stage names not checked",
+      "edits": [
+        {"file": "graph.py", "old": "    _check_names(graph)\n    order: list[str] = []\n", "new": "    order: list[str] = []\n"}
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "references to unknown stages not checked",
+      "edits": [
+        {"file": "graph.py", "old": "        for upstream in [*spec.get(\"inputs\", []), *spec.get(\"reference\", [])]:\n", "new": "        for upstream in spec.get(\"inputs\", []):\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "latency adds up every input",
+      "edits": [
+        {"file": "graph.py", "old": "        total, chain = max((best[i] for i in inputs), key=lambda tc: tc[0], default=(0, []))\n", "new": "        total = sum(best[i][0] for i in inputs)\n        chain = best[inputs[0]][1] if inputs else []\n"}
+      ],
+      "expect": "the slowest chain of inputs sets the latency"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "latency follows the first input",
+      "edits": [
+        {"file": "graph.py", "old": "        total, chain = max((best[i] for i in inputs), key=lambda tc: tc[0], default=(0, []))\n", "new": "        total, chain = best[inputs[0]] if inputs else (0, [])\n"}
+      ],
+      "expect": "the slowest chain of inputs sets the latency"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "a tie goes to the input listed last",
+      "edits": [
+        {"file": "graph.py", "old": "        total, chain = max((best[i] for i in inputs), key=lambda tc: tc[0], default=(0, []))\n", "new": "        total, chain = sorted((best[i] for i in inputs), key=lambda tc: tc[0])[-1] if inputs else (0, [])\n"}
+      ],
+      "expect": "a tie goes to the input listed first"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "plain recursion over inputs, every path walked",
+      "edits": [
+        {"file": "graph.py", "old": "    best: dict[str, tuple[int, list[str]]] = {}\n    for name in schedule(graph):\n        inputs = graph[name].get(\"inputs\", [])\n        total, chain = max((best[i] for i in inputs), key=lambda tc: tc[0], default=(0, []))\n        best[name] = (total + graph[name][\"ms\"], chain + [name])\n    if sink not in best:\n        raise ValueError(f\"unknown stage {sink!r}\")\n    return best[sink]\n", "new": "    schedule(graph)\n\n    def best(name):\n        inputs = graph[name].get(\"inputs\", [])\n        total, chain = max((best(i) for i in inputs), key=lambda tc: tc[0], default=(0, []))\n        return total + graph[name][\"ms\"], chain + [name]\n\n    return best(sink)\n"}
+      ],
+      "expect": "critical_path should be fast on a deep graph"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "the loop error reports the whole DFS path",
+      "edits": [
+        {"file": "graph.py", "old": "            loop = path[path.index(name) :] + [name]\n", "new": "            loop = path + [name]\n"}
+      ],
+      "expect": "the error names the stages in the loop, not everything behind it"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "greedy: walk back from the sink through the slowest input",
+      "edits": [
+        {"file": "graph.py", "old": "    best: dict[str, tuple[int, list[str]]] = {}\n    for name in schedule(graph):\n        inputs = graph[name].get(\"inputs\", [])\n        total, chain = max((best[i] for i in inputs), key=lambda tc: tc[0], default=(0, []))\n        best[name] = (total + graph[name][\"ms\"], chain + [name])\n    if sink not in best:\n        raise ValueError(f\"unknown stage {sink!r}\")\n    return best[sink]\n", "new": "    schedule(graph)\n    chain = [sink]\n    while graph[chain[0]].get(\"inputs\"):\n        chain.insert(0, max(graph[chain[0]][\"inputs\"], key=lambda i: graph[i][\"ms\"]))\n    return sum(graph[s][\"ms\"] for s in chain), chain\n"}
+      ],
+      "expect": "the slowest chain of inputs sets the latency"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "a tie taken by >= in a hand-written loop, so the last input wins",
+      "edits": [
+        {"file": "graph.py", "old": "        total, chain = max((best[i] for i in inputs), key=lambda tc: tc[0], default=(0, []))\n", "new": "        total, chain = 0, []\n        for i in inputs:\n            if best[i][0] >= total:\n                total, chain = best[i]\n"}
+      ],
+      "expect": "a tie goes to the input listed first"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "the sink's own ms left out",
+      "edits": [
+        {"file": "graph.py", "old": "    return best[sink]\n", "new": "    total, chain = best[sink]\n    return total - graph[sink][\"ms\"], chain\n"}
+      ],
+      "expect": "the slowest chain of inputs sets the latency"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "the chain listed from sink back to source",
+      "edits": [
+        {"file": "graph.py", "old": "    return best[sink]\n", "new": "    total, chain = best[sink]\n    return total, chain[::-1]\n"}
+      ],
+      "expect": "the slowest chain of inputs sets the latency"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "stages returned in name order",
+      "edits": [
+        {"file": "graph.py", "old": "    for name in graph:\n        visit(name)\n    return order\n", "new": "    for name in graph:\n        visit(name)\n    return sorted(order)\n"}
+      ],
+      "expect": "a stage runs after all of its inputs"
+    },
+    {
+      "test": "test_processing_graph",
+      "name": "a stage that reads itself skipped instead of refused",
+      "edits": [
+        {"file": "graph.py", "old": "        for upstream in graph[name].get(\"inputs\", []):\n            visit(upstream)\n", "new": "        for upstream in graph[name].get(\"inputs\", []):\n            if upstream != name:\n                visit(upstream)\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    }
+  ]
+}

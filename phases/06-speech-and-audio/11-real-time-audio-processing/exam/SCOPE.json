@@ -1,0 +1,124 @@
+{
+  "lesson": "phases/06-speech-and-audio/11-real-time-audio-processing",
+  "title": "Real-Time Audio Processing",
+  "format": "staged-brownfield",
+  "service": "RTLoop: a capture ring with a dBFS meter, SQLite latency traces in integer nanoseconds, a barge-in dialog, an asyncio stage pipeline, and a processing-graph planner",
+  "sources": {
+    "docs/en.md": "38770fe883e05dd7bc541c3d3dbca612686e46d48c7d9a2f4ab2b8b9bb9735db",
+    "code/main.py": "628d5384284f1c577fcf2e9d3b5a06908429a27c0b86176fdbc563dbf7ad39c6",
+    "code/main.rs": "6cb8f13c814676c6e50d3cded0caf4db098cb2dd4e298f3a5d52653cb3d61a52",
+    "quiz/quiz.md": "71eb1a9f13e15feeb4dc88bbe8ad38bf9ea9041518469b8bfd47161358248053"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_capture_path",
+      "kind": "debug",
+      "lesson_anchor": "Build It, Step 1 ring buffer; Concept: 20 ms frames (320 samples at 16 kHz) and code/main.rs FRAME_LEN = SAMPLE_RATE / 1000 * FRAME_MS; quiz core skills: samples per frame for any frame length and sample rate; quiz Q12 (a full deque(maxlen) drops the oldest samples silently); Concept: the ring prevents allocations in the hot path; code/main.py rms_dbfs with max(rms, 1e-10)",
+      "planted_bugs": [
+        "RingBuffer.write splits a write at the wrap with capacity - start - 1: the last slot is never written and the wrapped samples land one slot late; the TypeError surfaces two calls later in meter.rms, on the None still in that slot",
+        "ms_to_samples divides before it multiplies (sample_rate // 1000 * ms, the formula of code/main.rs FRAME_LEN): exact at 16 and 48 kHz, but a 20 ms frame at 44.1 kHz comes out as 880 samples instead of 882 and every timestamp drifts",
+        "write makes room in a full ring with read(1) but never counts the evicted samples in dropped",
+        "every evicted sample costs a read(1), and read copies the whole ring, so a stalled loop makes the audio callback O(chunk x capacity)"
+      ],
+      "timing_assert": "100 callback writes of 20 ms into a full 1 s ring under 0.1 s (the starter takes 1.2 to 1.5 s; one-step eviction about 0.1 ms; the slowest legitimate fix, evicting through a two-slice read, 5 to 7 ms)",
+      "overfix_guard": "a full-scale sine reads -3.01 dBFS, which rules out a peak meter and AES17 sine-referenced dBFS; a muted mic reads exactly FLOOR_DBFS, which rules out -inf; frames are compared sample by sample, which rules out silencing the TypeError with zero-filled storage; int(sample_rate / 1000) * ms still truncates first and fails at 44.1 kHz; after a stall the first frame is at 300 ms and the newest samples come out, which rules out counting drops without moving the reader and timestamps that leave out the dropped samples"
+    },
+    {
+      "part": 2,
+      "test": "test_trace_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "The Problem: the per-stage latency budget (mic, VAD, ASR, LLM first token, TTS first chunk); code/main.py latency breakdown; skill file: per-stage P50/P95/P99, never averages",
+      "exactness": "marks of a time.time_ns() clock (about 1.79e18, past 2**53) round-trip exactly as int across close and reopen; the budget check is exact to the nanosecond (500 ms is on budget, 500 ms + 1 ns is slow)",
+      "traps": [
+        "REAL columns or float seconds",
+        "float marks accepted",
+        "turn numbers global instead of per session",
+        "turn numbers counted in memory, restarting after a reopen",
+        "equal marks rejected",
+        ">= instead of > at the budget",
+        "the budget compared in whole milliseconds or on float seconds of the absolute marks",
+        "a turn without first audio counted as slow",
+        "slow turns ordered by session instead of recording order",
+        "None returned for the stages a turn never reached",
+        "unknown stage names ignored",
+        "missing commit",
+        "CREATE TABLE without IF NOT EXISTS"
+      ],
+      "clarifying_questions": ["which clock", "partial turns", "equal marks", "exactly on budget", "numbering scope"]
+    },
+    {
+      "part": 3,
+      "test": "test_barge_in",
+      "kind": "core algorithm",
+      "lesson_anchor": "Concept: Interruption (detect the barge-in, stop the TTS, discard the rest of the reply, all within 100 ms); Build It, Step 4 interruption handler; Pitfalls: 320 ms TTS chunks; quiz Q17 (keep only what was heard)",
+      "traps": [
+        "playback runs to the end of the current 320 ms chunk",
+        "queued chunks survive the barge-in",
+        "late chunks of the cancelled reply accepted (no reply number check)",
+        "a late reply_done of the cancelled reply ends the reply that replaced it",
+        "a user turn while the reply plays does not cut it off",
+        "speech frames counted without a reset, so leftover echo cuts the assistant off",
+        "barge-in only while audio is playing, not while thinking",
+        "chunks start on arrival and overlap",
+        "floor handed back at reply_done instead of after the last chunk",
+        "history records the whole reply instead of what was heard",
+        "an empty history entry for a reply that never made a sound"
+      ],
+      "integration": "frames from the Part 1 capture path, gated at the -40 dBFS threshold of code/main.py, cut the reply at 540 ms",
+      "clarifying_questions": ["the chunk cut mid-way", "TTS slower than real time", "speech frames before a user turn"]
+    },
+    {
+      "part": 4,
+      "test": "test_stage_pipeline",
+      "kind": "streaming",
+      "lesson_anchor": "The Problem: asynchronous pipelining with partial results; Build It, Step 4: async I/O and cancellable TTS; Pitfalls: single-shot error handling (one exception kills the session)",
+      "wire_format": "no text format: the test reads the frames that reach the sink, the Stats counters and the state of the tasks after a hang-up",
+      "traps": [
+        "the mic awaits room in the queue",
+        "the newest frame dropped instead of the oldest",
+        "unbounded queues between stages",
+        "one failing frame ends the session",
+        "an error in the sink ends the session, or the failed frame counts as delivered",
+        "returning when the mic ends, losing frames on their way",
+        "asyncio.gather returns while a stage is still cleaning up",
+        "a second cancel in finally interrupts the stage's cleanup",
+        "tasks cancelled but not awaited",
+        "CancelledError swallowed by run_pipeline",
+        "BaseException caught per frame, so the hang-up is ignored"
+      ],
+      "clarifying_questions": ["full first queue", "a frame the sink raised on", "frames left when the mic ends", "TaskGroup and the Python version"]
+    },
+    {
+      "part": 5,
+      "test": "test_processing_graph",
+      "kind": "recursive structure",
+      "lesson_anchor": "The Problem: the latency budget table summed stage by stage; Concept and Key Terms: AEC subtracts the speaker-to-mic path; code/main.py Step 4: where the production budget goes",
+      "traps": [
+        "the AEC's far-end reference ordered like an input (a false loop)",
+        "one visited set, so a diamond looks like a loop",
+        "the loop error naming stages outside the loop (Kahn leftovers or the whole DFS path)",
+        "unknown inputs raise KeyError",
+        "unknown references not checked",
+        "latency summed over all inputs",
+        "latency following the first input",
+        "greedy: the slowest input at each step instead of the slowest chain",
+        "ties going to the input listed last",
+        "path enumeration without memo on a cross-fed stereo chain"
+      ],
+      "timing_assert": "critical path of a 20-stage cross-fed stereo chain (2**20 paths) under 0.05 s (plain recursion takes about 1 s; dynamic programming in topological order about 30 microseconds)",
+      "clarifying_questions": ["latency of reference edges", "ties", "graph size"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the suggested list.pop(0) timing bug is replaced by eviction through a read that copies the whole ring. The starter's ring is the lesson's preallocated circular buffer with a wrap split, where pop(0) has no natural place. The cost appears only when the ring overflows, which is the real failure: the audio callback slows down exactly when the loop has stalled, and the lesson says the ring exists to keep allocations out of the hot path.",
+    "Part 1: the overwrite policy is planted as silent overflow (evicted samples not counted, quiz Q12). Keeping the oldest samples and reading past the writer (a lapped reader) are wrong-fix traps on the reference, caught by the quiz Q12 example, instead of extra planted bugs.",
+    "Part 2: no percentiles. The lesson's coderpad already has nearest-rank P50/P95, and latency metrics over an event stream belong to lesson 12; this part stays on exact storage, numbering and the budget boundary.",
+    "Part 3: time is passed into every call in integer nanoseconds, so the 100 ms rule and mid-chunk cuts are tested deterministically; the asyncio side of Step 4 (cancelling the TTS task) is tested in Part 4.",
+    "Part 4: no text wire format (see wire_format). The reference supervises with asyncio.wait and cancels each task once, because asyncio.gather returns as soon as the first child ends cancelled and a second cancel() interrupts the stage's own cleanup.",
+    "Part 5: adds the AEC far-end reference edge (a loop that is legal because it carries the previous frame) and a timing assertion against path enumeration.",
+    "code/main.rs: its FRAME_LEN formula (SAMPLE_RATE / 1000 * FRAME_MS, exact only when the rate divides by 1000) is the planted frame-length bug, shown at 44.1 kHz. The meter matches its rms_dbfs (20 * log10 of the RMS, floored at 1e-10); nothing in the pack contradicts its gain or FIR stage.",
+    "Part 1: the meter's digital-silence floor is a guard, not a planted bug, because Part 1 of 02 and 16 already plant a log of zero on silence."
+  ]
+}
