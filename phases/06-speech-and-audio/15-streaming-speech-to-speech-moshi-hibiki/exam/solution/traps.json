@@ -1,0 +1,491 @@
+{
+  "package": "duplex",
+  "tests": [
+    "test_duplex_step",
+    "test_session_log",
+    "test_inner_monologue",
+    "test_session_timeline",
+    "test_acoustic_delay"
+  ],
+  "layers": [
+    {
+      "test": "test_duplex_step",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [
+
+          ],
+          "expect": "'float' object cannot be interpreted as an integer"
+        },
+        {
+          "name": "fix SAMPLES_PER_FRAME",
+          "edits": [
+            {"file": "mimi.py", "old": "SAMPLES_PER_FRAME = SAMPLE_RATE / FRAME_RATE\n", "new": "SAMPLES_PER_FRAME = SAMPLE_RATE * FRAME_MS // 1000\n"}
+          ],
+          "expect": "a user frame carries 8 codes, got 4"
+        },
+        {
+          "name": "+ hear() steps through frames, not codebooks",
+          "edits": [
+            {"file": "model.py", "old": "from .mimi import encode\n", "new": "from .mimi import encode, frames_of\n"},
+            {"file": "model.py", "old": "for codes in encode(pcm)]", "new": "for codes in frames_of(encode(pcm))]"}
+          ],
+          "expect": "frame t is predicted after hearing user frames 0..t"
+        },
+        {
+          "name": "+ fold user frame t with the model's outputs from t - 1",
+          "edits": [
+            {"file": "model.py", "old": "from .tokens import CODEBOOK_SIZE, CODEBOOKS\n", "new": "from .tokens import AUDIO_START, CODEBOOK_SIZE, CODEBOOKS, TEXT_START\n"},
+            {"file": "model.py", "old": "        state = self._context()\n", "new": "        self.user.append(list(user))\n        state = self._context()\n"},
+            {"file": "model.py", "old": "        self.user.append(list(user))\n        self.text.append(text)\n", "new": "        self.text.append(text)\n"},
+            {"file": "model.py", "old": "        for user, text, audio in zip(self.user, self.text, self.audio):\n", "new": "        said = [TEXT_START] + self.text\n        spoken = [[AUDIO_START] * CODEBOOKS] + self.audio\n        for user, text, audio in zip(self.user, said, spoken):\n"}
+          ],
+          "expect": "a step costs the same two minutes into a session"
+        },
+        {
+          "name": "+ keep the context between steps",
+          "edits": [
+            {"file": "model.py", "old": "        self.audio: list[list[int]] = []\n\n    def step", "new": "        self.audio: list[list[int]] = []\n        self._state = model.initial()\n\n    def step"},
+            {"file": "model.py", "old": "        self.user.append(list(user))\n        state = self._context()\n", "new": "        said = self.text[-1] if self.text else TEXT_START\n        spoken = self.audio[-1] if self.audio else [AUDIO_START] * CODEBOOKS\n        self._state = self.model.advance(self._state, list(user), said, spoken)\n        state = self._state\n        self.user.append(list(user))\n"}
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_duplex_step",
+      "name": "encode made frame-major instead of fixing hear()",
+      "edits": [
+        {"file": "mimi.py", "old": "    return [[codes[k] for codes in per_frame] for k in range(CODEBOOKS)]\n", "new": "    return per_frame\n"},
+        {"file": "model.py", "old": "for codes in frames_of(encode(pcm))]", "new": "for codes in encode(pcm)]"}
+      ],
+      "expect": "encode keeps Mimi's codebook-major layout"
+    },
+    {
+      "test": "test_duplex_step",
+      "name": "frame rate rounded to 12 Hz so that // gives an int",
+      "edits": [
+        {"file": "mimi.py", "old": "SAMPLES_PER_FRAME = SAMPLE_RATE * FRAME_MS // 1000\n", "new": "SAMPLES_PER_FRAME = SAMPLE_RATE // 12\n"}
+      ],
+      "expect": "8 codebooks of 4 frames"
+    },
+    {
+      "test": "test_duplex_step",
+      "name": "the model's own outputs never folded in",
+      "edits": [
+        {"file": "model.py", "old": "self.model.advance(self._state, list(user), said, spoken)", "new": "self.model.advance(self._state, list(user), TEXT_START, [AUDIO_START] * CODEBOOKS)"}
+      ],
+      "expect": "the context holds the model's own text up to t - 1"
+    },
+    {
+      "test": "test_duplex_step",
+      "name": "context rebuilt from the last 8 frames only, to stay fast",
+      "edits": [
+        {"file": "model.py", "old": "        self._state = self.model.advance(self._state, list(user), said, spoken)\n        state = self._state\n", "new": "        heard = self.user[-7:] + [list(user)]\n        said = ([TEXT_START] + self.text)[-len(heard):]\n        spoken = ([[AUDIO_START] * CODEBOOKS] + self.audio)[-len(heard):]\n        state = self.model.initial()\n        for frame, text, audio in zip(heard, said, spoken):\n            state = self.model.advance(state, frame, text, audio)\n"}
+      ],
+      "expect": "100 frames in, the context still holds frame 0"
+    },
+    {
+      "test": "test_duplex_step",
+      "name": "user frame t - 1 folded at step t behind a start frame (count right, one frame late)",
+      "edits": [
+        {"file": "model.py", "old": "        self._state = self.model.advance(self._state, list(user), said, spoken)\n", "new": "        heard = self.user[-1] if self.user else [AUDIO_START] * CODEBOOKS\n        self._state = self.model.advance(self._state, heard, said, spoken)\n"}
+      ],
+      "expect": "step t folds in user frame t and the model's own audio from t - 1"
+    },
+    {
+      "test": "test_duplex_step",
+      "name": "code 0 instead of AUDIO_START before the first step",
+      "edits": [
+        {"file": "model.py", "old": "spoken = self.audio[-1] if self.audio else [AUDIO_START] * CODEBOOKS", "new": "spoken = self.audio[-1] if self.audio else [0] * CODEBOOKS"}
+      ],
+      "expect": "step t folds in user frame t and the model's own audio from t - 1"
+    },
+    {
+      "test": "test_session_log",
+      "name": "no commit after a write",
+      "edits": [
+        {"file": "log.py", "old": "        with self._db:\n            self._check_new(", "new": "        if True:\n            self._check_new("},
+        {"file": "log.py", "old": "        with self._db:\n            self._check_new(", "new": "        if True:\n            self._check_new("}
+      ],
+      "expect": "a reopened log keeps every frame"
+    },
+    {
+      "test": "test_session_log",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [
+        {"file": "log.py", "old": "CREATE TABLE IF NOT EXISTS", "new": "CREATE TABLE"}
+      ],
+      "expect": "table frames already exists"
+    },
+    {
+      "test": "test_session_log",
+      "name": "INSERT OR REPLACE for each side",
+      "edits": [
+        {"file": "log.py", "old": "\"INSERT INTO frames (session, frame, user) VALUES (?, ?, ?)\"\n                \" ON CONFLICT (session, frame) DO UPDATE SET user = excluded.user\",", "new": "\"INSERT OR REPLACE INTO frames (session, frame, user) VALUES (?, ?, ?)\","},
+        {"file": "log.py", "old": "\"INSERT INTO frames (session, frame, model, text) VALUES (?, ?, ?, ?)\"\n                \" ON CONFLICT (session, frame) DO UPDATE SET model = excluded.model, text = excluded.text\",", "new": "\"INSERT OR REPLACE INTO frames (session, frame, model, text) VALUES (?, ?, ?, ?)\","}
+      ],
+      "expect": "complete frames come back exactly, in frame order"
+    },
+    {
+      "test": "test_session_log",
+      "name": "frames in insertion order",
+      "edits": [
+        {"file": "log.py", "old": " ORDER BY frame\",", "new": " ORDER BY rowid\","}
+      ],
+      "expect": "complete frames come back exactly, in frame order"
+    },
+    {
+      "test": "test_session_log",
+      "name": "half-logged frames returned",
+      "edits": [
+        {"file": "log.py", "old": "f\" WHERE session = ? AND {COMPLETE} ORDER BY frame\",", "new": "f\" WHERE session = ? ORDER BY frame\","},
+        {"file": "log.py", "old": "    return Frame(index, json.loads(user), json.loads(model), text)\n", "new": "    return Frame(index, json.loads(user) if user else None, json.loads(model) if model else None, text)\n"}
+      ],
+      "expect": "a frame shows up once both of its sides are logged"
+    },
+    {
+      "test": "test_session_log",
+      "name": "codes read back as tuples",
+      "edits": [
+        {"file": "log.py", "old": "    return Frame(index, json.loads(user), json.loads(model), text)\n", "new": "    return Frame(index, tuple(json.loads(user)), tuple(json.loads(model)), text)\n"}
+      ],
+      "expect": "complete frames come back exactly, in frame order"
+    },
+    {
+      "test": "test_session_log",
+      "name": "codes packed one per byte",
+      "edits": [
+        {"file": "log.py", "old": "    return json.dumps(list(codes))\n", "new": "    return bytes(codes).hex()\n"}
+      ],
+      "expect": "bytes must be in range(0, 256)"
+    },
+    {
+      "test": "test_session_log",
+      "name": "a frame missing a codebook accepted",
+      "edits": [
+        {"file": "log.py", "old": "    if len(codes) != CODEBOOKS:\n", "new": "    if not codes:\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_session_log",
+      "name": "a side logged twice overwrites the first",
+      "edits": [
+        {"file": "log.py", "old": "        if row is not None and row[0] is not None:\n", "new": "        if False:\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_session_log",
+      "name": "PAD text taken for a missing side (truthiness check)",
+      "edits": [
+        {"file": "log.py", "old": "            f\" WHERE session = ? AND {COMPLETE} ORDER BY frame\",\n            (session,),\n        )\n        return [_to_frame(row) for row in rows]\n", "new": "            f\" WHERE session = ? ORDER BY frame\",\n            (session,),\n        )\n        return [_to_frame(row) for row in rows if row[1] and row[2] and row[3]]\n"}
+      ],
+      "expect": "complete frames come back exactly, in frame order"
+    },
+    {
+      "test": "test_session_log",
+      "name": "a frame counted complete once the model side is logged",
+      "edits": [
+        {"file": "log.py", "old": "COMPLETE = \"user IS NOT NULL AND model IS NOT NULL\"", "new": "COMPLETE = \"model IS NOT NULL\""},
+        {"file": "log.py", "old": "    return Frame(index, json.loads(user), json.loads(model), text)\n", "new": "    return Frame(index, json.loads(user) if user else None, json.loads(model) if model else None, text)\n"}
+      ],
+      "expect": "a frame shows up once both of its sides are logged"
+    },
+    {
+      "test": "test_session_log",
+      "name": "the model side can be logged twice",
+      "edits": [
+        {"file": "log.py", "old": "            self._check_new(session, index, \"model\")\n", "new": "            pass\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_session_log",
+      "name": "code 1024 accepted (range check off by one)",
+      "edits": [
+        {"file": "log.py", "old": "_is_token(code) and code < CODEBOOK_SIZE", "new": "_is_token(code) and code <= CODEBOOK_SIZE"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_session_log",
+      "name": "half frames held in memory until the other side arrives",
+      "edits": [
+        {"file": "log.py", "old": "        user = _codes(codes)\n        with self._db:\n            self._check_new(session, index, \"user\")\n            self._db.execute(\n                \"INSERT INTO frames (session, frame, user) VALUES (?, ?, ?)\"\n                \" ON CONFLICT (session, frame) DO UPDATE SET user = excluded.user\",\n                (session, index, user),\n            )\n", "new": "        self._half(session, index, \"user\", (_codes(codes),))\n"},
+        {"file": "log.py", "old": "        with self._db:\n            self._check_new(session, index, \"model\")\n            self._db.execute(\n                \"INSERT INTO frames (session, frame, model, text) VALUES (?, ?, ?, ?)\"\n                \" ON CONFLICT (session, frame) DO UPDATE SET model = excluded.model, text = excluded.text\",\n                (session, index, model, text),\n            )\n", "new": "        self._half(session, index, \"model\", (model, text))\n\n    def _half(self, session, index, side, value):\n        pending = self.__dict__.setdefault(\"_pending\", {})\n        sides = pending.setdefault((session, index), {})\n        if side in sides or self._db.execute(\"SELECT 1 FROM frames WHERE session = ? AND frame = ?\", (session, index)).fetchone():\n            raise ValueError(\"already logged\")\n        sides[side] = value\n        if len(sides) == 2:\n            with self._db:\n                self._db.execute(\"INSERT INTO frames VALUES (?, ?, ?, ?, ?)\", (session, index, sides[\"user\"][0], *sides[\"model\"]))\n            del pending[(session, index)]\n"}
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_inner_monologue",
+      "name": "rounded to the nearest frame",
+      "edits": [
+        {"file": "monologue.py", "old": "        first = max(ms // FRAME_MS, free + 1)\n", "new": "        first = max(round(word.start * 12.5), free + 1)\n"}
+      ],
+      "expect": "a word starts in the frame that holds its start time"
+    },
+    {
+      "test": "test_inner_monologue",
+      "name": "frame from start / 0.08",
+      "edits": [
+        {"file": "monologue.py", "old": "        first = max(ms // FRAME_MS, free + 1)\n", "new": "        first = max(int(word.start / 0.08), free + 1)\n"}
+      ],
+      "expect": "2.32 s falls in frame 29"
+    },
+    {
+      "test": "test_inner_monologue",
+      "name": "milliseconds truncated, not rounded",
+      "edits": [
+        {"file": "monologue.py", "old": "        ms = round(word.start * 1000)\n", "new": "        ms = int(word.start * 1000)\n"}
+      ],
+      "expect": "16.08 s in frame 201"
+    },
+    {
+      "test": "test_inner_monologue",
+      "name": "no frame kept free for the EPAD (a word at 0 s writes EPAD to stream[-1])",
+      "edits": [
+        {"file": "monologue.py", "old": "        first = max(ms // FRAME_MS, free + 1)\n", "new": "        first = max(ms // FRAME_MS, free)\n"}
+      ],
+      "expect": "a word at 0 s is announced in frame 0 and starts in frame 1"
+    },
+    {
+      "test": "test_inner_monologue",
+      "name": "a late word overwrites the one before it",
+      "edits": [
+        {"file": "monologue.py", "old": "        first = max(ms // FRAME_MS, free + 1)\n", "new": "        first = max(ms // FRAME_MS, 1)\n"}
+      ],
+      "expect": "words never overwrite each other"
+    },
+    {
+      "test": "test_inner_monologue",
+      "name": "words that run past the stream not rejected (slice assignment grows the list)",
+      "edits": [
+        {"file": "monologue.py", "old": "        if end > n_frames:\n", "new": "        if False:\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_inner_monologue",
+      "name": "time order not checked",
+      "edits": [
+        {"file": "monologue.py", "old": "        if ms < previous_ms:\n", "new": "        if ms < 0:\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_inner_monologue",
+      "name": "a word that ends in the last frame rejected (>= instead of >)",
+      "edits": [
+        {"file": "monologue.py", "old": "        if end > n_frames:\n", "new": "        if end >= n_frames:\n"}
+      ],
+      "expect": "the words need 3 frames, the stream has 3"
+    },
+    {
+      "test": "test_session_timeline",
+      "name": "packets paired by arrival, not by frame number",
+      "edits": [
+        {"file": "monitor.py", "old": "        if self._pending and self._pending[0][\"frame\"] == t:\n", "new": "        if self._pending:\n"}
+      ],
+      "expect": "the same lines whatever the bursts"
+    },
+    {
+      "test": "test_session_timeline",
+      "name": "a frame that has not arrived yet counted as lost",
+      "edits": [
+        {"file": "monitor.py", "old": "        while not self._pending and not self._ended:\n            try:\n                burst = await self._bursts.__anext__()\n            except StopAsyncIteration:\n                self._ended = True\n                break\n", "new": "        if not self._pending and not self._ended:\n            try:\n                burst = await self._bursts.__anext__()\n            except StopAsyncIteration:\n                self._ended = True\n                burst = []\n"}
+      ],
+      "expect": "the same lines whatever the bursts"
+    },
+    {
+      "test": "test_session_timeline",
+      "name": "every overlapping frame flagged as a barge-in",
+      "edits": [
+        {"file": "monitor.py", "old": "\"barge_in\": overlap and not user_before,", "new": "\"barge_in\": overlap,"}
+      ],
+      "expect": "the same lines whatever the bursts"
+    },
+    {
+      "test": "test_session_timeline",
+      "name": "stops as soon as one side ends",
+      "edits": [
+        {"file": "monitor.py", "old": "        if user is None and model is None and user_side.exhausted() and model_side.exhausted():\n", "new": "        if user_side.exhausted() or model_side.exhausted():\n"}
+      ],
+      "expect": "the same lines whatever the bursts"
+    },
+    {
+      "test": "test_session_timeline",
+      "name": "no newline after each line",
+      "edits": [
+        {"file": "monitor.py", "old": "yield json.dumps(line) + \"\\n\"", "new": "yield json.dumps(line)"}
+      ],
+      "expect": "Extra data"
+    },
+    {
+      "test": "test_session_timeline",
+      "name": "frame numbers not checked",
+      "edits": [
+        {"file": "monitor.py", "old": "                if packet[\"frame\"] <= self._last:\n", "new": "                if False:\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_session_timeline",
+      "name": "reads both directions to the end first",
+      "edits": [
+        {"file": "monitor.py", "old": "    user_side, model_side = _Side(uplink), _Side(downlink)\n", "new": "    async def replay(items):\n        for item in items:\n            yield item\n\n    user_side = _Side(replay([burst async for burst in uplink]))\n    model_side = _Side(replay([burst async for burst in downlink]))\n"}
+      ],
+      "expect": "send each frame's line as soon as both sides have it"
+    },
+    {
+      "test": "test_session_timeline",
+      "name": "stops at the first frame neither side has",
+      "edits": [
+        {"file": "monitor.py", "old": "        if user is None and model is None and user_side.exhausted() and model_side.exhausted():\n", "new": "        if user is None and model is None:\n"}
+      ],
+      "expect": "a frame both sides lost still gets its line"
+    },
+    {
+      "test": "test_session_timeline",
+      "name": "a lost packet keeps the user's last voiced state",
+      "edits": [
+        {"file": "monitor.py", "old": "        user_before = user is True\n", "new": "        if user is not None:\n            user_before = user is True\n"}
+      ],
+      "expect": "a lost frame counts as not voiced"
+    },
+    {
+      "test": "test_session_timeline",
+      "name": "a lost packet reported as silence",
+      "edits": [
+        {"file": "monitor.py", "old": "            return self._pending.popleft()[\"voiced\"]\n        return None\n", "new": "            return self._pending.popleft()[\"voiced\"]\n        if self._pending:\n            return False\n        return None\n"}
+      ],
+      "expect": "the same lines whatever the bursts"
+    },
+    {
+      "test": "test_session_timeline",
+      "name": "a side that ended reported as silent",
+      "edits": [
+        {"file": "monitor.py", "old": "        overlap = user is True and model is True\n", "new": "        user = False if user is None and user_side.exhausted() else user\n        model = False if model is None and model_side.exhausted() else model\n        overlap = user is True and model is True\n"}
+      ],
+      "expect": "the same lines whatever the bursts"
+    },
+    {
+      "test": "test_session_timeline",
+      "name": "a repeated frame number accepted",
+      "edits": [
+        {"file": "monitor.py", "old": "                if packet[\"frame\"] <= self._last:\n", "new": "                if packet[\"frame\"] < self._last:\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_session_timeline",
+      "name": "frame order checked within each burst only",
+      "edits": [
+        {"file": "monitor.py", "old": "            for packet in burst:\n", "new": "            self._last = -1\n            for packet in burst:\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_session_timeline",
+      "name": "a coroutine that returns every line instead of an async generator",
+      "edits": [
+        {"file": "monitor.py", "old": "    t = 0\n    user_before = False\n    while True:\n", "new": "    t = 0\n    user_before = False\n    out = []\n    while True:\n"},
+        {"file": "monitor.py", "old": "            return\n        overlap", "new": "            return out\n        overlap"},
+        {"file": "monitor.py", "old": "        yield json.dumps(line) + \"\\n\"\n", "new": "        out.append(json.dumps(line) + \"\\n\")\n"}
+      ],
+      "expect": "'async for' requires an object with __aiter__ method, got coroutine"
+    },
+    {
+      "test": "test_acoustic_delay",
+      "name": "as many steps as frames",
+      "edits": [
+        {"file": "delay.py", "old": "    return [_shift(delays, frames, s) for s in range(len(frames) + longest)]\n", "new": "    return [_shift(delays, frames, s) for s in range(len(frames))]\n"}
+      ],
+      "expect": "the last frame's acoustic codebooks need one more step"
+    },
+    {
+      "test": "test_acoustic_delay",
+      "name": "empty positions filled with code 0",
+      "edits": [
+        {"file": "delay.py", "old": "        return UNSET\n", "new": "        return 0\n"}
+      ],
+      "expect": "step 0 holds the semantic code of frame 0 and no acoustic codes"
+    },
+    {
+      "test": "test_acoustic_delay",
+      "name": "one delay for a whole stream",
+      "edits": [
+        {"file": "delay.py", "old": "        return [_at(frames, s - d, path + (k,)) for k, d in enumerate(spec)]\n", "new": "        return [_at(frames, s - max(spec), path + (k,)) for k in range(len(spec))]\n"}
+      ],
+      "expect": "step 0 holds the semantic code of frame 0"
+    },
+    {
+      "test": "test_acoustic_delay",
+      "name": "every step shares one template ([template] * n)",
+      "edits": [
+        {"file": "delay.py", "old": "    return [_shift(delays, frames, s) for s in range(len(frames) + longest)]\n", "new": "    template = _shift(delays, [], 0)\n    steps = [template] * (len(frames) + longest)\n\n    def fill(dst, src):\n        for key in dst:\n            if isinstance(dst[key], dict):\n                fill(dst[key], src[key])\n            else:\n                dst[key] = src[key]\n\n    for s, step in enumerate(steps):\n        fill(step, _shift(delays, frames, s))\n    return steps\n"}
+      ],
+      "expect": "step 0 holds the semantic code of frame 0"
+    },
+    {
+      "test": "test_acoustic_delay",
+      "name": "streams nested one level only",
+      "edits": [
+        {"file": "delay.py", "old": "        return {key: _shift(sub, frames, s, path + (key,)) for key, sub in spec.items()}\n", "new": "        return {\n            key: _at(frames, s - sub, path + (key,)) if isinstance(sub, int)\n            else [_at(frames, s - d, path + (key, k)) for k, d in enumerate(sub)]\n            for key, sub in spec.items()\n        }\n"}
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_acoustic_delay",
+      "name": "ready when the last codebook's step starts",
+      "edits": [
+        {"file": "delay.py", "old": "    return (frame + _longest(delays) + 1) * FRAME_MS\n", "new": "    return (frame + _longest(delays)) * FRAME_MS\n"}
+      ],
+      "expect": "the floor: an 80 ms frame plus 80 ms of acoustic delay"
+    },
+    {
+      "test": "test_acoustic_delay",
+      "name": "undelay trusts its input",
+      "edits": [
+        {"file": "delay.py", "old": "    if delay(frames, delays) != steps:\n", "new": "    if False:\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_acoustic_delay",
+      "name": "an extra codebook ignored",
+      "edits": [
+        {"file": "delay.py", "old": "        if not isinstance(node, list) or len(node) != len(spec):\n", "new": "        if not isinstance(node, list) or len(node) < len(spec):\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_acoustic_delay",
+      "name": "an extra stream ignored",
+      "edits": [
+        {"file": "delay.py", "old": "        if not isinstance(node, dict) or node.keys() != spec.keys():\n", "new": "        if not isinstance(node, dict) or not spec.keys() <= node.keys():\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_acoustic_delay",
+      "name": "undelay re-lays the frames without validating them (a hole goes through)",
+      "edits": [
+        {"file": "delay.py", "old": "    if delay(frames, delays) != steps:\n", "new": "    if [_shift(delays, frames, s) for s in range(len(steps))] != steps:\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_acoustic_delay",
+      "name": "delay accepts UNSET as a token",
+      "edits": [
+        {"file": "delay.py", "old": "        _check(frame, delays, unset_ok=False)\n", "new": "        _check(frame, delays, unset_ok=True)\n"}
+      ],
+      "expect": "DID NOT RAISE"
+    }
+  ]
+}

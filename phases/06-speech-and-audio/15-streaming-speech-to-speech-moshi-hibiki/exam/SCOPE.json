@@ -1,0 +1,66 @@
+{
+  "lesson": "phases/06-speech-and-audio/15-streaming-speech-to-speech-moshi-hibiki",
+  "title": "Streaming Speech-to-Speech — Moshi, Hibiki, and Full-Duplex Dialogue",
+  "format": "staged-brownfield",
+  "service": "Duplex: a toy full-duplex speech-to-speech backend with Mimi-style codes, a Moshi-style step loop, a session log, an inner-monologue aligner, a two-way session monitor and the acoustic delay layout",
+  "sources": {
+    "docs/en.md": "e21cb5cde8e5c2f46a027328b5d1eee69ad8231661d78f8b6509803a6dde3802",
+    "code/main.py": "3d76cc7a47504dad813f57a9ab9ef6dcc4bda39aa274edc97b065d8f21ebb11d"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_duplex_step",
+      "kind": "debug",
+      "lesson_anchor": "The Moshi architecture (12.5 Hz x 8 codebooks, depth transformer); Build It, Step 3: user_mimi[0..t], moshi_mimi[0..t-1], moshi_text[0..t-1], text before audio; code/main.py's main loop and its append order",
+      "planted_bugs": [
+        "SAMPLES_PER_FRAME = SAMPLE_RATE / FRAME_RATE is the float 1920.0; the TypeError surfaces in split_frames' range(), not at the constant",
+        "DuplexSession.hear iterates encode()'s codebook-major codes as if they were frames; the ValueError surfaces one call down, in DuplexStepper.step",
+        "step predicts first and appends all three histories at the end, so frame t is predicted before user frame t is heard, and user frame s is paired with the model's output of step s instead of s - 1",
+        "_context replays the whole session every step, O(T^2): no KV cache"
+      ],
+      "timing_assert": "1500 steps (2 minutes of dialogue) under 0.1 s; the replaying version takes about 1.6-2.0 s, the incremental one about 6-10 ms",
+      "overfix_guard": "encode keeps Mimi's codebook-major layout and 1920 samples per frame (rules out transposing in the codec and FRAME_RATE = 12); after 100 probe steps the context still holds frame 0 (rules out replaying only a recent window to get fast); the probe records the user frame and model audio folded in last (rules out padding the context with one start frame so that the count comes out right, and code 0 in place of AUDIO_START)",
+      "deviation": "The frame-index off-by-one is the step loop hearing the user one frame late (the lesson's user_mimi[0..t]), caught by a recording probe model. The semantic/acoustic ordering defect is a codebook-major versus frame-major layout mix-up, the real-world form of that mistake; the depth transformer's codebook order is checked by the probe as a guard. Converting frames to milliseconds moved to Part 5 (ready_ms, the 160 ms floor) and seconds to frames to Part 3, where each is part of the core logic."
+    },
+    {
+      "part": 2,
+      "test": "test_session_log",
+      "kind": "model and persistence",
+      "lesson_anchor": "All three streams (user audio, Moshi audio, Moshi text) run in parallel, frame by frame; the session log is what training and replay read back",
+      "exactness": "both sides of a frame round-trip as lists of ints, including code 0, code 1023 and PAD = 0, across close and reopen, with the two sides written separately and in any order",
+      "traps": ["INSERT OR REPLACE wipes the side written first", "missing commit", "CREATE TABLE without IF NOT EXISTS", "insertion order instead of frame order", "half-logged frames returned", "only the model side checked for completeness", "PAD = 0 taken for a missing side", "half frames held in memory and lost on reopen", "tuples on read", "one byte per code (1023 does not fit)", "a frame missing a codebook accepted", "code 1024 accepted", "a side logged twice silently overwritten, on either side"],
+      "clarifying_questions": ["same side logged twice", "half-logged frames in frames()", "code range validation"],
+      "deviation": "The uplink task and the generation loop log the two sides of a frame separately, so the store has to merge halves and expose only complete frames; this is where full-duplex logging differs from logging a pipeline."
+    },
+    {
+      "part": 3,
+      "test": "test_inner_monologue",
+      "kind": "core algorithm",
+      "lesson_anchor": "Why inner-monologue text helps: the text stream is the transcript of what Moshi says, aligned to its 80 ms audio frames; transcripts for free",
+      "traps": ["2.32 / 0.08 and 2.32 * 12.5 are 28.999999999999996", "int(16.08 * 1000) is 16079", "round instead of floor (0.62 s is frame 7)", "a word at 0 s writes EPAD to stream[-1]", "collisions overwrite the previous word", "slice assignment past the end grows the stream instead of raising", "end >= n_frames rejects a word that ends in the last frame", "words out of time order"],
+      "integration": "two tones go through Part 1's encode and frames_of, Part 2's log and the given transcript(); the words must come back with their frames",
+      "clarifying_questions": ["timestamp resolution", "words that do not fit", "two words with the same start", "time order by timestamp, not by frame"]
+    },
+    {
+      "part": 4,
+      "test": "test_session_timeline",
+      "kind": "streaming",
+      "lesson_anchor": "Build It, Steps 1-2: both directions run simultaneously over one session; Moshi hears the user while speaking, can be interrupted, keeps emitting frames while the user talks",
+      "wire_format": "NDJSON, one object per frame, decided by the test's join/splitlines/json.loads",
+      "traps": ["packets paired by arrival instead of frame number", "a frame not yet arrived treated as lost (empty bursts)", "a lost packet reported as silence", "reading both directions to the end first", "missing newline", "a coroutine instead of an async generator", "stopping when the first side ends", "an ended side reported as silent", "stopping at a frame both sides lost", "barge_in without the previous frame's state", "a lost frame keeping the previous voiced state", "frame numbers going backwards or repeating, checked across bursts"],
+      "clarifying_questions": ["out-of-order packets within a direction", "null in barge_in", "a stalled direction"],
+      "deviation": "The two async streams are a live session's uplink and downlink, merged by frame number into one timeline with overlap and barge-in flags. The model's silent frames are part of the input contract (a packet every 80 ms, voiced false while listening), so silence must not be confused with a lost packet. Backpressure, cancellation and turn-taking state machines belong to lessons 11 and 14 and are left out."
+    },
+    {
+      "part": 5,
+      "test": "test_acoustic_delay",
+      "kind": "nested structure",
+      "lesson_anchor": "Theoretical latency 160 ms = 80 ms Mimi frame + 80 ms acoustic delay; semantic codebook 0 then acoustic codebooks 1-7",
+      "traps": ["len(frames) steps instead of len(frames) + max delay", "0 instead of UNSET in empty positions", "one delay per stream instead of per codebook", "grouped streams handled one level deep only", "[template] * n aliasing", "an extra codebook or stream ignored", "UNSET accepted as a token", "undelay without validation", "undelay letting a hole (UNSET where a code belongs) through", "ready_ms without the +1 (80 ms instead of 160 ms)"],
+      "clarifying_questions": ["what fills empty positions", "nesting depth", "which delays ready_ms counts"],
+      "deviation": "Frames and delays share one nested shape (named streams, groups of streams, per-codebook delays), so the transform walks a tree; ready_ms ties the layout back to the lesson's 160 ms floor."
+    }
+  ]
+}
