@@ -1,0 +1,990 @@
+{
+  "package": "computeruse",
+  "tests": [
+    "test_agent_loop",
+    "test_capture_roundtrip",
+    "test_safety_service",
+    "test_trace_stream",
+    "test_hit_test_tree"
+  ],
+  "layers": [
+    {
+      "test": "test_agent_loop",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "the search-and-checkout flow runs step by step"
+        },
+        {
+          "name": "assess each action on the current screen",
+          "edits": [
+            {
+              "file": "agent.py",
+              "old": "    screen = desktop.screen()\n    for action in actions:\n        verdict",
+              "new": "    for action in actions:\n        screen = desktop.screen()\n        verdict"
+            }
+          ],
+          "expect": "typing into a sensitive field asks the human first"
+        },
+        {
+          "name": "+ confirm typing into a sensitive field",
+          "edits": [
+            {
+              "file": "safety.py",
+              "old": "                    False, f\"typed text contains injection marker: {marker!r}\", element=el.eid\n                )\n            return SafetyVerdict(True, \"ok\", element=el.eid)\n",
+              "new": "                    False, f\"typed text contains injection marker: {marker!r}\", element=el.eid\n                )\n            if el.sensitive:\n                return SafetyVerdict(\n                    True, f\"field {el.label!r} is sensitive; confirm required\",\n                    needs_confirmation=True, element=el.eid,\n                )\n            return SafetyVerdict(True, \"ok\", element=el.eid)\n"
+            }
+          ],
+          "expect": "a yes covers only the element the human was asked about"
+        },
+        {
+          "name": "+ re-check the confirmed element before running",
+          "edits": [
+            {
+              "file": "agent.py",
+              "old": "                trace.append(Step(action, \"denied\", verdict.reason))\n                continue\n",
+              "new": "                trace.append(Step(action, \"denied\", verdict.reason))\n                continue\n            now = desktop.screen()\n            if action.kind == \"click\":\n                still = now.element_at(action.args[\"x\"], action.args[\"y\"])\n                same = still is not None and still.eid == verdict.element\n            else:\n                same = now.focus == verdict.element\n            if not same:\n                trace.append(Step(action, \"aborted\", \"screen changed\"))\n                continue\n"
+            }
+          ],
+          "expect": "an element covers x <= px < x + w and y <= py < y + h"
+        },
+        {
+          "name": "+ half-open edges",
+          "edits": [
+            {
+              "file": "screen.py",
+              "old": "if el.x <= x <= el.x + el.w and el.y <= y <= el.y + el.h:",
+              "new": "if el.x <= x < el.x + el.w and el.y <= y < el.y + el.h:"
+            }
+          ],
+          "expect": "hit testing a dense screen should be fast"
+        },
+        {
+          "name": "+ grid index",
+          "edits": [
+            {
+              "file": "screen.py",
+              "old": "        for el in reversed(self.elements):\n            if el.x <= x < el.x + el.w and el.y <= y < el.y + el.h:\n                return el\n        return None\n",
+              "new": "        grid = self.__dict__.get('_grid')\n        if grid is None:\n            grid = self.__dict__['_grid'] = {}\n            for el in self.elements:\n                for cx in range(el.x // 64, (el.x + el.w - 1) // 64 + 1):\n                    for cy in range(el.y // 64, (el.y + el.h - 1) // 64 + 1):\n                        grid.setdefault((cx, cy), []).append(el)\n        for el in reversed(grid.get((x // 64, y // 64), ())):\n            if el.x <= x < el.x + el.w and el.y <= y < el.y + el.h:\n                return el\n        return None\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_agent_loop",
+      "name": "abort whenever the screen was redrawn during confirmation",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "            if not same:\n",
+          "new": "            if not same or now is not screen:\n"
+        }
+      ],
+      "expect": "a redraw that leaves the confirmed button in place does not cancel the click"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "re-resolve the point after a yes and click whatever is there now",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "                same = still is not None and still.eid == verdict.element\n",
+          "new": "                same = still is not None\n"
+        }
+      ],
+      "expect": "a yes covers only the element the human was asked about"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "re-check clicks only",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "                same = now.focus == verdict.element\n",
+          "new": "                same = True\n"
+        }
+      ],
+      "expect": "confirmed typing goes only to the field the human was asked about"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "grid bucket scanned in paint order instead of from the top",
+      "edits": [
+        {
+          "file": "screen.py",
+          "old": "for el in reversed(self._grid.get((x // CELL, y // CELL), ())):",
+          "new": "for el in self._grid.get((x // CELL, y // CELL), ()):"
+        }
+      ],
+      "expect": "a yes covers only the element the human was asked about"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "grid files each element under its top-left cell only",
+      "edits": [
+        {
+          "file": "screen.py",
+          "old": "            for cx in range(el.x // CELL, (el.x + el.w - 1) // CELL + 1):\n                for cy in range(el.y // CELL, (el.y + el.h - 1) // CELL + 1):\n",
+          "new": "            for cx in (el.x // CELL,):\n                for cy in (el.y // CELL,):\n"
+        }
+      ],
+      "expect": "the search-and-checkout flow runs step by step"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "grid with closed edges",
+      "edits": [
+        {
+          "file": "screen.py",
+          "old": "return self.x <= px < self.x + self.w and self.y <= py < self.y + self.h",
+          "new": "return self.x <= px <= self.x + self.w and self.y <= py <= self.y + self.h"
+        }
+      ],
+      "expect": "an element covers x <= px < x + w and y <= py < y + h"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "clicking a sensitive field asks for confirmation too",
+      "edits": [
+        {
+          "file": "safety.py",
+          "old": "if el.sensitive and el.role != \"textbox\":",
+          "new": "if el.sensitive:"
+        }
+      ],
+      "expect": "focusing it does not"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "after a yes, re-assess the action instead of checking the element",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "            now = desktop.screen()\n            if action.kind == \"click\":\n                still = now.element_at(action.args[\"x\"], action.args[\"y\"])\n                same = still is not None and still.eid == verdict.element\n            else:\n                same = now.focus == verdict.element\n            if not same:\n",
+          "new": "            again = classifier.assess(action, desktop.screen())\n            if not again.allow:\n"
+        }
+      ],
+      "expect": "confirmed typing goes only to the field the human was asked about"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "re-check against the screen from before the confirmation",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "            now = desktop.screen()\n",
+          "new": "            now = screen\n"
+        }
+      ],
+      "expect": "a yes covers only the element the human was asked about"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "re-check typing by whether anything is focused",
+      "edits": [
+        {
+          "file": "agent.py",
+          "old": "                same = now.focus == verdict.element\n",
+          "new": "                same = now.focus is not None\n"
+        }
+      ],
+      "expect": "confirmed typing goes only to the field the human was asked about"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "screenshots read back as Latin-1 text",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "            data = path.read_bytes()\n",
+          "new": "            data = path.read_text(encoding='latin-1').encode('latin-1')\n"
+        }
+      ],
+      "expect": "CorruptFrame"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "an existing file is trusted without checking it",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == digest:",
+          "new": "if path.exists():"
+        }
+      ],
+      "expect": "CorruptFrame"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "every put rewrites the file",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == digest:",
+          "new": "if False:"
+        }
+      ],
+      "expect": "a stored screenshot is never written again"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "digest taken over the hex text of the bytes",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "        digest = hashlib.sha256(frame).hexdigest()\n",
+          "new": "        digest = hashlib.sha256(frame.hex().encode()).hexdigest()\n"
+        }
+      ],
+      "expect": "point at their screenshot's SHA-256"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "a missing file leaks FileNotFoundError",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "        try:\n            data = path.read_bytes()\n        except FileNotFoundError:\n            raise MissingFrame(digest) from None\n",
+          "new": "        data = path.read_bytes()\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "no hash check on read",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "        if hashlib.sha256(data).hexdigest() != digest:\n            raise CorruptFrame(digest)\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "errors do not name the step",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "                raise type(exc)(f\"step {record.step}: screenshot {record.shot}\") from None\n",
+          "new": "                raise\n"
+        }
+      ],
+      "expect": "did not match"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "an existing file of the right size is trusted",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() == digest:",
+          "new": "if path.exists() and path.stat().st_size == len(frame):"
+        }
+      ],
+      "expect": "CorruptFrame"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "get leaks FileNotFoundError and only load_run maps it",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "        try:\n            data = path.read_bytes()\n        except FileNotFoundError:\n            raise MissingFrame(digest) from None\n",
+          "new": "        data = path.read_bytes()\n"
+        },
+        {
+          "file": "capture.py",
+          "old": "            except (MissingFrame, CorruptFrame) as exc:\n",
+          "new": "            except FileNotFoundError:\n                raise MissingFrame(f\"step {record.step}: screenshot {record.shot}\") from None\n            except (MissingFrame, CorruptFrame) as exc:\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "hash checked in load_run instead of get",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "        if hashlib.sha256(data).hexdigest() != digest:\n            raise CorruptFrame(digest)\n",
+          "new": ""
+        },
+        {
+          "file": "capture.py",
+          "old": "                frame = self.get(record.shot)\n",
+          "new": "                frame = self.get(record.shot)\n                if hashlib.sha256(frame).hexdigest() != record.shot:\n                    raise CorruptFrame(record.shot)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "saving a run_id again appends to it",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "        path = self.root / \"runs\" / f\"{run_id}.json\"\n        path.parent.mkdir(parents=True, exist_ok=True)\n",
+          "new": "        path = self.root / \"runs\" / f\"{run_id}.json\"\n        path.parent.mkdir(parents=True, exist_ok=True)\n        if path.exists():\n            doc = json.loads(path.read_text(encoding=\"utf-8\")) + doc\n"
+        }
+      ],
+      "expect": "saving a run_id again replaces that run"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "steps counted from 0 in the error message",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "f\"step {record.step}: ",
+          "new": "f\"step {record.step - 1}: "
+        }
+      ],
+      "expect": "did not match"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "digest taken over the base64 text of the bytes",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "        digest = hashlib.sha256(frame).hexdigest()\n",
+          "new": "        digest = hashlib.sha256(__import__('base64').b64encode(frame)).hexdigest()\n"
+        }
+      ],
+      "expect": "point at their screenshot's SHA-256"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "the temporary file is left next to the object",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "        tmp.write_bytes(frame)\n        os.replace(tmp, path)\n",
+          "new": "        tmp.write_bytes(frame)\n        __import__('shutil').copyfile(tmp, path)\n"
+        }
+      ],
+      "expect": "one file per distinct screenshot, named by the SHA-256 of its bytes"
+    },
+    {
+      "test": "test_capture_roundtrip",
+      "name": "screenshots kept in the run file as base64",
+      "edits": [
+        {
+          "file": "capture.py",
+          "old": "                \"shot\": r.shot,\n",
+          "new": "                \"shot\": r.shot,\n                \"png\": __import__(\"base64\").b64encode(self.get(r.shot)).decode(),\n"
+        }
+      ],
+      "expect": "the run file holds no image data"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "*. entries matched as a bare suffix",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "if host.endswith(entry[1:]):",
+          "new": "if host.endswith(entry[2:]):"
+        }
+      ],
+      "expect": "a host matches an entry exactly, or as a subdomain of a *. entry"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "exact entries matched as a URL prefix",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            elif host == entry:\n",
+          "new": "            elif url.lower().split('://', 1)[-1].startswith(entry):\n"
+        }
+      ],
+      "expect": "a host matches an entry exactly, or as a subdomain of a *. entry"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "host read from netloc",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        host = (parts.hostname or \"\").lower()\n",
+          "new": "        host = parts.netloc.lower()\n"
+        }
+      ],
+      "expect": "a host matches an entry exactly, or as a subdomain of a *. entry"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "page injection checked after the target",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        if has_injection(screen.dom_text):\n            return Decision(\"blocked\", \"injection\")\n",
+          "new": ""
+        },
+        {
+          "file": "policy.py",
+          "old": "        eid = el.eid if el is not None else None\n",
+          "new": "        if has_injection(screen.dom_text):\n            return Decision(\"blocked\", \"injection\")\n        eid = el.eid if el is not None else None\n"
+        }
+      ],
+      "expect": "checks run in the documented order and only the first failing one is reported"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "typed text checked before the target",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        if action.kind not in KINDS:\n            return Decision(\"blocked\", \"kind\")\n",
+          "new": "        if action.kind not in KINDS:\n            return Decision(\"blocked\", \"kind\")\n        if action.kind == \"type\" and has_injection(action.args[\"text\"]):\n            return Decision(\"blocked\", \"text\")\n"
+        }
+      ],
+      "expect": "checks run in the documented order and only the first failing one is reported"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "a link's href is not checked",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "if el is not None and el.role == \"link\" and el.href and not self.host_allowed(el.href):",
+          "new": "if False:"
+        }
+      ],
+      "expect": "checks run in the documented order and only the first failing one is reported"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "refusals not remembered",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            if (screen.url, el.eid) in self.denials:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "the human is not asked again about an element they refused on this page"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "refusals keyed by eid alone",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            if (screen.url, el.eid) in self.denials:\n",
+          "new": "            if el.eid in [e for _, e in self.denials]:\n"
+        }
+      ],
+      "expect": "a refusal covers that page's element, not the same id on another page"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "a yes remembered for the element",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        if el is not None and el.sensitive:\n",
+          "new": "        approved = self.__dict__.setdefault('approved', set())\n        if el is not None and el.sensitive and (screen.url, el.eid) not in approved:\n"
+        },
+        {
+          "file": "policy.py",
+          "old": "                return Decision(\"denied\", \"confirm\", eid)\n",
+          "new": "                return Decision(\"denied\", \"confirm\", eid)\n            approved.add((screen.url, el.eid))\n"
+        }
+      ],
+      "expect": "a yes covers one action only"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "the session reads the screen once",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "    for _ in range(max_steps):\n        screen = desktop.screen()\n",
+          "new": "    screen = desktop.screen()\n    for _ in range(max_steps):\n"
+        }
+      ],
+      "expect": "each action is decided on the page it lands on"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "an allowed navigate is never sent to the desktop",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        else:\n            desktop.navigate(action.args[\"url\"])\n",
+          "new": ""
+        }
+      ],
+      "expect": "each action is decided on the page it lands on"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "denied actions are still sent to the desktop",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        if decision.outcome != \"allow\":\n            continue\n",
+          "new": "        if decision.outcome == \"blocked\":\n            continue\n"
+        }
+      ],
+      "expect": "only allowed actions reach the desktop"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "refusals keyed by the page alone",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            if (screen.url, el.eid) in self.denials:\n",
+          "new": "            if screen.url in [u for u, _ in self.denials]:\n"
+        }
+      ],
+      "expect": "a refusal covers that element, not the whole page"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "the human is asked before the refusals are consulted",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            if (screen.url, el.eid) in self.denials:\n                return Decision(\"blocked\", \"denied\", eid)\n            if not self.human_confirm(f\"{action.kind} {el.label!r} on {screen.url}\"):\n",
+          "new": "            answer = self.human_confirm(f\"{action.kind} {el.label!r} on {screen.url}\")\n            if (screen.url, el.eid) in self.denials:\n                return Decision(\"blocked\", \"denied\", eid)\n            if not answer:\n"
+        }
+      ],
+      "expect": "the human is not asked again about an element they refused on this page"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "*. entries also allow the domain itself",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "if host.endswith(entry[1:]):",
+          "new": "if host.endswith(entry[1:]) or host == entry[2:]:"
+        }
+      ],
+      "expect": "a host matches an entry exactly, or as a subdomain of a *. entry"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "kind checked before page injection",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "        if has_injection(screen.dom_text):\n            return Decision(\"blocked\", \"injection\")\n        if action.kind not in KINDS:\n            return Decision(\"blocked\", \"kind\")\n",
+          "new": "        if action.kind not in KINDS:\n            return Decision(\"blocked\", \"kind\")\n        if has_injection(screen.dom_text):\n            return Decision(\"blocked\", \"injection\")\n"
+        }
+      ],
+      "expect": "checks run in the documented order and only the first failing one is reported"
+    },
+    {
+      "test": "test_safety_service",
+      "name": "a refusal logged again every time it blocks",
+      "edits": [
+        {
+          "file": "policy.py",
+          "old": "            if (screen.url, el.eid) in self.denials:\n                return Decision(\"blocked\", \"denied\", eid)\n",
+          "new": "            if (screen.url, el.eid) in self.denials:\n                self.denials.append((screen.url, el.eid))\n                return Decision(\"blocked\", \"denied\", eid)\n"
+        }
+      ],
+      "expect": "every refusal is logged"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "values never quoted",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "if text and not any(c in ' =\"\\\\' or c < \" \" or c == \"\\x7f\" for c in text):",
+          "new": "if True:"
+        }
+      ],
+      "expect": "every line ends with one newline"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "an empty value written bare",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "if text and not any(",
+          "new": "if not any("
+        }
+      ],
+      "expect": "each line is key=value pairs"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "newlines not escaped",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": " \"\\n\": \"\\\\n\",",
+          "new": ""
+        }
+      ],
+      "expect": "every line ends with one newline"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "actions collected before the first step",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "    async for action in actions:\n",
+          "new": "    for action in [a async for a in actions]:\n"
+        }
+      ],
+      "expect": "each step's line comes out before the next action is taken"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "time measured from the previous line",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "    n = 0\n    async for action in actions:\n        n += 1\n        start = clock()\n",
+          "new": "    n = 0\n    start = clock()\n    async for action in actions:\n        n += 1\n"
+        },
+        {
+          "file": "trace.py",
+          "old": "        yield logfmt(pairs) + \"\\n\"\n",
+          "new": "        yield logfmt(pairs) + \"\\n\"\n        start = clock()\n"
+        }
+      ],
+      "expect": "one line per step: what was tried, the verdict, the screenshot and the time it took"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "a failing step raises out of the stream",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "            except Exception as exc:\n",
+          "new": "            except LookupError as exc:\n"
+        }
+      ],
+      "expect": "froze"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "held actions run anyway",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "        elif verdict.needs_confirmation:\n",
+          "new": "        elif False:\n"
+        }
+      ],
+      "expect": "one line per step: what was tried, the verdict, the screenshot and the time it took"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "carriage returns not escaped",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": " \"\\r\": \"\\\\r\",",
+          "new": ""
+        }
+      ],
+      "expect": "every line ends with one newline"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "tabs not escaped",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": ", \"\\t\": \"\\\\t\"}",
+          "new": "}"
+        }
+      ],
+      "expect": "each line is key=value pairs"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "quoted only when a value has a space or a newline",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "if text and not any(c in ' =\"\\\\' or c < \" \" or c == \"\\x7f\" for c in text):",
+          "new": "if text and not any(c in ' \\n' for c in text):"
+        }
+      ],
+      "expect": "each line is key=value pairs"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "quoted with json.dumps, which escapes non-ASCII",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "            out.append(f'{key}=\"' + \"\".join(_ESCAPES.get(c, c) for c in text) + '\"')\n",
+          "new": "            out.append(f'{key}=' + __import__('json').dumps(text))\n"
+        }
+      ],
+      "expect": "one line per step: what was tried, the verdict, the screenshot and the time it took"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "quotes escaped before backslashes",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "\"\".join(_ESCAPES.get(c, c) for c in text)",
+          "new": "text.replace('\"', '\\\\\"').replace('\\\\', '\\\\\\\\').replace('\\n', '\\\\n').replace('\\r', '\\\\r').replace('\\t', '\\\\t')"
+        }
+      ],
+      "expect": "each line is key=value pairs"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "screenshots stored only for actions that run",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "        digest = store.put(frame)\n",
+          "new": "        digest = __import__('hashlib').sha256(frame).hexdigest()\n"
+        },
+        {
+          "file": "trace.py",
+          "old": "            try:\n                if action.kind == \"click\":",
+          "new": "            store.put(frame)\n            try:\n                if action.kind == \"click\":"
+        }
+      ],
+      "expect": "MissingFrame"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "time measured from after the capture",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "        start = clock()\n        screen, frame = await desktop.capture()\n",
+          "new": "        screen, frame = await desktop.capture()\n        start = clock()\n"
+        }
+      ],
+      "expect": "one line per step: what was tried, the verdict, the screenshot and the time it took"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "held actions written as blocked",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "pairs += [(\"verdict\", \"held\"), (\"reason\", verdict.reason)]",
+          "new": "pairs += [(\"verdict\", \"blocked\"), (\"reason\", verdict.reason)]"
+        }
+      ],
+      "expect": "one line per step: what was tried, the verdict, the screenshot and the time it took"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "the error reason carries the exception type",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "(\"reason\", str(exc))",
+          "new": "(\"reason\", f\"{type(exc).__name__}: {exc}\")"
+        }
+      ],
+      "expect": "one line per step: what was tried, the verdict, the screenshot and the time it took"
+    },
+    {
+      "test": "test_trace_stream",
+      "name": "every value quoted",
+      "edits": [
+        {
+          "file": "trace.py",
+          "old": "if text and not any(c in ' =\"\\\\' or c < \" \" or c == \"\\x7f\" for c in text):",
+          "new": "if False:"
+        }
+      ],
+      "expect": "run=ok steps=0"
+    },
+    {
+      "test": "test_hit_test_tree",
+      "name": "scaled with round()",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "    return (2 * x + 1) * W // (2 * sw), (2 * y + 1) * H // (2 * sh)\n",
+          "new": "    return round(x * W / sw), round(y * H / sh)\n"
+        }
+      ],
+      "expect": "a screenshot pixel maps to the centre of the screen pixels it covers, rounded down"
+    },
+    {
+      "test": "test_hit_test_tree",
+      "name": "scaled from the pixel's corner",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "    return (2 * x + 1) * W // (2 * sw), (2 * y + 1) * H // (2 * sh)\n",
+          "new": "    return x * W // sw, y * H // sh\n"
+        }
+      ],
+      "expect": "a screenshot pixel maps to the centre of the screen pixels it covers, rounded down"
+    },
+    {
+      "test": "test_hit_test_tree",
+      "name": "only descends into nodes that cover the point",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "    box = (left, top, left + node.w, top + node.h)\n",
+          "new": "    box = (left, top, left + node.w, top + node.h)\n    if not (box[0] <= px < box[2] and box[1] <= py < box[3]):\n        return None\n"
+        }
+      ],
+      "expect": "a child that sticks out of a parent that does not clip still gets clicks there"
+    },
+    {
+      "test": "test_hit_test_tree",
+      "name": "clip ignored",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "    if node.clip:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "a clipping ancestor hides what lies outside its box"
+    },
+    {
+      "test": "test_hit_test_tree",
+      "name": "scroll added instead of subtracted",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "    cx, cy = left - node.scroll_x, top - node.scroll_y\n",
+          "new": "    cx, cy = left + node.scroll_x, top + node.scroll_y\n"
+        }
+      ],
+      "expect": "scroll offsets add up"
+    },
+    {
+      "test": "test_hit_test_tree",
+      "name": "the deepest hit wins over the topmost",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "    for child in reversed(node.children):\n        hit = _visit(child, px, py, cx, cy, child_clip)\n        if hit is not None:\n            return (node.name,) + hit\n",
+          "new": "    hits = [h for h in (_visit(c, px, py, cx, cy, child_clip) for c in node.children) if h is not None]\n    if hits:\n        return (node.name,) + max(hits, key=len)\n"
+        }
+      ],
+      "expect": "a later sibling is on top, even of an earlier sibling's deepest node"
+    },
+    {
+      "test": "test_hit_test_tree",
+      "name": "invisible nodes still take clicks",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "    if not node.visible:\n        return None\n",
+          "new": ""
+        }
+      ],
+      "expect": "an invisible node neither gets clicks nor hides anything"
+    },
+    {
+      "test": "test_hit_test_tree",
+      "name": "closed box edges",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "    if box[0] <= px < box[2] and box[1] <= py < box[3]:\n",
+          "new": "    if box[0] <= px <= box[2] and box[1] <= py <= box[3]:\n"
+        }
+      ],
+      "expect": "a box's right edge is not part of it"
+    },
+    {
+      "test": "test_hit_test_tree",
+      "name": "flat paint-order scan that keeps only the nearest clipping box",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "    return _visit(root, x, y, 0, 0, None)\n",
+          "new": "    best = None\n\n    def walk(node, ox, oy, clip, path):\n        nonlocal best\n        if not node.visible:\n            return\n        left, top = ox + node.x, oy + node.y\n        box = (left, top, left + node.w, top + node.h)\n        path = path + (node.name,)\n        inside = clip is None or (clip[0] <= x < clip[2] and clip[1] <= y < clip[3])\n        if inside and box[0] <= x < box[2] and box[1] <= y < box[3]:\n            best = path\n        for child in node.children:\n            walk(child, left - node.scroll_x, top - node.scroll_y, box if node.clip else clip, path)\n\n    walk(root, 0, 0, None, ())\n    return best\n"
+        }
+      ],
+      "expect": "a clipping ancestor hides what lies outside its box"
+    },
+    {
+      "test": "test_hit_test_tree",
+      "name": "centre of the span rounded with round()",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "    return (2 * x + 1) * W // (2 * sw), (2 * y + 1) * H // (2 * sh)\n",
+          "new": "    return round((x + 0.5) * W / sw), round((y + 0.5) * H / sh)\n"
+        }
+      ],
+      "expect": "a screenshot pixel maps to the centre of the screen pixels it covers, rounded down"
+    },
+    {
+      "test": "test_hit_test_tree",
+      "name": "a node's own scroll moves its box",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "    left, top = ox + node.x, oy + node.y\n",
+          "new": "    left, top = ox + node.x - node.scroll_x, oy + node.y - node.scroll_y\n"
+        },
+        {
+          "file": "layout.py",
+          "old": "    cx, cy = left - node.scroll_x, top - node.scroll_y\n",
+          "new": "    cx, cy = left, top\n"
+        }
+      ],
+      "expect": "a clipping ancestor hides what lies outside its box"
+    },
+    {
+      "test": "test_hit_test_tree",
+      "name": "clip box shifted by the node's scroll",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "    if node.clip:\n        child_clip = box if clip is None else (\n            max(box[0], clip[0]), max(box[1], clip[1]), min(box[2], clip[2]), min(box[3], clip[3])\n        )\n",
+          "new": "    if node.clip:\n        sb = (left - node.scroll_x, top - node.scroll_y, left - node.scroll_x + node.w, top - node.scroll_y + node.h)\n        child_clip = sb if clip is None else (\n            max(sb[0], clip[0]), max(sb[1], clip[1]), min(sb[2], clip[2]), min(sb[3], clip[3])\n        )\n"
+        }
+      ],
+      "expect": "a clipping ancestor hides what lies outside its box"
+    },
+    {
+      "test": "test_hit_test_tree",
+      "name": "children tried in list order",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "    for child in reversed(node.children):",
+          "new": "    for child in node.children:"
+        }
+      ],
+      "expect": "a later sibling is on top, even of an earlier sibling's deepest node"
+    },
+    {
+      "test": "test_hit_test_tree",
+      "name": "an invisible node hides what is under it",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "    if not node.visible:\n        return None\n",
+          "new": "    if not node.visible:\n        l, t = ox + node.x, oy + node.y\n        return () if l <= px < l + node.w and t <= py < t + node.h else None\n"
+        }
+      ],
+      "expect": "an invisible node neither gets clicks nor hides anything"
+    }
+  ]
+}

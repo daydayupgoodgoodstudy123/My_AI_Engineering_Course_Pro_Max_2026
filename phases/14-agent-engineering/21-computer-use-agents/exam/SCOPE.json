@@ -1,0 +1,123 @@
+{
+  "lesson": "phases/14-agent-engineering/21-computer-use-agents",
+  "title": "Computer Use: Claude, OpenAI CUA, Gemini",
+  "format": "staged-brownfield",
+  "service": "ComputerUse: a toy vision-style computer-use agent over a FakeDesktop, with a per-step safety classifier and confirmation gate, content-addressed screenshot capture, a cross-page safety service with a host allowlist and sticky refusals, an unattended run traced in logfmt as each step finishes, and hit testing in a nested UI tree from scaled-down screenshot coordinates",
+  "sources": {
+    "docs/en.md": "fddd303eb087f556eb13754431e8a118980c7c9184eb53f61dc810b91638605e",
+    "code/main.py": "e8eeb2849a817c0c7617ca7530e0a42b247f0fec7afbecacda823b15adc2c7e8",
+    "outputs/skill-computer-use-safety.md": "958db080d7c7191edc063d8ae2fab48d6dc8461e28a3a78ce23c0428a9004ead"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no model, display or network: FakeDesktop (computeruse/desktop.py) stands in for the virtual display, and the tests script every action, the model function and the human confirmation",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_agent_loop",
+      "kind": "debug",
+      "lesson_anchor": "Claude computer use (agent loop, the computer tool, a virtual display); The shared contract: untrusted input; Defense patterns 1 and 3 (per-step safety classifier, human-in-the-loop for login, purchase, CAPTCHA); Where this pattern goes wrong: no confirmation on sensitive actions; Exercise 3; code/main.py Screen.element_at, SafetyClassifier.assess, run_agent",
+      "planted_bugs": [
+        "run_agent reads desktop.screen() once before the loop, as the lesson's run_agent takes one static screen; FakeDesktop shows a new Screen snapshot after a navigation or a focus change, so the classifier keeps judging the home page: the trace shows 'no element at (60, 75)' and 'nothing is focused', both produced in safety.py, which has no bug",
+        "SafetyClassifier.assess lets typing into a sensitive field (a card number) through without confirmation although its docstring asks for one",
+        "after a yes, run_agent clicks the coordinates without checking that the confirmed element is still the topmost one there: a promo popup drawn during the confirmation takes the click, and when the button is gone desktop.click returns None and el.label raises AttributeError; typing after a yes does not check that the field still has the focus",
+        "Screen.element_at uses closed intervals (x <= el.x + el.w), so a pixel on a shared edge goes to the later element and the pixel just past the right or bottom edge still hits",
+        "Screen.element_at scans every element on every lookup"
+      ],
+      "timing_assert": "about 2,000 lookups on a 76,800-cell screen with a modal on top under 0.1 s, the first lookup untimed; measured on this machine with other jobs running (load average 5 to 24 on 10 cores): the linear scan 1.20-3.03 s (12x or more over the limit), the reference grid with 32 px buckets 1.6-4.6 ms (20x or more under); 64 px buckets 3.4-12 ms, 128 px about 10 ms, 256 px about 26 ms, 512 px 86-90 ms (too close to the limit)",
+      "overfix_guard": "a redraw that leaves the confirmed button in place still runs the click (aborting whenever the screen object changed fails); re-resolving the point and clicking whatever is there now, or checking against the screen from before the confirmation, fails on the popup; re-checking clicks but not typing, re-running the classifier after the yes, or only checking that something is focused fails on the refocused field; asking before a click that only focuses the sensitive field fails the prompt count; a grid must still return the topmost element (scanning a bucket in paint order, or filing an element only under its top-left bucket, fails) with half-open edges"
+    },
+    {
+      "part": 2,
+      "test": "test_capture_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Defense pattern 4 (content capture to external storage, span references); Where this pattern goes wrong: long horizons without observability (per-step traces)",
+      "storage": "content-addressed files: objects/<digest[:2]>/<digest[2:]> holding each distinct screenshot's raw bytes, plus runs/<run_id>.json with the ordered step records that name their screenshot by digest",
+      "exactness": "a reopened store returns every run's step records equal (step numbers from 1, actions with int coordinates and a typed text with quotes, '=', a backslash, a newline, a tab and an emoji, outcome and detail) and every screenshot byte for byte: the PNG signature's \\r\\n, all 256 byte values and a trailing lone \\r",
+      "traps": [
+        "an existing file trusted because it exists or has the right length, so a torn file from a crash (right length, zeros after 100 bytes) is never repaired",
+        "an existing correct file rewritten on every put (mtime changes), or identical screenshots stored more than once",
+        "image data embedded in the run file, or a second save of a run_id appended to the first",
+        "get leaking FileNotFoundError or skipping the hash check (the damaged object keeps its length), even when load_run covers for it",
+        "MissingFrame or CorruptFrame from load_run that does not name the step",
+        "digest over the hex or base64 text instead of the bytes, or a temporary file left in objects/",
+        "screenshots read back as text (universal newlines turn \\r\\n and \\r into \\n)"
+      ],
+      "clarifying_questions": [
+        "base64 in the run file",
+        "compression or format conversion",
+        "garbage collection",
+        "atomic writes"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_safety_service",
+      "kind": "core algorithm",
+      "lesson_anchor": "Gemini 2.5 Computer Use per-step safety service (assesses each action before execution); Defense patterns 1, 2, 3 and 5 (per-step classifier, allowlist of navigation targets, human-in-the-loop, hard-coded refusals for directives in retrieved text); Exercise 2 (navigate with an allowlist of URLs) and Exercise 3 (log every denied confirmation); outputs/skill-computer-use-safety.md (allowlist of URLs, confirmation gate, trace of every decision)",
+      "traps": [
+        "host taken from netloc or matched as a URL prefix: the port, userinfo (https://shop.example.com@evil.test/) and shop.example.com.evil.test",
+        "*. entries matched as a bare suffix (badexample-cdn.net, the apex domain)",
+        "checks out of the documented order: page injection after the target or the kind, typed text before the target; only one rule reported",
+        "a clicked link's href not checked, so a sensitive off-list link reaches the human",
+        "refusals not remembered, checked only after asking the human again, or keyed by eid alone (the same eid on another page is blocked) or by page alone (the second purchase button on the page is blocked)",
+        "a yes remembered for the element",
+        "run_session reading the screen once, sending a denied action to the desktop, or never sending an allowed navigate"
+      ],
+      "integration": "run_session drives FakeDesktop across three pages (home, item, and an injected promo page reached by an allowed navigate) with a model function that records the screen it was shown; the human refuses the purchase, and the test compares every event that reached the desktop",
+      "clarifying_questions": [
+        "apex domain under *.",
+        "redirects",
+        "ports",
+        "retry after a refusal",
+        "a second purchase after a yes"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_trace_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Where this pattern goes wrong: long horizons without observability (a 200-click run that fails at click 180 is un-debuggable without per-step traces); Defense pattern 4 (span references to captured content); Exercise 5 (latency of per-step safety)",
+      "wire_format": "logfmt, one line per step (step kind [x y | text | url] element verdict [reason] shot ms) and a closing run=ok steps=<n> or run=failed failed_step=<n>, decided by the test's regex parser, splitlines and the joined text ending in a newline",
+      "traps": [
+        "values with spaces, '=' (a URL query without spaces), quotes, backslashes, CR, LF or tabs (a remote error with \\r\\n and a tab) not quoted and escaped; an empty value written bare; every value quoted (the empty run's line is compared exactly); json.dumps with ASCII escapes",
+        "blocked and held steps without a line, or held actions run anyway",
+        "all actions collected before the first step (the probe counts actions taken from the model)",
+        "ms measured from the previous line, which adds the model's 5 s of thinking, or from after the capture",
+        "an exception from the desktop escaping the stream instead of verdict=error plus run=failed, or a reason that adds the exception type",
+        "further actions taken after a failed step",
+        "screenshots stored only for steps that run (every remote screenshot shows the clock, so none repeat)"
+      ],
+      "clarifying_questions": [
+        "where the model's thinking time goes",
+        "actions that need confirmation in an unattended run",
+        "the classifier raising",
+        "the exception type in reason",
+        "rounding ms"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_hit_test_tree",
+      "kind": "recursive structure",
+      "lesson_anchor": "Claude counts pixels from reference points to target locations, producing resolution-independent coordinates; vision-based input with keyboard and mouse output, no accessibility API",
+      "traps": [
+        "coordinates scaled with round() (banker's rounding) or from the pixel's corner instead of the centre of its span",
+        "descending only into nodes that cover the point, which misses a child sticking out of a parent that does not clip",
+        "clipping ignored, shifted by the scroll offset, or only the nearest clipping box kept in a flattened scan (the sidebar and the list both clip)",
+        "scroll offsets added, applied to the node's own box, or not accumulated through every ancestor",
+        "the deepest hit chosen over the topmost sibling, or siblings tried in list order",
+        "invisible nodes taking clicks or hiding what is under them",
+        "closed box edges"
+      ],
+      "clarifying_questions": [
+        "z-index",
+        "rounding when scaling"
+      ]
+    }
+  ],
+  "notes": [
+    "Part 1 follows the chapter plan with one change: the shipped element_at already scans topmost first (reversed), so the planted hit-test bug is the closed interval, and the stale screen in run_agent is added as the bug that surfaces away from its cause.",
+    "Part 3 uses the lesson's DOM rule as code/main.py has it (a marker in the DOM blocks every action on that screen) rather than blocking only related actions, and reports one rule code per decision. Evaluating each action on its own screen is tested in Part 1; run_session checks it again only as integration. Redirects stay out, as the chapter plan asks.",
+    "The coordinate scaling rule (centre of the covered span, rounded down) is defined by the docstring; the lesson only says the coordinates are resolution-independent.",
+    "Part 4's guard is Part 1's SafetyClassifier, so navigate is always blocked as an unknown kind there; the line still carries the url."
+  ]
+}
