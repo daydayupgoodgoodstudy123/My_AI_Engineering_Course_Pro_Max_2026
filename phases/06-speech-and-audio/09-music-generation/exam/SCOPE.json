@@ -1,0 +1,106 @@
+{
+  "lesson": "phases/06-speech-and-audio/09-music-generation",
+  "title": "Music Generation — MusicGen, Stable Audio, Suno, and the Licensing Earthquake",
+  "format": "staged-brownfield",
+  "service": "MusicBox: symbolic prompt-to-notes generation, a SQLite track store with tempo maps, FAD scoring, bar-by-bar streaming to a player, and song-form expansion",
+  "sources": {
+    "docs/en.md": "eca9c3e4de1e7d92a60cd7ad0ebcf3e15cfc67c1999e3a5e7ec154fee581331a",
+    "code/main.py": "7d1485dcea38d9ae391a8b041cc1f467db728ed9d763e86f534e82ae74423778"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_prompt_to_notes",
+      "kind": "debug",
+      "lesson_anchor": "code/main.py fake_generate and its key, progression and drum tables; Exercise 1 (play the piece back as MIDI); Pitfall: tempo drift",
+      "planted_bugs": [
+        "chord_tones checks endswith('m') before 'dim', so G#dim splits into the root 'G#di'; the KeyError surfaces one call down in note_number, two calls below render",
+        "parse_bpm is the lesson's token loop: '128 bpm' splits into two tokens and int('') is swallowed, so the tempo silently stays 120 and 8 bars come out as 16 s",
+        "seconds uses tick // PPQ, so every position inside a beat collapses onto the beat",
+        "_held_until rescans every rendered note for each chord tone, O(n^2)"
+      ],
+      "timing_assert": "render of 2000 bars (about an hour at 140 bpm) under 0.15 s (quadratic version about 2.1 s, fixed version about 0.011 s)",
+      "overfix_guard": "the tempo is the number written before bpm ('8 bars of lofi at 90 bpm' is 90, not 8; 'jazz at 140BPM for 32 bars' is 140, not 32); legato survives the speed-up: D4 held over the repeated D chord, A4 held for three bars across the A and D chords, and a 16-bar D drone held from start to end, which rules out dropping legato, holding only when the whole chord repeats, and searching only the previous bar or the last N notes"
+    },
+    {
+      "part": 2,
+      "test": "test_track_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "tokens over time on a tick grid; Pitfall: tempo drift; legal landscape: AI-generated music must be disclosed",
+      "exactness": "notes (integer ticks, in the given order), the tempo map (128, 140 and 400/3 bpm, as tuples) and the generation record (a 64-bit seed) round-trip exactly across close and reopen; seconds are derived from ticks through the tempo map",
+      "traps": [
+        "missing commit",
+        "ids without ORDER BY (the UNIQUE track_id index returns UUID order; six tracks make a lucky pass 1 in 720)",
+        "tempo pairs back as JSON lists",
+        "notes reordered by start",
+        "tempo kept as MIDI integer microseconds per quarter (140 bpm drifts)",
+        "64-bit seed in an INTEGER column (OverflowError) or a REAL column (rounded)",
+        "seconds from the first tempo only, or from the tempo in force at the target tick",
+        "seconds with the module PPQ instead of the track's own ppq",
+        "tempo map with a repeated tick or a 0 bpm tempo",
+        "disclosure flag not enforced"
+      ],
+      "clarifying_questions": ["empty or late-starting tempo map", "note validation", "what counts as ai_generated"]
+    },
+    {
+      "part": 3,
+      "test": "test_frechet_audio_distance",
+      "kind": "core algorithm",
+      "lesson_anchor": "Evaluation: FAD; Build It, Step 3: FAD evaluation; Key Terms: FAD",
+      "traps": [
+        "mean term not squared",
+        "population covariance instead of n - 1",
+        "elementwise square root or sqrt of the trace instead of the trace of the matrix square root",
+        "det rounding below zero for a collapsed model",
+        "negative distance for a set identical to the reference",
+        "diagonal-only covariance, tr(sqrt(S_r) sqrt(S_g)) or a symmetric-M determinant, all exact on the proportional sets and caught only by the collapsed set",
+        "fewer than two embeddings in either set",
+        "ranking direction (lower is better)"
+      ],
+      "integration": "toy 2-D embeddings of pieces rendered by Part 1: lofi generations score closer to a lofi reference than rock generations",
+      "clarifying_questions": ["n or n - 1", "ties in the ranking"]
+    },
+    {
+      "part": 4,
+      "test": "test_stream_bars",
+      "kind": "streaming",
+      "lesson_anchor": "token LM generation over time; real-time music (Lyria RealTime); Pitfall: repetition and drift past 30 s",
+      "wire_format": "Server-Sent Events, one 'data: <json>' event per bar ended by a blank line, decided by the test's sse_events parser",
+      "traps": [
+        "single newline after each event (NDJSON habit)",
+        "missing data: field",
+        "reading every token before sending",
+        "notes not cut at the bar line",
+        "cut notes not carried into the next bar",
+        "a note that ends on the bar line carried on as a 0-step tie (>= instead of >)",
+        "position not reset when a bar opens",
+        "empty bars skipped",
+        "ringing notes not sent after the last token"
+      ],
+      "clarifying_questions": ["position reset per bar", "note before the first bar", "tokens ending mid-bar", "overlapping notes of one pitch", "a trailing empty bar"]
+    },
+    {
+      "part": 5,
+      "test": "test_song_form",
+      "kind": "recursive structure",
+      "lesson_anchor": "song generation with structure; Pitfall: loss of structure past 30 s; Udio-style inpainting of one section",
+      "traps": [
+        "section names mixed with repeat groups",
+        "nested repeats",
+        "bar length from the meter (3/4 and 6/8 are both 1440 ticks)",
+        "first and second endings",
+        "reuse of a section versus a section inside itself",
+        "note that starts outside its bar, including exactly on the next bar line"
+      ],
+      "clarifying_questions": ["unknown section", "repeat count 0", "endings count mismatch", "notes ringing past the bar line"]
+    }
+  ],
+  "adjustments": [
+    "Part 1: the suggested negative-transposition modulo bug was left out because Python's % already wraps negative semitones, so it would not be a natural Python bug here. The lesson's own BPM-parsing bug from code/main.py took its place, and the lesson's other bug (key detection by first letter) ships fixed with the quiz's regex so that Part 1 stays at four defects.",
+    "Part 1: the sixteenth-step defect is floor division in seconds() rather than an off-by-one. The lesson's drum patterns are 0-indexed strings, so an off-by-one step would have no natural cause in this code; floor division is the realistic slip in beat arithmetic, and it only shows on positions inside a beat.",
+    "Part 2: float seconds are kept out by design (ticks are stored, seconds derived through the tempo map) rather than by a failing round trip, because a seconds store that converts back with round() survives a round trip and only the truncating variant could be caught. The exactness assertion uses this domain's own precision traps instead: 140 bpm through MIDI's integer microseconds per quarter, 400/3 bpm, a 64-bit generation seed, tuple tempo pairs and note order. The lesson's disclosure rule (ai_generated) was added.",
+    "Part 4: Server-Sent Events, the push format a browser player reads. It differs from the NDJSON of 06/03, but 06/04, 06/05, 06/07, 06/08 and 06/12 also send SSE; what is particular to this part is the bar framing: notes cut at the bar line, tied over, and bars sent until the last note ends.",
+    "Part 5: first and second endings and meter changes (3/4, 6/8) were added to the suggested repeat expansion; infinite repetition is a section that plays inside itself and raises ValueError."
+  ]
+}

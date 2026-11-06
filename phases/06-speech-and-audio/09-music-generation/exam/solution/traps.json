@@ -1,0 +1,544 @@
+{
+  "package": "musicbox",
+  "tests": [
+    "test_prompt_to_notes",
+    "test_track_store",
+    "test_frechet_audio_distance",
+    "test_stream_bars",
+    "test_song_form"
+  ],
+  "layers": [
+    {
+      "test": "test_prompt_to_notes",
+      "steps": [
+        {"name": "as shipped", "edits": [], "expect": "KeyError"},
+        {
+          "name": "fix chord_tones",
+          "edits": [{"file": "theory.py",
+                     "old": "    if symbol.endswith(\"m\"):\n        root, quality = symbol[:-1], \"m\"\n    elif symbol.endswith(\"dim\"):\n        root, quality = symbol[:-3], \"dim\"\n",
+                     "new": "    if symbol.endswith(\"dim\"):\n        root, quality = symbol[:-3], \"dim\"\n    elif symbol.endswith(\"m\"):\n        root, quality = symbol[:-1], \"m\"\n"}],
+          "expect": "8 bars of 4/4 at 128 bpm last 15 s"
+        },
+        {
+          "name": "+ parse_bpm with a regex",
+          "edits": [{"file": "compose.py",
+                     "old": "    bpm = 120\n    for token in prompt.lower().split():\n        if token.endswith(\"bpm\"):\n            try:\n                bpm = int(token[:-3])\n            except ValueError:\n                pass\n    return bpm\n",
+                     "new": "    match = re.search(r\"(\\d+)\\s*bpm\\b\", prompt.lower())\n    return int(match.group(1)) if match else 120\n"}],
+          "expect": "a sixteenth step at 128 bpm lasts 0.1171875 s"
+        },
+        {
+          "name": "+ true division in seconds",
+          "edits": [{"file": "compose.py",
+                     "old": "    return tick // PPQ * 60 / piece.bpm\n",
+                     "new": "    return tick * 60 / (PPQ * piece.bpm)\n"}],
+          "expect": "render should be fast on long pieces"
+        },
+        {
+          "name": "+ held tones tracked bar to bar",
+          "edits": [{"file": "compose.py",
+                     "old": "    notes: list[Note] = []\n    for bar, chord in enumerate(piece.chords):\n        start = bar * BAR\n        for pitch in chord_tones(chord):\n            held = _held_until(notes, pitch, start)\n            if held is None:\n                notes.append(Note(start, BAR, pitch, 80))\n            else:\n                notes[held] = replace(notes[held], length=notes[held].length + BAR)\n",
+                     "new": "    notes: list[Note] = []\n    held: dict[int, int] = {}\n    for bar, chord in enumerate(piece.chords):\n        start = bar * BAR\n        sounding: dict[int, int] = {}\n        for pitch in chord_tones(chord):\n            if pitch in held:\n                i = held[pitch]\n                notes[i] = replace(notes[i], length=notes[i].length + BAR)\n            else:\n                i = len(notes)\n                notes.append(Note(start, BAR, pitch, 80))\n            sounding[pitch] = i\n        held = sounding\n"}],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_prompt_to_notes",
+      "name": "tempo taken as the first number in the prompt",
+      "edits": [{"file": "compose.py",
+                 "old": "re.search(r\"(\\d+)\\s*bpm\\b\", prompt.lower())",
+                 "new": "re.search(r\"(\\d+)\", prompt.lower())"}],
+      "expect": "the tempo is the number written before bpm"
+    },
+    {
+      "test": "test_prompt_to_notes",
+      "name": "held tones dropped to make render fast",
+      "edits": [{"file": "compose.py",
+                 "old": "            if pitch in held:\n                i = held[pitch]\n                notes[i] = replace(notes[i], length=notes[i].length + BAR)\n            else:\n                i = len(notes)\n                notes.append(Note(start, BAR, pitch, 80))\n",
+                 "new": "            i = len(notes)\n            notes.append(Note(start, BAR, pitch, 80))\n"}],
+      "expect": "a tone that the next chord keeps is held, not struck again"
+    },
+    {
+      "test": "test_prompt_to_notes",
+      "name": "only the last three notes searched for a held tone",
+      "edits": [{"file": "compose.py",
+                 "old": "            if pitch in held:\n                i = held[pitch]\n",
+                 "new": "            recent = [j for j in range(max(0, len(notes) - 3), len(notes)) if notes[j].channel == 0 and notes[j].pitch == pitch and notes[j].start + notes[j].length == start]\n            if recent:\n                i = recent[0]\n"}],
+      "expect": "a tone that the next chord keeps is held, not struck again"
+    },
+    {
+      "test": "test_prompt_to_notes",
+      "name": "held tone searched only among notes that started in the previous bar",
+      "edits": [{"file": "compose.py",
+                 "old": "            if pitch in held:\n                i = held[pitch]\n",
+                 "new": "            found = None\n            for j in range(len(notes) - 1, -1, -1):\n                if notes[j].start < start - BAR:\n                    break\n                if notes[j].channel == 0 and notes[j].pitch == pitch and notes[j].end == start:\n                    found = j\n                    break\n            if found is not None:\n                i = found\n"}],
+      "expect": "a tone is held for as many bars as the chords keep it"
+    },
+    {
+      "test": "test_prompt_to_notes",
+      "name": "tones held only when the whole chord repeats",
+      "edits": [{"file": "compose.py",
+                 "old": "            if pitch in held:\n",
+                 "new": "            if pitch in held and bar > 0 and piece.chords[bar - 1] == chord:\n"}],
+      "expect": "a tone is held for as many bars as the chords keep it"
+    },
+    {
+      "test": "test_prompt_to_notes",
+      "name": "held tone searched in the last 30 notes",
+      "edits": [{"file": "compose.py",
+                 "old": "            if pitch in held:\n                i = held[pitch]\n",
+                 "new": "            recent = [j for j in range(max(0, len(notes) - 30), len(notes)) if notes[j].channel == 0 and notes[j].pitch == pitch and notes[j].end == start]\n            if recent:\n                i = recent[0]\n"}],
+      "expect": "a chord that never changes is held from the first bar to the last"
+    },
+    {
+      "test": "test_prompt_to_notes",
+      "name": "tempo taken as the last number in the prompt",
+      "edits": [{"file": "compose.py",
+                 "old": "    match = re.search(r\"(\\d+)\\s*bpm\\b\", prompt.lower())\n    return int(match.group(1)) if match else 120\n",
+                 "new": "    numbers = re.findall(r\"\\d+\", prompt)\n    return int(numbers[-1]) if numbers else 120\n"}],
+      "expect": "the tempo is the number written before bpm"
+    },
+    {
+      "test": "test_track_store",
+      "name": "no commit after insert",
+      "edits": [{"file": "store.py",
+                 "old": "        with self._db:\n            self._db.execute(\n                \"INSERT",
+                 "new": "        if True:\n            self._db.execute(\n                \"INSERT"}],
+      "expect": "a reopened store sees earlier tracks"
+    },
+    {
+      "test": "test_track_store",
+      "name": "tempo map read back as JSON lists",
+      "edits": [{"file": "store.py",
+                 "old": "[tuple(change) for change in json.loads(tempo)]",
+                 "new": "json.loads(tempo)"}],
+      "expect": "a track must round-trip exactly"
+    },
+    {
+      "test": "test_track_store",
+      "name": "notes read back in start order (ORDER BY start)",
+      "edits": [{"file": "store.py",
+                 "old": "[Note(*fields) for fields in json.loads(notes)]",
+                 "new": "sorted((Note(*fields) for fields in json.loads(notes)), key=lambda note: note.start)"}],
+      "expect": "a track must round-trip exactly"
+    },
+    {
+      "test": "test_track_store",
+      "name": "tempo kept as integer microseconds per quarter, as in a MIDI file",
+      "edits": [
+        {"file": "store.py",
+         "old": "json.dumps(track.tempo),",
+         "new": "json.dumps([(at, round(60_000_000 / bpm)) for at, bpm in track.tempo]),"},
+        {"file": "store.py",
+         "old": "[tuple(change) for change in json.loads(tempo)]",
+         "new": "[(at, 60_000_000 / micros) for at, micros in json.loads(tempo)]"}
+      ],
+      "expect": "a track must round-trip exactly"
+    },
+    {
+      "test": "test_track_store",
+      "name": "seed kept in its own INTEGER column",
+      "edits": [
+        {"file": "store.py", "old": "    meta TEXT NOT NULL\n)", "new": "    meta TEXT NOT NULL,\n    seed INTEGER\n)"},
+        {"file": "store.py",
+         "old": "\"INSERT INTO tracks (track_id, title, ppq, tempo, notes, meta) VALUES (?, ?, ?, ?, ?, ?)\",",
+         "new": "\"INSERT INTO tracks (track_id, title, ppq, tempo, notes, meta, seed) VALUES (?, ?, ?, ?, ?, ?, ?)\","},
+        {"file": "store.py",
+         "old": "                    json.dumps(track.meta),\n                ),",
+         "new": "                    json.dumps(track.meta),\n                    track.meta.get(\"seed\"),\n                ),"}
+      ],
+      "expect": "OverflowError"
+    },
+    {
+      "test": "test_track_store",
+      "name": "seconds computed from the first tempo only",
+      "edits": [{"file": "store.py",
+                 "old": "        total = 0.0\n        ends = ",
+                 "new": "        return tick * 60 / (self.tempo[0][1] * self.ppq)\n        total = 0.0\n        ends = "}],
+      "expect": "after a tempo change, beats take the new tempo"
+    },
+    {
+      "test": "test_track_store",
+      "name": "AI-generated disclosure not enforced",
+      "edits": [{"file": "store.py",
+                 "old": "        if track.meta.get(\"ai_generated\") is not True:\n",
+                 "new": "        if False:\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_track_store",
+      "name": "ids listed newest first",
+      "edits": [{"file": "store.py",
+                 "old": "\"SELECT track_id FROM tracks ORDER BY seq\"",
+                 "new": "\"SELECT track_id FROM tracks ORDER BY seq DESC\""}],
+      "expect": "a reopened store sees earlier tracks, in the order they were added"
+    },
+    {
+      "test": "test_track_store",
+      "name": "seed kept in a REAL column",
+      "edits": [
+        {"file": "store.py",
+         "old": "    meta TEXT NOT NULL\n)",
+         "new": "    meta TEXT NOT NULL,\n    seed REAL\n)"},
+        {"file": "store.py",
+         "old": "\"INSERT INTO tracks (track_id, title, ppq, tempo, notes, meta) VALUES (?, ?, ?, ?, ?, ?)\",",
+         "new": "\"INSERT INTO tracks (track_id, title, ppq, tempo, notes, meta, seed) VALUES (?, ?, ?, ?, ?, ?, ?)\","},
+        {"file": "store.py",
+         "old": "                    json.dumps(track.meta),\n                ),",
+         "new": "                    json.dumps(track.meta),\n                    float(track.meta[\"seed\"]),\n                ),"},
+        {"file": "store.py",
+         "old": "\"SELECT title, ppq, tempo, notes, meta FROM tracks WHERE track_id = ?\"",
+         "new": "\"SELECT title, ppq, tempo, notes, meta, seed FROM tracks WHERE track_id = ?\""},
+        {"file": "store.py",
+         "old": "        title, ppq, tempo, notes, meta = row\n",
+         "new": "        title, ppq, tempo, notes, meta, seed = row\n"},
+        {"file": "store.py",
+         "old": "            json.loads(meta),\n",
+         "new": "            dict(json.loads(meta), seed=int(seed)),\n"}
+      ],
+      "expect": "a track must round-trip exactly"
+    },
+    {
+      "test": "test_track_store",
+      "name": "Track.seconds uses compose.PPQ instead of the track's ppq",
+      "edits": [
+        {"file": "store.py",
+         "old": "from .compose import Note\n",
+         "new": "from .compose import PPQ, Note\n"},
+        {"file": "store.py",
+         "old": "* 60 / (bpm * self.ppq)",
+         "new": "* 60 / (bpm * PPQ)"}
+      ],
+      "expect": "ticks count at the track's own ppq"
+    },
+    {
+      "test": "test_track_store",
+      "name": "seconds uses the tempo in force at tick for the whole span",
+      "edits": [{"file": "store.py",
+                 "old": "        total = 0.0\n        ends = ",
+                 "new": "        bpm = [b for at, b in self.tempo if at <= tick][-1]\n        return tick * 60 / (bpm * self.ppq)\n        total = 0.0\n        ends = "}],
+      "expect": "8 beats at 128 bpm"
+    },
+    {
+      "test": "test_track_store",
+      "name": "seconds stops at the last tempo change",
+      "edits": [{"file": "store.py",
+                 "old": "ends = [at for at, _ in self.tempo[1:]] + [math.inf]",
+                 "new": "ends = [at for at, _ in self.tempo[1:]]"}],
+      "expect": "every earlier tempo still counts"
+    },
+    {
+      "test": "test_track_store",
+      "name": "tempo ticks may repeat",
+      "edits": [{"file": "store.py",
+                 "old": "any(a >= b for a, b in zip(ticks, ticks[1:]))",
+                 "new": "any(a > b for a, b in zip(ticks, ticks[1:]))"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_track_store",
+      "name": "a tempo of 0 bpm accepted",
+      "edits": [{"file": "store.py",
+                 "old": "if any(bpm <= 0 for _, bpm in track.tempo):",
+                 "new": "if any(bpm < 0 for _, bpm in track.tempo):"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_frechet_audio_distance",
+      "name": "population covariance (divide by n)",
+      "edits": [{"file": "fad.py",
+                 "old": "    sxx = sum((x - mx) ** 2 for x, _ in points) / (n - 1)\n    syy = sum((y - my) ** 2 for _, y in points) / (n - 1)\n    sxy = sum((x - mx) * (y - my) for x, y in points) / (n - 1)\n",
+                 "new": "    sxx = sum((x - mx) ** 2 for x, _ in points) / n\n    syy = sum((y - my) ** 2 for _, y in points) / n\n    sxy = sum((x - mx) * (y - my) for x, y in points) / n\n"}],
+      "expect": "S is the sample covariance: divide by n - 1"
+    },
+    {
+      "test": "test_frechet_audio_distance",
+      "name": "elementwise square root of S_r S_g",
+      "edits": [{"file": "fad.py",
+                 "old": "    tr_sqrt = math.sqrt(max(0.0, m00 + m11 + 2.0 * math.sqrt(det)))\n",
+                 "new": "    tr_sqrt = math.sqrt(m00) + math.sqrt(m11)\n"}],
+      "expect": "same spread, means 1.5 apart on both axes: FAD 4.5"
+    },
+    {
+      "test": "test_frechet_audio_distance",
+      "name": "trace of the square root taken as the square root of the trace",
+      "edits": [{"file": "fad.py",
+                 "old": "    tr_sqrt = math.sqrt(max(0.0, m00 + m11 + 2.0 * math.sqrt(det)))\n",
+                 "new": "    tr_sqrt = math.sqrt(max(0.0, m00 + m11))\n"}],
+      "expect": "same spread, means 1.5 apart on both axes: FAD 4.5"
+    },
+    {
+      "test": "test_frechet_audio_distance",
+      "name": "mean term not squared",
+      "edits": [{"file": "fad.py",
+                 "old": "    mean_term = (mu_r[0] - mu_g[0]) ** 2 + (mu_r[1] - mu_g[1]) ** 2\n",
+                 "new": "    mean_term = math.dist(mu_r, mu_g)\n"}],
+      "expect": "same spread, means 1.5 apart on both axes: FAD 4.5"
+    },
+    {
+      "test": "test_frechet_audio_distance",
+      "name": "det(S_r S_g) not clamped at zero",
+      "edits": [{"file": "fad.py",
+                 "old": "    det = max(0.0, m00 * m11 - m01 * m10)\n",
+                 "new": "    det = m00 * m11 - m01 * m10\n"}],
+      "expect": "math domain error"
+    },
+    {
+      "test": "test_frechet_audio_distance",
+      "name": "distance not clamped at zero",
+      "edits": [{"file": "fad.py", "old": "    return max(0.0, distance)\n", "new": "    return distance\n"}],
+      "expect": "a model that matches the reference scores 0"
+    },
+    {
+      "test": "test_frechet_audio_distance",
+      "name": "highest FAD ranked first",
+      "edits": [{"file": "fad.py",
+                 "old": "    return sorted(scores, key=lambda item: item[1])\n",
+                 "new": "    return sorted(scores, key=lambda item: item[1], reverse=True)\n"}],
+      "expect": "lower FAD ranks first"
+    },
+    {
+      "test": "test_frechet_audio_distance",
+      "name": "cross-covariance dropped (diagonal covariances)",
+      "edits": [{"file": "fad.py",
+                 "old": "    sxy = sum((x - mx) * (y - my) for x, y in points) / (n - 1)\n",
+                 "new": "    sxy = 0.0\n"}],
+      "expect": "a model whose outputs all fall on one line still gets a score"
+    },
+    {
+      "test": "test_frechet_audio_distance",
+      "name": "tr(sqrt(S_r) sqrt(S_g)) in place of tr sqrt(S_r S_g)",
+      "edits": [
+        {"file": "fad.py",
+         "old": "    (m00, m01), (m10, m11) = _matmul(s_r, s_g)\n",
+         "new": "    (m00, m01), (m10, m11) = _matmul(_sqrtm(s_r), _sqrtm(s_g))\n"},
+        {"file": "fad.py",
+         "old": "    det = max(0.0, m00 * m11 - m01 * m10)\n    tr_sqrt = math.sqrt(max(0.0, m00 + m11 + 2.0 * math.sqrt(det)))\n",
+         "new": "    tr_sqrt = m00 + m11\n"},
+        {"file": "fad.py",
+         "old": "def _matmul(a: Matrix, b: Matrix) -> Matrix:\n",
+         "new": "def _sqrtm(a: Matrix) -> Matrix:\n    s = math.sqrt(max(0.0, a[0][0] * a[1][1] - a[0][1] * a[1][0]))\n    t = math.sqrt(a[0][0] + a[1][1] + 2.0 * s)\n    return ((a[0][0] + s) / t, a[0][1] / t), (a[1][0] / t, (a[1][1] + s) / t)\n\n\ndef _matmul(a: Matrix, b: Matrix) -> Matrix:\n"}
+      ],
+      "expect": "a model whose outputs all fall on one line still gets a score"
+    },
+    {
+      "test": "test_frechet_audio_distance",
+      "name": "det of S_r S_g taken as if the product were symmetric",
+      "edits": [{"file": "fad.py",
+                 "old": "    det = max(0.0, m00 * m11 - m01 * m10)\n",
+                 "new": "    det = max(0.0, m00 * m11 - m01 * m01)\n"}],
+      "expect": "a model whose outputs all fall on one line still gets a score"
+    },
+    {
+      "test": "test_frechet_audio_distance",
+      "name": "only the generated set checked for size",
+      "edits": [
+        {"file": "fad.py",
+         "old": "    mu_r, s_r = _gaussian(real)\n",
+         "new": "    if len(generated) < 2:\n        raise ValueError(\"need at least two generated embeddings\")\n    mu_r, s_r = _gaussian(real)\n"},
+        {"file": "fad.py",
+         "old": "    if n < 2:\n        raise ValueError(\"need at least two embeddings to estimate a covariance\")\n",
+         "new": ""}
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_frechet_audio_distance",
+      "name": "ranking sorted without a key (by model name)",
+      "edits": [{"file": "fad.py",
+                 "old": "    return sorted(scores, key=lambda item: item[1])\n",
+                 "new": "    return sorted(scores)\n"}],
+      "expect": "lower FAD ranks first"
+    },
+    {
+      "test": "test_stream_bars",
+      "name": "one newline after each event, as in NDJSON",
+      "edits": [{"file": "stream.py",
+                 "old": "json.dumps({\"bar\": bar, \"notes\": notes}) + \"\\n\\n\"",
+                 "new": "json.dumps({\"bar\": bar, \"notes\": notes}) + \"\\n\""}],
+      "expect": "every event ends with a blank line"
+    },
+    {
+      "test": "test_stream_bars",
+      "name": "JSON sent without the data: field",
+      "edits": [{"file": "stream.py",
+                 "old": "    return \"data: \" + json.dumps(",
+                 "new": "    return json.dumps("}],
+      "expect": "every event carries its JSON on a data: line"
+    },
+    {
+      "test": "test_stream_bars",
+      "name": "reads every token before sending",
+      "edits": [{"file": "stream.py",
+                 "old": "    async for token in tokens:\n",
+                 "new": "    everything = [token async for token in tokens]\n    for token in everything:\n"}],
+      "expect": "send each bar as soon as the next one starts"
+    },
+    {
+      "test": "test_stream_bars",
+      "name": "notes not cut at the bar line",
+      "edits": [{"file": "stream.py",
+                 "old": "            notes.append({\"pitch\": pitch, \"step\": step, \"steps\": min(steps, room), \"tied\": False})\n            if steps > room:\n                ringing.append((pitch, steps - room))\n",
+                 "new": "            notes.append({\"pitch\": pitch, \"step\": step, \"steps\": steps, \"tied\": False})\n"}],
+      "expect": "a note is cut at the bar line"
+    },
+    {
+      "test": "test_stream_bars",
+      "name": "cut notes not carried into the next bar",
+      "edits": [{"file": "stream.py",
+                 "old": "            step = 0\n            notes, ringing = _carry(ringing, steps_per_bar)\n",
+                 "new": "            step = 0\n            notes, ringing = [], []\n"}],
+      "expect": "the rest of a cut note opens the next bar, tied"
+    },
+    {
+      "test": "test_stream_bars",
+      "name": "stops when the tokens stop, with a note still ringing",
+      "edits": [{"file": "stream.py",
+                 "old": "    while ringing:\n        bar += 1\n        notes, ringing = _carry(ringing, steps_per_bar)\n        yield _event(bar, notes)\n",
+                 "new": ""}],
+      "expect": "one event per bar, including empty bars and the bars a last note rings into"
+    },
+    {
+      "test": "test_stream_bars",
+      "name": "empty bars skipped",
+      "edits": [{"file": "stream.py",
+                 "old": "            if bar >= 0:\n                yield _event(bar, notes)\n",
+                 "new": "            if bar >= 0 and notes:\n                yield _event(bar, notes)\n"}],
+      "expect": "one event per bar, including empty bars and the bars a last note rings into"
+    },
+    {
+      "test": "test_stream_bars",
+      "name": "a note that ends on the bar line still carried (steps >= room)",
+      "edits": [{"file": "stream.py",
+                 "old": "            if steps > room:\n",
+                 "new": "            if steps >= room:\n"}],
+      "expect": "a note that ends on the bar line does not ring into the next bar"
+    },
+    {
+      "test": "test_stream_bars",
+      "name": "a tied note that ends on a bar line still carried (left >= steps_per_bar)",
+      "edits": [{"file": "stream.py",
+                 "old": "if left > steps_per_bar]",
+                 "new": "if left >= steps_per_bar]"}],
+      "expect": "one event per bar, including empty bars and the bars a last note rings into"
+    },
+    {
+      "test": "test_stream_bars",
+      "name": "position not reset when a bar opens",
+      "edits": [{"file": "stream.py",
+                 "old": "            bar += 1\n            step = 0\n",
+                 "new": "            bar += 1\n"}],
+      "expect": "the new bar starts at step 0"
+    },
+    {
+      "test": "test_stream_bars",
+      "name": "tied notes sent after the bar's own notes",
+      "edits": [{"file": "stream.py",
+                 "old": "    return \"data: \" + json.dumps({\"bar\": bar, \"notes\": notes}) + \"\\n\\n\"",
+                 "new": "    notes = [n for n in notes if not n[\"tied\"]] + [n for n in notes if n[\"tied\"]]\n    return \"data: \" + json.dumps({\"bar\": bar, \"notes\": notes}) + \"\\n\\n\""}],
+      "expect": "the rest of a cut note opens the next bar, tied"
+    },
+    {
+      "test": "test_stream_bars",
+      "name": "pos outside the bar accepted",
+      "edits": [{"file": "stream.py",
+                 "old": "if kind == \"pos\" and len(args) == 1 and 0 <= int(args[0]) < steps_per_bar:",
+                 "new": "if kind == \"pos\" and len(args) == 1:"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_song_form",
+      "name": "endings ignored",
+      "edits": [{"file": "form.py",
+                 "old": "                if endings:\n                    at = play(endings[n], at, path)\n",
+                 "new": ""}],
+      "expect": "each pass plays its own ending"
+    },
+    {
+      "test": "test_song_form",
+      "name": "every ending played on every pass",
+      "edits": [{"file": "form.py",
+                 "old": "at = play(endings[n], at, path)",
+                 "new": "at = play([part for ending in endings for part in ending], at, path)"}],
+      "expect": "each pass plays its own ending"
+    },
+    {
+      "test": "test_song_form",
+      "name": "bar length ignores the beat unit (6/8 taken as six quarters)",
+      "edits": [{"file": "form.py",
+                 "old": "        bar_ticks = beats * ppq * 4 // unit\n",
+                 "new": "        bar_ticks = beats * ppq\n"}],
+      "expect": "a 3/4 bar is 1440 ticks, and so is a 6/8 bar"
+    },
+    {
+      "test": "test_song_form",
+      "name": "the next pass starts where the ending starts",
+      "edits": [{"file": "form.py",
+                 "old": "                    at = play(endings[n], at, path)\n",
+                 "new": "                    play(endings[n], at, path)\n"}],
+      "expect": "the second pass starts after the first ending"
+    },
+    {
+      "test": "test_song_form",
+      "name": "every section ever played treated as a loop",
+      "edits": [
+        {"file": "form.py",
+         "old": "    timeline: list[tuple[int, int, int]] = []\n",
+         "new": "    timeline: list[tuple[int, int, int]] = []\n    seen: set[str] = set()\n"},
+        {"file": "form.py", "old": "        if name in path:\n", "new": "        if name in seen:\n"},
+        {"file": "form.py",
+         "old": "{' > '.join(path + (name,))}\")\n",
+         "new": "{' > '.join(path + (name,))}\")\n        seen.add(name)\n"}
+      ],
+      "expect": "plays inside itself"
+    },
+    {
+      "test": "test_song_form",
+      "name": "no check for a section inside itself",
+      "edits": [{"file": "form.py", "old": "        if name in path:\n", "new": "        if False:\n"}],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_song_form",
+      "name": "notes past the bar line accepted",
+      "edits": [{"file": "form.py",
+                 "old": "                if not 0 <= tick < bar_ticks:\n",
+                 "new": "                if tick < 0:\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_song_form",
+      "name": "a note on the next bar line accepted (tick <= bar length)",
+      "edits": [{"file": "form.py",
+                 "old": "                if not 0 <= tick < bar_ticks:\n",
+                 "new": "                if not 0 <= tick <= bar_ticks:\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_song_form",
+      "name": "loop check against the parent section only",
+      "edits": [{"file": "form.py",
+                 "old": "        if name in path:\n",
+                 "new": "        if path and path[-1] == name:\n"}],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_song_form",
+      "name": "section length taken from its last note",
+      "edits": [{"file": "form.py",
+                 "old": "            at += bar_ticks\n",
+                 "new": "            at += max(t + n for t, n, _ in bar)\n"}],
+      "expect": "a repeat inside a section: the verse plays its riff twice, then the turn"
+    },
+    {
+      "test": "test_song_form",
+      "name": "endings played from the last one",
+      "edits": [{"file": "form.py",
+                 "old": "at = play(endings[n], at, path)",
+                 "new": "at = play(endings[-1 - n], at, path)"}],
+      "expect": "each pass plays its own ending"
+    }
+  ]
+}

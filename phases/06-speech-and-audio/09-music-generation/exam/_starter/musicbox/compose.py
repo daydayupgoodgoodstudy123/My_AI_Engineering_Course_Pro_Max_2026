@@ -1,0 +1,104 @@
+"""Prompt -> piece -> notes: the lesson's symbolic generator, rendered on a MIDI-style tick grid."""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, replace
+
+from .theory import DRUM_NOTES, DRUM_PATTERNS, MAJOR_KEYS, PROGRESSIONS, chord_tones
+
+PPQ = 480          # ticks per quarter note, i.e. per beat
+STEP = PPQ // 4    # one sixteenth-note step of a drum pattern
+BAR = 4 * PPQ      # one bar of 4/4
+DRUM_CHANNEL = 9   # General MIDI percussion ("channel 10" in most sequencers)
+
+
+@dataclass(frozen=True)
+class Note:
+    start: int         # ticks from the start
+    length: int        # ticks
+    pitch: int         # MIDI note number
+    velocity: int      # 1-127
+    channel: int = 0   # MIDI channel, 0-based
+
+    @property
+    def end(self) -> int:
+        return self.start + self.length
+
+
+@dataclass(frozen=True)
+class Piece:
+    key: str
+    genre: str
+    bpm: int
+    chords: list[str]  # one chord per bar
+    drums: str         # 16 steps per bar
+
+
+def detect_key(prompt: str) -> str:
+    """The key named after "in", as in "rock anthem in D"; C when no supported key is named."""
+    match = re.search(r"\bin ([a-g])\b", prompt.lower())
+    key = match.group(1).upper() if match else "C"
+    return key if key in MAJOR_KEYS else "C"
+
+
+def detect_genre(prompt: str) -> str:
+    """The first genre in PROGRESSIONS that the prompt mentions; pop otherwise."""
+    text = prompt.lower()
+    return next((genre for genre in PROGRESSIONS if genre in text), "pop")
+
+
+def parse_bpm(prompt: str) -> int:
+    """The tempo written in the prompt, as "128 bpm", "128bpm" or "128 BPM"; 120 when none is given."""
+    bpm = 120
+    for token in prompt.lower().split():
+        if token.endswith("bpm"):
+            try:
+                bpm = int(token[:-3])
+            except ValueError:
+                pass
+    return bpm
+
+
+def compose(prompt: str, bars: int = 8) -> Piece:
+    """The lesson's fake_generate: key, genre and tempo from the prompt, one chord per bar."""
+    key, genre = detect_key(prompt), detect_genre(prompt)
+    degrees = PROGRESSIONS[genre]
+    chords = [MAJOR_KEYS[key][degrees[bar % len(degrees)] - 1] for bar in range(bars)]
+    drums = DRUM_PATTERNS.get(genre, DRUM_PATTERNS["pop"]) * bars
+    return Piece(key, genre, parse_bpm(prompt), chords, drums)
+
+
+def render(piece: Piece) -> list[Note]:
+    """MIDI-style notes for a piece, in the order they start.
+
+    Each bar sounds its chord as a root-position triad (velocity 80) for the whole bar. The
+    chords are played legato: a tone that the next chord keeps is held over the bar line
+    instead of being struck again. Drum hits (velocity 100, DRUM_CHANNEL) last one step.
+    """
+    notes: list[Note] = []
+    for bar, chord in enumerate(piece.chords):
+        start = bar * BAR
+        for pitch in chord_tones(chord):
+            held = _held_until(notes, pitch, start)
+            if held is None:
+                notes.append(Note(start, BAR, pitch, 80))
+            else:
+                notes[held] = replace(notes[held], length=notes[held].length + BAR)
+        pattern = piece.drums[bar * 16 : (bar + 1) * 16]
+        for step, hit in enumerate(pattern):
+            if hit != ".":
+                notes.append(Note(start + step * STEP, STEP, DRUM_NOTES[hit], 100, DRUM_CHANNEL))
+    return notes
+
+
+def _held_until(notes: list[Note], pitch: int, tick: int) -> int | None:
+    """Index of the chord tone of this pitch that lasts up to tick, if there is one."""
+    for i, note in enumerate(notes):
+        if note.end == tick and note.pitch == pitch and note.channel == 0:
+            return i
+    return None
+
+
+def seconds(piece: Piece, tick: int) -> float:
+    """Seconds from the start of the piece to tick: tick / PPQ beats of 60 / bpm seconds each."""
+    return tick // PPQ * 60 / piece.bpm
