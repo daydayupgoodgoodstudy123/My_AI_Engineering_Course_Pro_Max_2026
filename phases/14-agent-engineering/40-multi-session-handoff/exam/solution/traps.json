@@ -1,0 +1,1869 @@
+{
+  "package": "handoffpkt",
+  "tests": [
+    "test_generate_handoff",
+    "test_history_roundtrip",
+    "test_clean_state",
+    "test_trim_stream",
+    "test_branch_heads"
+  ],
+  "layers": [
+    {
+      "test": "test_generate_handoff",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "AttributeError"
+        },
+        {
+          "name": "fix derive_risks: a missing review, or a total that is not a number, is a risk",
+          "edits": [
+            {
+              "file": "packet.py",
+              "old": "    total = review_total(snapshot.review)\n    if total < REVIEW_FLOOR:\n",
+              "new": "    if snapshot.review is None:\n        risks.append({\"severity\": \"warn\", \"detail\": \"review report missing\"})\n        return risks\n    total = snapshot.review.get(\"total\")\n    if not isinstance(total, int) or isinstance(total, bool):\n        risks.append({\"severity\": \"warn\", \"detail\": f\"review total {total!r} is not a number\"})\n    elif total < REVIEW_FLOOR:\n"
+            }
+          ],
+          "expect": "a command that never exited is a failed attempt too"
+        },
+        {
+          "name": "+ a record with no exit code failed",
+          "edits": [
+            {
+              "file": "packet.py",
+              "old": "    return record.get(\"exit_code\") not in (0, None)\n",
+              "new": "    return record.get(\"exit_code\") != 0\n"
+            }
+          ],
+          "expect": "the last 5 records plus every earlier failure, in log order"
+        },
+        {
+          "name": "+ trim_feedback keeps log order (and k=0 keeps no tail)",
+          "edits": [
+            {
+              "file": "packet.py",
+              "old": "    tail = records[-k:]\n    kept: list[dict] = []\n    seen: set[int] = set()\n    for record in tail + [r for r in records if failed(r)]:\n        if id(record) not in seen:\n            seen.add(id(record))\n            kept.append(record)\n    return kept\n",
+              "new": "    start = max(len(records) - k, 0)\n    return [record for i, record in enumerate(records) if i >= start or failed(record)]\n"
+            }
+          ],
+          "expect": "handoff.md is a render of the payload: the same next action"
+        },
+        {
+          "name": "+ render_markdown reads the payload only",
+          "edits": [
+            {
+              "file": "packet.py",
+              "old": "def render_markdown(payload: HandoffPayload, state: dict) -> str:",
+              "new": "def render_markdown(payload: HandoffPayload) -> str:"
+            },
+            {
+              "file": "packet.py",
+              "old": "        str(state.get(\"next_action\", payload.next_action)),\n",
+              "new": "        payload.next_action,\n"
+            },
+            {
+              "file": "packet.py",
+              "old": "    return render_markdown(payload, snapshot.state), payload\n",
+              "new": "    return render_markdown(payload), payload\n"
+            }
+          ],
+          "expect": "fitting a long session into max_bytes should be fast"
+        },
+        {
+          "name": "+ fit_budget finds the cut by bisection instead of one pop at a time",
+          "edits": [
+            {
+              "file": "packet.py",
+              "old": "    while packet_size(payload) > max_bytes:\n        if not payload.commands_run:\n            raise PacketTooLarge(f\"{payload.task_id}: the packet needs more than {max_bytes} bytes without any commands\")\n        payload.commands_run.pop(0)\n        payload.commands_omitted += 1\n    return payload\n",
+              "new": "    commands = list(payload.commands_run)\n\n    def size_keeping(keep: int) -> int:\n        payload.commands_run = commands[len(commands) - keep :]\n        payload.commands_omitted = len(commands) - keep\n        return packet_size(payload)\n\n    if size_keeping(len(commands)) <= max_bytes:\n        return payload\n    if size_keeping(0) > max_bytes:\n        raise PacketTooLarge(f\"{payload.task_id}: the packet needs more than {max_bytes} bytes without any commands\")\n    fits, too_big = 0, len(commands)\n    while too_big - fits > 1:\n        middle = (fits + too_big) // 2\n        if size_keeping(middle) <= max_bytes:\n            fits = middle\n        else:\n            too_big = middle\n    size_keeping(fits)\n    return payload\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_generate_handoff",
+      "name": "overfix: keep the newest 100 commands instead of measuring",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    if size_keeping(len(commands)) <= max_bytes:\n        return payload\n",
+          "new": "    size_keeping(min(len(commands), 100))\n    return payload\n"
+        }
+      ],
+      "expect": "keep every recent command that fits"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "overfix: make room by dropping the failed attempts and the feedback tail",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    if size_keeping(0) > max_bytes:\n        raise PacketTooLarge(",
+          "new": "    if size_keeping(0) > max_bytes:\n        payload.failed_attempts, payload.feedback_tail = [], []\n        if size_keeping(0) <= max_bytes:\n            return payload\n        raise PacketTooLarge("
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "overfix: one pop at a time, but only every 50th size measured",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    if size_keeping(len(commands)) <= max_bytes:\n        return payload\n",
+          "new": "    keep = len(commands)\n    while keep and size_keeping(keep) > max_bytes:\n        keep = max(keep - 50, 0)\n    if size_keeping(keep) <= max_bytes:\n        return payload\n"
+        }
+      ],
+      "expect": "keep every recent command that fits"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "bisection that ends on the first size that does not fit",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    size_keeping(fits)\n    return payload\n",
+          "new": "    size_keeping(too_big)\n    return payload\n"
+        }
+      ],
+      "expect": "handoff.json fits in max_bytes"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "the newest commands left out instead of the oldest",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "        payload.commands_run = commands[len(commands) - keep :]\n",
+          "new": "        payload.commands_run = commands[:keep]\n"
+        }
+      ],
+      "expect": "the most recent commands stay, oldest first"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "commands_omitted never set",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "        payload.commands_omitted = len(commands) - keep\n",
+          "new": "        payload.commands_omitted = 0\n"
+        }
+      ],
+      "expect": "commands_omitted counts the commands left out"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "handoff.md rendered before the budget trims the commands",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    payload = build_payload(snapshot, max_bytes)\n    return render_markdown(payload), payload\n",
+          "new": "    markdown = render_markdown(build_payload(snapshot, 10**9))\n    return markdown, build_payload(snapshot, max_bytes)\n"
+        }
+      ],
+      "expect": "handoff.md lists the commands handoff.json kept"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "handoff.md without the line on the omitted commands",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    if payload.commands_omitted:\n        commands.append(",
+          "new": "    if False:\n        commands.append("
+        }
+      ],
+      "expect": "handoff.md lists the commands handoff.json kept"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "commands_run taken from the trimmed feedback",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "        commands_run=[shell_line(record.get(\"command\", \"\")) for record in snapshot.feedback],\n",
+          "new": "        commands_run=[shell_line(record.get(\"command\", \"\")) for record in trim_feedback(snapshot.feedback)],\n"
+        }
+      ],
+      "expect": "every command as one shell line"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "trim keeps every record equal to a kept one",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    start = max(len(records) - k, 0)\n    return [record for i, record in enumerate(records) if i >= start or failed(record)]\n",
+          "new": "    keep = records[len(records) - k :] if k else []\n    keep = keep + [r for r in records[: len(records) - len(keep)] if failed(r)]\n    return [record for record in records if record in keep]\n"
+        }
+      ],
+      "expect": "each record once, where it is in the log, even when two are equal"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "trim puts the kept records back in order with list.index",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    start = max(len(records) - k, 0)\n    return [record for i, record in enumerate(records) if i >= start or failed(record)]\n",
+          "new": "    start = max(len(records) - k, 0)\n    keep = records[start:] + [r for r in records[:start] if failed(r)]\n    return sorted(keep, key=records.index)\n"
+        }
+      ],
+      "expect": "each record once, where it is in the log, even when two are equal"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "trim takes records[-k:] as the tail, which is the whole log for k=0",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    start = max(len(records) - k, 0)\n    return [record for i, record in enumerate(records) if i >= start or failed(record)]\n",
+          "new": "    tail = records[-k:]\n    return [r for r in records[: len(records) - len(tail)] if failed(r)] + tail\n"
+        }
+      ],
+      "expect": "k=0 keeps the failures only"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "a falsy exit code read as success, so None passes",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    return record.get(\"exit_code\") != 0\n",
+          "new": "    return bool(record.get(\"exit_code\"))\n"
+        }
+      ],
+      "expect": "a command that never exited is a failed attempt too"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "failed attempts that say 'exit None'",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    outcome = \"no exit code\" if code is None else f\"exit {code}\"\n",
+          "new": "    outcome = f\"exit {code}\"\n"
+        }
+      ],
+      "expect": "a command that never exited is a failed attempt too"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "failed attempts without the record's error",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    if record.get(\"error\"):\n        text +=",
+          "new": "    if False:\n        text +="
+        }
+      ],
+      "expect": "a command that never exited is a failed attempt too"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "a missing review read as a total of 0",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    if snapshot.review is None:\n        risks.append({\"severity\": \"warn\", \"detail\": \"review report missing\"})\n        return risks\n    total = snapshot.review.get(\"total\")\n",
+          "new": "    total = (snapshot.review or {}).get(\"total\", 0)\n"
+        }
+      ],
+      "expect": "a missing review report is a risk"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "a missing review skipped, as if nobody expected one",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "        risks.append({\"severity\": \"warn\", \"detail\": \"review report missing\"})\n        return risks\n",
+          "new": "        return risks\n"
+        }
+      ],
+      "expect": "a missing review report is a risk"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "a review total converted with int()",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    if not isinstance(total, int) or isinstance(total, bool):\n        risks.append({\"severity\": \"warn\", \"detail\": f\"review total {total!r} is not a number\"})\n    elif total < REVIEW_FLOOR:\n",
+          "new": "    if int(total) < REVIEW_FLOOR:\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "a review total that is not a number read as a pass, as in the lesson code",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    if not isinstance(total, int) or isinstance(total, bool):\n        risks.append({\"severity\": \"warn\", \"detail\": f\"review total {total!r} is not a number\"})\n    elif total < REVIEW_FLOOR:\n",
+          "new": "    if not isinstance(total, int):\n        total = 10\n    if total < REVIEW_FLOOR:\n"
+        }
+      ],
+      "expect": "a review total that is not a number is a risk"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "a total of 7 counted as below the floor",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    elif total < REVIEW_FLOOR:\n",
+          "new": "    elif total <= REVIEW_FLOOR:\n"
+        }
+      ],
+      "expect": "a total of 7 or more is not"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "every finding carried as a risk, info included",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "        if isinstance(finding, dict) and finding.get(\"severity\") in (\"block\", \"warn\"):\n",
+          "new": "        if isinstance(finding, dict):\n"
+        }
+      ],
+      "expect": "open_risks: block and warn findings"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "next_action stripped but left on two lines",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    next_action = \" \".join(str(state.get(\"next_action\") or \"\").split())\n",
+          "new": "    next_action = str(state.get(\"next_action\") or \"\").strip()\n"
+        }
+      ],
+      "expect": "next_action on one line"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "a placeholder next_action instead of NoNextAction, as in the lesson code",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    if not next_action:\n        raise NoNextAction(",
+          "new": "    if not next_action:\n        next_action = \"no next_action recorded; needs human\"\n    if False:\n        raise NoNextAction("
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "next_action checked before it is normalised, so a blank one passes",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    if not next_action:\n        raise NoNextAction(",
+          "new": "    if not state.get(\"next_action\"):\n        raise NoNextAction("
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "argv shown as a Python list, as str() does in the lesson code",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    return shlex.join(str(part) for part in command)\n",
+          "new": "    return str(command)\n"
+        }
+      ],
+      "expect": "every command as one shell line"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "changed_files deduplicated with a set, not sorted",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "        changed_files=sorted(set(snapshot.diff_summary.get(\"touched\") or [])),\n",
+          "new": "        changed_files=list(set(snapshot.diff_summary.get(\"touched\") or [])),\n"
+        }
+      ],
+      "expect": "every touched path once, sorted"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "changed_files in the order first touched",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "        changed_files=sorted(set(snapshot.diff_summary.get(\"touched\") or [])),\n",
+          "new": "        changed_files=list(dict.fromkeys(snapshot.diff_summary.get(\"touched\") or [])),\n"
+        }
+      ],
+      "expect": "every touched path once, sorted"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "the floor itself counted as too large",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    if size_keeping(0) > max_bytes:\n",
+          "new": "    if size_keeping(0) >= max_bytes:\n"
+        }
+      ],
+      "expect": "PacketTooLarge"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "commands_run with each command once",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "        commands_run=[shell_line(record.get(\"command\", \"\")) for record in snapshot.feedback],\n",
+          "new": "        commands_run=list(dict.fromkeys(shell_line(record.get(\"command\", \"\")) for record in snapshot.feedback)),\n"
+        }
+      ],
+      "expect": "every command as one shell line"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "changed_files sorted but not deduplicated",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "        changed_files=sorted(set(snapshot.diff_summary.get(\"touched\") or [])),\n",
+          "new": "        changed_files=sorted(snapshot.diff_summary.get(\"touched\") or []),\n"
+        }
+      ],
+      "expect": "every touched path once, sorted"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "the review risk listed before the blockers",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    for blocker in snapshot.state.get(\"blockers\") or []:\n        risks.append({\"severity\": \"warn\", \"detail\": f\"open blocker: {blocker}\"})\n",
+          "new": ""
+        },
+        {
+          "file": "packet.py",
+          "old": "        open_risks=derive_risks(snapshot),\n",
+          "new": "        open_risks=derive_risks(snapshot) + [{\"severity\": \"warn\", \"detail\": f\"open blocker: {b}\"} for b in snapshot.state.get(\"blockers\") or []],\n"
+        }
+      ],
+      "expect": "open_risks: block and warn findings, the blockers, then the review"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "trim_feedback ignores k and always keeps TAIL_K",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    start = max(len(records) - k, 0)\n",
+          "new": "    start = max(len(records) - TAIL_K, 0)\n"
+        }
+      ],
+      "expect": "each record once, where it is in the log, even when two are equal"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "a risk for every review verdict that is not a pass, on top of the total",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    elif total < REVIEW_FLOOR:\n",
+          "new": "    if snapshot.review.get(\"verdict\") != \"pass\":\n        risks.append({\"severity\": \"warn\", \"detail\": f\"review verdict {snapshot.review.get('verdict')}\"})\n    if isinstance(total, int) and total < REVIEW_FLOOR:\n"
+        }
+      ],
+      "expect": "a review total that is not a number is a risk"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "only commands_run measured against max_bytes",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "        payload.commands_omitted = len(commands) - keep\n        return packet_size(payload)\n",
+          "new": "        payload.commands_omitted = len(commands) - keep\n        return len(json.dumps(payload.commands_run, ensure_ascii=False).encode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "handoff.json fits in max_bytes"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "the tail sliced as records[len(records) - k:], which wraps around for a short log",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    start = max(len(records) - k, 0)\n    return [record for i, record in enumerate(records) if i >= start or failed(record)]\n",
+          "new": "    tail = records[len(records) - k :] if k else []\n    return [r for r in records[: len(records) - len(tail)] if failed(r)] + tail\n"
+        }
+      ],
+      "expect": "a log shorter than k is kept whole"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "a failure read as None or a positive exit code, so a signal kill (-9) passes",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    return record.get(\"exit_code\") != 0\n",
+          "new": "    code = record.get(\"exit_code\")\n    return code is None or code > 0\n"
+        }
+      ],
+      "expect": "a command that never exited is a failed attempt too"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "trim keeps one record too few of the last k",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "if i >= start or failed(record)]",
+          "new": "if i > start or failed(record)]"
+        }
+      ],
+      "expect": "the last 5 records plus every earlier failure, in log order"
+    },
+    {
+      "test": "test_generate_handoff",
+      "name": "bisection that leaves the payload at its last probe",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    size_keeping(fits)\n    return payload\n",
+          "new": "    return payload\n"
+        }
+      ],
+      "expect": "at the floor every command is left out"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "the first session's previous written as 0",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "\"previous\": done[-1] if done else None}",
+          "new": "\"previous\": done[-1] if done else 0}"
+        }
+      ],
+      "expect": "the first session has no previous"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "the first session written without a previous key",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "stored = {**own, \"session\": number, \"previous\": done[-1] if done else None}",
+          "new": "stored = {**own, \"session\": number, **({\"previous\": done[-1]} if done else {})}"
+        }
+      ],
+      "expect": "the first session has no previous"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "no idempotency: every save is a new session",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        if done:\n            latest = self.load(done[-1])\n",
+          "new": "        if False:\n            latest = self.load(done[-1])\n"
+        }
+      ],
+      "expect": "the same packet saved again is the same session"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "the repeat check compares session and previous too",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "            if own == {key: value for key, value in latest.items() if key not in ASSIGNED}:\n",
+          "new": "            if packet == latest:\n"
+        }
+      ],
+      "expect": "the same packet saved again is the same session"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "a packet equal to any earlier session is that session",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        if done:\n            latest = self.load(done[-1])\n            if own == {key: value for key, value in latest.items() if key not in ASSIGNED}:\n                return done[-1]\n",
+          "new": "        for earlier in done:\n            latest = self.load(earlier)\n            if own == {key: value for key, value in latest.items() if key not in ASSIGNED}:\n                return earlier\n"
+        }
+      ],
+      "expect": "a packet like an older session is a new session"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "the repeat check reads the first session instead of the latest",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "            latest = self.load(done[-1])\n            if own ==",
+          "new": "            latest = self.load(done[0])\n            if own =="
+        },
+        {
+          "file": "history.py",
+          "old": "                return done[-1]\n",
+          "new": "                return done[0]\n"
+        }
+      ],
+      "expect": "a packet loaded back and saved unchanged is the same session"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "a repeat recognised by its next_action alone",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "            if own == {key: value for key, value in latest.items() if key not in ASSIGNED}:\n",
+          "new": "            if own.get(\"next_action\") == latest.get(\"next_action\"):\n"
+        }
+      ],
+      "expect": "any change to the packet is a new session"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "session and previous already in the packet are kept",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "stored = {**own, \"session\": number, \"previous\": done[-1] if done else None}",
+          "new": "stored = {\"session\": number, \"previous\": done[-1] if done else None, **packet}"
+        }
+      ],
+      "expect": "save assigns session and previous itself"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "sessions found with glob('session-*') and the stem",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        found = (SESSION_FILE.fullmatch(path.name) for path in self.root.iterdir())\n        return sorted(int(match.group(1)) for match in found if match)\n",
+          "new": "        return sorted(int(path.stem.split(\"-\")[1]) for path in self.root.glob(\"session-*\"))\n"
+        }
+      ],
+      "expect": "sessions in number order"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "the next number from the count of files in root",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        number = done[-1] + 1 if done else 1\n",
+          "new": "        number = len(list(self.root.iterdir())) + 1 if self.root.is_dir() else 1\n"
+        }
+      ],
+      "expect": "the next number comes from the session files"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "a missing root raises instead of having no sessions",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        if not self.root.is_dir():\n            return []\n",
+          "new": ""
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "root not created before the first save",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        self.root.mkdir(parents=True, exist_ok=True)\n",
+          "new": ""
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "load lets FileNotFoundError out for an unknown session",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "            raise KeyError(session) from None\n",
+          "new": "            raise\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "latest kept in memory by the instance that saved it",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "        return number\n\n    def load",
+          "new": "        self._latest = self.load(number)\n        return number\n\n    def load"
+        },
+        {
+          "file": "history.py",
+          "old": "        done = self.sessions()\n        return self.load(done[-1]) if done else None\n",
+          "new": "        return getattr(self, \"_latest\", None)\n"
+        }
+      ],
+      "expect": "latest is the highest session number on disk"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "the repeat check strips the assigned keys from the stored packet only",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "            if own == {key: value for key, value in latest.items() if key not in ASSIGNED}:\n",
+          "new": "            if packet == {key: value for key, value in latest.items() if key not in ASSIGNED}:\n"
+        }
+      ],
+      "expect": "a packet loaded back and saved unchanged is the same session"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "session files named without the zero padding",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "f\"session-{number:04d}.json\"",
+          "new": "f\"session-{number}.json\""
+        },
+        {
+          "file": "history.py",
+          "old": "f\"session-{session:04d}.json\"",
+          "new": "f\"session-{session}.json\""
+        },
+        {
+          "file": "history.py",
+          "old": "r\"session-([0-9]{4,})\\.json\"",
+          "new": "r\"session-([1-9][0-9]*)\\.json\""
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_history_roundtrip",
+      "name": "session files matched with re.match, so the editor's backup session-0001.json~ counts",
+      "edits": [
+        {
+          "file": "history.py",
+          "old": "SESSION_FILE.fullmatch(path.name)",
+          "new": "SESSION_FILE.match(path.name)"
+        }
+      ],
+      "expect": "sessions in number order"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "a rename reported as the whole 'old -> new' text",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        if \" -> \" in path:\n            path = path.split(\" -> \", 1)[1]\n",
+          "new": ""
+        }
+      ],
+      "expect": "every change is committed, or stashed with a note"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "status lines split on whitespace, so a rename reports its old path",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        path = line[3:]\n",
+          "new": "        path = line.split()[1]\n"
+        }
+      ],
+      "expect": "every change is committed, or stashed with a note"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "any stash message counts as a note",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        if message.startswith(\"WIP on \"):\n",
+          "new": "        if not message.strip():\n"
+        }
+      ],
+      "expect": "every change is committed, or stashed with a note"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "'WIP on' anywhere in the line marks a stash without a note",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        if message.startswith(\"WIP on \"):\n",
+          "new": "        if \"WIP on\" in message:\n"
+        }
+      ],
+      "expect": "every change is committed, or stashed with a note"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "scratch found as a substring of the path",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        if \"scratch\" in parts[:-1]:\n            directory = \"/\".join(parts[: parts.index(\"scratch\") + 1]) + \"/\"\n",
+          "new": "        if \"scratch\" in path:\n            directory = path.split(\"scratch\")[0] + \"scratch/\"\n"
+        }
+      ],
+      "expect": "*.tmp files and scratch directories"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "every file inside a scratch dir reported",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "            if directory not in scratch_dirs:\n",
+          "new": "            if True:\n"
+        }
+      ],
+      "expect": "*.tmp files and scratch directories"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "a *.tmp file inside a scratch dir reported as well",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        elif parts[-1].endswith(\".tmp\"):\n",
+          "new": "        if parts[-1].endswith(\".tmp\"):\n"
+        }
+      ],
+      "expect": "*.tmp files and scratch directories"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "'tmp' anywhere in the path",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        elif parts[-1].endswith(\".tmp\"):\n",
+          "new": "        elif \"tmp\" in path:\n"
+        }
+      ],
+      "expect": "*.tmp files and scratch directories"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "context and removed lines searched for prints too",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        elif line.startswith(\"+\"):\n            if path and path.endswith(\".py\") and line[1:].lstrip().startswith(DEBUG_CALLS):\n                found.append(f\"debug print: {path}:{line_no}\")\n            line_no += 1\n",
+          "new": "        elif line[:1] in (\"+\", \"-\", \" \"):\n            if path and path.endswith(\".py\") and line[1:].lstrip().startswith(DEBUG_CALLS):\n                found.append(f\"debug print: {path}:{line_no}\")\n            if not line.startswith(\"-\"):\n                line_no += 1\n"
+        }
+      ],
+      "expect": "debug prints among the lines this session added"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "print( found anywhere in the line",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "line[1:].lstrip().startswith(DEBUG_CALLS):",
+          "new": "any(call in line for call in DEBUG_CALLS):"
+        }
+      ],
+      "expect": "debug prints among the lines this session added"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "the file path taken from the --- line",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        if line.startswith(\"+++ \"):\n            target = line[4:]\n            path = target[2:] if target.startswith(\"b/\") else None\n        elif line.startswith(\"--- \") or line.startswith(\"diff --git \"):\n",
+          "new": "        if line.startswith(\"--- \"):\n            target = line[4:]\n            path = target[2:] if target.startswith(\"a/\") else None\n        elif line.startswith(\"+++ \") or line.startswith(\"diff --git \"):\n"
+        }
+      ],
+      "expect": "debug prints among the lines this session added"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "removed lines move the new file's line number",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        elif line.startswith(\" \"):\n            line_no += 1\n",
+          "new": "        elif line.startswith((\" \", \"-\")):\n            line_no += 1\n"
+        }
+      ],
+      "expect": "at their new line numbers"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "added lines in any file, not only .py",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "if path and path.endswith(\".py\") and line",
+          "new": "if path and line"
+        }
+      ],
+      "expect": "debug prints among the lines this session added"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "only failed tests are red",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "RED = (\"failed\", \"error\")",
+          "new": "RED = (\"failed\",)"
+        }
+      ],
+      "expect": "a red test blocks unless an open risk names exactly that test"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "skipped tests counted as red",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "RED = (\"failed\", \"error\")",
+          "new": "RED = (\"failed\", \"error\", \"skipped\")"
+        }
+      ],
+      "expect": "a red test blocks unless an open risk names exactly that test"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "a risk names a test by prefix",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        if outcome in RED and node not in named:\n",
+          "new": "        if outcome in RED and not any(node.startswith(test) for test in named if test):\n"
+        }
+      ],
+      "expect": "a red test blocks unless an open risk names exactly that test"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "a risk about one test unblocks every test in its file",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        if outcome in RED and node not in named:\n",
+          "new": "        if outcome in RED and node.split(\"::\")[0] not in {test.split(\"::\")[0] for test in named if test}:\n"
+        }
+      ],
+      "expect": "a red test blocks unless an open risk names exactly that test"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "a single in_progress feature reported",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "    if len(in_progress) > 1:\n",
+          "new": "    if in_progress:\n"
+        }
+      ],
+      "expect": "a clean workbench has no blocking issue"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "the active feature not checked",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "    if active and status.get(active) == \"done\":\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "the feature board matches what happened"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "finished features checked against the active one only",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "    for feature_id in repo.finished:\n",
+          "new": "    for feature_id in [f for f in repo.finished if f == repo.board.get(\"active\")]:\n"
+        }
+      ],
+      "expect": "the feature board matches what happened"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "a detached HEAD reported as a wrong branch too",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "    elif repo.branch != repo.expected_branch:\n",
+          "new": "    if repo.branch != repo.expected_branch:\n"
+        }
+      ],
+      "expect": "on the expected branch, and no stray branches"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "the expected branch reported as an orphan",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        if not merged and name not in (repo.base_branch, repo.expected_branch):\n",
+          "new": "        if not merged and name != repo.base_branch:\n"
+        }
+      ],
+      "expect": "on the expected branch, and no stray branches"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "merged branches reported as orphans",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        if not merged and name not in (repo.base_branch, repo.expected_branch):\n",
+          "new": "        if name not in (repo.base_branch, repo.expected_branch):\n"
+        }
+      ],
+      "expect": "on the expected branch, and no stray branches"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "debug prints listed before the files",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "    issues.extend(_debug_prints(repo.diff))\n",
+          "new": ""
+        },
+        {
+          "file": "cleanup.py",
+          "old": "    scratch_dirs: set[str] = set()\n",
+          "new": "    issues.extend(_debug_prints(repo.diff))\n    scratch_dirs: set[str] = set()\n"
+        }
+      ],
+      "expect": "the checks in the table's order"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "generate_handoff does not assert the clean-state precondition",
+      "edits": [
+        {
+          "file": "packet.py",
+          "old": "    if clean_state:\n        raise DirtyWorkbench(list(clean_state))\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "untracked files left out of the working-tree check",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "    for line in repo.status:\n        path = line[3:]\n",
+          "new": "    for line in repo.status:\n        if line.startswith(\"??\"):\n            continue\n        path = line[3:]\n"
+        }
+      ],
+      "expect": "every change is committed, or stashed with a note"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "a line starting with 'print' read as a print, print_table( included",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "DEBUG_CALLS = (\"print(\", \"pprint(\", \"breakpoint(\")",
+          "new": "DEBUG_CALLS = (\"print\", \"pprint\", \"breakpoint\")"
+        }
+      ],
+      "expect": "a clean workbench has no blocking issue"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "scratch dirs gathered in a set and listed after the temp files",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "            if directory not in scratch_dirs:\n                scratch_dirs.add(directory)\n                issues.append(f\"scratch dir: {directory}\")\n",
+          "new": "            scratch_dirs.add(directory)\n"
+        },
+        {
+          "file": "cleanup.py",
+          "old": "    issues.extend(_debug_prints(repo.diff))\n",
+          "new": "    issues.extend(f\"scratch dir: {d}\" for d in sorted(scratch_dirs))\n    issues.extend(_debug_prints(repo.diff))\n"
+        }
+      ],
+      "expect": "*.tmp files and scratch directories"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "temp artifacts looked for among the untracked status lines only",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "    for path in repo.files:\n",
+          "new": "    for path in [line[3:] for line in repo.status if line.startswith(\"??\")]:\n"
+        }
+      ],
+      "expect": "*.tmp files and scratch directories"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "line numbers counted from the hunk's old start",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "HUNK = re.compile(r\"@@ -\\d+(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@\")",
+          "new": "HUNK = re.compile(r\"@@ -(\\d+)(?:,\\d+)? \\+\\d+(?:,\\d+)? @@\")"
+        }
+      ],
+      "expect": "at their new line numbers"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "features in_progress listed in sorted order",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "', '.join(in_progress)",
+          "new": "', '.join(sorted(in_progress))"
+        }
+      ],
+      "expect": "the feature board matches what happened"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "the active feature checked against the finished list instead of the board",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "    if active and status.get(active) == \"done\":\n",
+          "new": "    if active and active in repo.finished:\n"
+        }
+      ],
+      "expect": "the feature board matches what happened"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "status lines stripped before the path is sliced off",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        path = line[3:]\n",
+          "new": "        path = line.strip()[3:]\n"
+        }
+      ],
+      "expect": "every change is committed, or stashed with a note"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "the line number advanced before the added line is checked",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        elif line.startswith(\"+\"):\n            if path and path.endswith(\".py\") and line[1:].lstrip().startswith(DEBUG_CALLS):\n                found.append(f\"debug print: {path}:{line_no}\")\n            line_no += 1\n",
+          "new": "        elif line.startswith(\"+\"):\n            line_no += 1\n            if path and path.endswith(\".py\") and line[1:].lstrip().startswith(DEBUG_CALLS):\n                found.append(f\"debug print: {path}:{line_no}\")\n"
+        }
+      ],
+      "expect": "at their new line numbers"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "the checked-out branch excused from the orphan check instead of the expected one",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "name not in (repo.base_branch, repo.expected_branch):",
+          "new": "name not in (repo.base_branch, repo.branch):"
+        }
+      ],
+      "expect": "on the expected branch, and no stray branches"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "scratch only as a top-level directory",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        if \"scratch\" in parts[:-1]:\n            directory = \"/\".join(parts[: parts.index(\"scratch\") + 1]) + \"/\"\n",
+          "new": "        if parts[0] == \"scratch\" and len(parts) > 1:\n            directory = \"scratch/\"\n"
+        }
+      ],
+      "expect": "*.tmp files and scratch directories"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "every scratch dir listed before the temp files",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "    scratch_dirs: set[str] = set()\n",
+          "new": "    scratch_dirs: set[str] = set()\n    temp_files: list[str] = []\n"
+        },
+        {
+          "file": "cleanup.py",
+          "old": "            issues.append(f\"temp file: {path}\")\n",
+          "new": "            temp_files.append(f\"temp file: {path}\")\n"
+        },
+        {
+          "file": "cleanup.py",
+          "old": "    issues.extend(_debug_prints(repo.diff))\n",
+          "new": "    issues.extend(temp_files)\n    issues.extend(_debug_prints(repo.diff))\n"
+        }
+      ],
+      "expect": "*.tmp files and scratch directories"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "staged changes taken as committed: only the work-tree column of a status line read",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "    for line in repo.status:\n        path = line[3:]\n",
+          "new": "    for line in repo.status:\n        if line[1] == \" \":\n            continue\n        path = line[3:]\n"
+        }
+      ],
+      "expect": "every change is committed, or stashed with a note"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "untracked files that the temp-artifact check reports left out of the working tree",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        path = line[3:]\n        if \" -> \" in path:\n",
+          "new": "        path = line[3:]\n        if line.startswith(\"??\") and (path.endswith(\".tmp\") or \"scratch\" in path.split(\"/\")):\n            continue\n        if \" -> \" in path:\n"
+        }
+      ],
+      "expect": "every change is committed, or stashed with a note"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "context lines leave the new file's line number where it is",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        elif line.startswith(\" \"):\n            line_no += 1\n",
+          "new": "        elif line.startswith(\" \"):\n            pass\n"
+        }
+      ],
+      "expect": "at their new line numbers"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "one row per in_progress feature",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        issues.append(f\"features in_progress at once: {', '.join(in_progress)}\")\n",
+          "new": "        issues.extend(f\"features in_progress at once: {feature_id}\" for feature_id in in_progress)\n"
+        }
+      ],
+      "expect": "the feature board matches what happened"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "a finished feature reported only while the board still says in_progress",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "        if status.get(feature_id) != \"done\":\n",
+          "new": "        if status.get(feature_id) == \"in_progress\":\n"
+        }
+      ],
+      "expect": "the feature board matches what happened"
+    },
+    {
+      "test": "test_clean_state",
+      "name": "a detached HEAD reported as 'wrong branch: None' instead",
+      "edits": [
+        {
+          "file": "cleanup.py",
+          "old": "    if repo.branch is None:\n        issues.append(\"detached HEAD\")\n    elif repo.branch != repo.expected_branch:\n",
+          "new": "    if repo.branch != repo.expected_branch:\n"
+        }
+      ],
+      "expect": "on the expected branch, and no stray branches"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "failures written the moment they arrive",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    window: deque[dict] = deque()\n    for record in records:\n        window.append(record)\n        if len(window) > k:\n            oldest = window.popleft()\n            if failed(oldest):\n                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n    while window:\n        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n",
+          "new": "    window: deque[dict] = deque()\n    for record in records:\n        if failed(record):\n            yield json.dumps(record, ensure_ascii=False) + \"\\n\"\n        window.append(record)\n        if len(window) > k:\n            window.popleft()\n    for record in window:\n        if not failed(record):\n            yield json.dumps(record, ensure_ascii=False) + \"\\n\"\n"
+        }
+      ],
+      "expect": "in log order"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "failures written on arrival and the last k written whole at the end",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    window: deque[dict] = deque()\n    for record in records:\n        window.append(record)\n        if len(window) > k:\n            oldest = window.popleft()\n            if failed(oldest):\n                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n    while window:\n        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n",
+          "new": "    window: deque[dict] = deque()\n    for record in records:\n        window.append(record)\n        if failed(record):\n            yield json.dumps(record, ensure_ascii=False) + \"\\n\"\n        if len(window) > k:\n            window.popleft()\n    for record in window:\n        yield json.dumps(record, ensure_ascii=False) + \"\\n\"\n"
+        }
+      ],
+      "expect": "a failure among the last k once"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "failures held back until the log ends",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    window: deque[dict] = deque()\n    for record in records:\n        window.append(record)\n        if len(window) > k:\n            oldest = window.popleft()\n            if failed(oldest):\n                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n    while window:\n        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n",
+          "new": "    window: deque[dict] = deque()\n    held: list[dict] = []\n    for record in records:\n        window.append(record)\n        if len(window) > k:\n            oldest = window.popleft()\n            if failed(oldest):\n                held.append(oldest)\n    for record in held + list(window):\n        yield json.dumps(record, ensure_ascii=False) + \"\\n\"\n"
+        }
+      ],
+      "expect": "a failure is written as soon as it leaves the last k"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "the whole log read before trimming",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    for record in records:\n",
+          "new": "    for record in list(records):\n"
+        }
+      ],
+      "expect": "a failure is written as soon as it leaves the last k"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "the lines built as a list and returned, not yielded",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    window: deque[dict] = deque()\n    for record in records:\n        window.append(record)\n        if len(window) > k:\n            oldest = window.popleft()\n            if failed(oldest):\n                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n    while window:\n        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n",
+          "new": "    from .packet import trim_feedback\n    return [json.dumps(record, ensure_ascii=False) + \"\\n\" for record in trim_feedback(list(records), k)]\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "deque(maxlen=k), which keeps nothing when k=0",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    window: deque[dict] = deque()\n    for record in records:\n        window.append(record)\n        if len(window) > k:\n            oldest = window.popleft()\n            if failed(oldest):\n                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n    while window:\n        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n",
+          "new": "    window: deque[dict] = deque(maxlen=k)\n    for record in records:\n        if k and len(window) == k and failed(window[0]):\n            yield json.dumps(window[0], ensure_ascii=False) + \"\\n\"\n        window.append(record)\n    for record in window:\n        yield json.dumps(record, ensure_ascii=False) + \"\\n\"\n"
+        }
+      ],
+      "expect": "k=0 keeps the failures only"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "a missing exit code read as a pass",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if failed(oldest):\n",
+          "new": "            if oldest.get(\"exit_code\") not in (0, None):\n"
+        }
+      ],
+      "expect": "every failure plus the last k"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "records yielded as dicts",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n",
+          "new": "                yield oldest\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n",
+          "new": "        yield window.popleft()\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "every failure written is also kept in a list",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    window: deque[dict] = deque()\n    for record in records:\n        window.append(record)\n        if len(window) > k:\n            oldest = window.popleft()\n            if failed(oldest):\n                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n    while window:\n        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n",
+          "new": "    window: deque[dict] = deque()\n    written: list[dict] = []\n    for record in records:\n        window.append(record)\n        if len(window) > k:\n            oldest = window.popleft()\n            if failed(oldest):\n                written.append(oldest)\n                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n    while window:\n        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n"
+        }
+      ],
+      "expect": "hold the last k records, not the log and not its failures"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "the last k written newest first",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n",
+          "new": "        yield json.dumps(window.pop(), ensure_ascii=False) + \"\\n\"\n"
+        }
+      ],
+      "expect": "in log order"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "the window kept one record short",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if len(window) > k:\n",
+          "new": "        if len(window) >= k:\n"
+        }
+      ],
+      "expect": "every failure plus the last k"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "records written with str()",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n",
+          "new": "                yield str(oldest) + \"\\n\"\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n",
+          "new": "        yield str(window.popleft()) + \"\\n\"\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "records written without the newline",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n",
+          "new": "                yield json.dumps(oldest, ensure_ascii=False)\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n",
+          "new": "        yield json.dumps(window.popleft(), ensure_ascii=False)\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "records pretty-printed with indent=2, like handoff.json",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n",
+          "new": "                yield json.dumps(oldest, ensure_ascii=False, indent=2) + \"\\n\"\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n",
+          "new": "        yield json.dumps(window.popleft(), ensure_ascii=False, indent=2) + \"\\n\"\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "a failure read as None or a positive exit code, so -9 passes",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if failed(oldest):\n",
+          "new": "            if oldest.get(\"exit_code\") is None or oldest[\"exit_code\"] > 0:\n"
+        }
+      ],
+      "expect": "k=0 keeps the failures only"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "deque(maxlen=k + 1) with the whole window written at the end",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    window: deque[dict] = deque()\n    for record in records:\n        window.append(record)\n        if len(window) > k:\n            oldest = window.popleft()\n            if failed(oldest):\n                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n    while window:\n        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n",
+          "new": "    window: deque[dict] = deque(maxlen=k + 1)\n    for record in records:\n        window.append(record)\n        if len(window) > k and failed(window[0]):\n            yield json.dumps(window[0], ensure_ascii=False) + \"\\n\"\n    for record in window:\n        yield json.dumps(record, ensure_ascii=False) + \"\\n\"\n"
+        }
+      ],
+      "expect": "every failure plus the last k"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "bytes yielded instead of str",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n",
+          "new": "                yield (json.dumps(oldest, ensure_ascii=False) + \"\\n\").encode()\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n",
+          "new": "        yield (json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\").encode()\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_trim_stream",
+      "name": "the window cut with window[-k:], which keeps everything for k=0",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    window: deque[dict] = deque()\n    for record in records:\n        window.append(record)\n        if len(window) > k:\n            oldest = window.popleft()\n            if failed(oldest):\n                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n    while window:\n        yield json.dumps(window.popleft(), ensure_ascii=False) + \"\\n\"\n",
+          "new": "    window: list = []\n    for record in records:\n        window.append(record)\n        if len(window) > k:\n            oldest, window = window[0], window[-k:]\n            if failed(oldest):\n                yield json.dumps(oldest, ensure_ascii=False) + \"\\n\"\n    for record in window:\n        yield json.dumps(record, ensure_ascii=False) + \"\\n\"\n"
+        }
+      ],
+      "expect": "k=0 keeps the failures only"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "risks keyed by their wording",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "                still_open[risk[\"id\"]] = risk\n",
+          "new": "                still_open[risk[\"detail\"]] = risk\n"
+        }
+      ],
+      "expect": "a risk is matched by id"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "a new wording moves the risk to the end",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "                still_open[risk[\"id\"]] = risk\n",
+          "new": "                still_open.pop(risk[\"id\"], None)\n                still_open[risk[\"id\"]] = risk\n"
+        }
+      ],
+      "expect": "new wording replaces it in place"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "a reopened risk keeps the place it first opened at",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        still_open: dict[str, dict] = {}\n",
+          "new": "        still_open: dict[str, dict] = {}\n        first_seen: list[str] = []\n"
+        },
+        {
+          "file": "chain.py",
+          "old": "                still_open[risk[\"id\"]] = risk\n",
+          "new": "                still_open[risk[\"id\"]] = risk\n                if risk[\"id\"] not in first_seen:\n                    first_seen.append(risk[\"id\"])\n"
+        },
+        {
+          "file": "chain.py",
+          "old": "list(still_open.values())",
+          "new": "[still_open[i] for i in first_seen if i in still_open]"
+        }
+      ],
+      "expect": "a reopened one goes to the end"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "every session up to the head applied, whatever its branch",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        for session in lineage:\n",
+          "new": "        for session in sorted(s for s in by_session if s <= number):\n"
+        }
+      ],
+      "expect": "only the head's own chain counts"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "a branch's own packets only",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        lineage.reverse()\n",
+          "new": "        lineage = [s for s in sorted(by_session) if by_session[s][\"branch\"] == branch]\n"
+        }
+      ],
+      "expect": "inherits the sessions before the fork"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "a branch's head is its last packet in the input",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "    for number in sorted(by_session):\n        head_of[",
+          "new": "    for number in by_session:\n        head_of["
+        }
+      ],
+      "expect": "one head per branch, its highest session"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "heads are the packets nothing points to",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "    for number in sorted(by_session):\n        head_of[by_session[number][\"branch\"]] = number\n",
+          "new": "    pointed = {packet.get(\"previous\") for packet in by_session.values()}\n    for number in sorted(by_session):\n        if number not in pointed:\n            head_of[by_session[number][\"branch\"]] = number\n"
+        }
+      ],
+      "expect": "one head per branch, its highest session"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "a missing previous starts a new chain",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        if previous not in by_session:\n            raise BrokenChain(",
+          "new": "        if previous not in by_session:\n            continue\n            raise BrokenChain("
+        },
+        {
+          "file": "chain.py",
+          "old": "        while cursor is not None:\n",
+          "new": "        while cursor in by_session:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "a missing previous noticed only on a head's own chain",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        if previous not in by_session:\n            raise BrokenChain(",
+          "new": "        if previous not in by_session:\n            continue\n            raise BrokenChain("
+        },
+        {
+          "file": "chain.py",
+          "old": "            lineage.append(cursor)\n",
+          "new": "            if cursor not in by_session:\n                raise BrokenChain(f\"session {lineage[-1]} points to session {cursor}, which is missing\")\n            lineage.append(cursor)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "previous 0 read as no previous",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        if previous is None:\n            continue\n",
+          "new": "        if not previous:\n            continue\n"
+        },
+        {
+          "file": "chain.py",
+          "old": "        while cursor is not None:\n",
+          "new": "        while cursor:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "a second packet for a session replaces the first",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        if number in by_session:\n            raise ValueError(",
+          "new": "        if False:\n            raise ValueError("
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "a previous later than its own session accepted",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        if previous >= number:\n            raise ValueError(",
+          "new": "        if False:\n            raise ValueError("
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "heads ordered by branch name",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "    return sorted(heads, key=lambda head: head.session)\n",
+          "new": "    return sorted(heads, key=lambda head: head.branch)\n"
+        }
+      ],
+      "expect": "ordered by session"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "lineage listed from the head back",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        lineage.reverse()\n        still_open",
+          "new": "        lineage.reverse()\n        lineage_out = lineage[::-1]\n        still_open"
+        },
+        {
+          "file": "chain.py",
+          "old": "list(still_open.values()), lineage))",
+          "new": "list(still_open.values()), lineage_out))"
+        }
+      ],
+      "expect": "inherits the sessions before the fork"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "a missing previous raised as a plain ValueError",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "            raise BrokenChain(f\"session {number} points to session {previous}, which is missing\")\n",
+          "new": "            raise ValueError(f\"session {number} points to session {previous}, which is missing\")\n"
+        }
+      ],
+      "expect": "ValueError: session 6 points to session 4"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "only the head's own open_risks, nothing carried",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        for session in lineage:\n",
+          "new": "        for session in lineage[-1:]:\n"
+        }
+      ],
+      "expect": "risks carry over until a session closes them"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "lineage stops where the branch changes",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        while cursor is not None:\n",
+          "new": "        while cursor is not None and by_session[cursor][\"branch\"] == branch:\n"
+        }
+      ],
+      "expect": "inherits the sessions before the fork"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "a close in any earlier session applies, whatever its branch",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "            for risk_id in packet.get(\"closed_risks\", []):\n",
+          "new": "            for risk_id in [r for s in by_session if s <= session for r in by_session[s].get(\"closed_risks\", [])]:\n"
+        }
+      ],
+      "expect": "only the head's own chain counts"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "open risks sorted by id",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "list(still_open.values()), lineage))",
+          "new": "sorted(still_open.values(), key=lambda r: r[\"id\"]), lineage))"
+        }
+      ],
+      "expect": "closed risks drop out, and a reopened one goes to the end"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "next_action taken from the first packet of the lineage",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "BranchHead(branch, number, by_session[number][\"next_action\"]",
+          "new": "BranchHead(branch, number, by_session[lineage[0]][\"next_action\"]"
+        }
+      ],
+      "expect": "a head carries its own next_action"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "BrokenChain that does not name the missing session",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "            raise BrokenChain(f\"session {number} points to session {previous}, which is missing\")\n",
+          "new": "            raise BrokenChain(\"the chain is broken\")\n"
+        }
+      ],
+      "expect": "BrokenChain names the missing session"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "new wording merged into the first listing with update(), which changes the caller's packets",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "                still_open[risk[\"id\"]] = risk\n",
+          "new": "                if risk[\"id\"] in still_open:\n                    still_open[risk[\"id\"]].update(risk)\n                else:\n                    still_open[risk[\"id\"]] = risk\n"
+        }
+      ],
+      "expect": "the packets are left as they came"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "a previous equal to its own session accepted",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "        if previous >= number:\n",
+          "new": "        if previous > number:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_branch_heads",
+      "name": "BrokenChain names the packet that points, not the missing session",
+      "edits": [
+        {
+          "file": "chain.py",
+          "old": "            raise BrokenChain(f\"session {number} points to session {previous}, which is missing\")\n",
+          "new": "            raise BrokenChain(f\"session {number} has a broken previous pointer\")\n"
+        }
+      ],
+      "expect": "BrokenChain names the missing session"
+    }
+  ]
+}

@@ -1,0 +1,141 @@
+{
+  "lesson": "phases/14-agent-engineering/40-multi-session-handoff",
+  "title": "Multi-Session Handoff",
+  "format": "staged-brownfield",
+  "service": "HandoffPkt: a session-end handoff generator (seven fields as handoff.json and a Markdown render of it, a byte budget for the packet), a JSON-snapshot history of every session's packet, the five Leave-a-clean-state checks as the generator's precondition, a one-pass trimmer for feedback logs of any length, and branch heads over a forked chain of packets",
+  "sources": {
+    "docs/en.md": "d2537f34853af5e07bae24f3d5c5198bf321aa4de6fec9349ac5cd7804d723c4",
+    "code/main.py": "bc93d44e9070a3e87fb4bc80dbd796aa5310fae87dfba7695c925daede57a1e4",
+    "quiz/quiz.md": "c692ef8f9ab20543d2b880d3b43782225bd27d1efbbe7b9b5c5e2fe9f238f9eb",
+    "outputs/skill-handoff-generator.md": "03dd5772ce7515c01a381c03c950965e7a9ff2ad95c08b27140722c9d650028c"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no model and no network: the workbench artifacts and the repository snapshot are data the tests hand in",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_generate_handoff",
+      "kind": "debug",
+      "lesson_anchor": "Seven fields every handoff carries (next_action is the load-bearing one); Handoffs are generated, not written; Two forms: if they diverge, the JSON wins; Feedback log trimming (last K plus every non-zero exit, the packet stays small); code/main.py trim_feedback, derive_risks, generate_handoff; skill hard rejects (no next_action, markdown diverging from the JSON); quiz Q6, Q9, Q10, Q11",
+      "planted_bugs": [
+        "derive_risks hands a missing review report (None) to review_total, which reads review.get('total', 10) as in code/main.py; the AttributeError surfaces one call away, and the obvious `review or {}` turns a missing review into a perfect score, while the docstring makes a missing report, and a total that is not an integer, warn risks",
+        "failed() is code/main.py's `exit_code not in (0, None)`, so a timeout is neither a failed attempt nor in the feedback tail; the docstring says None is a failure",
+        "trim_feedback is the lesson's tail-first version (last k, then every failure, deduplicated by id), out of log order, and records[-k:] is the whole log for k=0",
+        "render_markdown(payload, state) takes next_action from the state's raw text (two lines) instead of the payload's one-line next_action, so handoff.md and handoff.json disagree and handoff.md cannot be rendered from handoff.json alone"
+      ],
+      "timing_assert": "generate_handoff on a 3500-command session with max_bytes=12000 under 0.1 s. The starter's fit_budget drops the oldest command and serializes the whole packet again each time (quadratic). Measured on this machine with Python 3.12.14, load average 6-8, five rounds: starter 1.08-1.16 s (2-3 s while other jobs saturate the CPU), bisection over the number of commands kept 4.3 ms median (6.8 ms worst single call), incremental byte counting 3.3 ms, so both sides keep at least a 10x margin. Dropping indent=2 alone, which also changes handoff.json, still takes 0.68-0.91 s. Growing from no commands, one newest command at a time with a full re-serialization per step, passes at 17-23 ms but is quadratic in the commands kept (252 ms at the 64 KiB default, against 7 ms for the bisection). At load average 12-45 a single first call took 1.6-2.8 s for the starter and 5-9 ms for the reference. Other interpreters on this machine: Python 3.10.20 3.5 s and 8.8 ms; 3.13.13 0.64 s and 3.3 ms; 3.14.7 0.73 s and 4.2 ms",
+      "overfix_guard": "failed_attempts and feedback_tail are never dropped to make room: a budget exactly the size of the packet with no commands succeeds and one byte less raises PacketTooLarge; the whole handoff.json fits in max_bytes and keeps every recent command that fits (one more does not fit), which rules out a fixed 'last 100', dropping 50 at a time, a bisection that stops on the first size that does not fit and measuring commands_run alone; the kept commands are the newest, in order, counted in commands_omitted, and handoff.md is rendered after the budget; NoNextAction for a missing or blank next_action; changed_files sorted and unique on 42 paths, so an unsorted set cannot pass by luck; trim keeps two equal records apart (the lesson demo's records have no ids); a command killed by a signal (exit -9) is a failed attempt, which rules out rewriting failed() as `is None or > 0`"
+    },
+    {
+      "part": 2,
+      "test": "test_history_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Use It: the session-end hook writes the packet into outputs/handoff/<session_id>/; One active handoff per branch and topic; Exercise 4 (make the generator idempotent: running it twice produces the same packet)",
+      "exactness": "a packet with exit_code 0 and null, a duration of 0, a float timestamp, non-ASCII text and an em dash, and risks in order comes back from session-<nnnn>.json equal to what was saved plus session and previous, across a new instance",
+      "traps": [
+        "previous written as 0, or left out, for the first session",
+        "other files beside the snapshots (session-0001.md, the editor backup session-0001.json~, notes.txt) counted as sessions, through glob('session-*'), a regex anchored only at the start, or the number of files",
+        "file names without the four-digit padding (session-15.json)",
+        "the repeat check compares session and previous too, compares against any earlier session or the first one, or compares next_action alone",
+        "session and previous already in the packet kept instead of assigned",
+        "a missing root raising instead of having no sessions, or not created on the first save",
+        "FileNotFoundError instead of KeyError for an unknown session",
+        "latest kept in memory instead of read from disk"
+      ],
+      "clarifying_questions": [
+        "files that are not sessions",
+        "a packet that already carries session and previous",
+        "the same packet saved twice",
+        "two writers at once",
+        "validating the packet's fields"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_clean_state",
+      "kind": "core algorithm",
+      "lesson_anchor": "Leave a clean state: working tree, temp artifacts, tests, feature board, branch; clean_state.json of blocking issues, an empty list is the precondition the generator asserts; feature_list.json statuses (Phase 14 · 36)",
+      "traps": [
+        "an untracked ?? line left out of the working tree, or left to the temp-artifact check; a staged change taken as committed (only the work-tree column read); the line stripped before the two-column code is sliced off",
+        "a debug print's line number counted from the hunk's old start, advanced on removed lines, not advanced on context lines, or advanced before the line is checked; the path taken from the --- line (/dev/null for a new file)",
+        "a single in_progress reported, one row per in_progress feature, or the ids sorted; a finished feature reported only while the board still says in_progress (audit-log is still todo), or only when it is the active one; the active feature not checked, or checked against the finished list instead of the board",
+        "a detached HEAD also reported as a wrong branch, or as 'wrong branch: None'; the expected branch or merged branches reported as orphans, or the checked-out branch excused instead of the expected one",
+        "a rename reported as 'old -> new' or by its old path",
+        "error not counted as red, skipped counted as red",
+        "a scratch dir only at the top level, reported per file, or *.tmp inside it reported again; scratch dirs and temp files not interleaved in the order of files, or looked for among the untracked status lines only",
+        "prints searched in context and removed lines, or in non-.py files",
+        "the checks out of the table's order",
+        "generate_handoff not asserting the precondition",
+        "side check, the docstring gives the rule: 'WIP on' anywhere in the stash line (stash@{1}'s note contains it), or any stash message taken as a note",
+        "side check, the docstring gives the rule: 'tmp' anywhere in the path (app/tmpl/)",
+        "side check, the docstring gives the rule: scratch matched as a substring (app/scratchcard.py)",
+        "side check, the docstring gives the rule: print( anywhere in the line, as in app.register_blueprint(, or print without its parenthesis, as in print_table(rows)",
+        "side check, the docstring gives the rule: a risk matching a test by prefix or by file (test_burst_window)"
+      ],
+      "clarifying_questions": [
+        "untracked temp files",
+        "staged changes",
+        "*.tmp inside scratch",
+        "prints from before the session",
+        "prints outside .py files",
+        "skipped tests",
+        "merged branches",
+        "detached HEAD and wrong branch",
+        "commented-out blocks"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_trim_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Feedback log trimming: the full feedback_record.jsonl may be long, the handoff carries only the last K plus every entry with a non-zero exit; Trim large feedback logs into a handoff-sized summary",
+      "wire_format": "NDJSON, one string per kept record, decided by the test's ''.join(...).splitlines() and json.loads",
+      "traps": [
+        "failures written the moment they arrive, ahead of earlier records that stay in the last k, or written again with the window",
+        "failures held back to the end, or the whole log read first (a probe with a failure first must see it after at most 6 records)",
+        "memory beyond the last k records, measured with a dict subclass that counts live records (a list of every written failure fails)",
+        "deque(maxlen=0) dropping every record for k=0",
+        "None or a negative exit code (-9, a signal) not counted as a failure",
+        "a list returned instead of a generator, dicts yielded, or str() instead of JSON",
+        "the window flushed newest first, or kept one record short"
+      ],
+      "clarifying_questions": [
+        "memory allowed",
+        "when a failure is written",
+        "k=0",
+        "output format"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_branch_heads",
+      "kind": "graph",
+      "lesson_anchor": "One active handoff per branch and topic (branch, last_known_good_commit, status active | superseded | archived; only the active one drives the next session); open_risks carried until closed; Cross-agent handoff",
+      "traps": [
+        "heads taken as the packets nothing points to, or as the last packet in the input (the input is shuffled)",
+        "lineage limited to the branch's own packets, or stopped where the branch name changes",
+        "risks keyed by their wording, a new wording moved to the end, a reopened risk kept at its first place, risks sorted by id",
+        "every packet applied in session order whatever its branch, or closes from any branch applied",
+        "nothing carried: the head's own open_risks only",
+        "a missing previous starting a new chain, noticed only on a head's own chain, read as no previous when it is 0, raised as a plain ValueError, or without naming the missing session",
+        "duplicate sessions and a previous later than its session, or equal to it, accepted",
+        "heads ordered by branch name; next_action from the first packet",
+        "the caller's packets changed, for example a new wording merged into the first listing with update()"
+      ],
+      "clarifying_questions": [
+        "which packet is a branch's head",
+        "new wording, same id",
+        "open and close in one session",
+        "a missing packet on an abandoned branch",
+        "branches with no recent work"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the suggested defects 1-3 are kept (tail-first trim, the missing review read as 10 points, the Markdown next_action taken from the state). The fail-open review is planted in a review_total helper, so its AttributeError surfaces one call away from derive_risks. Defect 4 (a backtick in a file name breaking inline code) is replaced by code/main.py's own `exit_code not in (0, None)`: catching a broken code span needs a CommonMark parser in the test, while a timeout missing from failed_attempts is what the quiz (Q6, Q9) and lessons 37-38 point at. Chapter 14 already has bytes-versus-characters and ASCII-escape traps in five or more lessons and argv joined with plain spaces twice in lesson 38, so the long session is ASCII and the starter's shlex.join is guarded only against the lesson's own str(list).",
+    "Part 1 timing: the suggested 'drop the oldest feedback record and re-dump the packet until it fits' would keep zero-exit records older than the last K whenever there is room, which contradicts the lesson's 'only the last K plus every entry with a non-zero exit'. The byte budget trims commands_run instead (the field that grows with the session), oldest first, counted in commands_omitted. The slow version re-serializes the whole packet per dropped command. The overfix guard is the suggested one: failures are never dropped, and a packet that does not fit raises PacketTooLarge. The skill's 30-entry cap on the tail is not used; the byte budget is the size limit. The long session has 3500 commands, so the quadratic version stays above 1 s on Python 3.12 while the bisection takes about 4 ms.",
+    "Part 2: JSON snapshots as assigned (session-<nnnn>.json, written through a temporary file and os.replace, previous pointer, latest = highest session on disk). Instead of the lesson's outputs/handoff/<session_id>/, the history keeps one directory per task (outputs/handoff/T-014/) with one file per session, so the previous pointers and the latest packet are found by number. The suggested round-trip details (risk order, exit_code 0 versus null, non-ASCII) are in the data, but a JSON store does not naturally break them. Chapter 14 already uses sort_keys and key order, NaN, inputs mutated in place, a failed save leaving nothing behind and reopen-after-commit as designed traps two or more times each, and numbers sorted as text three times (lesson 07's rids, lesson 24's trace ids and versions), so none of them is a designed trap here: the file names are zero-padded to four digits, so name order and number order agree, and the padding is checked by reading session-0015.json directly. The designed traps are previous null versus 0, other files beside the snapshots, an idempotent save (Exercise 4: a hook that fires twice records one session) compared against the latest packet only and without the assigned keys, and assigned keys replacing the packet's own.",
+    "Part 3: as suggested. Commented-out blocks from the lesson's table are not checked, because there is no precise rule without heuristics (left as a follow-up question). The docstring gives each row's matching rule: a stash whose message starts with 'WIP on <branch>:' (git's message for a stash made without -m), a file name that ends in .tmp, a path segment named scratch, an added line of a .py file that starts with print(, pprint( or breakpoint( once its indentation is stripped, and an open risk whose test is the whole node id. Substring matching is already a main trap of lessons 26 (Part 1) and 08 (Part 3), so app/tmpl/, app/scratchcard.py, register_blueprint(, print_table(, a stash note that contains 'WIP on' and test_burst_window are side checks. The main traps come from the lesson's Leave a clean state table: every status line blocks, untracked ?? lines and staged changes included; debug prints are reported at their new-file line numbers, counted from the hunk header, with the path from the +++ b/ line; the feature board (more than one in_progress as one row in board order, a finished feature not marked done, an active feature that is already done: the lesson's stale board); and the branch (a detached HEAD reported once, the expected and merged branches not orphans). A rename's new path and skipped-is-not-red stay ordinary checks, not main traps: splitting on whitespace is already in lessons 19 (Part 1) and 36 (Part 4), and a skip that is not a failure in lessons 35 (Part 4) and 41 (Part 1).",
+    "Part 4: NDJSON as assigned. Memory is bounded by the last k records rather than 'failures plus the K window': a failure is written as soon as it leaves the window, so failures never need to be held. The newline and pretty-printing traps are not designed (the chapter already has them more than twice), and two equal records are tested in Part 1 only.",
+    "Part 5: as suggested. Heads are per branch (the highest session number, so a superseded leaf does not count), BrokenChain is raised for any packet's missing previous, not only on a head's own chain, and duplicate sessions, forward pointers and a packet pointing to itself are ValueErrors. A deep chain that breaks recursion is not a designed trap (the chapter already has RecursionError three times)."
+  ]
+}
