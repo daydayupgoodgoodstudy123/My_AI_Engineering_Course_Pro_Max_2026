@@ -1,0 +1,344 @@
+{
+  "package": "rolloutlab",
+  "tests": [
+    "test_prompt_preparation_and_observation_replay",
+    "test_rollout_snapshot",
+    "test_rollout_shadow_execution",
+    "test_role_aware_sse",
+    "test_deployment_registry_evidence"
+  ],
+  "layers": [
+    {
+      "test": "test_prompt_preparation_and_observation_replay",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "AttributeError"
+        },
+        {
+          "name": "scoped prompt records",
+          "edits": [
+            {
+              "file": "routing.py",
+              "old": "return templates[name]",
+              "new": "return templates[name][version]"
+            }
+          ],
+          "expect": "user cohorts remain the declared stable assignments across process environments"
+        },
+        {
+          "name": "stable cohort hash",
+          "edits": [
+            {
+              "file": "routing.py",
+              "old": "return hash(user+\":\"+experiment_id)%100",
+              "new": "return int(hashlib.md5((user+\":\"+experiment_id).encode(\"utf-8\")).hexdigest(),16)%100"
+            }
+          ],
+          "expect": "cached outputs receive both safety stages before delivery"
+        },
+        {
+          "name": "cache-safe preparation",
+          "edits": [
+            {
+              "file": "prepare.py",
+              "old": "    cached=cache.get(cache_key(request,request.query))\n    if cached is not None:return Immediate(request.request_id,cached,\"approved\",True)\n",
+              "new": ""
+            }
+          ],
+          "expect": "large observation replays should stay responsive"
+        },
+        {
+          "name": "observation ingestion",
+          "edits": [
+            {
+              "file": "ledger.py",
+              "old": "        self.totals=empty_totals()\n        for previous in self.records:fold_one(self.totals,previous)",
+              "new": "        fold_one(self.totals,row)"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_prompt_preparation_and_observation_replay",
+      "name": "omit shadow paid observations from the public replay",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        self.records.append(row)",
+          "new": "        if getattr(row,\"role\",None)==\"shadow\":return\n        self.records.append(row)"
+        }
+      ],
+      "expect": "observation replay retains every request and paid fact with complete paid-versus-served totals"
+    },
+    {
+      "test": "test_prompt_preparation_and_observation_replay",
+      "name": "keep only aggregate totals and discard original observed records",
+      "edits": [
+        {
+          "file": "ledger.py",
+          "old": "        self.records.append(row)",
+          "new": "        self.records[:]=[row]"
+        }
+      ],
+      "expect": "observation replay retains every request and paid fact with complete paid-versus-served totals"
+    },
+    {
+      "test": "test_rollout_snapshot",
+      "name": "rewrite persisted shadow paid roles as served",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "[(observation_json(row),) for row in snapshot.observations]",
+          "new": "[(observation_json(__import__(\"dataclasses\").replace(row,role=\"served\") if getattr(row,\"role\",None)==\"shadow\" else row),) for row in snapshot.observations]"
+        }
+      ],
+      "expect": "observed paid roles and original token counts survive independently of served text"
+    },
+    {
+      "test": "test_rollout_snapshot",
+      "name": "collapse independent experiment assignments by user",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "[(a.user,a.experiment_id,a.bucket) for a in snapshot.assignments]",
+          "new": "[(a.user,a.experiment_id,a.bucket) for a in {a.user:a for a in snapshot.assignments}.values()]"
+        }
+      ],
+      "expect": "one user retains independent stable bucket assignments for every experiment"
+    },
+    {
+      "test": "test_rollout_snapshot",
+      "name": "replace observed output token counts with a display placeholder count",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "[(observation_json(row),) for row in snapshot.observations]",
+          "new": "[(observation_json(__import__(\"dataclasses\").replace(row,output_tokens=1) if hasattr(row,\"output_tokens\") else row),) for row in snapshot.observations]"
+        }
+      ],
+      "expect": "observed paid roles and original token counts survive independently of served text"
+    },
+    {
+      "test": "test_rollout_shadow_execution",
+      "name": "gate the shadow branch by rollout traffic percent",
+      "edits": [
+        {
+          "file": "experiment.py",
+          "old": "else [(\"served\",experiment.control),(\"shadow\",experiment.variant)]",
+          "new": "else [(\"served\",experiment.control)]+([(\"shadow\",experiment.variant)] if bucket<experiment.traffic_pct else [])"
+        }
+      ],
+      "expect": "shadow mode observes every eligible miss while the control remains served"
+    },
+    {
+      "test": "test_rollout_shadow_execution",
+      "name": "promote the highest-scoring shadow branch into the served result",
+      "edits": [
+        {
+          "file": "experiment.py",
+          "old": "served=next(b for b in branches if b.role==\"served\")",
+          "new": "served=max(branches,key=lambda b:b.quality if b.quality is not None else -1)"
+        }
+      ],
+      "expect": "shadow mode observes every eligible miss while the control remains served"
+    },
+    {
+      "test": "test_rollout_shadow_execution",
+      "name": "discard paid facts when output safety replaces the text",
+      "edits": [
+        {
+          "file": "experiment.py",
+          "old": "observations=tuple(PaidObservation",
+          "new": "if status==\"blocked_output\":facts=()\n        observations=tuple(PaidObservation"
+        }
+      ],
+      "expect": "safety-replaced outputs retain all original observed paid attempts and role provenance"
+    },
+    {
+      "test": "test_rollout_shadow_execution",
+      "name": "discard observed facts attached to a failed provider attempt",
+      "edits": [
+        {
+          "file": "experiment.py",
+          "old": "facts=exc.attempts;status=\"error\"",
+          "new": "facts=();status=\"error\""
+        }
+      ],
+      "expect": "an observed shadow failure cannot erase served success or its paid evidence"
+    },
+    {
+      "test": "test_role_aware_sse",
+      "name": "publish shadow text as client content",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "if branch.role==\"shadow\":return [(\"shadow\",telemetry)]",
+          "new": "if branch.role==\"shadow\":return [(\"content\",{\"text\":branch.served_text}),(\"shadow\",telemetry)]"
+        }
+      ],
+      "expect": "shadow completions publish only status quality and observed usage telemetry"
+    },
+    {
+      "test": "test_role_aware_sse",
+      "name": "derive billed output usage from short served safety text",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "\"paid_usage\":dict(branch.paid_usage)",
+          "new": "\"paid_usage\":dict(branch.paid_usage,output_tokens=len(branch.served_text.split()))"
+        }
+      ],
+      "expect": "served telemetry retains original observed billing even for a short refusal"
+    },
+    {
+      "test": "test_role_aware_sse",
+      "name": "replace branch execution status with an approved constant",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "\"status\":branch.status",
+          "new": "\"status\":\"approved\""
+        }
+      ],
+      "expect": "served telemetry retains original observed billing even for a short refusal"
+    },
+    {
+      "test": "test_deployment_registry_evidence",
+      "name": "accept an experiment version found only under another template",
+      "edits": [
+        {
+          "file": "deployment.py",
+          "old": "if version not in templates[experiment.template]",
+          "new": "if not any(version in family for family in templates.values())"
+        }
+      ],
+      "expect": "experiment versions resolve only within their declared template family"
+    },
+    {
+      "test": "test_deployment_registry_evidence",
+      "name": "use the global primary context for every record model check",
+      "edits": [
+        {
+          "file": "deployment.py",
+          "old": "registered_model(record.model,models)",
+          "new": "registered_model(primary_model,models)"
+        }
+      ],
+      "expect": "record evidence retains outer identity mismatches and its actual model path"
+    },
+    {
+      "test": "test_deployment_registry_evidence",
+      "name": "omit outer record version identity mismatches",
+      "edits": [
+        {
+          "file": "deployment.py",
+          "old": "if record.version!=version:problems.append(issue((\"templates\",name,version,\"version\"),\"record_version\"))",
+          "new": "if False:problems.append(issue((\"templates\",name,version,\"version\"),\"record_version\"))"
+        }
+      ],
+      "expect": "record evidence retains outer identity mismatches and its actual model path"
+    },
+    {
+      "test": "test_rollout_snapshot",
+      "name": "fresh-p2-cost-spelling-float-normalization",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "[(observation_json(row),) for row in snapshot.observations]",
+          "new": "[(observation_json(__import__(\"dataclasses\").replace(row,cost_text=str(float(row.cost_text))) if hasattr(row,\"cost_text\") else row),) for row in snapshot.observations]"
+        }
+      ],
+      "expect": "observed paid roles and original token counts survive independently of served text"
+    },
+    {
+      "test": "test_rollout_snapshot",
+      "name": "fresh-p2-commit-after-delete",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            self.db.executemany(\"INSERT INTO prompts",
+          "new": "            self.db.commit()\n            self.db.executemany(\"INSERT INTO prompts"
+        }
+      ],
+      "expect": "failed snapshot replacement retains the previous complete snapshot after reopen"
+    },
+    {
+      "test": "test_rollout_shadow_execution",
+      "name": "fresh-p3-include-exact-cohort-boundary",
+      "edits": [
+        {
+          "file": "experiment.py",
+          "old": "experiment.variant if bucket<experiment.traffic_pct else experiment.control",
+          "new": "experiment.variant if bucket<=experiment.traffic_pct else experiment.control"
+        }
+      ],
+      "expect": "the exact percentage boundary stays outside the variant cohort"
+    },
+    {
+      "test": "test_rollout_shadow_execution",
+      "name": "fresh-p3-success-only-last-observed-attempt",
+      "edits": [
+        {
+          "file": "experiment.py",
+          "old": "facts=reply.attempts;safety=output_guard(reply.text)",
+          "new": "facts=reply.attempts;safety=output_guard(reply.text)\n            if safety.passed:facts=facts[-1:]"
+        }
+      ],
+      "expect": "approved delivery retains every original paid attempt in order"
+    },
+    {
+      "test": "test_role_aware_sse",
+      "name": "fresh-p4-omit-approved-served-content",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "    if branch.role==\"shadow\":return [(\"shadow\",telemetry)]",
+          "new": "    if branch.role==\"shadow\":return [(\"shadow\",telemetry)]\n    if branch.status==\"approved\":return [(\"served\",telemetry)]"
+        }
+      ],
+      "expect": "approved served completions retain empty content and zero quality as observed"
+    },
+    {
+      "test": "test_role_aware_sse",
+      "name": "fresh-p4-collapse-zero-quality",
+      "edits": [
+        {
+          "file": "events.py",
+          "old": "\"quality\":branch.quality",
+          "new": "\"quality\":branch.quality or None"
+        }
+      ],
+      "expect": "approved served completions retain empty content and zero quality as observed"
+    },
+    {
+      "test": "test_deployment_registry_evidence",
+      "name": "fresh-p5-skip-empty-family",
+      "edits": [
+        {
+          "file": "deployment.py",
+          "old": "    for name,versions in templates.items():\n        reports={}",
+          "new": "    for name,versions in templates.items():\n        if not versions:continue\n        reports={}"
+        }
+      ],
+      "expect": "declared empty template families retain scoped missing-reference evidence"
+    },
+    {
+      "test": "test_deployment_registry_evidence",
+      "name": "fresh-p5-propagate-record-invalidity-to-reference",
+      "edits": [
+        {
+          "file": "deployment.py",
+          "old": "entry={\"valid\":not problems,\"control_path\":paths.get(\"control\"),\"variant_path\":paths.get(\"variant\"),\"issues\":problems}",
+          "new": "entry={\"valid\":not problems and all(result[\"templates\"][experiment.template][\"versions\"][v][\"valid\"] for v in (experiment.control,experiment.variant)),\"control_path\":paths.get(\"control\"),\"variant_path\":paths.get(\"variant\"),\"issues\":problems}"
+        }
+      ],
+      "expect": "existing references remain valid independently of their record issues"
+    }
+  ]
+}
