@@ -1,0 +1,943 @@
+{
+  "package": "ttsfront",
+  "tests": [
+    "test_text_frontend",
+    "test_lexicon_roundtrip",
+    "test_frame_allocation",
+    "test_speech_events",
+    "test_ssml_flatten"
+  ],
+  "layers": [
+    {
+      "test": "test_text_frontend",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "no grapheme rule for '-'"
+        },
+        {
+          "name": "fix number_words",
+          "edits": [
+            {
+              "file": "normalize.py",
+              "old": "return TENS[tens] if ones == 0 else f\"{TENS[tens]}-{ONES[ones]}\"",
+              "new": "return TENS[tens] if ones == 0 else f\"{TENS[tens]} {ONES[ones]}\""
+            }
+          ],
+          "expect": "lexicon lookup ignores case"
+        },
+        {
+          "name": "+ case-insensitive lookup",
+          "edits": [
+            {
+              "file": "g2p.py",
+              "old": "    phones: list[str] = []\n    after_word = False\n",
+              "new": "    folded = {key.lower(): value for key, value in lexicon.items()}\n    phones: list[str] = []\n    after_word = False\n"
+            },
+            {
+              "file": "g2p.py",
+              "old": "known = lexicon.get(word)",
+              "new": "known = folded.get(word.lower())"
+            }
+          ],
+          "expect": "abbreviations are read as words, and their period is not a pause"
+        },
+        {
+          "name": "+ abbreviation keeps its period",
+          "edits": [
+            {
+              "file": "normalize.py",
+              "old": "    tokens = _TOKEN.findall(text)\n",
+              "new": "    raw = _TOKEN.findall(text)\n    tokens = [t for i, t in enumerate(raw) if not (t == '.' and i > 0 and raw[i - 1].lower() in ABBREVIATIONS)]\n"
+            }
+          ],
+          "expect": "a long unknown word should not stall the frontend"
+        },
+        {
+          "name": "+ match length capped at MAX_RULE",
+          "edits": [
+            {
+              "file": "g2p.py",
+              "old": "range(len(word) - i, 0, -1)",
+              "new": "range(min(MAX_RULE, len(word) - i), 0, -1)"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_text_frontend",
+      "name": "words missing from the lexicon dropped",
+      "edits": [
+        {
+          "file": "g2p.py",
+          "old": "known if known is not None else rule_phones(word)",
+          "new": "known if known is not None else []"
+        }
+      ],
+      "expect": "a word missing from the lexicon is read with the grapheme rules"
+    },
+    {
+      "test": "test_text_frontend",
+      "name": "long words skipped to keep the frontend fast",
+      "edits": [
+        {
+          "file": "g2p.py",
+          "old": "known if known is not None else rule_phones(word)",
+          "new": "known if known is not None else (rule_phones(word) if len(word) <= 64 else [])"
+        }
+      ],
+      "expect": "every letter of an unknown word is read"
+    },
+    {
+      "test": "test_text_frontend",
+      "name": "hyphen silenced by a rule instead of fixing number_words",
+      "edits": [
+        {
+          "file": "normalize.py",
+          "old": "return TENS[tens] if ones == 0 else f\"{TENS[tens]} {ONES[ones]}\"",
+          "new": "return TENS[tens] if ones == 0 else f\"{TENS[tens]}-{ONES[ones]}\""
+        },
+        {
+          "file": "g2p.py",
+          "old": "\"y\": [\"Y\"], \"z\": [\"Z\"],",
+          "new": "\"y\": [\"Y\"], \"z\": [\"Z\"], \"-\": [],"
+        }
+      ],
+      "expect": "numbers are read as words"
+    },
+    {
+      "test": "test_text_frontend",
+      "name": "characters without a rule skipped, as in the lesson code",
+      "edits": [
+        {
+          "file": "normalize.py",
+          "old": "return TENS[tens] if ones == 0 else f\"{TENS[tens]} {ONES[ones]}\"",
+          "new": "return TENS[tens] if ones == 0 else f\"{TENS[tens]}-{ONES[ones]}\""
+        },
+        {
+          "file": "g2p.py",
+          "old": "        else:\n            raise ValueError(f\"no grapheme rule for {word[i]!r} in {word!r}\")\n",
+          "new": "        else:\n            i += 1\n"
+        }
+      ],
+      "expect": "numbers are read as words"
+    },
+    {
+      "test": "test_text_frontend",
+      "name": "match length capped at 3, as in the lesson's (3, 2, 1)",
+      "edits": [
+        {
+          "file": "g2p.py",
+          "old": "range(min(MAX_RULE, len(word) - i), 0, -1)",
+          "new": "range(min(3, len(word) - i), 0, -1)"
+        }
+      ],
+      "expect": "a word missing from the lexicon is read with the grapheme rules, longest match first"
+    },
+    {
+      "test": "test_text_frontend",
+      "name": "shortest match first",
+      "edits": [
+        {
+          "file": "g2p.py",
+          "old": "range(min(MAX_RULE, len(word) - i), 0, -1)",
+          "new": "range(1, min(MAX_RULE, len(word) - i) + 1)"
+        }
+      ],
+      "expect": "a word missing from the lexicon is read with the grapheme rules, longest match first"
+    },
+    {
+      "test": "test_text_frontend",
+      "name": "single-letter rules only, to keep the frontend fast",
+      "edits": [
+        {
+          "file": "g2p.py",
+          "old": "range(min(MAX_RULE, len(word) - i), 0, -1)",
+          "new": "range(1, 0, -1)"
+        }
+      ],
+      "expect": "a word missing from the lexicon is read with the grapheme rules, longest match first"
+    },
+    {
+      "test": "test_text_frontend",
+      "name": "doctor/drive looks past the period, but the period is still a pause",
+      "edits": [
+        {
+          "file": "normalize.py",
+          "old": "if not (token == \".\" and i > 0 and raw[i - 1].lower() in ABBREVIATIONS)",
+          "new": "if True"
+        },
+        {
+          "file": "normalize.py",
+          "old": "following = tokens[i + 1] if i + 1 < len(tokens) else \"\"",
+          "new": "following = next((t for t in tokens[i + 1:] if t != \".\"), \"\")"
+        }
+      ],
+      "expect": "abbreviations are read as words, and their period is not a pause"
+    },
+    {
+      "test": "test_text_frontend",
+      "name": "period dropped after every word, not only after abbreviations",
+      "edits": [
+        {
+          "file": "normalize.py",
+          "old": "raw[i - 1].lower() in ABBREVIATIONS)",
+          "new": "raw[i - 1].isalpha())"
+        }
+      ],
+      "expect": "Right contains one more item: '_PAUSE_'"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "phones joined into one string, read back one code point at a time",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "encoded = json.dumps(list(phones))",
+          "new": "encoded = \"\".join(phones)"
+        },
+        {
+          "file": "lexicon.py",
+          "old": "Pronunciation(w, json.loads(phones), priority)",
+          "new": "Pronunciation(w, list(phones), priority)"
+        },
+        {
+          "file": "lexicon.py",
+          "old": "best.setdefault(word, json.loads(phones))",
+          "new": "best.setdefault(word, list(phones))"
+        }
+      ],
+      "expect": "phones round-trip exactly, code point for code point"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "segments NFC-normalized on the way in",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "encoded = json.dumps(list(phones))",
+          "new": "encoded = json.dumps([unicodedata.normalize(\"NFC\", p) for p in phones])"
+        }
+      ],
+      "expect": "phones round-trip exactly, code point for code point"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "words stored as typed",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "        key = word.lower()\n",
+          "new": "        key = word\n"
+        }
+      ],
+      "expect": "words match ignoring case"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "equal priorities newest first",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "\" ORDER BY priority DESC, seq\",",
+          "new": "\" ORDER BY priority DESC, seq DESC\","
+        }
+      ],
+      "expect": "every pronunciation, highest priority first, ties in the order added"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "one row per word (INSERT OR REPLACE)",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "    word TEXT NOT NULL,\n",
+          "new": "    word TEXT NOT NULL UNIQUE,\n"
+        },
+        {
+          "file": "lexicon.py",
+          "old": "\"INSERT INTO pronunciations",
+          "new": "\"INSERT OR REPLACE INTO pronunciations"
+        }
+      ],
+      "expect": "every pronunciation, highest priority first, ties in the order added"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "duplicates left to a UNIQUE constraint",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "    priority INTEGER NOT NULL\n)",
+          "new": "    priority INTEGER NOT NULL,\n    UNIQUE (word, phones)\n)"
+        },
+        {
+          "file": "lexicon.py",
+          "old": "        if duplicate:\n            raise ValueError(f\"{word!r} already has the pronunciation {phones!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "IntegrityError"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "no commit after insert",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "        with self._db:\n            self._db.execute(\n                \"INSERT",
+          "new": "        if True:\n            self._db.execute(\n                \"INSERT"
+        }
+      ],
+      "expect": "a reopened lexicon sees every word"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "a detached combining mark accepted",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "            if unicodedata.category(segment[0]).startswith(\"M\"):\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "segments NFD-normalized on the way in",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "encoded = json.dumps(list(phones))",
+          "new": "encoded = json.dumps([unicodedata.normalize(\"NFD\", p) for p in phones])"
+        }
+      ],
+      "expect": "phones round-trip exactly, code point for code point"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "phones read back as a tuple",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "Pronunciation(w, json.loads(phones), priority)",
+          "new": "Pronunciation(w, tuple(json.loads(phones)), priority)"
+        }
+      ],
+      "expect": "phones round-trip exactly, code point for code point"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "case folded by COLLATE NOCASE, words stored as typed",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "    word TEXT NOT NULL,\n",
+          "new": "    word TEXT NOT NULL COLLATE NOCASE,\n"
+        },
+        {
+          "file": "lexicon.py",
+          "old": "        key = word.lower()\n",
+          "new": "        key = word\n"
+        },
+        {
+          "file": "lexicon.py",
+          "old": "            (word.lower(),),",
+          "new": "            (word,),"
+        }
+      ],
+      "expect": "words match ignoring case"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "duplicate check uses the word as typed",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "(key, encoded)\n        ).fetchone()",
+          "new": "(word, encoded)\n        ).fetchone()"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "empty segment not checked",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "if not isinstance(segment, str) or not segment:",
+          "new": "if not isinstance(segment, str):"
+        }
+      ],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "CREATE TABLE IF NOT EXISTS",
+          "new": "CREATE TABLE"
+        }
+      ],
+      "expect": "table pronunciations already exists"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "table() keeps the last row of each word",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "best.setdefault(word, json.loads(phones))",
+          "new": "best[word] = json.loads(phones)"
+        }
+      ],
+      "expect": "a reopened lexicon sees every word"
+    },
+    {
+      "test": "test_lexicon_roundtrip",
+      "name": "table() takes the first pronunciation added, not the highest priority",
+      "edits": [
+        {
+          "file": "lexicon.py",
+          "old": "ORDER BY word, priority DESC, seq\"",
+          "new": "ORDER BY word, seq\""
+        }
+      ],
+      "expect": "a reopened lexicon sees every word"
+    },
+    {
+      "test": "test_frame_allocation",
+      "name": "each phone rounded on its own",
+      "edits": [
+        {
+          "file": "duration.py",
+          "old": "    return frames",
+          "new": "    return [round(share) for share in shares]"
+        }
+      ],
+      "expect": "the frames add up to the whole duration"
+    },
+    {
+      "test": "test_frame_allocation",
+      "name": "Python's round() for the total (half to even)",
+      "edits": [
+        {
+          "file": "duration.py",
+          "old": "total = math.floor(sum(shares) + Fraction(1, 2))",
+          "new": "total = round(sum(shares))"
+        }
+      ],
+      "expect": "2.5 frames in total round half up to 3"
+    },
+    {
+      "test": "test_frame_allocation",
+      "name": "shares computed in floating point",
+      "edits": [
+        {
+          "file": "duration.py",
+          "old": "share = Fraction(duration) / hop",
+          "new": "share = duration / hop_ms"
+        }
+      ],
+      "expect": "2.4 and 4.4 frames: the earlier phone wins the tie"
+    },
+    {
+      "test": "test_frame_allocation",
+      "name": "ties to the later phone",
+      "edits": [
+        {
+          "file": "duration.py",
+          "old": "key=lambda i: (frames[i] - shares[i], i)",
+          "new": "key=lambda i: (frames[i] - shares[i], -i)"
+        }
+      ],
+      "expect": "of equal remainders, the earlier phone gets the frame"
+    },
+    {
+      "test": "test_frame_allocation",
+      "name": "no one-frame minimum",
+      "edits": [
+        {
+          "file": "duration.py",
+          "old": "shares.append(max(Fraction(1), share))",
+          "new": "shares.append(share)"
+        }
+      ],
+      "expect": "every phone keeps at least one frame"
+    },
+    {
+      "test": "test_frame_allocation",
+      "name": "one-frame minimum applied after allocating",
+      "edits": [
+        {
+          "file": "duration.py",
+          "old": "shares.append(max(Fraction(1), share))",
+          "new": "shares.append(share)"
+        },
+        {
+          "file": "duration.py",
+          "old": "    return frames",
+          "new": "    return [max(1, f) for f in frames]"
+        }
+      ],
+      "expect": "a phone shorter than one frame counts as one frame"
+    },
+    {
+      "test": "test_frame_allocation",
+      "name": "leftover frames to the largest shares",
+      "edits": [
+        {
+          "file": "duration.py",
+          "old": "key=lambda i: (frames[i] - shares[i], i)",
+          "new": "key=lambda i: (-shares[i], i)"
+        }
+      ],
+      "expect": "leftover frames go to the largest remainders"
+    },
+    {
+      "test": "test_frame_allocation",
+      "name": "running total rounded phone by phone",
+      "edits": [
+        {
+          "file": "duration.py",
+          "old": "    total = math.floor(sum(shares) + Fraction(1, 2))\n    frames = [math.floor(share) for share in shares]\n    order = sorted(range(len(shares)), key=lambda i: (frames[i] - shares[i], i))\n    for i in order[: total - sum(frames)]:\n        frames[i] += 1\n    return frames",
+          "new": "    frames, running, given = [], Fraction(0), 0\n    for share in shares:\n        running += share\n        frames.append(math.floor(running + Fraction(1, 2)) - given)\n        given += frames[-1]\n    return frames"
+        }
+      ],
+      "expect": "of equal remainders, the earlier phone gets the frame"
+    },
+    {
+      "test": "test_frame_allocation",
+      "name": "remainders taken before the one-frame minimum",
+      "edits": [
+        {
+          "file": "duration.py",
+          "old": "    shares: list[Fraction] = []\n",
+          "new": "    shares: list[Fraction] = []\n    raw: list[Fraction] = []\n"
+        },
+        {
+          "file": "duration.py",
+          "old": "        shares.append(max(Fraction(1), share))\n",
+          "new": "        shares.append(max(Fraction(1), share))\n        raw.append(share)\n"
+        },
+        {
+          "file": "duration.py",
+          "old": "key=lambda i: (frames[i] - shares[i], i)",
+          "new": "key=lambda i: (math.floor(raw[i]) - raw[i], i)"
+        }
+      ],
+      "expect": "a phone shorter than one frame counts as one frame"
+    },
+    {
+      "test": "test_frame_allocation",
+      "name": "total taken before the one-frame minimum",
+      "edits": [
+        {
+          "file": "duration.py",
+          "old": "    shares: list[Fraction] = []\n",
+          "new": "    shares: list[Fraction] = []\n    raw: list[Fraction] = []\n"
+        },
+        {
+          "file": "duration.py",
+          "old": "        shares.append(max(Fraction(1), share))\n",
+          "new": "        shares.append(max(Fraction(1), share))\n        raw.append(share)\n"
+        },
+        {
+          "file": "duration.py",
+          "old": "total = math.floor(sum(shares) + Fraction(1, 2))",
+          "new": "total = math.floor(sum(raw) + Fraction(1, 2))"
+        }
+      ],
+      "expect": "every phone keeps at least one frame"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "a mark at the end of the text so far ends a chunk",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    for j in range(len(text) - 1):\n",
+          "new": "    for j in range(len(text)):\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "        if not text[j + 1].isspace():\n",
+          "new": "        if j + 1 < len(text) and not text[j + 1].isspace():\n"
+        }
+      ],
+      "expect": "the same chunks however the text is split"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "reads the whole stream before cutting",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for delta in deltas:\n        buffer += delta\n",
+          "new": "    everything = \"\".join([d async for d in deltas])\n    for delta in [everything]:\n        buffer += delta\n"
+        }
+      ],
+      "expect": "send the first chunk as soon as it is complete"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "no blank line after an event",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "+ \"\\n\\n\"",
+          "new": "+ \"\\n\""
+        }
+      ],
+      "expect": "every event ends with a blank line"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "a period after an abbreviation ends a chunk",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if mark == \".\" and _after_abbreviation(text, j):\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "a chunk ends at . ? ! and, once long enough, at , ; :"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "min_chars applied to sentence marks too",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if mark in \".?!\":\n",
+          "new": "        if mark in \".?!\" and len(text[: j + 1].strip()) >= min_chars:\n"
+        }
+      ],
+      "expect": "a chunk ends at . ? ! and, once long enough, at , ; :"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "every comma ends a chunk",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if mark in \",;:\" and len(text[: j + 1].strip()) >= min_chars:\n",
+          "new": "        if mark in \",;:\":\n"
+        }
+      ],
+      "expect": "a chunk ends at . ? ! and, once long enough, at , ; :"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "an empty last chunk sent",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    if rest:\n        yield _event(seq, rest)\n",
+          "new": "    yield _event(seq, rest)\n"
+        }
+      ],
+      "expect": "no empty chunks"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "only a space counts as whitespace",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "if not text[j + 1].isspace():",
+          "new": "if text[j + 1] != \" \":"
+        }
+      ],
+      "expect": "a newline is whitespace too"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "min_chars compared with >",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "len(text[: j + 1].strip()) >= min_chars",
+          "new": "len(text[: j + 1].strip()) > min_chars"
+        }
+      ],
+      "expect": "a chunk exactly min_chars long can end at a comma"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "min_chars counted without the mark",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "if mark in \",;:\" and len(text[: j + 1].strip()) >= min_chars:",
+          "new": "if mark in \",;:\" and len(text[:j].strip()) >= min_chars:"
+        }
+      ],
+      "expect": "a chunk exactly min_chars long can end at a comma"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "min_chars counts the leading space",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "if mark in \",;:\" and len(text[: j + 1].strip()) >= min_chars:",
+          "new": "if mark in \",;:\" and len(text[: j + 1]) >= min_chars:"
+        }
+      ],
+      "expect": "a chunk ends at . ? ! and, once long enough, at , ; :"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "abbreviation found by the letters just before the period",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    word = _WORD_BEFORE.search(text, 0, j)\n    return word is not None and word.group(1).lower() in ABBREVIATIONS\n",
+          "new": "    return text[:j].lower().endswith(tuple(ABBREVIATIONS))\n"
+        }
+      ],
+      "expect": "a chunk ends at . ? ! and, once long enough, at , ; :"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "one cut per delta",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "while (cut := _first_cut(buffer, min_chars)) is not None:",
+          "new": "if (cut := _first_cut(buffer, min_chars)) is not None:"
+        }
+      ],
+      "expect": "a chunk ends at . ? ! and, once long enough, at , ; :"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "cut at the last mark in the buffer",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    for j in range(len(text) - 1):\n        mark = text[j]\n",
+          "new": "    last = None\n    for j in range(len(text) - 1):\n        mark = text[j]\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "            return j + 1\n        if mark in \",;:\" and len(text[: j + 1].strip()) >= min_chars:\n            return j + 1\n    return None",
+          "new": "            last = j + 1\n            continue\n        if mark in \",;:\" and len(text[: j + 1].strip()) >= min_chars:\n            last = j + 1\n    return last"
+        }
+      ],
+      "expect": "a chunk ends at . ? ! and, once long enough, at , ; :"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "chunks sent unstripped",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "chunk, buffer = buffer[:cut].strip(), buffer[cut:]",
+          "new": "chunk, buffer = buffer[:cut], buffer[cut:]"
+        }
+      ],
+      "expect": "a chunk ends at . ? ! and, once long enough, at , ; :"
+    },
+    {
+      "test": "test_speech_events",
+      "name": "event JSON written by hand",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "return \"data: \" + json.dumps({\"seq\": seq, \"text\": text}) + \"\\n\\n\"",
+          "new": "return 'data: {\"seq\": %d, \"text\": \"%s\"}\\n\\n' % (seq, text)"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_ssml_flatten",
+      "name": "text after a closing tag keeps the inner prosody",
+      "edits": [
+        {
+          "file": "ssml.py",
+          "old": "            add_text(child.tail, prosody)\n",
+          "new": "            add_text(child.tail, _combine(prosody, child) if _tag(child) == \"prosody\" else prosody)\n"
+        }
+      ],
+      "expect": "text after a tag is back in the outer prosody"
+    },
+    {
+      "test": "test_ssml_flatten",
+      "name": "an inner prosody replaces the outer one",
+      "edits": [
+        {
+          "file": "ssml.py",
+          "old": "rate *= _percent(",
+          "new": "rate = _percent("
+        },
+        {
+          "file": "ssml.py",
+          "old": "pitch += _semitones(",
+          "new": "pitch = _semitones("
+        }
+      ],
+      "expect": "an inner prosody multiplies the rate and adds to the pitch"
+    },
+    {
+      "test": "test_ssml_flatten",
+      "name": "break unit checked for s before ms",
+      "edits": [
+        {
+          "file": "ssml.py",
+          "old": "    if value.endswith(\"ms\"):\n        ms = float(value[:-2])\n    elif value.endswith(\"s\"):\n        ms = float(value[:-1]) * 1000\n",
+          "new": "    if value.endswith(\"s\"):\n        ms = float(value[:-1]) * 1000\n    elif value.endswith(\"ms\"):\n        ms = float(value[:-2])\n"
+        }
+      ],
+      "expect": "'250m'"
+    },
+    {
+      "test": "test_ssml_flatten",
+      "name": "namespace left on the tag",
+      "edits": [
+        {
+          "file": "ssml.py",
+          "old": "    return element.tag.rsplit(\"}\", 1)[-1]\n",
+          "new": "    return element.tag\n"
+        }
+      ],
+      "expect": "synthesis}speak"
+    },
+    {
+      "test": "test_ssml_flatten",
+      "name": "pieces stripped and joined with spaces",
+      "edits": [
+        {
+          "file": "ssml.py",
+          "old": "        text = \" \".join(\"\".join(pending).split())\n",
+          "new": "        text = \" \".join(piece.strip() for piece in pending if piece.strip())\n"
+        }
+      ],
+      "expect": "text with the same prosody is one segment, spaced as written"
+    },
+    {
+      "test": "test_ssml_flatten",
+      "name": "unknown elements skipped",
+      "edits": [
+        {
+          "file": "ssml.py",
+          "old": "        elif tag != \"speak\":\n            raise ValueError(f\"unsupported SSML element <{tag}>\")\n",
+          "new": "        elif tag != \"speak\":\n            return\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_ssml_flatten",
+      "name": "Part 1 hyphen patched in normalize, not in number_words",
+      "edits": [
+        {
+          "file": "normalize.py",
+          "old": "f\"{TENS[tens]} {ONES[ones]}\"",
+          "new": "f\"{TENS[tens]}-{ONES[ones]}\""
+        },
+        {
+          "file": "normalize.py",
+          "old": "number_words(int(token)).split()",
+          "new": "number_words(int(token)).replace(\"-\", \" \").split()"
+        }
+      ],
+      "expect": "twenty-one"
+    },
+    {
+      "test": "test_ssml_flatten",
+      "name": "a break does not flush the pending text",
+      "edits": [
+        {
+          "file": "ssml.py",
+          "old": "        if tag == \"break\":\n            flush()\n",
+          "new": "        if tag == \"break\":\n"
+        }
+      ],
+      "expect": "a break separates segments; its time is in ms or s"
+    },
+    {
+      "test": "test_ssml_flatten",
+      "name": "tail read with the root prosody",
+      "edits": [
+        {
+          "file": "ssml.py",
+          "old": "            add_text(child.tail, prosody)\n",
+          "new": "            add_text(child.tail, (1.0, 0.0))\n"
+        }
+      ],
+      "expect": "a whole SSML document, namespace and all, flattens in reading order"
+    },
+    {
+      "test": "test_ssml_flatten",
+      "name": "element text read after its children",
+      "edits": [
+        {
+          "file": "ssml.py",
+          "old": "        add_text(element.text, prosody)\n        for child in element:\n            walk(child, prosody)\n            # Text after a child's closing tag is back in this element's prosody.\n            add_text(child.tail, prosody)\n",
+          "new": "        for child in element:\n            walk(child, prosody)\n            # Text after a child's closing tag is back in this element's prosody.\n            add_text(child.tail, prosody)\n        add_text(element.text, prosody)\n"
+        }
+      ],
+      "expect": "text with the same prosody is one segment, spaced as written"
+    },
+    {
+      "test": "test_ssml_flatten",
+      "name": "segment ends stripped, inner whitespace kept",
+      "edits": [
+        {
+          "file": "ssml.py",
+          "old": "        text = \" \".join(\"\".join(pending).split())\n",
+          "new": "        text = \"\".join(pending).strip()\n"
+        }
+      ],
+      "expect": "text with the same prosody is one segment, spaced as written"
+    },
+    {
+      "test": "test_ssml_flatten",
+      "name": "whitespace-only text sent as an empty segment",
+      "edits": [
+        {
+          "file": "ssml.py",
+          "old": "        if text:\n            rate, pitch = pending_prosody",
+          "new": "        if pending:\n            rate, pitch = pending_prosody"
+        }
+      ],
+      "expect": "a whole SSML document, namespace and all, flattens in reading order"
+    },
+    {
+      "test": "test_ssml_flatten",
+      "name": "namespace stripped from the root only",
+      "edits": [
+        {
+          "file": "ssml.py",
+          "old": "        tag = _tag(element)\n",
+          "new": "        tag = _tag(element) if element is root else element.tag\n"
+        }
+      ],
+      "expect": "unsupported SSML element <{http://www.w3.org/2001/10/synthesis}prosody>"
+    },
+    {
+      "test": "test_ssml_flatten",
+      "name": "say-as cardinal read one digit at a time",
+      "edits": [
+        {
+          "file": "ssml.py",
+          "old": "\" \".join(digit_words(text)) if kind == \"digits\" else number_words(int(text))",
+          "new": "\" \".join(digit_words(text))"
+        }
+      ],
+      "expect": "a whole SSML document, namespace and all, flattens in reading order"
+    }
+  ]
+}

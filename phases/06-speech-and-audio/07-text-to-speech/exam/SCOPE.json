@@ -1,0 +1,68 @@
+{
+  "lesson": "phases/06-speech-and-audio/07-text-to-speech",
+  "title": "Text-to-Speech (TTS) — From Tacotron to F5 and Kokoro",
+  "format": "staged-brownfield",
+  "service": "TTSFront: text normalization, lexicon-backed G2P, duration-to-frame allocation, LLM-to-TTS chunking and SSML flattening",
+  "sources": {
+    "docs/en.md": "d974cde93a3a8e692caf62fd9e48e18ebd8b889043bef6cf2367b4d89049a561",
+    "code/main.py": "0656376a277a67c9b1207462fb80182149b77f805ebdd93e88f8dac0bbe932a4"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_text_frontend",
+      "kind": "debug",
+      "lesson_anchor": "Pitfalls: no text normalizer, OOV proper nouns; code/main.py phonemize (greedy longest match)",
+      "planted_bugs": [
+        "number_words joins tens and ones with a hyphen ('forty-two'); the ValueError surfaces three calls later in rule_phones",
+        "phonemize looks words up case-sensitively, so the lexicon entry 'Kokoro' is missed",
+        "the tokenizer splits the period off 'Dr.', so it becomes a pause and the doctor/drive lookahead sees '.'",
+        "rule_phones tries every length from the rest of the word down, O(L^2) slices per word"
+      ],
+      "timing_assert": "a 3000-letter 'hahaha...' token under 0.05 s (unbounded match length takes about 1.1 s)",
+      "overfix_guard": "words missing from the lexicon are read with the grapheme rules, longest match first: dropping OOV words, skipping long words, skipping unruled characters, or a match length below MAX_RULE (single letters, the lesson's (3, 2, 1), shortest first) fails on 'Ghumare station' or the 'ha' run",
+      "clarifying_questions": ["Dr without a period", "abbreviation at the end of a sentence", "numbers with separators or decimals", "Kokoro and kokoro both in the lexicon"]
+    },
+    {
+      "part": 2,
+      "test": "test_lexicon_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Step 1 phonemize (IPA output); Pitfalls: OOV proper nouns need a lexicon and a fallback",
+      "exactness": "IPA segments with combining tildes and tie bars, and a precomposed ç, round-trip code point for code point, across close and reopen",
+      "traps": ["segments joined and split per code point", "NFC normalization", "NFD normalization", "one row per word", "equal priorities newest first", "case-sensitive words", "case-sensitive duplicate check", "UNIQUE constraint raises IntegrityError, not ValueError", "missing commit", "CREATE TABLE without IF NOT EXISTS", "detached combining mark accepted", "empty segment", "table() ignores priority"],
+      "clarifying_questions": ["duplicate pronunciation with a new priority", "Unicode normalization of phones", "stress marks as segments"]
+    },
+    {
+      "part": 3,
+      "test": "test_frame_allocation",
+      "kind": "core algorithm",
+      "lesson_anchor": "FastSpeech 2 duration predictor; code/main.py duration and mel_schedule (integer frames, max(1, ...), round)",
+      "traps": ["per-phone rounding drifts the total", "round() is half to even", "float remainders break exact ties", "ties to the later phone", "one-frame minimum applied after allocation", "remainders or total taken before the one-frame minimum", "leftover frames by share size", "rounding the running total"],
+      "integration": "lexicon (Part 2) and frontend (Part 1) through the lesson's duration table at 1.25x speed",
+      "clarifying_questions": ["all-zero durations", "empty input"]
+    },
+    {
+      "part": 4,
+      "test": "test_speech_events",
+      "kind": "streaming",
+      "lesson_anchor": "The Problem: under 300 ms for a live voice assistant; first-chunk latency",
+      "wire_format": "server-sent events, one 'data: <json>' line per chunk and a blank line, decided by the test's split/startswith/json.loads",
+      "traps": ["deciding a mark at the end of a delta", "period after an abbreviation", "abbreviation matched as a suffix ('rest.')", "only a space counts as whitespace", "min_chars on sentence marks", "every comma cuts", "min_chars boundary (> instead of >=, the mark not counted, the leading space counted)", "one cut per delta", "reading the whole stream first", "missing blank line", "JSON built by hand", "empty last chunk"],
+      "clarifying_questions": ["what counts as whitespace", "a mark followed by a quote", "min_chars counts the stripped chunk", "a long sentence with no punctuation"]
+    },
+    {
+      "part": 5,
+      "test": "test_ssml_flatten",
+      "kind": "recursive structure",
+      "lesson_anchor": "The Problem: correct prosody (pauses, stress); the text frontend predicts prosody features; Use It: expressive and emotion tags",
+      "traps": ["tail text read with the child's prosody", "inner prosody overrides instead of combining", "'s' checked before 'ms'", "W3C namespace on tags", "namespace stripped from the root only", "pieces stripped and re-spaced", "whitespace-only text as an empty segment", "break without flushing the pending text", "unknown elements skipped"],
+      "clarifying_questions": ["rate keywords", "merging across a break", "namespace"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the suggested abbreviation and punctuation-pause defects are one root cause here (the tokenizer splits the period off 'Dr.'); the number defect is the hyphen in number_words, which also gives the error three calls from its cause.",
+    "Part 4: min_chars applies only to , ; : so a short first sentence still goes out at once; numbers are protected by requiring whitespace after the mark and waiting for the next delta, not by a separate number rule.",
+    "Part 5: prosody carries rate and pitch only (volume dropped to fit 12 minutes); the W3C namespace is supported because real SSML documents carry it."
+  ]
+}
