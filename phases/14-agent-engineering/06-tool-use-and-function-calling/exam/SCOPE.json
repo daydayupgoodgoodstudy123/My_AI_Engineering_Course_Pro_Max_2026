@@ -1,0 +1,141 @@
+{
+  "lesson": "phases/14-agent-engineering/06-tool-use-and-function-calling",
+  "title": "Tool Use and Function Calling",
+  "format": "staged-brownfield",
+  "service": "ToolCall: a tool registry (validation, coercion, timeouts), a dbm bank of BFCL-style eval cases, AST and state-based grading with the V4 weights, a concurrent TAP eval pipeline and a resolver for references inside multi-turn tool chains",
+  "sources": {
+    "docs/en.md": "73cf8bf653c6148817147fd98b4fc780d9794ca3e9651605f6c8e3f242a14992",
+    "code/main.py": "306cad1c9544979767563bca3b1a0ed218d8e3f757ce63707654cf70bbb5aa67",
+    "quiz/quiz.md": "bcb9aa2ec09e837754b06a60c21a40981ace34fb3edd889426b805de2fd2139d"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network: a scripted stand-in model in the tests and a fake drive API (toolcall/drive.py)",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_registry_dispatch",
+      "kind": "debug",
+      "lesson_anchor": "Argument validation (coerce if unambiguous, reject if not; dates, emails, URLs validated with concrete parsers, not regex); Sandboxing (every tool specifies a timeout); code/main.py _coerce, validate and ToolRegistry.dispatch; quiz Q8 (timeout_s is never read), Q9 (NaN passes minimum and maximum), Q12 (int() accepts ' 7 ', '1_0' and Arabic-Indic digits)",
+      "planted_bugs": [
+        "_coerce's number branch accepts NaN and the infinities (json.loads reads NaN and Infinity, float() reads 'nan', '1e999' overflows to inf); NaN compares False against minimum and maximum, so it reaches the tool, and the failure surfaces in the test's executor as 'execution error: ValueError: cannot convert float NaN to integer', two calls from the root cause (dispatch -> validate -> _coerce)",
+        "string coercion uses int() and float(), which accept ' 7', '+7', '07', '1_000', '٣', '1٣', '7\\n', ' 2.5', '2_5', '٢.٥', '2.٥', '.5' and '2.'; the docstring allows only strings written exactly as JSON writes the number",
+        "format date is checked with re.match(r'\\d{4}-\\d{2}-\\d{2}'), so 2026-02-30 reaches the tool and fails there, in date.fromisoformat ('day is out of range for month')",
+        "ToolDef.timeout_s is never read: dispatch calls the executor inline and waits out a tool that is stuck for 2.5 s"
+      ],
+      "timing_assert": "a tool stuck for 2.5 s with timeout_s=0.01 must come back as a timeout observation in under 0.25 s; measured on this machine with other jobs running (load average about 3.7): the inline call 2.51 s in 3 of 3 runs (10x the limit), the worker-thread fix median 0.014 s and at most 0.017-0.025 s over 300 runs (10-19x under the limit), one outlier of 0.061 s in about 470 runs; at load average 10 to 14, with four processes timing at once, the fix had median 0.014 s and at most 0.020 s over 1,600 runs (12x under the limit) and the inline call took 2.50-2.51 s",
+      "overfix_guard": "rejecting every string ('5' must become 5 and '-1' -1; '21.5', '2.15e1' and '-0.2' stay numbers); str.isdigit() or -?\\d+ ('٣', '07'), the JSON grammar written with \\d ('1٣', '2.٥'), Decimal() (' 2.5'); stripping whitespace only ('+7'); re.match with $ ('7\\n'); math.isnan only (Infinity), a list of NaN spellings ('1e999'), a finite check on strings only (json's NaN is a float); strptime or int parts passed to date() ('2026-2-5'), date.fromisoformat alone or after a length check ('20260302', '2026-W10-1' on 3.11+), a pattern plus month and day ranges ('2026-02-30'); the leap day 2028-02-29 must pass; waiting inside a with ThreadPoolExecutor block or checking the elapsed time after the executor returns (2.5 s); one shared single-thread pool (a 0.05 s lookup with timeout_s=2 times out behind the stuck call); ToolDef's class default timeout instead of the tool's own; a worker that loses the executor's exception (KeyError: 'content')"
+    },
+    {
+      "part": 2,
+      "test": "test_case_bank",
+      "kind": "model and persistence",
+      "lesson_anchor": "BFCL V4's five categories (Agentic, Multi-Turn, Live, Non-Live, Hallucination); V3 state-based evaluation (the API's actual state after a tool sequence); Tool schema (name, description, input_schema); Exercise 4 (run BFCL-style prompts through your agent)",
+      "exactness": "every case round-trips through dbm with value types and list order intact, compared with a typed() walk because Python's 200 == 200.0: an int and a float for one number parameter in two accepted answers, '5' for a string parameter, the order of the accepted answers, ids with '/', spaces and non-ASCII text, across close and reopen; the raw file has exactly one key per case and every value is JSON",
+      "traps": [
+        "dbm keys come back as bytes: str(key), or Latin-1 decoding of 'weather/zürich 3'",
+        "a key 'cleaned' by replacing spaces, so 'rename report' and 'rename_report' collide",
+        "flag 'n' empties the file on every open",
+        "ids in dbm key (hash) order; cases() not in ids() order",
+        "storing validate()'s coerced arguments, or writing them back into the caller's calls (200 becomes 200.0)",
+        "calls read back as plain dicts",
+        "a case written before it is checked; a duplicate id replacing the stored case; an unknown id returning None",
+        "the schema looked up before the tool is checked against the catalog (KeyError: 'book_rooms')",
+        "missing rejections: '#' in an id, an unknown category, an empty answer, answers on a hallucination case, a missing initial state; a rule checked for only one of the two categories it names (a live case without answers, an agentic case without its initial state) or for the first accepted answer only",
+        "pickled values, or every case under one key"
+      ],
+      "clarifying_questions": [
+        "'/', spaces and non-ASCII in ids",
+        "storing validated arguments",
+        "which dbm module",
+        "an id that exists"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_bfcl_scoring",
+      "kind": "core algorithm",
+      "lesson_anchor": "BFCL V4 composition (40% agentic, 30% multi-turn, 10% live, 10% non-live, 10% hallucination); V3 state-based evaluation instead of matching the AST of the tool calls; Hallucination (detect when no tool should be called); Parallel tool calls; Exercise 2 and quiz Q12 (where coercion starts to hide real bugs)",
+      "traps": [
+        "arguments compared as unsorted JSON text",
+        "parallel calls compared in order, as a set, or by membership without counts",
+        "defaults not filled in, or an omitted argument treated as a wildcard",
+        "defaults and floats written into the calls being matched, or answers sorted in place, which changes the case's own answers",
+        "Python == on values (4.0 matches an integer 4), or JSON types for number parameters (200 against 200.0)",
+        "coercing with validate() before comparing ('4', '200')",
+        "only the first accepted answer tried; strings compared without case; the tool name left out (get_forecast shares get_weather's schema)",
+        "a tool outside the catalog crashing the checker",
+        "AST used for a multi-turn case because it lists answers; state used for a live case because it carries a state",
+        "replay stopping at the first failed call, offering every drive tool, bypassing the registry (a filter on the offered names still lets a write_file whose text is a number reach the drive), sorting the calls, comparing file paths without their text",
+        "replay on the case's own or a shallow-copied initial state",
+        "hallucination taken as calling a tool that does not exist; no attempt taken as calling nothing, in grade or in score_run (attempts.get(id, []))",
+        "one accuracy over every case (0.571), an unweighted mean of categories (0.533), an empty category counted as zero (0.1 instead of 0.5) or scored 0.0, division by zero with no verdicts, attempts for unknown cases ignored"
+      ],
+      "integration": "the state check replays the calls through FakeDrive.registry(case.tools), that is through Part 1's validation, coercion and timeouts; the same four calls are right on the multi-turn case and wrong on the live one",
+      "clarifying_questions": [
+        "21.0 against 21",
+        "coercing in the checker",
+        "matching calls on multi-turn cases",
+        "empty categories",
+        "missing attempts"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_suite_tap",
+      "kind": "streaming",
+      "lesson_anchor": "Use It: BFCL is the reference benchmark, run it against your agent before shipping; Exercise 4; Hallucination detection; Parallel tool calls run concurrently",
+      "wire_format": "TAP: one 'ok N - <id> # <category>' or 'not ok N - <id> # <category>: <reason>' line per case the moment it is graded, numbered in output order, then '# score <total to four decimals>' ('-' with no cases) and the plan '1..N' last; every line ends with a newline; decided by the test's join, split('\\n') and exact line list, plus a probe that records how many cases had finished when each line arrived",
+      "traps": [
+        "lines numbered by the case's position instead of output order",
+        "every case graded, or every case started, before the first line comes out",
+        "no concurrency limit, batches of `concurrency`, or one case at a time (the expected order depends on first-come slots)",
+        "an exception not caught, or only the model call guarded (a catalog without descriptions makes FakeDrive.registry raise KeyError while grading): the lost verdict leaves the reader waiting, and the test's 3 s limit turns that into TimeoutError",
+        "a failed model call graded as no calls, which makes the hallucination case ok",
+        "failed cases left out of the score (0.6111 instead of 0.5500)",
+        "the plan first; result lines without a newline; a multi-line reason written raw; two decimals",
+        "running cases left alone, cancelled without waiting, or gathered without return_exceptions (CancelledError out of aclose), when the reader calls aclose()",
+        "the empty suite's None total formatted with :.4f",
+        "concurrency below 1 accepted (Semaphore(0) waits forever)"
+      ],
+      "integration": "EvalService runs the live cases from Part 2's bank in id order and grades them with Part 3",
+      "clarifying_questions": [
+        "numbering",
+        "a model call or a grading that raises",
+        "where the score and the plan go"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_call_chains",
+      "kind": "recursive structure",
+      "lesson_anchor": "Multi-Turn: interactive conversations with tool chains; 2026 open problems: dynamic decision-making (choosing tools based on prior results) and long-horizon tool chaining; V3 state-based evaluation ('is the file created?')",
+      "traps": [
+        "references checked only when their step runs, after earlier steps have run",
+        "a referenced call run again for every reference (search_files re-runs on a changed drive)",
+        "a missing field read as None with .get()",
+        "negative indexes; a string indexed like an array ('closed'[0])",
+        "field lookup with `in` on None (TypeError instead of ChainError)",
+        "resolved values turned into text; references replaced inside longer text; strings that come out of a result resolved again",
+        "arguments rewritten in place",
+        "only top-level arguments resolved, or only top-level arguments checked",
+        "at holding the whole reference instead of the part up to the failing step",
+        "a malformed reference passed on as text, or found only when its step runs (field names written as \\w+ let '.0' through)",
+        "duplicate call ids, also when they are noticed only as the second step runs; a step referring to itself"
+      ],
+      "integration": "the agentic case's reference chain, replayed on FakeDrive with references into search_files' hits, reproduces that case's expected state",
+      "clarifying_questions": [
+        "references to later calls",
+        "negative indexes",
+        "a reference inside text",
+        "reference-like strings in results"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: number strings were as lenient as integer strings (float() takes ' 2.5', '2_5' and '٢.٥'), so the canonical-string rule covers both: a string is coerced only when it is written exactly as JSON writes the number, and one layer fixes both branches. Bool-as-number is not tested (chapter 13 lesson 01 owns it); the code keeps the lesson's bool exclusion.",
+    "Part 1 timing: timeout_s is 0.01 instead of 0.03. Thread joins on macOS wake on a roughly 10 ms grid, so with 0.03 the fixed dispatch takes 0.03 to 0.04 s and no limit keeps 8x on both sides of a 2.5 s stuck call; with 0.01 the fix takes about 0.014 s against a 0.25 s limit.",
+    "Part 2: one key per case is the case id in UTF-8. The id rules also reject '#' and line breaks, because Part 4 writes ids into TAP lines. add() reuses Part 1's validate on the accepted answers, which is where the type trap comes from: validate returns 200.0 for a number parameter.",
+    "Part 3: accepted answers are whole alternatives (each the complete list of calls), not per-parameter value lists. The checker does not coerce: '4' for an integer parameter is wrong even though the registry would repair it (Exercise 2, quiz Q12). The state check replays through Part 1's registry restricted to the case's catalog, which adds the trap that only offered tools may run. A case without an attempt is wrong in every category, Hallucination included. Empty categories are left out and the other weights rescaled. These matching rules and the per-category split are this pack's simplification, not BFCL's official checker.",
+    "Part 4: besides the suggested traps, the suite has a concurrency limit with first-come slots (the expected line order depends on it), a failed model call counts as wrong in its category (an API error is not a refusal), multi-line reasons are joined into one line, aclose() cancels the running cases, and the score comment comes before the plan so that the plan is the last line.",
+    "Part 5: calls run in list order, so 'a call referred to many times runs once' is checked through the executor log against a lazy resolver that re-runs referenced calls. Repeated call ids, references to unknown, self or later calls and malformed references are rejected before any call runs; a string that starts like a reference but does not parse is an error, not text. ChainError carries call_id, ref and at. What happens after an executor raises is not tested; lesson 02 (ReWOO) owns failure propagation."
+  ]
+}

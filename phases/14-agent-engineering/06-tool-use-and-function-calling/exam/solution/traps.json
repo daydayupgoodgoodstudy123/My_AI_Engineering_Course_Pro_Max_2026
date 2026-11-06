@@ -1,0 +1,1765 @@
+{
+  "package": "toolcall",
+  "tests": [
+    "test_registry_dispatch",
+    "test_case_bank",
+    "test_bfcl_scoring",
+    "test_suite_tap",
+    "test_call_chains"
+  ],
+  "layers": [
+    {
+      "test": "test_registry_dispatch",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a number must be finite before the tool runs"
+        },
+        {
+          "name": "reject non-finite numbers",
+          "edits": [
+            {
+              "file": "registry.py",
+              "old": "import re\n",
+              "new": "import math\nimport re\n"
+            },
+            {
+              "file": "registry.py",
+              "old": "        if isinstance(value, (int, float)) and not isinstance(value, bool):\n            return float(value), None\n        if isinstance(value, str):\n            try:\n                return float(value), None\n            except ValueError:\n                return value, f\"cannot coerce string {value!r} to number\"\n        return value, f\"expected number, got {type(value).__name__}\"\n",
+              "new": "        if isinstance(value, (int, float)) and not isinstance(value, bool):\n            number = float(value)\n        elif isinstance(value, str):\n            try:\n                number = float(value)\n            except ValueError:\n                return value, f\"cannot coerce string {value!r} to number\"\n        else:\n            return value, f\"expected number, got {type(value).__name__}\"\n        if not math.isfinite(number):\n            return value, f\"expected a finite number, got {value!r}\"\n        return number, None\n"
+            }
+          ],
+          "expect": "only a canonical decimal string becomes an integer"
+        },
+        {
+          "name": "+ coerce only strings written as JSON numbers",
+          "edits": [
+            {
+              "file": "registry.py",
+              "old": "        if isinstance(value, str):\n            try:\n                return int(value), None\n            except ValueError:\n                return value, f\"cannot coerce string {value!r} to integer\"\n",
+              "new": "        if isinstance(value, str):\n            if re.fullmatch(r\"-?(?:0|[1-9][0-9]*)\", value):\n                return int(value), None\n            return value, f\"cannot coerce string {value!r} to integer\"\n"
+            },
+            {
+              "file": "registry.py",
+              "old": "        elif isinstance(value, str):\n            try:\n                number = float(value)\n            except ValueError:\n                return value, f\"cannot coerce string {value!r} to number\"\n",
+              "new": "        elif isinstance(value, str):\n            if not re.fullmatch(r\"-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\", value):\n                return value, f\"cannot coerce string {value!r} to number\"\n            number = float(value)\n"
+            }
+          ],
+          "expect": "a date must exist and be written YYYY-MM-DD"
+        },
+        {
+          "name": "+ parse dates instead of matching a pattern",
+          "edits": [
+            {
+              "file": "registry.py",
+              "old": "import math\n",
+              "new": "import datetime\nimport math\n"
+            },
+            {
+              "file": "registry.py",
+              "old": "_DATE = re.compile(r\"\\d{4}-\\d{2}-\\d{2}\")\n",
+              "new": "_DATE = re.compile(r\"\\d{4}-\\d{2}-\\d{2}\")\n\n\ndef _is_date(text: str) -> bool:\n    try:\n        return datetime.date.fromisoformat(text).isoformat() == text\n    except ValueError:\n        return False\n"
+            },
+            {
+              "file": "registry.py",
+              "old": "not _DATE.match(coerced):",
+              "new": "not _is_date(coerced):"
+            }
+          ],
+          "expect": "a tool that overruns its timeout_s gets a timeout observation"
+        },
+        {
+          "name": "+ honour timeout_s in a worker thread",
+          "edits": [
+            {
+              "file": "registry.py",
+              "old": "import re\n",
+              "new": "import re\nimport threading\n"
+            },
+            {
+              "file": "registry.py",
+              "old": "        try:\n            return ToolResult(call.tool_use_id, True, tool.executor(**validated))\n        except Exception as e:\n            return ToolResult(call.tool_use_id, False,\n                              f\"execution error: {type(e).__name__}: {e}\")\n",
+              "new": "        outcome: dict[str, Any] = {}\n\n        def run() -> None:\n            try:\n                outcome[\"content\"] = tool.executor(**validated)\n            except Exception as e:\n                outcome[\"error\"] = e\n\n        worker = threading.Thread(target=run, daemon=True)\n        worker.start()\n        worker.join(tool.timeout_s)\n        if worker.is_alive():\n            return ToolResult(call.tool_use_id, False,\n                              f\"timeout: {tool.name} did not finish within {tool.timeout_s} s\")\n        if \"error\" in outcome:\n            e = outcome[\"error\"]\n            return ToolResult(call.tool_use_id, False,\n                              f\"execution error: {type(e).__name__}: {e}\")\n        return ToolResult(call.tool_use_id, True, outcome[\"content\"])\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_registry_dispatch",
+      "name": "every integer string rejected (over-fix)",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        if isinstance(value, str):\n            if _INTEGER.fullmatch(value):\n                try:\n                    return int(value), None\n                except ValueError:  # more digits than int() converts\n                    pass\n            return value, f\"cannot coerce string {value!r} to integer\"\n",
+          "new": "        if isinstance(value, str):\n            return value, f\"cannot coerce string {value!r} to integer\"\n"
+        }
+      ],
+      "expect": "a canonical decimal string is coerced"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "every number string rejected (over-fix)",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "if isinstance(value, str) and not _NUMBER.fullmatch(value):",
+          "new": "if isinstance(value, str):"
+        }
+      ],
+      "expect": "a number written as a string is still a number"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "str.isdigit() decides what is an integer",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "if _INTEGER.fullmatch(value):",
+          "new": "if value.isdigit():"
+        }
+      ],
+      "expect": "only a canonical decimal string becomes an integer, not '٣'"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "integer pattern -?\\d+ (Unicode digits, leading zeros)",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "_INTEGER = re.compile(r\"-?(?:0|[1-9][0-9]*)\")",
+          "new": "_INTEGER = re.compile(r\"-?\\d+\")"
+        }
+      ],
+      "expect": "only a canonical decimal string becomes an integer, not '٣'"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "only surrounding whitespace rejected",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "if _INTEGER.fullmatch(value):",
+          "new": "if value == value.strip():"
+        }
+      ],
+      "expect": "only a canonical decimal string becomes an integer, not '+7'"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "re.match with $ (matches before a trailing newline)",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "if _INTEGER.fullmatch(value):",
+          "new": "if re.match(r\"-?(?:0|[1-9][0-9]*)$\", value):"
+        }
+      ],
+      "expect": "only a canonical decimal string becomes an integer, not '7\\n'"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "finite check only for strings (JSON NaN gets through)",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        if not math.isfinite(number):\n",
+          "new": "        if isinstance(value, str) and not math.isfinite(number):\n"
+        }
+      ],
+      "expect": "a number must be finite before the tool runs"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "math.isnan instead of math.isfinite",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        if not math.isfinite(number):\n",
+          "new": "        if math.isnan(number):\n"
+        }
+      ],
+      "expect": "a number must be finite before the tool runs, offset Infinity"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "a list of NaN and infinity spellings",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        if not math.isfinite(number):\n",
+          "new": "        if str(value).strip().lower() in (\"nan\", \"inf\", \"-inf\", \"infinity\", \"-infinity\"):\n"
+        }
+      ],
+      "expect": "a number must be finite before the tool runs, offset \"1e999\""
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "float() for number strings, finite check kept",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "if isinstance(value, str) and not _NUMBER.fullmatch(value):",
+          "new": "if isinstance(value, str) and not value:"
+        }
+      ],
+      "expect": "only a string written as a JSON number becomes a number, not ' 2.5'"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "datetime.strptime(text, '%Y-%m-%d') (accepts 2026-2-5)",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "def _is_date(text: str) -> bool:\n    try:\n        return datetime.date.fromisoformat(text).isoformat() == text\n    except ValueError:\n        return False\n",
+          "new": "def _is_date(text: str) -> bool:\n    try:\n        datetime.datetime.strptime(text, \"%Y-%m-%d\")\n        return True\n    except ValueError:\n        return False\n"
+        }
+      ],
+      "expect": "a date must exist and be written YYYY-MM-DD, not '2026-2-5'"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "date.fromisoformat alone (Python 3.11+ reads 20260302)",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        return datetime.date.fromisoformat(text).isoformat() == text\n",
+          "new": "        datetime.date.fromisoformat(text)\n        return True\n"
+        }
+      ],
+      "expect": "a date must exist and be written YYYY-MM-DD, not '20260302'"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "full-match pattern plus month and day ranges",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "def _is_date(text: str) -> bool:\n    try:\n        return datetime.date.fromisoformat(text).isoformat() == text\n    except ValueError:\n        return False\n",
+          "new": "def _is_date(text: str) -> bool:\n    m = re.fullmatch(r\"([0-9]{4})-([0-9]{2})-([0-9]{2})\", text)\n    return bool(m) and 1 <= int(m[2]) <= 12 and 1 <= int(m[3]) <= 31\n"
+        }
+      ],
+      "expect": "a date must exist and be written YYYY-MM-DD, not '2026-02-30'"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "pool in a with block (shutdown waits for the stuck call)",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "import threading\n",
+          "new": "import concurrent.futures\nimport threading\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        outcome: dict[str, Any] = {}\n\n        def run() -> None:\n            try:\n                outcome[\"content\"] = tool.executor(**validated)\n            except Exception as e:\n                outcome[\"error\"] = e\n\n        worker = threading.Thread(target=run, name=f\"tool-{tool.name}\", daemon=True)\n        worker.start()\n        worker.join(tool.timeout_s)\n        if worker.is_alive():\n            return ToolResult(call.tool_use_id, False,\n                              f\"timeout: {tool.name} did not finish within {tool.timeout_s} s\")\n        if \"error\" in outcome:\n            e = outcome[\"error\"]\n            return ToolResult(call.tool_use_id, False,\n                              f\"execution error: {type(e).__name__}: {e}\")\n        return ToolResult(call.tool_use_id, True, outcome[\"content\"])\n",
+          "new": "        try:\n            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:\n                content = pool.submit(tool.executor, **validated).result(timeout=tool.timeout_s)\n        except concurrent.futures.TimeoutError:\n            return ToolResult(call.tool_use_id, False,\n                              f\"timeout: {tool.name} did not finish within {tool.timeout_s} s\")\n        except Exception as e:\n            return ToolResult(call.tool_use_id, False,\n                              f\"execution error: {type(e).__name__}: {e}\")\n        return ToolResult(call.tool_use_id, True, content)\n"
+        }
+      ],
+      "expect": "dispatch stops waiting once timeout_s has passed"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "elapsed time checked after the executor returns",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "import threading\n",
+          "new": "import threading\nimport time\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        outcome: dict[str, Any] = {}\n\n        def run() -> None:\n            try:\n                outcome[\"content\"] = tool.executor(**validated)\n            except Exception as e:\n                outcome[\"error\"] = e\n\n        worker = threading.Thread(target=run, name=f\"tool-{tool.name}\", daemon=True)\n        worker.start()\n        worker.join(tool.timeout_s)\n        if worker.is_alive():\n            return ToolResult(call.tool_use_id, False,\n                              f\"timeout: {tool.name} did not finish within {tool.timeout_s} s\")\n        if \"error\" in outcome:\n            e = outcome[\"error\"]\n            return ToolResult(call.tool_use_id, False,\n                              f\"execution error: {type(e).__name__}: {e}\")\n        return ToolResult(call.tool_use_id, True, outcome[\"content\"])\n",
+          "new": "        start = time.monotonic()\n        try:\n            content = tool.executor(**validated)\n        except Exception as e:\n            return ToolResult(call.tool_use_id, False,\n                              f\"execution error: {type(e).__name__}: {e}\")\n        if time.monotonic() - start > tool.timeout_s:\n            return ToolResult(call.tool_use_id, False,\n                              f\"timeout: {tool.name} did not finish within {tool.timeout_s} s\")\n        return ToolResult(call.tool_use_id, True, content)\n"
+        }
+      ],
+      "expect": "dispatch stops waiting once timeout_s has passed"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "one shared worker thread for every call",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "import threading\n",
+          "new": "import concurrent.futures\nimport threading\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "class ToolRegistry:\n",
+          "new": "_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=1)\n\n\nclass ToolRegistry:\n"
+        },
+        {
+          "file": "registry.py",
+          "old": "        outcome: dict[str, Any] = {}\n\n        def run() -> None:\n            try:\n                outcome[\"content\"] = tool.executor(**validated)\n            except Exception as e:\n                outcome[\"error\"] = e\n\n        worker = threading.Thread(target=run, name=f\"tool-{tool.name}\", daemon=True)\n        worker.start()\n        worker.join(tool.timeout_s)\n        if worker.is_alive():\n            return ToolResult(call.tool_use_id, False,\n                              f\"timeout: {tool.name} did not finish within {tool.timeout_s} s\")\n        if \"error\" in outcome:\n            e = outcome[\"error\"]\n            return ToolResult(call.tool_use_id, False,\n                              f\"execution error: {type(e).__name__}: {e}\")\n        return ToolResult(call.tool_use_id, True, outcome[\"content\"])\n",
+          "new": "        future = _POOL.submit(tool.executor, **validated)\n        try:\n            content = future.result(timeout=tool.timeout_s)\n        except concurrent.futures.TimeoutError:\n            return ToolResult(call.tool_use_id, False,\n                              f\"timeout: {tool.name} did not finish within {tool.timeout_s} s\")\n        except Exception as e:\n            return ToolResult(call.tool_use_id, False,\n                              f\"execution error: {type(e).__name__}: {e}\")\n        return ToolResult(call.tool_use_id, True, content)\n"
+        }
+      ],
+      "expect": "a tool within its own timeout_s still answers while a stuck call runs on"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "ToolDef's default timeout instead of the tool's own",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        worker.join(tool.timeout_s)\n",
+          "new": "        worker.join(ToolDef.timeout_s)\n"
+        }
+      ],
+      "expect": "a tool that overruns its timeout_s gets a timeout observation"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "the worker does not hand back the executor's exception",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "            try:\n                outcome[\"content\"] = tool.executor(**validated)\n            except Exception as e:\n                outcome[\"error\"] = e\n",
+          "new": "            outcome[\"content\"] = tool.executor(**validated)\n"
+        }
+      ],
+      "expect": "KeyError: 'content'"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "JSON integer grammar written with \\d (Unicode digits after the first)",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "_INTEGER = re.compile(r\"-?(?:0|[1-9][0-9]*)\")",
+          "new": "_INTEGER = re.compile(r\"-?(?:0|[1-9]\\d*)\")"
+        }
+      ],
+      "expect": "only a canonical decimal string becomes an integer, not '1٣'"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "JSON number grammar written with \\d",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "_NUMBER = re.compile(r\"-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\")",
+          "new": "_NUMBER = re.compile(r\"-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\")"
+        }
+      ],
+      "expect": "only a string written as a JSON number becomes a number, not '2.٥'"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "decimal.Decimal() decides what a number string is",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        if isinstance(value, str) and not _NUMBER.fullmatch(value):\n            return value, f\"cannot coerce string {value!r} to number\"\n",
+          "new": "        if isinstance(value, str):\n            import decimal\n            try:\n                decimal.Decimal(value)\n            except decimal.InvalidOperation:\n                return value, f\"cannot coerce string {value!r} to number\"\n"
+        }
+      ],
+      "expect": "only a string written as a JSON number becomes a number, not ' 2.5'"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "date split on '-' and passed to date()",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "def _is_date(text: str) -> bool:\n    try:\n        return datetime.date.fromisoformat(text).isoformat() == text\n    except ValueError:\n        return False\n",
+          "new": "def _is_date(text: str) -> bool:\n    try:\n        datetime.date(*map(int, text.split(\"-\")))\n        return True\n    except (ValueError, TypeError):\n        return False\n"
+        }
+      ],
+      "expect": "a date must exist and be written YYYY-MM-DD, not '2026-2-5'"
+    },
+    {
+      "test": "test_registry_dispatch",
+      "name": "ten characters plus date.fromisoformat (Python 3.11+ reads 2026-W10-1)",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "        return datetime.date.fromisoformat(text).isoformat() == text\n",
+          "new": "        return len(text) == 10 and bool(datetime.date.fromisoformat(text))\n"
+        }
+      ],
+      "expect": "a date must exist and be written YYYY-MM-DD, not '2026-W10-1'"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "ids built with str(bytes)",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "        ids = sorted(key.decode(\"utf-8\") for key in self._db.keys())\n",
+          "new": "        ids = sorted(str(key) for key in self._db.keys())\n"
+        }
+      ],
+      "expect": "a reopened bank lists every id exactly, sorted"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "keys decoded as Latin-1",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "        ids = sorted(key.decode(\"utf-8\") for key in self._db.keys())\n",
+          "new": "        ids = sorted(key.decode(\"latin-1\") for key in self._db.keys())\n"
+        }
+      ],
+      "expect": "a reopened bank lists every id exactly, sorted"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "spaces in ids turned into underscores for the key",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "        key = case.case_id.encode(\"utf-8\")\n",
+          "new": "        key = case.case_id.replace(\" \", \"_\").encode(\"utf-8\")\n"
+        },
+        {
+          "file": "cases.py",
+          "old": "        raw = self._db.get(case_id.encode(\"utf-8\"))\n",
+          "new": "        raw = self._db.get(case_id.replace(\" \", \"_\").encode(\"utf-8\"))\n"
+        },
+        {
+          "file": "cases.py",
+          "old": "        ids = sorted(key.decode(\"utf-8\") for key in self._db.keys())\n",
+          "new": "        ids = sorted(key.decode(\"utf-8\").replace(\"_\", \" \") for key in self._db.keys())\n"
+        }
+      ],
+      "expect": "is already stored"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "dbm opened with flag 'n' (a new, empty file every time)",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "self._db = dbm.open(path, \"c\")",
+          "new": "self._db = dbm.open(path, \"n\")"
+        }
+      ],
+      "expect": "a reopened bank lists every id exactly, sorted"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "validate()'s coerced arguments stored",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "        self._db[key] = json.dumps(dataclasses.asdict(case))\n",
+          "new": "        schemas = {tool[\"name\"]: tool[\"input_schema\"] for tool in case.tools}\n        accepted = [[Call(c.name, validate(c.args, schemas[c.name])[0]) for c in answer]\n                    for answer in case.accepted]\n        self._db[key] = json.dumps(dataclasses.asdict(dataclasses.replace(case, accepted=accepted)))\n"
+        }
+      ],
+      "expect": "a case comes back exactly, value types included"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "ids in dbm key order",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "        ids = sorted(key.decode(\"utf-8\") for key in self._db.keys())\n",
+          "new": "        ids = [key.decode(\"utf-8\") for key in self._db.keys()]\n"
+        }
+      ],
+      "expect": "a reopened bank lists every id exactly, sorted"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "a duplicate id silently replaces the stored case",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "        if key in self._db:\n            raise ValueError(f\"case {case.case_id!r} is already stored\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "case written before it is checked",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "        problem = _problem(case)\n        if problem is not None:\n            raise ValueError(f\"case {case.case_id!r}: {problem}\")\n        key = case.case_id.encode(\"utf-8\")\n        if key in self._db:\n            raise ValueError(f\"case {case.case_id!r} is already stored\")\n        self._db[key] = json.dumps(dataclasses.asdict(case))\n",
+          "new": "        key = case.case_id.encode(\"utf-8\")\n        if key in self._db:\n            raise ValueError(f\"case {case.case_id!r} is already stored\")\n        self._db[key] = json.dumps(dataclasses.asdict(case))\n        problem = _problem(case)\n        if problem is not None:\n            raise ValueError(f\"case {case.case_id!r}: {problem}\")\n"
+        }
+      ],
+      "expect": "a rejected case is not stored"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "category not checked",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "    if case.category not in CATEGORIES:\n        return f\"unknown category {case.category!r}\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "add rejects a case whose category is unknown"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "catalog not checked before looking up the schema",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "            if call.name not in schemas:\n                return f\"accepted call to {call.name!r}, which the catalog does not offer\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "KeyError: 'book_rooms'"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "accepted calls not validated",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "            _, errors = validate(call.args, schemas[call.name])\n            if errors:\n                return f\"accepted call to {call.name}: \" + \"; \".join(errors)\n",
+          "new": ""
+        }
+      ],
+      "expect": "add rejects a case whose answer breaks its tool's schema"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "hallucination cases may list answers",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "    if case.category == \"hallucination\" and case.accepted:\n        return \"a hallucination case accepts no calls\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "add rejects a case whose hallucination case has answers"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "empty answers allowed",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "        if not answer:\n            return \"an accepted answer has no calls\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "add rejects a case whose answer is empty"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "only the expected state required",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "(case.initial_state is None or case.expected_state is None)",
+          "new": "case.expected_state is None"
+        }
+      ],
+      "expect": "add rejects a case whose multi_turn case has no initial state"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "'#' allowed in ids",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "any(c in case.case_id for c in \"#\\r\\n\")",
+          "new": "any(c in case.case_id for c in \"\\r\\n\")"
+        }
+      ],
+      "expect": "add rejects a case whose id holds a '#'"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "calls read back as plain dicts",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "        accepted=[[Call(c[\"name\"], c[\"args\"]) for c in answer] for answer in data[\"accepted\"]],\n",
+          "new": "        accepted=data[\"accepted\"],\n"
+        }
+      ],
+      "expect": "a case comes back exactly, value types included"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "unknown id returns None",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "        if raw is None:\n            raise KeyError(case_id)\n        return _to_case(json.loads(raw))\n",
+          "new": "        if raw is None:\n            return None\n        return _to_case(json.loads(raw))\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "values pickled instead of JSON",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "import json\n",
+          "new": "import json\nimport pickle\n"
+        },
+        {
+          "file": "cases.py",
+          "old": "        self._db[key] = json.dumps(dataclasses.asdict(case))\n",
+          "new": "        self._db[key] = pickle.dumps(dataclasses.asdict(case))\n"
+        },
+        {
+          "file": "cases.py",
+          "old": "        return _to_case(json.loads(raw))\n",
+          "new": "        return _to_case(pickle.loads(raw))\n"
+        },
+        {
+          "file": "cases.py",
+          "old": "json.loads(self._db[i.encode(\"utf-8\")])[\"category\"]",
+          "new": "pickle.loads(self._db[i.encode(\"utf-8\")])[\"category\"]"
+        }
+      ],
+      "expect": "each value is JSON"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "every case in one dbm value",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "        key = case.case_id.encode(\"utf-8\")\n        if key in self._db:\n            raise ValueError(f\"case {case.case_id!r} is already stored\")\n        self._db[key] = json.dumps(dataclasses.asdict(case))\n",
+          "new": "        stored = json.loads(self._db.get(b\"cases\", b\"{}\"))\n        if case.case_id in stored:\n            raise ValueError(f\"case {case.case_id!r} is already stored\")\n        stored[case.case_id] = dataclasses.asdict(case)\n        self._db[b\"cases\"] = json.dumps(stored)\n"
+        },
+        {
+          "file": "cases.py",
+          "old": "        raw = self._db.get(case_id.encode(\"utf-8\"))\n        if raw is None:\n            raise KeyError(case_id)\n        return _to_case(json.loads(raw))\n",
+          "new": "        return _to_case(json.loads(self._db.get(b\"cases\", b\"{}\"))[case_id])\n"
+        },
+        {
+          "file": "cases.py",
+          "old": "        ids = sorted(key.decode(\"utf-8\") for key in self._db.keys())\n        if category is None:\n            return ids\n        return [i for i in ids if json.loads(self._db[i.encode(\"utf-8\")])[\"category\"] == category]\n",
+          "new": "        stored = json.loads(self._db.get(b\"cases\", b\"{}\"))\n        return sorted(i for i, c in stored.items() if category in (None, c[\"category\"]))\n"
+        }
+      ],
+      "expect": "one dbm key per case"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "cases() in dbm key order",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "        return [self.get(case_id) for case_id in self.ids(category)]\n",
+          "new": "        return [self.get(key.decode(\"utf-8\")) for key in self._db.keys()\n                if category is None or json.loads(self._db[key])[\"category\"] == category]\n"
+        }
+      ],
+      "expect": "cases come in id order"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "answers required only for non_live cases",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "    if case.category in AST_CATEGORIES and not case.accepted:\n",
+          "new": "    if case.category == \"non_live\" and not case.accepted:\n"
+        }
+      ],
+      "expect": "add rejects a case whose live case has no answers"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "states required only for multi_turn cases",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "    if case.category in STATE_CATEGORIES and (case.initial_state is None or case.expected_state is None):\n",
+          "new": "    if case.category == \"multi_turn\" and (case.initial_state is None or case.expected_state is None):\n"
+        }
+      ],
+      "expect": "add rejects a case whose agentic case has no initial state"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "only the first accepted answer validated",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "    for answer in case.accepted:\n        if not answer:\n",
+          "new": "    for answer in case.accepted[:1]:\n        if not answer:\n"
+        }
+      ],
+      "expect": "add rejects a case whose second answer breaks its tool's schema"
+    },
+    {
+      "test": "test_case_bank",
+      "name": "validate()'s coerced values written back into the caller's calls",
+      "edits": [
+        {
+          "file": "cases.py",
+          "old": "            _, errors = validate(call.args, schemas[call.name])\n",
+          "new": "            fixed, errors = validate(call.args, schemas[call.name])\n            call.args.update(fixed)\n"
+        }
+      ],
+      "expect": "a case comes back exactly, value types included"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "calls compared in the order the model made them",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        if None not in theirs and Counter(theirs) == want:\n",
+          "new": "        if None not in theirs and theirs == mine:\n"
+        }
+      ],
+      "expect": "parallel calls match in any order"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "arguments compared as JSON text in their own order",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    return call.name, json.dumps(args, sort_keys=True)\n",
+          "new": "    return call.name, json.dumps(args)\n"
+        }
+      ],
+      "expect": "argument order does not matter"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "schema defaults not filled in",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    args = {name: prop[\"default\"] for name, prop in props.items() if \"default\" in prop}\n    args.update(call.args)\n",
+          "new": "    args = dict(call.args)\n"
+        }
+      ],
+      "expect": "an omitted argument equals its schema default"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "an omitted argument matches anything",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    schemas = {tool[\"name\"]: tool[\"input_schema\"] for tool in tools}\n    mine = [_canonical(call, schemas) for call in calls]\n    if None in mine:\n        return False\n    want = Counter(mine)\n    for answer in accepted:\n        theirs = [_canonical(call, schemas) for call in answer]\n        if None not in theirs and Counter(theirs) == want:\n            return True\n    return False\n",
+          "new": "    names = {tool[\"name\"] for tool in tools}\n\n    def same(a: Call, b: Call) -> bool:\n        if a.name != b.name or a.name not in names:\n            return False\n        shared = set(a.args) & set(b.args)\n        return all(json.dumps(a.args[k]) == json.dumps(b.args[k]) for k in shared)\n\n    for answer in accepted:\n        left = list(answer)\n        if len(left) != len(calls):\n            continue\n        for call in calls:\n            hit = next((c for c in left if same(call, c)), None)\n            if hit is None:\n                break\n            left.remove(hit)\n        else:\n            return True\n    return False\n"
+        }
+      ],
+      "expect": "an omitted argument is its default, not a wildcard"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "Python == on argument values (4.0 == 4)",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    return call.name, json.dumps(args, sort_keys=True)\n",
+          "new": "    return call.name, tuple(sorted(args.items()))\n"
+        }
+      ],
+      "expect": "an integer parameter needs an int"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "number parameters compared by JSON type too",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        if number and props[name].get(\"type\") == \"number\":\n            args[name] = float(value)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a number parameter compares by value"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "arguments coerced with validate() before comparing",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "from .registry import ToolCall\n",
+          "new": "from .registry import ToolCall, validate\n"
+        },
+        {
+          "file": "scoring.py",
+          "old": "    args.update(call.args)\n",
+          "new": "    args.update(call.args)\n    args = validate(args, schema)[0]\n"
+        }
+      ],
+      "expect": "the checker grades what the model wrote; it does not coerce"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "accepted calls compared as a set",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        if None not in theirs and Counter(theirs) == want:\n",
+          "new": "        if None not in theirs and set(theirs) == set(mine):\n"
+        }
+      ],
+      "expect": "an extra call is wrong"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "every call found somewhere in the answer, counts ignored",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        if None not in theirs and Counter(theirs) == want:\n",
+          "new": "        if None not in theirs and len(theirs) == len(mine) and all(c in theirs for c in mine):\n"
+        }
+      ],
+      "expect": "each accepted call is matched once"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "only the first accepted answer tried",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    for answer in accepted:\n",
+          "new": "    for answer in accepted[:1]:\n"
+        }
+      ],
+      "expect": "any accepted answer may match"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "a tool outside the catalog crashes the checker",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    schema = schemas.get(call.name)\n    if schema is None:\n        return None\n",
+          "new": "    schema = schemas.get(call.name)\n"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "AST used whenever a case has accepted answers",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    elif case.category in STATE_CATEGORIES:\n        correct, reason = state_match(calls, case), \"final state differs\"\n",
+          "new": "    elif case.accepted:\n        correct, reason = ast_match(calls, case.accepted, case.tools), \"no accepted answer matches\"\n    elif case.category in STATE_CATEGORIES:\n        correct, reason = state_match(calls, case), \"final state differs\"\n"
+        }
+      ],
+      "expect": "a multi-turn case is graded on the state its calls leave"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "state used whenever a case has an expected state",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    elif case.category in STATE_CATEGORIES:\n",
+          "new": "    elif case.expected_state is not None:\n"
+        }
+      ],
+      "expect": "a live case is graded on its calls, whatever state they leave"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "replay stops at the first failed call",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        registry.dispatch(ToolCall(f\"replay-{number}\", call.name, call.args))\n",
+          "new": "        if not registry.dispatch(ToolCall(f\"replay-{number}\", call.name, call.args)).ok:\n            break\n"
+        }
+      ],
+      "expect": "a failed call changes nothing, and the replay goes on"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "replay offers every drive tool",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "from .drive import FakeDrive\n",
+          "new": "from .drive import TOOLS, FakeDrive\n"
+        },
+        {
+          "file": "scoring.py",
+          "old": "    registry = drive.registry(case.tools)\n",
+          "new": "    registry = drive.registry(TOOLS)\n"
+        }
+      ],
+      "expect": "only the tools the case offers can run"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "replay calls the drive directly, around the registry",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    registry = drive.registry(case.tools)\n    for number, call in enumerate(calls, 1):\n        registry.dispatch(ToolCall(f\"replay-{number}\", call.name, call.args))\n",
+          "new": "    for call in calls:\n        try:\n            drive.call(call.name, call.args)\n        except Exception:\n            pass\n"
+        }
+      ],
+      "expect": "only the tools the case offers can run"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "replay runs on the case's own initial state",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    drive = FakeDrive(copy.deepcopy(case.initial_state))\n",
+          "new": "    drive = FakeDrive(case.initial_state)\n"
+        }
+      ],
+      "expect": "grading leaves the case unchanged"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "replay on a shallow copy of the initial state",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    drive = FakeDrive(copy.deepcopy(case.initial_state))\n",
+          "new": "    drive = FakeDrive(dict(case.initial_state))\n"
+        }
+      ],
+      "expect": "grading leaves the case unchanged"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "hallucination means calling a tool that does not exist",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        correct, reason = not calls, \"a tool was called\"\n",
+          "new": "        offered = {tool[\"name\"] for tool in case.tools}\n        correct, reason = all(c.name in offered for c in calls), \"a tool was called\"\n"
+        }
+      ],
+      "expect": "any call on a hallucination case is wrong, even to a real tool"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "no attempt treated as calling nothing",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    if calls is None:\n        return Verdict(case.case_id, case.category, False, \"no attempt\")\n",
+          "new": "    if calls is None:\n        calls = []\n"
+        }
+      ],
+      "expect": "no attempt is not a refusal"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "one accuracy over every case",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    total = sum(WEIGHTS[c] * scores[c] for c in present) / weight\n",
+          "new": "    total = sum(right.values()) / sum(counts.values())\n"
+        }
+      ],
+      "expect": "categories are averaged first, then weighted 40/30/10/10/10"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "categories averaged without their weights",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    total = sum(WEIGHTS[c] * scores[c] for c in present) / weight\n",
+          "new": "    total = sum(scores[c] for c in present) / len(present)\n"
+        }
+      ],
+      "expect": "categories are averaged first, then weighted 40/30/10/10/10"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "an empty category counted as zero",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    weight = sum(WEIGHTS[c] for c in present)\n",
+          "new": "    weight = sum(WEIGHTS.values())\n"
+        }
+      ],
+      "expect": "the total leaves out empty categories and rescales the other weights"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "an empty category scored 0.0",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    scores = {c: right[c] / counts[c] if counts[c] else None for c in CATEGORIES}\n",
+          "new": "    scores = {c: right[c] / counts[c] if counts[c] else 0.0 for c in CATEGORIES}\n"
+        }
+      ],
+      "expect": "a category without cases has no score"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "no verdicts divides by zero",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    if not present:\n        return Report(scores, counts, None)\n",
+          "new": ""
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "attempts for unknown cases ignored",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    if stray:\n        raise ValueError(f\"attempts for cases that are not in the run: {stray}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "tool name left out of the comparison",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    return call.name, json.dumps(args, sort_keys=True)\n",
+          "new": "    return \"call\", json.dumps(args, sort_keys=True)\n"
+        }
+      ],
+      "expect": "the tool name must match too"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "strings compared without case",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        if number and props[name].get(\"type\") == \"number\":\n            args[name] = float(value)\n",
+          "new": "        if number and props[name].get(\"type\") == \"number\":\n            args[name] = float(value)\n        if isinstance(value, str):\n            args[name] = value.lower()\n"
+        }
+      ],
+      "expect": "strings compare exactly; variants are listed as accepted answers"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "state compared by file paths only",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    return drive.state == case.expected_state\n",
+          "new": "    return set(drive.state[\"files\"]) == set(case.expected_state[\"files\"])\n"
+        }
+      ],
+      "expect": "the state is compared file by file, text included"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "calls replayed sorted by tool name",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    for number, call in enumerate(calls, 1):\n",
+          "new": "    for number, call in enumerate(sorted(calls, key=lambda c: c.name), 1):\n"
+        }
+      ],
+      "expect": "calls replay in the order they were made"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "a case missing from the attempts graded as calling nothing",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    return summarize([grade(case, attempts.get(case.case_id)) for case in cases])",
+          "new": "    return summarize([grade(case, attempts.get(case.case_id, [])) for case in cases])"
+        }
+      ],
+      "expect": "a case missing from the attempts had no attempt"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "defaults and floats written into the calls being matched",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    args = {name: prop[\"default\"] for name, prop in props.items() if \"default\" in prop}\n    args.update(call.args)\n",
+          "new": "    args = call.args\n    for name, prop in props.items():\n        if \"default\" in prop:\n            args.setdefault(name, prop[\"default\"])\n"
+        }
+      ],
+      "expect": "AST matching leaves the case unchanged"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "replay calls the drive directly for the offered tools only",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    registry = drive.registry(case.tools)\n    for number, call in enumerate(calls, 1):\n        registry.dispatch(ToolCall(f\"replay-{number}\", call.name, call.args))\n",
+          "new": "    offered = {tool[\"name\"] for tool in case.tools}\n    for call in calls:\n        if call.name in offered:\n            try:\n                drive.call(call.name, call.args)\n            except Exception:\n                pass\n"
+        }
+      ],
+      "expect": "a call with invalid arguments changes nothing"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "whole-number floats accepted for integer parameters",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        if number and props[name].get(\"type\") == \"number\":\n            args[name] = float(value)\n",
+          "new": "        if number and props[name].get(\"type\") == \"number\":\n            args[name] = float(value)\n        elif isinstance(value, float) and value.is_integer() and props[name].get(\"type\") == \"integer\":\n            args[name] = int(value)\n"
+        }
+      ],
+      "expect": "an integer parameter needs an int"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "the last accepted answer decides",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    want = Counter(mine)\n    for answer in accepted:\n        theirs = [_canonical(call, schemas) for call in answer]\n        if None not in theirs and Counter(theirs) == want:\n            return True\n    return False\n",
+          "new": "    want = Counter(mine)\n    found = False\n    for answer in accepted:\n        theirs = [_canonical(call, schemas) for call in answer]\n        found = None not in theirs and Counter(theirs) == want\n    return found\n"
+        }
+      ],
+      "expect": "argument order does not matter"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "category scores rounded to four decimals",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    scores = {c: right[c] / counts[c] if counts[c] else None for c in CATEGORIES}\n",
+          "new": "    scores = {c: round(right[c] / counts[c], 4) if counts[c] else None for c in CATEGORIES}\n"
+        }
+      ],
+      "expect": "accuracy per category; a case without an attempt is wrong"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "hallucination graded by ast_match against no answers",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        correct, reason = not calls, \"a tool was called\"\n",
+          "new": "        correct, reason = ast_match(calls, case.accepted, case.tools), \"a tool was called\"\n"
+        }
+      ],
+      "expect": "calling nothing is right when no tool fits"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "number parameters normalised with float(), strings included",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "        number = isinstance(value, (int, float)) and not isinstance(value, bool)\n        if number and props[name].get(\"type\") == \"number\":\n            args[name] = float(value)\n",
+          "new": "        if props[name].get(\"type\") == \"number\":\n            try:\n                args[name] = float(value)\n            except (TypeError, ValueError):\n                pass\n"
+        }
+      ],
+      "expect": "the checker grades what the model wrote; it does not coerce"
+    },
+    {
+      "test": "test_bfcl_scoring",
+      "name": "accepted answers sorted in place before comparing",
+      "edits": [
+        {
+          "file": "scoring.py",
+          "old": "    for answer in accepted:\n        theirs = [_canonical(call, schemas) for call in answer]\n",
+          "new": "    for answer in accepted:\n        answer.sort(key=lambda call: (call.name, json.dumps(call.args, sort_keys=True)))\n        theirs = [_canonical(call, schemas) for call in answer]\n"
+        }
+      ],
+      "expect": "grading leaves every case unchanged"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "lines numbered by the case's position in the suite",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "        for number in range(1, len(cases) + 1):\n            verdict = await graded.get()\n            verdicts.append(verdict)\n            yield _tap_line(number, verdict)\n",
+          "new": "        position = {case.case_id: n for n, case in enumerate(cases, 1)}\n        for _ in cases:\n            verdict = await graded.get()\n            verdicts.append(verdict)\n            yield _tap_line(position[verdict.case_id], verdict)\n"
+        }
+      ],
+      "expect": "one line per case, numbered as cases finish"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "every case graded before the first line",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "        for number in range(1, len(cases) + 1):\n            verdict = await graded.get()\n            verdicts.append(verdict)\n            yield _tap_line(number, verdict)\n",
+          "new": "        everything = [await graded.get() for _ in cases]\n        for number, verdict in enumerate(everything, 1):\n            verdicts.append(verdict)\n            yield _tap_line(number, verdict)\n"
+        }
+      ],
+      "expect": "write each line as soon as its case is graded"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "an exception in one case is not caught",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "            try:\n                verdict = grade(case, await model(case))\n            except Exception as e:\n                reason = f\"error: {type(e).__name__}: {e}\"\n                verdict = Verdict(case.case_id, case.category, False, reason)\n",
+          "new": "            verdict = grade(case, await model(case))\n"
+        }
+      ],
+      "expect": "TimeoutError"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "a failed model call graded as no calls",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "                reason = f\"error: {type(e).__name__}: {e}\"\n                verdict = Verdict(case.case_id, case.category, False, reason)\n",
+          "new": "                verdict = grade(case, [])\n"
+        }
+      ],
+      "expect": "one line per case, numbered as cases finish"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "failed cases left out of the score",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    total = summarize(verdicts).total\n",
+          "new": "    total = summarize([v for v in verdicts if not v.reason.startswith(\"error:\")]).total\n"
+        }
+      ],
+      "expect": "one line per case, numbered as cases finish"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "no concurrency limit",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "        async with slots:\n",
+          "new": "        if slots:\n"
+        }
+      ],
+      "expect": "one line per case, numbered as cases finish"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "cases run in batches of `concurrency`",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    tasks = [asyncio.create_task(run_one(case)) for case in cases]\n    verdicts: list[Verdict] = []\n    try:\n        for number in range(1, len(cases) + 1):\n            verdict = await graded.get()\n            verdicts.append(verdict)\n            yield _tap_line(number, verdict)\n",
+          "new": "    tasks: list[asyncio.Task] = []\n    verdicts: list[Verdict] = []\n    try:\n        for start in range(0, len(cases), concurrency):\n            batch = [asyncio.create_task(run_one(case)) for case in cases[start:start + concurrency]]\n            tasks += batch\n            for _ in batch:\n                verdict = await graded.get()\n                verdicts.append(verdict)\n                yield _tap_line(len(verdicts), verdict)\n"
+        }
+      ],
+      "expect": "one line per case, numbered as cases finish"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "one case at a time",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    slots = asyncio.Semaphore(concurrency)\n",
+          "new": "    slots = asyncio.Semaphore(1)\n"
+        }
+      ],
+      "expect": "one line per case, numbered as cases finish"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "plan line first",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    tasks = [asyncio.create_task(run_one(case)) for case in cases]\n",
+          "new": "    yield f\"1..{len(cases)}\\n\"\n    tasks = [asyncio.create_task(run_one(case)) for case in cases]\n"
+        },
+        {
+          "file": "pipeline.py",
+          "old": "    yield f\"1..{len(cases)}\\n\"\n\n\ndef _tap_line",
+          "new": "\n\ndef _tap_line"
+        }
+      ],
+      "expect": "one line per case, numbered as cases finish"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "result lines without a newline",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "        return f\"ok {number} - {verdict.case_id} # {verdict.category}\\n\"\n",
+          "new": "        return f\"ok {number} - {verdict.case_id} # {verdict.category}\"\n"
+        }
+      ],
+      "expect": "one line per case, numbered as cases finish"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "a reason that spans lines written as it is",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    reason = \" \".join(verdict.reason.splitlines())\n",
+          "new": "    reason = verdict.reason\n"
+        }
+      ],
+      "expect": "one line per case, numbered as cases finish"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "running cases left alone when the reader stops",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    finally:\n        for task in tasks:\n            task.cancel()\n        await asyncio.gather(*tasks, return_exceptions=True)\n",
+          "new": "    finally:\n        pass\n"
+        }
+      ],
+      "expect": "a reader that stops early cancels the cases still running"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "cancelled without waiting for the cancellation",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "        await asyncio.gather(*tasks, return_exceptions=True)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a reader that stops early cancels the cases still running"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "score to two decimals",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "f'{total:.4f}'",
+          "new": "f'{total:.2f}'"
+        }
+      ],
+      "expect": "one line per case, numbered as cases finish"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "no total for an empty suite crashes the format",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "{'-' if total is None else f'{total:.4f}'}",
+          "new": "{total:.4f}"
+        }
+      ],
+      "expect": "NoneType"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "every case started before the first line",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "        async with slots:\n",
+          "new": "        if True:\n"
+        },
+        {
+          "file": "pipeline.py",
+          "old": "        graded.put_nowait(verdict)\n",
+          "new": "        graded.put_nowait(verdict)\n        slots.release()\n"
+        },
+        {
+          "file": "pipeline.py",
+          "old": "    tasks = [asyncio.create_task(run_one(case)) for case in cases]\n",
+          "new": "    tasks = []\n    for case in cases:\n        await slots.acquire()\n        tasks.append(asyncio.create_task(run_one(case)))\n"
+        }
+      ],
+      "expect": "write each line as soon as its case is graded"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "concurrency below 1 accepted",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    if concurrency < 1:\n        raise ValueError(\"concurrency must be at least 1\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "TimeoutError"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "only the model call inside try, the grading outside it",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "            try:\n                verdict = grade(case, await model(case))\n            except Exception as e:\n                reason = f\"error: {type(e).__name__}: {e}\"\n                verdict = Verdict(case.case_id, case.category, False, reason)\n",
+          "new": "            try:\n                calls = await model(case)\n            except Exception as e:\n                reason = f\"error: {type(e).__name__}: {e}\"\n                verdict = Verdict(case.case_id, case.category, False, reason)\n            else:\n                verdict = grade(case, calls)\n"
+        }
+      ],
+      "expect": "TimeoutError"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "cancelled tasks gathered without return_exceptions",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "        await asyncio.gather(*tasks, return_exceptions=True)\n",
+          "new": "        await asyncio.gather(*tasks)\n"
+        }
+      ],
+      "expect": "CancelledError"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "error reason written with repr",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "                reason = f\"error: {type(e).__name__}: {e}\"\n",
+          "new": "                reason = f\"error: {e!r}\"\n"
+        }
+      ],
+      "expect": "one line per case, numbered as cases finish"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "cases dealt to workers in fixed stripes",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    tasks = [asyncio.create_task(run_one(case)) for case in cases]\n",
+          "new": "    async def worker(start: int) -> None:\n        for case in cases[start::concurrency]:\n            await run_one(case)\n\n    tasks = [asyncio.create_task(worker(i)) for i in range(concurrency)]\n"
+        }
+      ],
+      "expect": "one line per case, numbered as cases finish"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "score written with round(total, 4)",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    yield f\"# score {'-' if total is None else f'{total:.4f}'}\\n\"\n",
+          "new": "    yield f\"# score {'-' if total is None else round(total, 4)}\\n\"\n"
+        }
+      ],
+      "expect": "one line per case, numbered as cases finish"
+    },
+    {
+      "test": "test_suite_tap",
+      "name": "an empty suite writes nothing",
+      "edits": [
+        {
+          "file": "pipeline.py",
+          "old": "    slots = asyncio.Semaphore(concurrency)\n",
+          "new": "    if not cases:\n        return\n    slots = asyncio.Semaphore(concurrency)\n"
+        }
+      ],
+      "expect": "an empty suite still ends with its score and its plan"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "references checked only when their step runs",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "            target = parsed[0]\n            if target not in position:\n                raise ChainError(f\"{text}: no call {target!r} in the chain\", step.call_id, text)\n            if position[target] >= index:\n                where = \"itself\" if target == step.call_id else \"a later call\"\n                raise ChainError(f\"{text}: {step.call_id} refers to {where}\", step.call_id, text)\n",
+          "new": ""
+        },
+        {
+          "file": "chains.py",
+          "old": "    target, steps = parsed\n    value = results[target]\n",
+          "new": "    target, steps = parsed\n    if target not in results:\n        raise ChainError(f\"{ref}: {target} has not run\", call_id, ref)\n    value = results[target]\n"
+        }
+      ],
+      "expect": "a reference to a later call is rejected before anything runs"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "a referenced call is run again for every reference",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "    results: dict[str, Any] = {}\n    ran: list[Ran] = []\n    for step in steps:\n        args = _resolve(step.args, step.call_id, results)\n        result = execute(step.name, args)\n        results[step.call_id] = result\n        ran.append(Ran(step.call_id, step.name, args, result))\n    return ran\n",
+          "new": "    by_id = {step.call_id: step for step in steps}\n\n    class Rerun(dict):\n        def __missing__(self, call_id: str) -> Any:\n            step = by_id[call_id]\n            return execute(step.name, _resolve(step.args, step.call_id, self))\n\n    ran: list[Ran] = []\n    for step in steps:\n        args = _resolve(step.args, step.call_id, Rerun())\n        ran.append(Ran(step.call_id, step.name, args, execute(step.name, args)))\n    return ran\n"
+        }
+      ],
+      "expect": "a call referred to many times still runs once"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "a missing field read as None",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "            if not isinstance(value, dict) or key not in value:\n",
+          "new": "            if not isinstance(value, dict):\n"
+        },
+        {
+          "file": "chains.py",
+          "old": "        value = value[key]\n",
+          "new": "        value = value.get(key) if isinstance(key, str) else value[key]\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "negative indexes allowed",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "_STEP = re.compile(r\"\\.([A-Za-z_][A-Za-z0-9_]*)|\\[([0-9]+)\\]\")",
+          "new": "_STEP = re.compile(r\"\\.([A-Za-z_][A-Za-z0-9_]*)|\\[(-?[0-9]+)\\]\")"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "a string indexed like an array",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        elif not isinstance(value, list) or key >= len(value):\n",
+          "new": "        elif not isinstance(value, (list, str)) or key >= len(value):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "field lookup with `in` on whatever the value is",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "            if not isinstance(value, dict) or key not in value:\n",
+          "new": "            if key not in value:\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "resolved values turned into text",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "    return copy.deepcopy(value)\n",
+          "new": "    return str(value)\n"
+        }
+      ],
+      "expect": "references resolve at any depth, keep their type, and results are never resolved again"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "references replaced inside longer text",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        parsed = _parse(value, call_id)\n        return value if parsed is None else _follow(value, parsed, call_id, results)\n",
+          "new": "        parsed = _parse(value, call_id)\n        if parsed is None:\n            return re.sub(\n                r\"\\$[A-Za-z0-9_-]+\\.result(?:\\.[A-Za-z_][A-Za-z0-9_]*|\\[[0-9]+\\])*\",\n                lambda m: str(_follow(m.group(0), _parse(m.group(0), call_id), call_id, results)),\n                value,\n            )\n        return _follow(value, parsed, call_id, results)\n"
+        }
+      ],
+      "expect": "references resolve at any depth, keep their type, and results are never resolved again"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "values from a result resolved again",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "    return copy.deepcopy(value)\n",
+          "new": "    return _resolve(copy.deepcopy(value), call_id, results)\n"
+        }
+      ],
+      "expect": "references resolve at any depth, keep their type, and results are never resolved again"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "arguments rewritten in place",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "    if isinstance(value, dict):\n        return {key: _resolve(item, call_id, results) for key, item in value.items()}\n",
+          "new": "    if isinstance(value, dict):\n        for key, item in value.items():\n            value[key] = _resolve(item, call_id, results)\n        return value\n"
+        }
+      ],
+      "expect": "the chain itself is not changed"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "only top-level arguments resolved",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        args = _resolve(step.args, step.call_id, results)\n",
+          "new": "        args = {k: _resolve(v, step.call_id, results) if isinstance(v, str) else v for k, v in step.args.items()}\n"
+        }
+      ],
+      "expect": "references resolve at any depth, keep their type, and results are never resolved again"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "only top-level arguments checked before running",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "    elif isinstance(value, dict):\n        for item in value.values():\n            yield from _strings(item)\n    elif isinstance(value, list):\n        for item in value:\n            yield from _strings(item)\n",
+          "new": "    elif isinstance(value, dict):\n        for item in value.values():\n            if isinstance(item, str):\n                yield item\n"
+        }
+      ],
+      "expect": "KeyError: 'c2'"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "at holds the whole reference",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "            if not isinstance(value, dict) or key not in value:\n                raise ChainError(f\"{ref}: nothing at {ref[:end]}\", call_id, ref, ref[:end])\n        elif not isinstance(value, list) or key >= len(value):\n            raise ChainError(f\"{ref}: nothing at {ref[:end]}\", call_id, ref, ref[:end])\n",
+          "new": "            if not isinstance(value, dict) or key not in value:\n                raise ChainError(f\"{ref}: nothing at {ref}\", call_id, ref, ref)\n        elif not isinstance(value, list) or key >= len(value):\n            raise ChainError(f\"{ref}: nothing at {ref}\", call_id, ref, ref)\n"
+        }
+      ],
+      "expect": "$c1.result.tickets[2].id cannot be followed past $c1.result.tickets[2]"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "a malformed reference passed on as text",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        if step is None:\n            raise ChainError(f\"{text!r} is not a valid reference\", call_id, text)\n",
+          "new": "        if step is None:\n            return None\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "two steps may share a call id",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        if step.call_id in position:\n            raise ChainError(f\"call id {step.call_id!r} is used twice\", step.call_id)\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "a step may refer to itself",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "            if position[target] >= index:\n",
+          "new": "            if position[target] > index:\n"
+        }
+      ],
+      "expect": "KeyError: 'c2'"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "a repeated call id caught only when its second step runs",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        if step.call_id in position:\n            raise ChainError(f\"call id {step.call_id!r} is used twice\", step.call_id)\n        position[step.call_id] = index\n",
+          "new": "        position.setdefault(step.call_id, index)\n"
+        },
+        {
+          "file": "chains.py",
+          "old": "    for step in steps:\n        args = _resolve(step.args, step.call_id, results)\n",
+          "new": "    for step in steps:\n        if step.call_id in results:\n            raise ChainError(f\"call id {step.call_id!r} is used twice\", step.call_id)\n        args = _resolve(step.args, step.call_id, results)\n"
+        }
+      ],
+      "expect": "two steps cannot share a call id"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "field names matched with \\w+ ('.0' parses as a field)",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "_STEP = re.compile(r\"\\.([A-Za-z_][A-Za-z0-9_]*)|\\[([0-9]+)\\]\")",
+          "new": "_STEP = re.compile(r\"\\.(\\w+)|\\[([0-9]+)\\]\")"
+        }
+      ],
+      "expect": "'$c1.result.tickets.0' starts like a reference but does not parse"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "at stops before the step that failed",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "    target, steps = parsed\n    value = results[target]\n    for key, end in steps:\n        if isinstance(key, str):\n            if not isinstance(value, dict) or key not in value:\n                raise ChainError(f\"{ref}: nothing at {ref[:end]}\", call_id, ref, ref[:end])\n        elif not isinstance(value, list) or key >= len(value):\n            raise ChainError(f\"{ref}: nothing at {ref[:end]}\", call_id, ref, ref[:end])\n        value = value[key]\n",
+          "new": "    target, steps = parsed\n    value = results[target]\n    start = len(\"$\" + target + \".result\")\n    for key, end in steps:\n        if isinstance(key, str):\n            if not isinstance(value, dict) or key not in value:\n                raise ChainError(f\"{ref}: nothing at {ref[:start]}\", call_id, ref, ref[:start])\n        elif not isinstance(value, list) or key >= len(value):\n            raise ChainError(f\"{ref}: nothing at {ref[:start]}\", call_id, ref, ref[:start])\n        value = value[key]\n        start = end\n"
+        }
+      ],
+      "expect": "$c1.result.tickets[2].id cannot be followed past $c1.result.tickets[2]"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "value[key] inside try/except (KeyError, IndexError, TypeError)",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "    for key, end in steps:\n        if isinstance(key, str):\n            if not isinstance(value, dict) or key not in value:\n                raise ChainError(f\"{ref}: nothing at {ref[:end]}\", call_id, ref, ref[:end])\n        elif not isinstance(value, list) or key >= len(value):\n            raise ChainError(f\"{ref}: nothing at {ref[:end]}\", call_id, ref, ref[:end])\n        value = value[key]\n",
+          "new": "    for key, end in steps:\n        try:\n            value = value[key]\n        except (KeyError, IndexError, TypeError):\n            raise ChainError(f\"{ref}: nothing at {ref[:end]}\", call_id, ref, ref[:end]) from None\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "an unknown target checked only when its step runs",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "            if target not in position:\n                raise ChainError(f\"{text}: no call {target!r} in the chain\", step.call_id, text)\n            if position[target] >= index:\n",
+          "new": "            if target in position and position[target] >= index:\n"
+        },
+        {
+          "file": "chains.py",
+          "old": "    target, steps = parsed\n    value = results[target]\n",
+          "new": "    target, steps = parsed\n    if target not in results:\n        raise ChainError(f\"{ref}: no call {target!r}\", call_id, ref)\n    value = results[target]\n"
+        }
+      ],
+      "expect": "a reference to an unknown call is rejected before anything runs"
+    },
+    {
+      "test": "test_call_chains",
+      "name": "'$c1.results' passed on as text (only '.' or '[' after .result counts)",
+      "edits": [
+        {
+          "file": "chains.py",
+          "old": "        if step is None:\n            raise ChainError(f\"{text!r} is not a valid reference\", call_id, text)\n",
+          "new": "        if step is None:\n            if text[pos] in \".[\":\n                raise ChainError(f\"{text!r} is not a valid reference\", call_id, text)\n            return None\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    }
+  ]
+}
