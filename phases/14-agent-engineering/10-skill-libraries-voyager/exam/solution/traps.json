@@ -1,0 +1,1584 @@
+{
+  "package": "voyager",
+  "tests": [
+    "test_skill_library",
+    "test_store_roundtrip",
+    "test_curriculum",
+    "test_refinement_stream",
+    "test_version_lock"
+  ],
+  "layers": [
+    {
+      "test": "test_skill_library",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a tag given as one string is one tag"
+        },
+        {
+          "name": "fix tag normalization in register",
+          "edits": [
+            {
+              "file": "skills.py",
+              "old": "        tags = tuple(tags)\n",
+              "new": "        tags = (tags,) if isinstance(tags, str) else tuple(tags)\n"
+            }
+          ],
+          "expect": "a parent pinned to mine_ore@1 keeps running version 1"
+        },
+        {
+          "name": "+ keep every version as its own Skill",
+          "edits": [
+            {
+              "file": "skills.py",
+              "old": "        self._skills: dict[str, Skill] = {}\n        self._history: dict[str, list[str]] = {}\n",
+              "new": "        self._skills: dict[str, Skill] = {}\n        self._versions: dict[str, list[Skill]] = {}\n"
+            },
+            {
+              "file": "skills.py",
+              "old": "        current = self._skills.get(name)\n        if current is None:\n            skill = Skill(name, 1, description, code, tags, depends_on, compile_skill(code, f\"{name} v1\"))\n            self._skills[name] = skill\n            self._history[name] = []\n            self._words[name] = words\n            return skill\n        fn = compile_skill(code, f\"{name} v{current.version + 1}\")\n        self._history[name].append(current.code)\n        current.version += 1\n        current.description = description\n        current.code = code\n        current.tags = tags\n        current.depends_on = depends_on\n        current.fn = fn\n        self._words[name] = words\n        return current\n",
+              "new": "        version = len(self._versions.get(name, ())) + 1\n        skill = Skill(name, version, description, code, tags, depends_on, compile_skill(code, f\"{name} v{version}\"))\n        self._versions.setdefault(name, []).append(skill)\n        self._skills[name] = skill\n        self._words[name] = words\n        return skill\n"
+            },
+            {
+              "file": "skills.py",
+              "old": "        return replace(current, version=version, code=self._history[name][version - 1])\n",
+              "new": "        return self._versions[name][version - 1]\n"
+            }
+          ],
+          "expect": "a failed run leaves the world as it was"
+        },
+        {
+          "name": "+ roll the world back when a skill raises",
+          "edits": [
+            {
+              "file": "skills.py",
+              "old": "import linecache\n",
+              "new": "import copy\nimport linecache\n"
+            },
+            {
+              "file": "skills.py",
+              "old": "        plan = self._plan(root)\n        log: list[str] = []\n",
+              "new": "        plan = self._plan(root)\n        before = copy.deepcopy(world)\n        log: list[str] = []\n"
+            },
+            {
+              "file": "skills.py",
+              "old": "            except Exception:\n                return Run(",
+              "new": "            except Exception:\n                world.clear()\n                world.update(before)\n                return Run("
+            }
+          ],
+          "expect": "searching one tag of a large library should be fast"
+        },
+        {
+          "name": "+ index skills by tag, and score only the tagged ones",
+          "edits": [
+            {
+              "file": "skills.py",
+              "old": "        self._words: dict[str, frozenset[str]] = {}\n",
+              "new": "        self._words: dict[str, frozenset[str]] = {}\n        self._tagged: dict[str, set[str]] = {}\n"
+            },
+            {
+              "file": "skills.py",
+              "old": "        self._versions.setdefault(name, []).append(skill)\n        self._skills[name] = skill\n",
+              "new": "        if name in self._skills:\n            for tag in self._skills[name].tags:\n                self._tagged[tag].discard(name)\n        for tag in tags:\n            self._tagged.setdefault(tag, set()).add(name)\n        self._versions.setdefault(name, []).append(skill)\n        self._skills[name] = skill\n"
+            },
+            {
+              "file": "skills.py",
+              "old": "        scored: list[tuple[float, Skill]] = []\n        for name, skill in self._skills.items():\n            described = self._words[name]\n            overlap = len(words & described)\n            if overlap:\n                scored.append((overlap / len(words | described), skill))\n        if tag_filter is not None:\n            scored = [(score, skill) for score, skill in scored if tag_filter in skill.tags]\n",
+              "new": "        names = self._skills if tag_filter is None else self._tagged.get(tag_filter, ())\n        scored: list[tuple[float, Skill]] = []\n        for name in names:\n            described = self._words[name]\n            overlap = len(words & described)\n            if overlap:\n                scored.append((overlap / len(words | described), self._skills[name]))\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_skill_library",
+      "name": "unpinned dependencies frozen at version 1",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "                visit(self.get(*parse_ref(ref)))\n",
+          "new": "                name, pin = parse_ref(ref)\n                visit(self.get(name, pin or 1))\n"
+        }
+      ],
+      "expect": "an unpinned dependency runs its latest version"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "bare references pinned to the version current at registration",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        depends_on = tuple(depends_on)\n        for ref in depends_on:\n            self.get(*parse_ref(ref))\n        version =",
+          "new": "        depends_on = tuple(r if \"@\" in r else f\"{r}@{self.get(r).version}\" for r in depends_on)\n        for ref in depends_on:\n            self.get(*parse_ref(ref))\n        version ="
+        }
+      ],
+      "expect": "an unpinned dependency runs its latest version"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "get(name) returns the oldest version",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        if version is None:\n            return versions[-1]\n",
+          "new": "        if version is None:\n            return versions[0]\n"
+        }
+      ],
+      "expect": "an unpinned dependency runs its latest version"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "the lesson's stack walk, which reverses siblings",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        visit(root)\n        return plan\n",
+          "new": "        plan.clear()\n        seen: set[tuple[str, int]] = set()\n        stack = [(root, False)]\n        while stack:\n            node, finished = stack.pop()\n            if finished:\n                plan.append(node)\n                continue\n            if (node.name, node.version) in seen:\n                continue\n            seen.add((node.name, node.version))\n            stack.append((node, True))\n            for ref in node.depends_on:\n                stack.append((self.get(*parse_ref(ref)), False))\n        return plan\n"
+        }
+      ],
+      "expect": "dependencies run first, in the order they are written"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "search runs over every version",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        for name in names:\n            described = self._words[name]\n            overlap = len(words & described)\n            if overlap:\n                scored.append((overlap / len(words | described), self._versions[name][-1]))\n",
+          "new": "        for skill in [s for name in names for s in self._versions[name]]:\n            described = set(skill.description.lower().split())\n            overlap = len(words & described)\n            if overlap:\n                scored.append((overlap / len(words | described), skill))\n"
+        }
+      ],
+      "expect": "search returns each skill once, at its latest version"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "search runs over the first version of each skill",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "self._versions[name][-1]))\n",
+          "new": "self._versions[name][0]))\n"
+        }
+      ],
+      "expect": "search returns each skill once, at its latest version"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "a string tag always wrapped, so a tuple of tags nests",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        tags = (tags,) if isinstance(tags, str) else tuple(tags)\n",
+          "new": "        tags = (tags,)\n"
+        }
+      ],
+      "expect": "a tag given as one string is one tag"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "tag filter matched as a substring",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        names = self._versions if tag_filter is None else self._tagged.get(tag_filter, ())\n",
+          "new": "        names = self._versions if tag_filter is None else {\n            name for tag, tagged in self._tagged.items() if tag_filter in tag for name in tagged\n        }\n"
+        }
+      ],
+      "expect": "a tag filter matches whole tags"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "snapshot taken with a shallow copy",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        before = copy.deepcopy(world)\n",
+          "new": "        before = dict(world)\n"
+        }
+      ],
+      "expect": "a failed run leaves the world as it was"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "rollback rebinds the local name",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "                world.clear()\n                world.update(before)\n",
+          "new": "                world = before\n"
+        }
+      ],
+      "expect": "a failed run leaves the world as it was"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "rollback updates without clearing",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "                world.clear()\n                world.update(before)\n",
+          "new": "                world.update(before)\n"
+        }
+      ],
+      "expect": "a failed run leaves the world as it was"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "rollback also throws away the log",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "                return Run(False, log, ",
+          "new": "                return Run(False, [], "
+        }
+      ],
+      "expect": "a failed run still reports what ran before it failed"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "error keeps only the exception message",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "            except Exception:\n                world.clear()\n                world.update(before)\n                return Run(False, log, f\"{skill.name}@{skill.version}\", traceback.format_exc())\n",
+          "new": "            except Exception as exc:\n                world.clear()\n                world.update(before)\n                return Run(False, log, f\"{skill.name}@{skill.version}\", f\"{type(exc).__name__}: {exc}\")\n"
+        }
+      ],
+      "expect": "the error carries the stack trace"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "plan memo keyed by name only",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "            key = (skill.name, skill.version)\n",
+          "new": "            key = skill.name\n"
+        }
+      ],
+      "expect": "each skill version runs once, and two versions of one skill are two steps"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "shared dependencies run every time they are needed",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "            if key in done:\n                return\n            if key in active:",
+          "new": "            if key in active:"
+        }
+      ],
+      "expect": "each skill version runs once, and two versions of one skill are two steps"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "get without a bounds check",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        if not 1 <= version <= len(versions):\n            raise KeyError(f\"{name}@{version}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "plan cached on the library across calls",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        plan = self._plan(root)\n",
+          "new": "        plans = self.__dict__.setdefault(\"_plans\", {})\n        if (root.name, root.version) not in plans:\n            plans[(root.name, root.version)] = self._plan(root)\n        plan = plans[(root.name, root.version)]\n"
+        }
+      ],
+      "expect": "an unpinned dependency runs its latest version"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "a recursive plan that merges closures, memoized on the library",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        plan: list[Skill] = []\n        done: set[tuple[str, int]] = set()\n        active: set[tuple[str, int]] = set()\n",
+          "new": "        memo = self.__dict__.setdefault(\"_memo\", {})\n        key = (root.name, root.version)\n        if key in memo:\n            return memo[key]\n        plan: list[Skill] = []\n        for ref in root.depends_on:\n            for dep in self._plan(self.get(*parse_ref(ref))):\n                if dep not in plan:\n                    plan.append(dep)\n        plan.append(root)\n        memo[key] = plan\n        return plan\n        done: set[tuple[str, int]] = set()\n        active: set[tuple[str, int]] = set()\n"
+        }
+      ],
+      "expect": "an unpinned dependency runs its latest version"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "plan rebuilt for every dependency, without memoization",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        plan: list[Skill] = []\n        done: set[tuple[str, int]] = set()\n        active: set[tuple[str, int]] = set()\n",
+          "new": "        plan: list[Skill] = []\n        for ref in root.depends_on:\n            for dep in self._plan(self.get(*parse_ref(ref))):\n                if dep not in plan:\n                    plan.append(dep)\n        plan.append(root)\n        return plan\n        done: set[tuple[str, int]] = set()\n        active: set[tuple[str, int]] = set()\n"
+        }
+      ],
+      "expect": "composing skills that share sub-skills should be fast"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "the lesson's order: the tag checked first, inside a scan of every skill",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        names = self._versions if tag_filter is None else self._tagged.get(tag_filter, ())\n        scored: list[tuple[float, Skill]] = []\n        for name in names:\n",
+          "new": "        names = self._versions\n        scored: list[tuple[float, Skill]] = []\n        for name in names:\n            if tag_filter is not None and tag_filter not in self._versions[name][-1].tags:\n                continue\n"
+        }
+      ],
+      "expect": "searching one tag of a large library should be fast"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "tagged skills found by scanning every skill's tags",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        names = self._versions if tag_filter is None else self._tagged.get(tag_filter, ())\n",
+          "new": "        names = [n for n, v in self._versions.items() if tag_filter is None or tag_filter in v[-1].tags]\n"
+        }
+      ],
+      "expect": "searching one tag of a large library should be fast"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "the index never forgets a tag",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        if version > 1:\n            for tag in self._versions[name][-1].tags:\n                self._tagged[tag].discard(name)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a refined skill leaves the tags its latest version dropped"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "the index read with [] for a tag no skill carries",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "self._tagged.get(tag_filter, ())",
+          "new": "self._tagged[tag_filter]"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "the index holds Skill objects and a refinement only touches the tags that changed",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        if version > 1:\n            for tag in self._versions[name][-1].tags:\n                self._tagged[tag].discard(name)\n        for tag in tags:\n            self._tagged.setdefault(tag, set()).add(name)\n",
+          "new": "        before = set(self._versions[name][-1].tags) if version > 1 else set()\n        for tag in before - set(tags):\n            del self._tagged[tag][name]\n        for tag in set(tags) - before:\n            self._tagged.setdefault(tag, {})[name] = skill\n"
+        },
+        {
+          "file": "skills.py",
+          "old": "        names = self._versions if tag_filter is None else self._tagged.get(tag_filter, ())\n        scored: list[tuple[float, Skill]] = []\n        for name in names:\n            described = self._words[name]\n            overlap = len(words & described)\n            if overlap:\n                scored.append((overlap / len(words | described), self._versions[name][-1]))\n",
+          "new": "        if tag_filter is None:\n            candidates = {name: versions[-1] for name, versions in self._versions.items()}\n        else:\n            candidates = self._tagged.get(tag_filter, {})\n        scored: list[tuple[float, Skill]] = []\n        for name, skill in candidates.items():\n            described = self._words[name]\n            overlap = len(words & described)\n            if overlap:\n                scored.append((overlap / len(words | described), skill))\n"
+        }
+      ],
+      "expect": "a tag filter finds each skill once, at its latest version"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "the index is a list that gains the name on every register",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        if version > 1:\n            for tag in self._versions[name][-1].tags:\n                self._tagged[tag].discard(name)\n        for tag in tags:\n            self._tagged.setdefault(tag, set()).add(name)\n",
+          "new": "        if version > 1:\n            for tag in set(self._versions[name][-1].tags) - set(tags):\n                self._tagged[tag].remove(name)\n        for tag in tags:\n            self._tagged.setdefault(tag, []).append(name)\n"
+        }
+      ],
+      "expect": "a tag filter finds each skill once, at its latest version"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "the index filled only when a skill is first registered",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        for tag in tags:\n            self._tagged.setdefault(tag, set()).add(name)\n",
+          "new": "        for tag in tags if version == 1 else ():\n            self._tagged.setdefault(tag, set()).add(name)\n"
+        }
+      ],
+      "expect": "a tag filter finds each skill once, at its latest version"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "ties left in index order",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        scored.sort(key=lambda item: (-item[0], item[1].name))\n",
+          "new": "        scored.sort(key=lambda item: -item[0])\n"
+        }
+      ],
+      "expect": "equal scores go to the alphabetically first name"
+    },
+    {
+      "test": "test_skill_library",
+      "name": "description words kept from the first registration",
+      "edits": [
+        {
+          "file": "skills.py",
+          "old": "        self._words[name] = frozenset(description.lower().split())\n",
+          "new": "        self._words.setdefault(name, frozenset(description.lower().split()))\n"
+        }
+      ],
+      "expect": "search reads the latest description"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "object read back as text (universal newlines)",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "                data = (root / \"objects\" / digest).read_bytes()\n",
+          "new": "                data = (root / \"objects\" / digest).read_text(encoding=\"utf-8\").encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "does not match its hash"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "object read as text and not checked",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            if hashlib.sha256(data).hexdigest() != digest:\n",
+          "new": "            if False:\n"
+        },
+        {
+          "file": "store.py",
+          "old": "            code = data.decode(\"utf-8\")\n",
+          "new": "            code = (root / \"objects\" / digest).read_text(encoding=\"utf-8\")\n"
+        }
+      ],
+      "expect": "every version reads back exactly"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "line endings normalized before writing",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            _write_atomic(path, skill.code.encode(\"utf-8\"))\n",
+          "new": "            _write_atomic(path, skill.code.replace(\"\\r\\n\", \"\\n\").encode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "an object holds the code byte for byte"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "code stripped before hashing",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    return hashlib.sha256(code.encode(\"utf-8\")).hexdigest()\n",
+          "new": "    return hashlib.sha256(code.strip().encode(\"utf-8\")).hexdigest()\n"
+        }
+      ],
+      "expect": "one object per distinct code, named by the SHA-256 of its UTF-8 bytes"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "object named by the whole version record",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        digest = code_hash(skill.code)\n",
+          "new": "        digest = code_hash(f\"{skill.name}@{skill.version}\\n{skill.code}\")\n"
+        }
+      ],
+      "expect": "one object per distinct code, named by the SHA-256 of its UTF-8 bytes"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "a version with already-stored code left out of the manifest",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if not path.exists():\n            _write_atomic(path, skill.code.encode(\"utf-8\"))\n",
+          "new": "        if not path.exists():\n            _write_atomic(path, skill.code.encode(\"utf-8\"))\n        if any(r[\"code\"] == digest for r in manifest.get(skill.name, [])):\n            continue\n"
+        }
+      ],
+      "expect": "the manifest lists each skill's versions in order and refers to code by hash"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "pins dropped from dependencies",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "                \"depends_on\": list(skill.depends_on),\n",
+          "new": "                \"depends_on\": [d.split(\"@\")[0] for d in skill.depends_on],\n"
+        }
+      ],
+      "expect": "dependencies keep their pins"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "tags read back as a list",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "                    tuple(record[\"tags\"]),\n",
+          "new": "                    record[\"tags\"],\n"
+        }
+      ],
+      "expect": "every version reads back exactly"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "dependencies read back as a list",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "                    tuple(record[\"depends_on\"]),\n",
+          "new": "                    record[\"depends_on\"],\n"
+        }
+      ],
+      "expect": "every version reads back exactly"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "loaded skills not compiled",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "                    compile_skill(code, f\"{name} v{record['version']}\"),\n",
+          "new": "                    None,\n"
+        }
+      ],
+      "expect": "'NoneType' object is not callable"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "objects created with mode x and no existence check",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if not path.exists():\n            _write_atomic(path, skill.code.encode(\"utf-8\"))\n",
+          "new": "        with open(path, \"xb\") as handle:\n            handle.write(skill.code.encode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "FileExistsError"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "every save rewrites every object",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if not path.exists():\n            _write_atomic(path, skill.code.encode(\"utf-8\"))\n",
+          "new": "        _write_atomic(path, skill.code.encode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "an object that is already stored is not written again"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "save merges into the old manifest",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    manifest: dict[str, list[dict]] = {}\n",
+          "new": "    old = root / \"manifest.json\"\n    manifest: dict[str, list[dict]] = json.loads(old.read_text(encoding=\"utf-8\")) if old.exists() else {}\n"
+        }
+      ],
+      "expect": "saving again replaces the manifest"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "a missing object raises FileNotFoundError",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            try:\n                data = (root / \"objects\" / digest).read_bytes()\n            except FileNotFoundError:\n                raise StoreError(f\"{ref}: object {digest} is missing\") from None\n",
+          "new": "            data = (root / \"objects\" / digest).read_bytes()\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "objects not checked against their hash",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            if hashlib.sha256(data).hexdigest() != digest:\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "store errors that do not name the version",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            ref = f\"{name}@{record['version']}\"\n",
+          "new": "            ref = name\n"
+        }
+      ],
+      "expect": "Regex pattern did not match"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "save merges the old manifest by name",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    _write_atomic(root / \"manifest.json\", (json.dumps(manifest, indent=2) + \"\\n\").encode(\"utf-8\"))\n",
+          "new": "    if (root / \"manifest.json\").exists():\n        old = json.loads((root / \"manifest.json\").read_text(encoding=\"utf-8\"))\n        old.update(manifest)\n        manifest = old\n    _write_atomic(root / \"manifest.json\", (json.dumps(manifest, indent=2) + \"\\n\").encode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "saving again replaces the manifest"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "save merges the old manifest by version, new records winning",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    _write_atomic(root / \"manifest.json\", (json.dumps(manifest, indent=2) + \"\\n\").encode(\"utf-8\"))\n",
+          "new": "    if (root / \"manifest.json\").exists():\n        old = json.loads((root / \"manifest.json\").read_text(encoding=\"utf-8\"))\n        for n, records in manifest.items():\n            by_version = {r[\"version\"]: r for r in old.get(n, [])}\n            by_version.update({r[\"version\"]: r for r in records})\n            old[n] = [by_version[v] for v in sorted(by_version)]\n        manifest = old\n    _write_atomic(root / \"manifest.json\", (json.dumps(manifest, indent=2) + \"\\n\").encode(\"utf-8\"))\n"
+        }
+      ],
+      "expect": "saving again replaces the manifest"
+    },
+    {
+      "test": "test_store_roundtrip",
+      "name": "save removes objects that no version uses",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    _write_atomic(root / \"manifest.json\", (json.dumps(manifest, indent=2) + \"\\n\").encode(\"utf-8\"))\n",
+          "new": "    _write_atomic(root / \"manifest.json\", (json.dumps(manifest, indent=2) + \"\\n\").encode(\"utf-8\"))\n    used = {r[\"code\"] for records in manifest.values() for r in records}\n    for path in objects.iterdir():\n        if path.name not in used:\n            path.unlink()\n"
+        }
+      ],
+      "expect": "saving again keeps every object"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "prerequisites followed through known skills",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "            if skill in have or skill in missing:\n                continue\n            missing.add(skill)\n",
+          "new": "            if skill in missing:\n                continue\n            if skill not in have:\n                missing.add(skill)\n"
+        }
+      ],
+      "expect": "a skill the library has needs nothing more"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "the task's own skill not counted",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "        todo = [task]\n",
+          "new": "        todo = list(recipe.requires)\n"
+        }
+      ],
+      "expect": "a task's own skill is missing, and so are the missing skills it needs"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "direct prerequisites only",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "            if skill in recipes:\n                todo.extend(recipes[skill].requires)\n",
+          "new": "            if skill == task:\n                todo.extend(recipes[skill].requires)\n"
+        }
+      ],
+      "expect": "missing skills are followed through missing prerequisites, including ones with no recipe"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "a prerequisite with no recipe looked up anyway",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "            if skill in recipes:\n                todo.extend(recipes[skill].requires)\n",
+          "new": "            todo.extend(recipes[skill].requires)\n"
+        }
+      ],
+      "expect": "KeyError: 'collect_coal'"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "a prerequisite with no recipe dropped",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "            if skill in have or skill in missing:\n",
+          "new": "            if skill in have or skill in missing or skill not in recipes:\n"
+        }
+      ],
+      "expect": "missing skills are followed through missing prerequisites, including ones with no recipe"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "missing skills collected in a list",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "        missing: set[str] = set()\n",
+          "new": "        missing: list[str] = []\n"
+        },
+        {
+          "file": "curriculum.py",
+          "old": "            if skill in have or skill in missing:\n",
+          "new": "            if skill in have:\n"
+        },
+        {
+          "file": "curriculum.py",
+          "old": "            missing.add(skill)\n",
+          "new": "            missing.append(skill)\n"
+        }
+      ],
+      "expect": "a skill that two paths need is missing once"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "ranked by a recursive count of missing skills",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "        ranked.append(((len(missing), bool(short), -recipe.value, task), gap))\n",
+          "new": "        def count(name: str) -> int:\n            if name in have:\n                return 0\n            below = recipes[name].requires if name in recipes else ()\n            return 1 + sum(count(p) for p in below)\n\n        ranked.append(((count(task), bool(short), -recipe.value, task), gap))\n"
+        }
+      ],
+      "expect": "fewest missing skills first, then materials in hand, then value, then name"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "materials checked for presence only",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "            item: count - inventory.get(item, 0)\n            for item, count in recipe.needs.items()\n            if count > inventory.get(item, 0)\n",
+          "new": "            item: count\n            for item, count in recipe.needs.items()\n            if item not in inventory\n"
+        }
+      ],
+      "expect": "short counts what is missing: 3 cobblestone with 2 in hand is 1 short"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "every material listed, short or not",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "            item: count - inventory.get(item, 0)\n            for item, count in recipe.needs.items()\n            if count > inventory.get(item, 0)\n",
+          "new": "            item: max(0, count - inventory.get(item, 0))\n            for item, count in recipe.needs.items()\n"
+        }
+      ],
+      "expect": "exactly enough is not short; a material the inventory lacks is short by the full count"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "lower value first",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "bool(short), -recipe.value, task)",
+          "new": "bool(short), recipe.value, task)"
+        }
+      ],
+      "expect": "fewest missing skills first, then materials in hand, then value, then name"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "materials in hand left out of the ranking",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "(len(missing), bool(short), -recipe.value, task)",
+          "new": "(len(missing), -recipe.value, task)"
+        }
+      ],
+      "expect": "fewest missing skills first, then materials in hand, then value, then name"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "materials ranked by how many are short",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "(len(missing), bool(short), -recipe.value, task)",
+          "new": "(len(missing), sum(short.values()), -recipe.value, task)"
+        }
+      ],
+      "expect": "fewest missing skills first, then materials in hand, then value, then name"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "materials ranked by how many kinds are short",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "(len(missing), bool(short), -recipe.value, task)",
+          "new": "(len(missing), len(short), -recipe.value, task)"
+        }
+      ],
+      "expect": "fewest missing skills first, then materials in hand, then value, then name"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "name ranked before value",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "(len(missing), bool(short), -recipe.value, task)",
+          "new": "(len(missing), bool(short), task, -recipe.value)"
+        }
+      ],
+      "expect": "fewest missing skills first, then materials in hand, then value, then name"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "value ranked before missing skills",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "(len(missing), bool(short), -recipe.value, task)",
+          "new": "(-recipe.value, len(missing), bool(short), task)"
+        }
+      ],
+      "expect": "fewest missing skills first, then materials in hand, then value, then name"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "known skills kept as candidates",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "        if task in have:\n            continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "a task whose skill the library already has is not a candidate"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "materials summed over every missing skill",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "        short = {\n            item: count - inventory.get(item, 0)\n            for item, count in recipe.needs.items()\n",
+          "new": "        needs: dict[str, int] = {}\n        for skill in missing:\n            for item, count in (recipes[skill].needs.items() if skill in recipes else ()):\n                needs[item] = needs.get(item, 0) + count\n        short = {\n            item: count - inventory.get(item, 0)\n            for item, count in needs.items()\n"
+        }
+      ],
+      "expect": "short is for the task's own recipe, not for the skills it is missing"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "exactly enough counted as short",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "            if count > inventory.get(item, 0)\n",
+          "new": "            if count >= inventory.get(item, 0)\n"
+        }
+      ],
+      "expect": "exactly enough is not short; a material the inventory lacks is short by the full count"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "materials the inventory lacks skipped",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "            if count > inventory.get(item, 0)\n",
+          "new": "            if item in inventory and count > inventory[item]\n"
+        }
+      ],
+      "expect": "exactly enough is not short; a material the inventory lacks is short by the full count"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "ties left in recipe order",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "(len(missing), bool(short), -recipe.value, task)",
+          "new": "(len(missing), bool(short), -recipe.value)"
+        }
+      ],
+      "expect": "ties on value go to the name"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "propose indexes an empty ranking",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "    return ranked[0] if ranked else None\n",
+          "new": "    return ranked[0]\n"
+        }
+      ],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "missing skills listed in walk order, not by name",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "        missing: set[str] = set()\n",
+          "new": "        missing: dict[str, None] = {}\n"
+        },
+        {
+          "file": "curriculum.py",
+          "old": "            missing.add(skill)\n",
+          "new": "            missing[skill] = None\n"
+        },
+        {
+          "file": "curriculum.py",
+          "old": "        gap = Gap(task, tuple(sorted(missing)), short)\n",
+          "new": "        gap = Gap(task, tuple(missing), short)\n"
+        }
+      ],
+      "expect": "a task's own skill is missing, and so are the missing skills it needs"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "tasks short of materials ranked first",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "bool(short), -recipe.value",
+          "new": "not short, -recipe.value"
+        }
+      ],
+      "expect": "fewest missing skills first, then materials in hand, then value, then name"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "inventory indexed directly",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "            item: count - inventory.get(item, 0)\n            for item, count in recipe.needs.items()\n            if count > inventory.get(item, 0)\n",
+          "new": "            item: count - inventory[item]\n            for item, count in recipe.needs.items()\n            if count > inventory[item]\n"
+        }
+      ],
+      "expect": "KeyError: 'coal'"
+    },
+    {
+      "test": "test_curriculum",
+      "name": "prerequisites without a recipe made candidates",
+      "edits": [
+        {
+          "file": "curriculum.py",
+          "old": "    for task, recipe in recipes.items():\n        if task in have:\n",
+          "new": "    every = dict(recipes)\n    for r in recipes.values():\n        for p in r.requires:\n            every.setdefault(p, Recipe())\n    for task, recipe in every.items():\n        if task in have:\n"
+        }
+      ],
+      "expect": "a skill the library has needs nothing more"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "no reset between rounds",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "            draft = await writer(task, feedback)\n            _reset(world, start)\n",
+          "new": "            draft = await writer(task, feedback)\n"
+        }
+      ],
+      "expect": "every round starts from the world as it was when refine was called"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "reset shares the snapshot's objects",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "    world.update(copy.deepcopy(start))\n",
+          "new": "    world.update(start)\n"
+        }
+      ],
+      "expect": "every round starts from the world as it was when refine was called"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "world left as the last failed round left it",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "    finally:\n        if not learned:\n            _reset(world, start)\n",
+          "new": "    finally:\n        pass\n"
+        }
+      ],
+      "expect": "a task that never succeeds leaves the world as it started"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "reset after the loop instead of in finally",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "            if learned:\n                return\n    finally:\n        if not learned:\n            _reset(world, start)\n",
+          "new": "            if learned:\n                return\n        _reset(world, start)\n    finally:\n        pass\n"
+        }
+      ],
+      "expect": "a stream closed early leaves the world as it started"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "world reset after a success",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "    finally:\n        if not learned:\n            _reset(world, start)\n",
+          "new": "    finally:\n        _reset(world, start)\n"
+        }
+      ],
+      "expect": "after a success the world holds what that round did"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "every draft registered before it runs",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "                run = lib.execute(lib.draft(task.name, draft.code, draft.depends_on), world)\n",
+          "new": "                skill = lib.register(task.name, task.description, draft.code, task.tags, draft.depends_on)\n                run = lib.execute(skill, world)\n"
+        },
+        {
+          "file": "refine.py",
+          "old": "                        version = lib.register(\n                            task.name, task.description, draft.code, task.tags, draft.depends_on\n                        ).version\n",
+          "new": "                        version = skill.version\n"
+        }
+      ],
+      "expect": "a draft that passes verification is registered as the next version"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "version reported as the round number",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "                        ).version\n",
+          "new": "                        ).version and n\n"
+        }
+      ],
+      "expect": "a draft that passes verification is registered as the next version"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "self-verification failure reported as an error",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "                        signal = \"self_verification_failure\"\n",
+          "new": "                        signal = \"error\"\n"
+        }
+      ],
+      "expect": "a run that finishes but fails verification is a self-verification failure"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "verification run on a failed run as well",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "                if not run.ok:\n                    signal, detail = \"error\", run.error\n                else:\n",
+          "new": "                if False:\n                    pass\n                else:\n"
+        }
+      ],
+      "expect": "an error carries the stack trace"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "error detail cut to the last line",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "                    signal, detail = \"error\", run.error\n",
+          "new": "                    signal, detail = \"error\", run.error.strip().splitlines()[-1]\n"
+        }
+      ],
+      "expect": "an error carries the stack trace"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "a draft that does not compile escapes the loop",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "            try:\n                run = lib.execute(lib.draft(task.name, draft.code, draft.depends_on), world)\n",
+          "new": "            skill = lib.draft(task.name, draft.code, draft.depends_on)\n            try:\n                run = lib.execute(skill, world)\n"
+        }
+      ],
+      "expect": "SyntaxError"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "a compile error reported with its message only",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "                signal, detail = \"error\", traceback.format_exc()\n",
+          "new": "                signal, detail = \"error\", traceback.format_exc().strip().splitlines()[-1]\n"
+        }
+      ],
+      "expect": "a draft that does not compile is an error, with its stack trace"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "rounds streamed after the loop ends",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "    learned = False\n",
+          "new": "    learned = False\n    lines: list[str] = []\n"
+        },
+        {
+          "file": "refine.py",
+          "old": "            yield json.dumps(feedback) + \"\\n\"\n            if learned:\n                return\n",
+          "new": "            lines.append(json.dumps(feedback) + \"\\n\")\n            if learned:\n                break\n        for line in lines:\n            yield line\n"
+        }
+      ],
+      "expect": "stream each round as soon as it ends"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "next draft requested before the round is streamed",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "        for n in range(1, max_rounds + 1):\n            draft = await writer(task, feedback)\n",
+          "new": "        upcoming = await writer(task, feedback)\n        for n in range(1, max_rounds + 1):\n            draft = upcoming\n"
+        },
+        {
+          "file": "refine.py",
+          "old": "            feedback = {\"round\": n, \"signal\": signal, \"version\": version, \"detail\": detail}\n",
+          "new": "            feedback = {\"round\": n, \"signal\": signal, \"version\": version, \"detail\": detail}\n            if not learned and n < max_rounds:\n                upcoming = await writer(task, feedback)\n"
+        }
+      ],
+      "expect": "stream each round as soon as it ends"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "events pretty-printed",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "            yield json.dumps(feedback) + \"\\n\"\n",
+          "new": "            yield json.dumps(feedback, indent=2) + \"\\n\"\n"
+        }
+      ],
+      "expect": "Expecting property name enclosed in double quotes"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "no newline after each event",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "            yield json.dumps(feedback) + \"\\n\"\n",
+          "new": "            yield json.dumps(feedback)\n"
+        }
+      ],
+      "expect": "Extra data"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "one round too many",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "        for n in range(1, max_rounds + 1):\n",
+          "new": "        for n in range(1, max_rounds + 2):\n"
+        }
+      ],
+      "expect": "the loop asked for more rounds than the script has"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "keeps asking after a success",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "            if learned:\n                return\n",
+          "new": ""
+        }
+      ],
+      "expect": "the loop asked for more rounds than the script has"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "writer shown only the detail",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "            draft = await writer(task, feedback)\n",
+          "new": "            draft = await writer(task, feedback and feedback[\"detail\"])\n"
+        }
+      ],
+      "expect": "the writer sees the previous round's event"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "registered without the task's tags",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "                            task.name, task.description, draft.code, task.tags, draft.depends_on\n",
+          "new": "                            task.name, task.description, draft.code, (), draft.depends_on\n"
+        }
+      ],
+      "expect": "the registered version is the draft that succeeded, with the task's description and tags"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "each round resets with update and no clear",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "            draft = await writer(task, feedback)\n            _reset(world, start)\n",
+          "new": "            draft = await writer(task, feedback)\n            world.update(copy.deepcopy(start))\n"
+        }
+      ],
+      "expect": "after a success the world holds what that round did"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "reset on GeneratorExit and after the loop, not in finally",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "    finally:\n        if not learned:\n            _reset(world, start)\n",
+          "new": "    except GeneratorExit:\n        _reset(world, start)\n        raise\n    _reset(world, start)\n"
+        }
+      ],
+      "expect": "a stream closed right after a success keeps what that round did"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "success remembered only after the yield",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "            learned = signal == \"success\"\n            feedback = {\"round\": n, \"signal\": signal, \"version\": version, \"detail\": detail}\n            yield json.dumps(feedback) + \"\\n\"\n",
+          "new": "            feedback = {\"round\": n, \"signal\": signal, \"version\": version, \"detail\": detail}\n            yield json.dumps(feedback) + \"\\n\"\n            learned = signal == \"success\"\n"
+        }
+      ],
+      "expect": "a stream closed right after a success keeps what that round did"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "one round too few",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "        for n in range(1, max_rounds + 1):\n",
+          "new": "        for n in range(1, max_rounds):\n"
+        }
+      ],
+      "expect": "stop after max_rounds"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "registered without the draft's dependencies",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "task.name, task.description, draft.code, task.tags, draft.depends_on\n",
+          "new": "task.name, task.description, draft.code, task.tags\n"
+        }
+      ],
+      "expect": "the registered version is the draft that succeeded, with the task's description and tags"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "writer shown the JSON line",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "            feedback = {\"round\": n, \"signal\": signal, \"version\": version, \"detail\": detail}\n            yield json.dumps(feedback) + \"\\n\"\n",
+          "new": "            event = {\"round\": n, \"signal\": signal, \"version\": version, \"detail\": detail}\n            feedback = json.dumps(event) + \"\\n\"\n            yield feedback\n"
+        }
+      ],
+      "expect": "the writer sees the previous round's event"
+    },
+    {
+      "test": "test_refinement_stream",
+      "name": "version counted before registering",
+      "edits": [
+        {
+          "file": "refine.py",
+          "old": "                        version = lib.register(\n                            task.name, task.description, draft.code, task.tags, draft.depends_on\n                        ).version\n",
+          "new": "                        version = len(lib.versions(task.name))\n                        lib.register(task.name, task.description, draft.code, task.tags, draft.depends_on)\n"
+        }
+      ],
+      "expect": "a draft that passes verification is registered as the next version"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "a bare reference always takes the latest version",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "            visit(child, locked(child))\n",
+          "new": "            visit(child, parse_ref(dep)[1] or max(index[child]))\n"
+        }
+      ],
+      "expect": "a bare reference follows a pin made elsewhere in the tree"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "the first reference met decides the version",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "    root, root_pin = parse_ref(ref)\n    root_version = _version(index, root, root_pin)\n",
+          "new": "    root, root_pin = parse_ref(ref)\n    root_version = _version(index, root, root_pin)\n    chosen: dict[str, int] = {}\n    found: list[str] = []\n\n    def first(name: str, version: int, path: str) -> None:\n        if name in chosen:\n            if chosen[name] != version:\n                raise VersionConflict(f\"{name}: {path}\")\n            return\n        chosen[name] = version\n        for dep in index[name][version]:\n            child, pin = parse_ref(dep)\n            v = chosen[child] if pin is None and child in chosen else _version(index, child, pin)\n            first(child, v, f\"{path} -> {child}@{v}\")\n        found.append(f\"{name}@{version}\")\n\n    first(root, root_version, f\"{root}@{root_version}\")\n    return found\n"
+        }
+      ],
+      "expect": "VersionConflict"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "pins only from the skills walked so far",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "            child = parse_ref(dep)[0]\n            visit(child, locked(child))\n",
+          "new": "            child, pin = parse_ref(dep)\n            if pin is not None:\n                walked.setdefault(child, pin)\n            visit(child, walked.get(child, max(index[child])))\n"
+        },
+        {
+          "file": "lock.py",
+          "old": "    order: list[str] = []\n",
+          "new": "    order: list[str] = []\n    walked: dict[str, int] = {}\n"
+        }
+      ],
+      "expect": "a bare reference follows a pin made elsewhere in the tree"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "the tree walked once per skill name",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "        if (name, version) in seen:\n            continue\n        seen.add((name, version))\n",
+          "new": "        if name in seen:\n            continue\n        seen.add(name)\n"
+        }
+      ],
+      "expect": "the pins inside a pinned version count, even when that skill was first reached by a bare reference"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "every reference treated as a pin",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "            if pin is not None:\n                if child in pins and pins[child][0] != pin:\n",
+          "new": "            if True:\n                pin = child_version\n                if child in pins and pins[child][0] != pin:\n"
+        }
+      ],
+      "expect": "VersionConflict"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "no conflict check",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "                if child in pins and pins[child][0] != pin:\n",
+          "new": "                if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "the same pin twice raises",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "                if child in pins and pins[child][0] != pin:\n",
+          "new": "                if child in pins:\n"
+        }
+      ],
+      "expect": "VersionConflict"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "conflict names the versions, not the paths",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "                        f\"{child} is pinned twice: {pins[child][1]} and {child_path}\"\n",
+          "new": "                        f\"{child} is pinned to {pins[child][0]} and to {pin}\"\n"
+        }
+      ],
+      "expect": "a conflict names both paths"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "paths start below the root",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "    todo = [(root, root_version, f\"{root}@{root_version}\")]\n",
+          "new": "    todo = [(root, root_version, \"\")]\n"
+        }
+      ],
+      "expect": "a conflict names both paths"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "paths written with bare names",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "            child_path = f\"{path} -> {child}@{child_version}\"\n",
+          "new": "            child_path = f\"{path} -> {child}\"\n"
+        }
+      ],
+      "expect": "a conflict names both paths"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "skills listed before their dependencies",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "        active.add(name)\n        for dep in index[name][version]:",
+          "new": "        active.add(name)\n        order.append(f\"{name}@{version}\")\n        for dep in index[name][version]:"
+        },
+        {
+          "file": "lock.py",
+          "old": "        done.add(name)\n        order.append(f\"{name}@{version}\")\n",
+          "new": "        done.add(name)\n"
+        }
+      ],
+      "expect": "a bare reference takes the latest version; dependencies come first, in the order they are written"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "dependencies taken in reverse order",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "        for dep in index[name][version]:\n            child = parse_ref(dep)[0]\n",
+          "new": "        for dep in reversed(index[name][version]):\n            child = parse_ref(dep)[0]\n"
+        }
+      ],
+      "expect": "a bare reference takes the latest version; dependencies come first, in the order they are written"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "a pin on the root ignored",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "    root_version = _version(index, root, root_pin)\n",
+          "new": "    root_version = _version(index, root, None)\n"
+        }
+      ],
+      "expect": "a bare reference follows a pin made elsewhere in the tree"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "an unknown version falls back to the latest",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "    if pin not in index[name]:\n        raise KeyError(f\"{name}@{pin}\")\n    return pin\n",
+          "new": "    if pin not in index[name]:\n        return max(index[name])\n    return pin\n"
+        },
+        {
+          "file": "lock.py",
+          "old": "                pins.setdefault(child, (pin, child_path))\n",
+          "new": "                pins.setdefault(child, (child_version, child_path))\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "an unknown skill skipped",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "        for dep in index[name][version]:\n            child, pin = parse_ref(dep)\n            child_version",
+          "new": "        for dep in [d for d in index[name][version] if parse_ref(d)[0] in index]:\n            child, pin = parse_ref(dep)\n            child_version"
+        },
+        {
+          "file": "lock.py",
+          "old": "        for dep in index[name][version]:\n            child = parse_ref(dep)[0]\n",
+          "new": "        for dep in [d for d in index[name][version] if parse_ref(d)[0] in index]:\n            child = parse_ref(dep)[0]\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "the highest pin wins instead of a conflict",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "                if child in pins and pins[child][0] != pin:\n                    raise VersionConflict(\n                        f\"{child} is pinned twice: {pins[child][1]} and {child_path}\"\n                    )\n                pins.setdefault(child, (pin, child_path))\n",
+          "new": "                if child not in pins or pins[child][0] < pin:\n                    pins[child] = (pin, child_path)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "locked versions written over the literal walk",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "        for dep in index[name][version]:\n            child = parse_ref(dep)[0]\n            visit(child, locked(child))\n",
+          "new": "        for dep in index[name][version]:\n            child, pin = parse_ref(dep)\n            visit(child, _version(index, child, pin))\n"
+        },
+        {
+          "file": "lock.py",
+          "old": "        order.append(f\"{name}@{version}\")\n",
+          "new": "        order.append(f\"{name}@{version if name == root else locked(name)}\")\n"
+        }
+      ],
+      "expect": "a bare reference follows a pin made elsewhere in the tree"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "a bare reference follows only the pins on its own path",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "    root, root_pin = parse_ref(ref)\n    root_version = _version(index, root, root_pin)\n",
+          "new": "    root, root_pin = parse_ref(ref)\n    root_version = _version(index, root, root_pin)\n    out: list[str] = []\n    placed: dict[str, int] = {}\n\n    def walk(name: str, version: int, scope: dict, path: str) -> None:\n        if name in placed:\n            if placed[name] != version:\n                raise VersionConflict(f\"{name}: {path}\")\n            return\n        deps = [parse_ref(d) for d in index[name][version]]\n        inner = dict(scope)\n        for child, pin in deps:\n            _version(index, child, pin)\n            if pin is not None:\n                inner[child] = pin\n        for child, pin in deps:\n            v = pin if pin is not None else inner.get(child, max(index[child]))\n            walk(child, v, inner, f\"{path} -> {child}@{v}\")\n        placed[name] = version\n        out.append(f\"{name}@{version}\")\n\n    walk(root, root_version, {}, f\"{root}@{root_version}\")\n    return out\n"
+        }
+      ],
+      "expect": "VersionConflict"
+    },
+    {
+      "test": "test_version_lock",
+      "name": "pins checked only when the lock is walked",
+      "edits": [
+        {
+          "file": "lock.py",
+          "old": "            child_version = _version(index, child, pin)\n",
+          "new": "            child_version = pin if pin is not None else _version(index, child, None)\n"
+        }
+      ],
+      "expect": "Regex pattern did not match"
+    }
+  ]
+}

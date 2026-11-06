@@ -1,0 +1,145 @@
+{
+  "lesson": "phases/14-agent-engineering/10-skill-libraries-voyager",
+  "title": "Skill Libraries and Lifelong Learning (Voyager)",
+  "format": "staged-brownfield",
+  "service": "Voyager: a skill library whose skills are versioned Python code run against a toy crafting world and searched through a tag index, with a content-addressed store, an automatic curriculum that proposes the task just above current capability, an iterative refinement loop streamed as NDJSON, and version locks for composed skills",
+  "sources": {
+    "docs/en.md": "c6cf28951a1e4272831bb047e46deda31477551d3f6e142633ec101e6cce5bb2",
+    "code/main.py": "95dd4cc1eb5f6c8a6aa28bbb7885bfdeeb6093a104de67660997dfb1663dacbb"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_skill_library",
+      "kind": "debug",
+      "lesson_anchor": "Where this pattern goes wrong (Skill library rot: retrieval returns only one; Composed-skill drift: a parent pinned to v1 doesn't magically pick up v3; Retrieval quality: vector retrieval over skill descriptions degrades as the library grows past a few hundred, supplement with tag filters and hard constraints); Iterative refinement (a failure is the signal for the next try); Exercise 2 (per-skill version pinning); code/main.py SkillLibrary.register, search, topo_order, execute",
+      "planted_bugs": [
+        "register normalizes tags with tuple(tags), so tags='gather' is stored as its letters; the failure shows up in search, where tag_filter='gather' misses gather_sticks and tag_filter='g' would match it",
+        "register refines a skill by rewriting the one Skill object in place and keeps only old code strings, and get(name, v) rebuilds an old version with dataclasses.replace, so mine_ore@1 keeps v2's fn, description and dependencies; starter_kit pinned to mine_ore@1 fails with failed='mine_ore@1' while the stack trace points at <skill mine_ore v2>",
+        "execute returns on the first exception without restoring world, so the skills that ran before the failure leave their changes (a new key and a nested dict entry)",
+        "search with tag_filter scores every skill in the library with Jaccard and filters by tag only afterwards, although the class docstring says register keeps an index from each tag to the names of the skills whose latest version carries it and a filtered search scores only the skills that index lists; register keeps only the description words, which it already splits once at registration"
+      ],
+      "timing_assert": "30 tag-filtered searches in a 50,000-skill library (kit000 to kit999, 50 skills each) under 0.03 s. Measured on this machine at load average about 6: score-then-filter 1.29-1.52 s inside pytest (0.64-1.64 s standalone on Python 3.10-3.14), the tag checked before scoring but every skill still scanned 0.10-0.20 s, the indexed reference 0.95-1.5 ms inside pytest (0.8-1.8 ms standalone). Building the library takes 0.8-1.0 s and is not timed. The 18-level ladder (38 skills) stays as a guard on _plan: execute under 0.05 s, the reference 0.02-0.06 ms, a plan that rebuilds the closure for every dependency 0.80-0.85 s",
+      "overfix_guard": "only name@v references are pinned: freezing unpinned dependencies at v1, pinning bare names at registration time, or get(name) returning the oldest version all fail; a registered version never changes; search returns each skill once at its latest version; a failed run keeps its log and a full stack trace; a shallow snapshot, rebinding world, or update without clear do not restore the world; a memo keyed by name drops gather_sticks v2 from a plan that needs v1 and v2; a plan cached on the library across calls keeps running gather_sticks v1 after the refinement (the test runs starter_kit once before refining); the lesson's stack walk reverses sibling order; the tag index follows the latest version: a refinement that drops a tag takes the skill out of it and a new tag adds it (mine_iron_tools_7007 moves from kit007 to kit999); the index holds names, so an index of Skill objects returns v1 after a refinement and a list that gains the name on every register returns duplicates; a tag no skill carries finds nothing, so self._tagged[tag] raises KeyError on tag_filter='g'; equal scores go to the alphabetically first name (kit007 has 2 skills at 0.6 and 11 at 1/3, and a set index iterates in hash order); the description words are replaced on refinement ('two at a time' is only in gather_sticks v2); checking the tag first while still scanning every skill fails the timing"
+    },
+    {
+      "part": 2,
+      "test": "test_store_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Three components (skill library: each skill is executable code, persistent store of skills); Skill library rot (deduplication on write); Composed-skill drift (version skills, dependencies keep their pins)",
+      "exactness": "every version reads back equal (code, description, tags and dependencies as tuples, pins kept) and executable; code is exact byte for byte through the object file: CRLF line ends, trailing spaces and tabs, a file without a final newline, non-ASCII text; objects are named by the SHA-256 of the code's UTF-8 bytes and identical code is stored once; a second save that no longer has craft_pickaxe reads back without it and keeps its object",
+      "traps": [
+        "object read in text mode (universal newlines turn CRLF into LF), with or without a hash check",
+        "line ends normalized before writing",
+        "hash over stripped code or over the whole version record",
+        "a version whose code is already stored dropped from the manifest",
+        "pins dropped from dependencies",
+        "tags or dependencies read back as lists",
+        "loaded skills not compiled",
+        "open(path, 'xb') without an existence check on the second save",
+        "every save rewrites every object (mtime changes)",
+        "the manifest merged with the old one (appended, by name or by version) instead of replaced, so craft_pickaxe, which the second save no longer has, stays",
+        "save deleting the object that no version uses any more",
+        "a missing object leaking FileNotFoundError",
+        "no hash check on load (the damaged object keeps its length)",
+        "a StoreError that does not name the skill version"
+      ],
+      "clarifying_questions": [
+        "normalizing line ends",
+        "what the hash covers",
+        "identical code in two skills",
+        "merging the manifest on a second save",
+        "garbage collection",
+        "atomic writes"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_curriculum",
+      "kind": "core algorithm",
+      "lesson_anchor": "Three components (automatic curriculum); Curriculum and exploration (environment state + skill inventory pick a task just above current capability; the what's-missing operator); Exercise 4",
+      "traps": [
+        "prerequisites followed through skills the library already has",
+        "the task's own skill not counted as missing",
+        "direct prerequisites only",
+        "a prerequisite with no recipe looked up (KeyError) or dropped",
+        "missing skills kept in a list, or counted recursively for the ranking, so a diamond counts twice",
+        "materials checked for presence only, every material listed, exactly enough counted as short, materials the inventory lacks skipped",
+        "materials of the missing prerequisites added to the task's shortfall",
+        "ranking: lower value first, name before value, materials in hand ignored, ranked by units or kinds short, value before missing skills, ties left in recipe order",
+        "skills the library has kept as candidates",
+        "propose indexing an empty ranking"
+      ],
+      "clarifying_questions": [
+        "the task's own skill",
+        "a prerequisite without a recipe",
+        "whose materials count",
+        "excluding tasks that are short",
+        "completed tasks"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_refinement_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Iterative refinement (write a skill, run it, one of three signals: success, error with stack trace, self-verification failure, rewrite with the signal, until success or max rounds); Three components (iterative prompting mechanism; new skills are added when a task succeeds); code/main.py phase 4-6 and the v2 that returns 'skipped' instead of raising",
+      "wire_format": "NDJSON, one object per round {round, signal, version, detail}, decided by the test's join/splitlines/json.loads; the writer gets the same event dict as feedback",
+      "traps": [
+        "no reset between rounds, or a reset that shares the snapshot's nested dicts (round 4 then succeeds on leftovers from round 3)",
+        "a per-round reset that updates without clearing, so the waiting_for flag a failed draft wrote is still there after the success",
+        "world not restored when every round fails, or when the caller closes the stream early (no finally), or restored after a success, including when the caller closes the stream right after the success line (reset only on GeneratorExit, or the success noted after the yield)",
+        "every draft registered before it runs, or the version reported as the round number",
+        "self-verification failure reported as an error, or verification run on a failed run",
+        "error detail cut to its last line, a compile error reported without its stack trace, a compile error escaping the loop",
+        "rounds streamed after the loop, or the next draft requested before the round is streamed",
+        "pretty-printed events or a missing newline",
+        "one round too many, or asking again after a success",
+        "the writer shown only the detail",
+        "the registered version without the task's tags"
+      ],
+      "clarifying_questions": [
+        "a draft that does not compile",
+        "a draft without run() or with an unknown dependency",
+        "what the writer sees",
+        "world between rounds",
+        "world after every round fails or the stream is closed",
+        "keeping failed drafts",
+        "the success detail"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_version_lock",
+      "kind": "graph",
+      "lesson_anchor": "Composed-skill drift (version skills; a parent pinned to v1 doesn't magically pick up v3); Key Terms: Composition (skills invoking skills, topologically sorted on execution); Exercise 2 (a parent composing crafting@1 must not silently upgrade)",
+      "traps": [
+        "a bare reference always taking the latest version",
+        "the first reference met deciding the version (single walk)",
+        "pins taken only from the skills walked so far",
+        "the tree walked once per skill name, so the pins inside a pinned version are missed",
+        "every reference treated as a pin",
+        "no conflict check, or the same pin twice reported as a conflict",
+        "a conflict message without both full paths from the root",
+        "skills listed before their dependencies, or dependencies taken in reverse order",
+        "a pin on the root ignored",
+        "an unknown version falling back to the latest, an unknown skill skipped"
+      ],
+      "clarifying_questions": [
+        "pins anywhere in the tree",
+        "a pin to the latest version",
+        "which path to report",
+        "a pin under a version the lock does not use",
+        "an unknown version"
+      ]
+    }
+  ],
+  "deviations": [
+    "Skills are real Python code: Skill.code defines run(world) and compile_skill turns it into fn, with the label <skill name vN> in stack traces. In the lesson the code string is never run; here the store (Part 2) and the refinement loop (Part 4) need code that runs.",
+    "Part 1 keeps the three suggested defects. Its timing defect is the lesson's retrieval-quality point at scale: a tag filter has to narrow a 50,000-skill library through an index before anything is scored. Descriptions are split into words once, at registration, already in the starter, so the defect is not re-tokenizing on every query (chapter 14 lessons 07 and 15). _plan is the lesson's topo_order walk with a visited set, written recursively so siblings keep their written order; it has no planted defect, and its ladder timing and memo guards stay. The starter's in-place refinement follows the lesson's register, and get(name, v) rebuilds old versions with dataclasses.replace, so the failure surfaces in execute as a v1 step running v2's code. Execute resolves each reference on its own (bare name = latest), so one plan can hold two versions of one skill; the test pins that both run once. Besides the suggested guard (unpinned dependencies take the latest version), the test also pins: registered versions never change, search returns each skill once at its latest version, with or without a tag filter, ties go to the alphabetically first name, a failed run keeps its log and full stack trace, and sibling order follows the written order.",
+    "Part 2 works on Skill records (save(skills, root), load(root) -> {name: [versions]}) instead of a SkillLibrary, so it does not depend on Part 1's fix. Besides the suggested exactness checks, load also verifies every object against its hash, objects already stored are not rewritten, and a second save replaces the manifest.",
+    "Part 3 drops the completed-tasks input: Voyager adds a skill when it completes a task, so tasks whose skill is already in the library are the completed ones. Missing skills include the task's own skill, so 'exactly one missing' is the smallest count. Between the missing count and value the ranking puts 'all materials in hand', because the lesson's proposer uses environment state as well as the skill inventory. A prerequisite with no recipe counts as missing.",
+    "Part 4's signals are 'success', 'error' and 'self_verification_failure'. A draft that does not compile is an error round. The writer is async and gets the previous round's event. The world is also restored when the caller closes the stream early, so the loop needs try/finally.",
+    "Part 5 resolves over an index name -> version -> dependency references (what Part 2's manifest records) instead of a SkillLibrary. Pins are read from the tree as written, where a bare name means the latest version. The lock then gives every skill its pin, or its latest version when nothing pins it. A pin that only appears under a version the lock does not use still counts; the docstring says so and the tests do not cover it. This is version-conflict resolution, not install order or cycle detection (chapter 13 lessons 22 and 25)."
+  ]
+}
