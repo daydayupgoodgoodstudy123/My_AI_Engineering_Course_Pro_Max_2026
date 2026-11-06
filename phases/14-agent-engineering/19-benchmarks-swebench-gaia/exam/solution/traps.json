@@ -1,0 +1,1090 @@
+{
+  "package": "swebench",
+  "tests": [
+    "test_harness_gate",
+    "test_result_store",
+    "test_report_views",
+    "test_stream_results",
+    "test_gaia_levels"
+  ],
+  "layers": [
+    {
+      "test": "test_harness_gate",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a patch that breaks a PASS_TO_PASS test is unresolved"
+        },
+        {
+          "name": "rerun the whole suite after the patch",
+          "edits": [
+            {
+              "file": "harness.py",
+              "old": "    to_flip = {test_id: check for test_id, check in task.tests.items() if test_id in task.fail_to_pass}\n    after = _gate(run_tests(to_flip, patched), task.fail_to_pass) + before[nf:]\n",
+              "new": "    after = _gate(run_tests(task.tests, patched), ids)\n"
+            }
+          ],
+          "expect": "a test passes only when its own id is reported PASSED"
+        },
+        {
+          "name": "+ split a report line at the first space only",
+          "edits": [
+            {
+              "file": "harness.py",
+              "old": "        status, name = line.split()[:2]\n",
+              "new": "        status, _, name = line.partition(\" \")\n"
+            }
+          ],
+          "expect": "a task whose tests do not hold before the patch is invalid"
+        },
+        {
+          "name": "+ invalid tasks",
+          "edits": [
+            {
+              "file": "harness.py",
+              "old": "    outcomes = [Outcome(test_id, \"before\", ok) for test_id, ok in zip(ids, before)]\n",
+              "new": "    outcomes = [Outcome(test_id, \"before\", ok) for test_id, ok in zip(ids, before)]\n    if not nf or any(before[:nf]) or not all(before[nf:]):\n        return TaskResult(task.instance_id, \"invalid\", 0, nf, 0, np_, outcomes)\n"
+            }
+          ],
+          "expect": "run_task should be fast on large test suites"
+        },
+        {
+          "name": "+ parse each report once",
+          "edits": [
+            {
+              "file": "harness.py",
+              "old": "    return [passed(log, test_id) for test_id in test_ids]\n",
+              "new": "    statuses = {}\n    for line in log.splitlines():\n        status, _, name = line.partition(\" \")\n        statuses[name] = status\n    return [statuses.get(test_id) == \"PASSED\" for test_id in test_ids]\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_harness_gate",
+      "name": "the whole run marked error when a test raises",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        try:\n            ok = bool(check(state))\n        except Exception:\n            lines.append(f\"ERROR {test_id}\")\n            continue\n        lines.append(f\"{'PASSED' if ok else 'FAILED'} {test_id}\")\n",
+          "new": "        lines.append(f\"{'PASSED' if check(state) else 'FAILED'} {test_id}\")\n"
+        },
+        {
+          "file": "harness.py",
+          "old": "    before = _gate(run_tests(task.tests, copy.deepcopy(task.state)), ids)\n",
+          "new": "    try:\n        before = _gate(run_tests(task.tests, copy.deepcopy(task.state)), ids)\n    except Exception:\n        return TaskResult(task.instance_id, \"error\", 0, nf, 0, np_, [])\n"
+        }
+      ],
+      "expect": "a test that raises is a failing test, not a broken run"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "a raising test reported as PASSED",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "            lines.append(f\"ERROR {test_id}\")\n",
+          "new": "            lines.append(f\"PASSED {test_id}\")\n"
+        }
+      ],
+      "expect": "a test that raises is a failing test, not a broken run"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "skip the run before the patch and trust the lists (faster)",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    before = _gate(run_tests(task.tests, copy.deepcopy(task.state)), ids)\n",
+          "new": "    before = [False] * nf + [True] * np_\n"
+        }
+      ],
+      "expect": "a task whose tests do not hold before the patch is invalid"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "prefix match on the report line",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    statuses = parse_log(log)\n    return [statuses.get(test_id) == \"PASSED\" for test_id in test_ids]\n",
+          "new": "    lines = log.splitlines()\n    return [any(line.startswith(f\"PASSED {test_id}\") for line in lines) for test_id in test_ids]\n"
+        }
+      ],
+      "expect": "a test passes only when its own id is reported PASSED"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "report parsed with str.split()",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        status, _, test_id = line.partition(\" \")\n",
+          "new": "        status, test_id = line.split()[0], line.split()[-1]\n"
+        }
+      ],
+      "expect": "a test passes only when its own id is reported PASSED"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "patch applied to a shallow copy",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        patched = patch.apply(copy.deepcopy(task.state))\n",
+          "new": "        patched = patch.apply(dict(task.state))\n"
+        }
+      ],
+      "expect": "the task's own state never changes"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "a raising test reported as FAILED",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "            lines.append(f\"ERROR {test_id}\")\n",
+          "new": "            lines.append(f\"FAILED {test_id}\")\n"
+        }
+      ],
+      "expect": "a test that raises is reported as ERROR"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "a raising test stops the run",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "            lines.append(f\"ERROR {test_id}\")\n            continue\n",
+          "new": "            lines.append(f\"ERROR {test_id}\")\n            break\n"
+        }
+      ],
+      "expect": "a test that raises is a failing test, not a broken run"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "only KeyError caught in run_tests",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        except Exception:\n            lines.append(f\"ERROR {test_id}\")",
+          "new": "        except KeyError:\n            lines.append(f\"ERROR {test_id}\")"
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "invalid only when every FAIL_TO_PASS test already passes",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "any(before[:nf])",
+          "new": "all(before[:nf])"
+        }
+      ],
+      "expect": "a task whose tests do not hold before the patch is invalid"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "invalid only when every PASS_TO_PASS test fails",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "not all(before[nf:])",
+          "new": "not any(before[nf:])"
+        }
+      ],
+      "expect": "a task whose tests do not hold before the patch is invalid"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "validity checked after the patch is applied",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    if not nf or any(before[:nf]) or not all(before[nf:]):\n        return TaskResult(task.instance_id, \"invalid\", 0, nf, 0, np_, outcomes)\n    try:\n        patched = patch.apply(copy.deepcopy(task.state))\n    except Exception:\n        return TaskResult(task.instance_id, \"error\", 0, nf, 0, np_, outcomes)\n",
+          "new": "    try:\n        patched = patch.apply(copy.deepcopy(task.state))\n    except Exception:\n        return TaskResult(task.instance_id, \"error\", 0, nf, 0, np_, outcomes)\n    if not nf or any(before[:nf]) or not all(before[nf:]):\n        return TaskResult(task.instance_id, \"invalid\", 0, nf, 0, np_, outcomes)\n"
+        }
+      ],
+      "expect": "an invalid task never has its patch applied"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "resolved judged on FAIL_TO_PASS alone",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    status = \"resolved\" if all(after) else \"unresolved\"\n",
+          "new": "    status = \"resolved\" if all(after[:nf]) else \"unresolved\"\n"
+        }
+      ],
+      "expect": "a patch that breaks a PASS_TO_PASS test is unresolved"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "status from a full rerun, counts and outcomes still copied from before the patch",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    after = _gate(run_tests(task.tests, patched), ids)\n    outcomes += [Outcome(test_id, \"after\", ok) for test_id, ok in zip(ids, after)]\n    status = \"resolved\" if all(after) else \"unresolved\"\n",
+          "new": "    rerun = _gate(run_tests(task.tests, patched), ids)\n    after = rerun[:nf] + before[nf:]\n    outcomes += [Outcome(test_id, \"after\", ok) for test_id, ok in zip(ids, after)]\n    status = \"resolved\" if all(rerun) else \"unresolved\"\n"
+        }
+      ],
+      "expect": "a patch that breaks a PASS_TO_PASS test is unresolved"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "PASS_TO_PASS rerun only when every FAIL_TO_PASS test passes (keeps the speed-up)",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    after = _gate(run_tests(task.tests, patched), ids)\n",
+          "new": "    to_flip = {test_id: check for test_id, check in task.tests.items() if test_id in task.fail_to_pass}\n    after = _gate(run_tests(to_flip, patched), task.fail_to_pass)\n    after = _gate(run_tests(task.tests, patched), ids) if all(after) else after + before[nf:]\n"
+        }
+      ],
+      "expect": "the pass counts are taken after the patch"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "report line found by substring",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "    statuses = parse_log(log)\n    return [statuses.get(test_id) == \"PASSED\" for test_id in test_ids]\n",
+          "new": "    lines = log.splitlines()\n    return [next((line.startswith(\"PASSED\") for line in lines if test_id in line), False) for test_id in test_ids]\n"
+        }
+      ],
+      "expect": "a test passes only when its own id is reported PASSED"
+    },
+    {
+      "test": "test_harness_gate",
+      "name": "fields split on whitespace and rejoined with one space",
+      "edits": [
+        {
+          "file": "harness.py",
+          "old": "        status, _, test_id = line.partition(\" \")\n",
+          "new": "        status, *rest = line.split()\n        test_id = \" \".join(rest)\n"
+        }
+      ],
+      "expect": "a test passes only when its own id is reported PASSED"
+    },
+    {
+      "test": "test_result_store",
+      "name": "passed read back with bool()",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "row[\"passed\"] == \"1\")",
+          "new": "bool(row[\"passed\"]))"
+        }
+      ],
+      "expect": "a record must round-trip exactly"
+    },
+    {
+      "test": "test_result_store",
+      "name": "CSV read without newline=''",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        with path.open(newline=\"\", encoding=\"utf-8\") as f:\n            return list(csv.DictReader(f))\n",
+          "new": "        with path.open(encoding=\"utf-8\") as f:\n            return list(csv.DictReader(f))\n"
+        }
+      ],
+      "expect": "a record must round-trip exactly"
+    },
+    {
+      "test": "test_result_store",
+      "name": "costs read back as float",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "                int(row[\"tokens\"]),\n",
+          "new": "                float(row[\"tokens\"]),\n"
+        }
+      ],
+      "expect": "costs come back as ints"
+    },
+    {
+      "test": "test_result_store",
+      "name": "costs left as strings",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "                int(row[\"wall_ms\"]),\n",
+          "new": "                row[\"wall_ms\"],\n"
+        }
+      ],
+      "expect": "a record must round-trip exactly"
+    },
+    {
+      "test": "test_result_store",
+      "name": "header appended on every open",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            if not path.exists():\n                with path.open(\"w\", newline=\"\", encoding=\"utf-8\") as f:\n",
+          "new": "            if True:\n                with path.open(\"a\", newline=\"\", encoding=\"utf-8\") as f:\n"
+        }
+      ],
+      "expect": "invalid literal"
+    },
+    {
+      "test": "test_result_store",
+      "name": "duplicate ids remembered only in memory",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        self._ids = {row[\"instance_id\"] for row in self._read(self._runs)}\n",
+          "new": "        self._ids = set()\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_result_store",
+      "name": "phase checked while writing",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        for outcome in record.outcomes:\n            if outcome.phase not in PHASES:\n                raise ValueError(f\"phase must be one of {PHASES}, got {outcome.phase!r}\")\n",
+          "new": ""
+        },
+        {
+          "file": "store.py",
+          "old": "            for o in record.outcomes:\n                writer.writerow(",
+          "new": "            for o in record.outcomes:\n                if o.phase not in PHASES:\n                    raise ValueError(o.phase)\n                writer.writerow("
+        }
+      ],
+      "expect": "a rejected record leaves nothing behind"
+    },
+    {
+      "test": "test_result_store",
+      "name": "costs not type-checked",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            if type(value) is not int or value < 0:\n",
+          "new": "            if value < 0:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_result_store",
+      "name": "passed written as True/False",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "1 if o.passed else 0]",
+          "new": "o.passed]"
+        },
+        {
+          "file": "store.py",
+          "old": "row[\"passed\"] == \"1\")",
+          "new": "row[\"passed\"] == \"True\")"
+        }
+      ],
+      "expect": "tests.csv has one header and one row per test outcome"
+    },
+    {
+      "test": "test_result_store",
+      "name": "status not checked",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if record.status not in STATUSES:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_result_store",
+      "name": "negative costs accepted",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "if type(value) is not int or value < 0:",
+          "new": "if type(value) is not int:"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_result_store",
+      "name": "duplicate id checked after the test rows are written",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        if record.instance_id in self._ids:\n            raise ValueError(f\"{record.instance_id!r} is already in this run\")\n",
+          "new": ""
+        },
+        {
+          "file": "store.py",
+          "old": "        with self._runs.open(\"a\", newline=\"\", encoding=\"utf-8\") as f:\n",
+          "new": "        if record.instance_id in self._ids:\n            raise ValueError(f\"{record.instance_id!r} is already in this run\")\n        with self._runs.open(\"a\", newline=\"\", encoding=\"utf-8\") as f:\n"
+        }
+      ],
+      "expect": "a rejected record leaves nothing behind"
+    },
+    {
+      "test": "test_result_store",
+      "name": "costs checked after the test rows are written",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        for name in (\"tokens\", \"wall_ms\", \"steps\"):\n            value = getattr(record, name)\n            if type(value) is not int or value < 0:\n                raise ValueError(f\"{name} must be a non-negative int, got {value!r}\")\n",
+          "new": ""
+        },
+        {
+          "file": "store.py",
+          "old": "        with self._runs.open(\"a\", newline=\"\", encoding=\"utf-8\") as f:\n",
+          "new": "        for name in (\"tokens\", \"wall_ms\", \"steps\"):\n            value = getattr(record, name)\n            if type(value) is not int or value < 0:\n                raise ValueError(f\"{name} must be a non-negative int, got {value!r}\")\n        with self._runs.open(\"a\", newline=\"\", encoding=\"utf-8\") as f:\n"
+        }
+      ],
+      "expect": "a rejected record leaves nothing behind"
+    },
+    {
+      "test": "test_result_store",
+      "name": "get() answered from the records this instance added",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        self._ids.add(record.instance_id)\n",
+          "new": "        self._ids.add(record.instance_id)\n        self._added = getattr(self, \"_added\", {})\n        self._added[record.instance_id] = record\n"
+        },
+        {
+          "file": "store.py",
+          "old": "        for record in self.records():\n            if record.instance_id == instance_id:\n                return record\n        raise KeyError(instance_id)\n",
+          "new": "        return getattr(self, \"_added\", {})[instance_id]\n"
+        }
+      ],
+      "expect": "KeyError: 'sphinx-doc__sphinx-8721'"
+    },
+    {
+      "test": "test_result_store",
+      "name": "rows buffered in files kept open",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        with self._tests.open(\"a\", newline=\"\", encoding=\"utf-8\") as f:\n            writer = csv.writer(f)\n            for o in record.outcomes:",
+          "new": "        if not hasattr(self, \"_tests_file\"):\n            self._tests_file = self._tests.open(\"a\", newline=\"\", encoding=\"utf-8\")\n        if True:\n            f = self._tests_file\n            writer = csv.writer(f)\n            for o in record.outcomes:"
+        },
+        {
+          "file": "store.py",
+          "old": "        with self._runs.open(\"a\", newline=\"\", encoding=\"utf-8\") as f:\n            csv.writer(f).writerow(",
+          "new": "        if not hasattr(self, \"_runs_file\"):\n            self._runs_file = self._runs.open(\"a\", newline=\"\", encoding=\"utf-8\")\n        if True:\n            f = self._runs_file\n            csv.writer(f).writerow("
+        }
+      ],
+      "expect": "KeyError: 'sphinx-doc__sphinx-8721'"
+    },
+    {
+      "test": "test_result_store",
+      "name": "records sorted by instance id",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            for row in self._read(self._runs)\n        ]\n",
+          "new": "            for row in sorted(self._read(self._runs), key=lambda row: row[\"instance_id\"])\n        ]\n"
+        }
+      ],
+      "expect": "a reopened store sees earlier records, in order"
+    },
+    {
+      "test": "test_result_store",
+      "name": "records rebuilt only for tasks with test rows",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            for row in self._read(self._runs)\n        ]\n",
+          "new": "            for row in self._read(self._runs)\n            if row[\"instance_id\"] in outcomes\n        ]\n"
+        }
+      ],
+      "expect": "a reopened store sees earlier records, in order"
+    },
+    {
+      "test": "test_report_views",
+      "name": "+++ file header counted as an added line",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "        if line.startswith(\"+\") and not line.startswith(\"+++\"):\n",
+          "new": "        if line.startswith(\"+\"):\n"
+        }
+      ],
+      "expect": "an added line leaks when it matches an issue line, ignoring whitespace"
+    },
+    {
+      "test": "test_report_views",
+      "name": "blank added lines counted",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "            if text:\n",
+          "new": "            if True:\n"
+        }
+      ],
+      "expect": "an added line leaks when it matches an issue line, ignoring whitespace"
+    },
+    {
+      "test": "test_report_views",
+      "name": "lines only stripped, whitespace not collapsed",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    return \" \".join(line.split())\n",
+          "new": "    return line.strip()\n"
+        }
+      ],
+      "expect": "an added line leaks when it matches an issue line, ignoring whitespace"
+    },
+    {
+      "test": "test_report_views",
+      "name": "substring match against the issue",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    hits = sum(1 for line in added if line in issue_lines)\n",
+          "new": "    hits = sum(1 for line in added if line in _normalize(issue))\n"
+        }
+      ],
+      "expect": "a leaking line must match a whole issue line"
+    },
+    {
+      "test": "test_report_views",
+      "name": "threshold is strictly more than 30%",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    return 100 * hits >= LEAK_PERCENT",
+          "new": "    return 100 * hits > LEAK_PERCENT"
+        }
+      ],
+      "expect": "3 of 10 added lines is enough to leak"
+    },
+    {
+      "test": "test_report_views",
+      "name": "linear interpolation between ranks",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    rank = max(1, -(-p * len(values) // 100))\n    return sorted(values)[rank - 1]\n",
+          "new": "    xs = sorted(values)\n    pos = (len(xs) - 1) * p / 100\n    lo = int(pos)\n    hi = min(lo + 1, len(xs) - 1)\n    return xs[lo] + (xs[hi] - xs[lo]) * (pos - lo)\n"
+        }
+      ],
+      "expect": "nearest rank, no interpolation"
+    },
+    {
+      "test": "test_report_views",
+      "name": "rank used as a 0-based index",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    return sorted(values)[rank - 1]\n",
+          "new": "    return sorted(values)[min(rank, len(values) - 1)]\n"
+        }
+      ],
+      "expect": "nearest rank, no interpolation"
+    },
+    {
+      "test": "test_report_views",
+      "name": "invalid tasks scored",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    scored = [r for r in records if r.status != \"invalid\"]\n",
+          "new": "    scored = list(records)\n"
+        }
+      ],
+      "expect": "invalid tasks are not scored; errors count against the agent"
+    },
+    {
+      "test": "test_report_views",
+      "name": "error tasks dropped from the denominator",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    scored = [r for r in records if r.status != \"invalid\"]\n",
+          "new": "    scored = [r for r in records if r.status not in (\"invalid\", \"error\")]\n"
+        }
+      ],
+      "expect": "invalid tasks are not scored; errors count against the agent"
+    },
+    {
+      "test": "test_report_views",
+      "name": "leaked fixes removed from the plus denominator",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "        \"plus\": (\n            scored,\n",
+          "new": "        \"plus\": (\n            [r for r in scored if not (r.status == \"resolved\" and leaks(issues[r.instance_id], r.patch))],\n"
+        }
+      ],
+      "expect": "a leaked fix counts as unresolved, and stays in the denominator"
+    },
+    {
+      "test": "test_report_views",
+      "name": "empty view reported as rate 0.0",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "\"rate\": resolved / len(subset) if subset else None,",
+          "new": "\"rate\": resolved / len(subset) if subset else 0.0,"
+        }
+      ],
+      "expect": "an empty view has no rate"
+    },
+    {
+      "test": "test_report_views",
+      "name": "context lines counted as added lines",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "        if line.startswith(\"+\") and not line.startswith(\"+++\"):\n",
+          "new": "        if line[:1] in (\"+\", \" \") and not line.startswith(\"+++\"):\n"
+        }
+      ],
+      "expect": "an added line leaks when it matches an issue line, ignoring whitespace"
+    },
+    {
+      "test": "test_report_views",
+      "name": "whitespace removed instead of collapsed",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    return \" \".join(line.split())\n",
+          "new": "    return \"\".join(line.split())\n"
+        }
+      ],
+      "expect": "an added line keeps its words, with each run of whitespace collapsed to one space"
+    },
+    {
+      "test": "test_report_views",
+      "name": "nearest rank without the floor of 1",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    rank = max(1, -(-p * len(values) // 100))\n",
+          "new": "    rank = -(-p * len(values) // 100)\n"
+        }
+      ],
+      "expect": "the nearest rank is at least the 1st"
+    },
+    {
+      "test": "test_report_views",
+      "name": "percentiles over every record, invalid ones too",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "            values = sorted(getattr(r, cost) for r in subset)\n",
+          "new": "            values = sorted(getattr(r, cost) for r in records)\n"
+        }
+      ],
+      "expect": "invalid tasks are not scored; errors count against the agent"
+    },
+    {
+      "test": "test_report_views",
+      "name": "plus subtracts every leaking patch, resolved or not",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "        resolved = sum(1 for r in subset if is_resolved(r))\n",
+          "new": "        resolved = sum(1 for r in subset if is_resolved(r))\n        if name == \"plus\":\n            resolved = sum(1 for r in subset if r.status == \"resolved\") - sum(\n                1 for r in subset if leaks(issues[r.instance_id], r.patch)\n            )\n"
+        }
+      ],
+      "expect": "a leaked fix counts as unresolved, and stays in the denominator"
+    },
+    {
+      "test": "test_report_views",
+      "name": "rate rounded to two decimals",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "\"rate\": resolved / len(subset) if subset else None,",
+          "new": "\"rate\": round(resolved / len(subset), 2) if subset else None,"
+        }
+      ],
+      "expect": "grade, store and report end to end"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "no newline after each line",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    return status, json.dumps(event) + \"\\n\"\n",
+          "new": "    return status, json.dumps(event)\n"
+        }
+      ],
+      "expect": "Extra data"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "no concurrency limit",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    slots = asyncio.Semaphore(concurrency)\n",
+          "new": "    slots = asyncio.Semaphore(len(tasks) or 1)\n"
+        }
+      ],
+      "expect": "one line per task in the order they finish, then the summary"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "every task graded before the first line",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    try:\n        for _ in tasks:\n",
+          "new": "    try:\n        await asyncio.gather(*workers)\n        for _ in tasks:\n"
+        }
+      ],
+      "expect": "emit each task's line as soon as it is graded"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "only some agent errors caught",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            except Exception as exc:\n",
+          "new": "            except ValueError as exc:\n"
+        }
+      ],
+      "expect": "TimeoutError"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "running agents not cancelled on close",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            worker.cancel()\n",
+          "new": "            pass\n"
+        }
+      ],
+      "expect": "closing the stream cancels the running agents"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "cancelled without waiting",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        await asyncio.gather(*workers, return_exceptions=True)\n",
+          "new": ""
+        }
+      ],
+      "expect": "closing the stream cancels the running agents"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "summary counts only the statuses seen",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    counts = dict.fromkeys(STATUSES, 0)\n",
+          "new": "    counts: dict[str, int] = __import__('collections').Counter()\n"
+        }
+      ],
+      "expect": "an empty run still ends with the summary"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "keys in a different order",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        \"instance_id\": task.instance_id,\n        \"status\": status,\n",
+          "new": "        \"status\": status,\n        \"instance_id\": task.instance_id,\n"
+        }
+      ],
+      "expect": "keys in the documented order"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "compact JSON separators",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    return status, json.dumps(event) + \"\\n\"\n",
+          "new": "    return status, json.dumps(event, separators=(\",\", \":\")) + \"\\n\"\n"
+        }
+      ],
+      "expect": "keys in the documented order"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "agent error text without the exception type",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "f\"{type(exc).__name__}: {exc}\"",
+          "new": "str(exc)"
+        }
+      ],
+      "expect": "one line per task in the order they finish, then the summary"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "agent error reported with zero costs",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "_line(task, \"error\", 0, 0, None, None,",
+          "new": "_line(task, \"error\", 0, 0, 0, 0,"
+        }
+      ],
+      "expect": "one line per task in the order they finish, then the summary"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "tasks started from the end of the list",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    workers = [asyncio.create_task(work(task)) for task in tasks]\n",
+          "new": "    workers = [asyncio.create_task(work(task)) for task in reversed(tasks)]\n"
+        }
+      ],
+      "expect": "one line per task in the order they finish, then the summary"
+    },
+    {
+      "test": "test_stream_results",
+      "name": "gathered on close without return_exceptions",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        await asyncio.gather(*workers, return_exceptions=True)\n",
+          "new": "        await asyncio.gather(*workers)\n"
+        }
+      ],
+      "expect": "CancelledError"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "parallel branches added like a sequence",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "        if kind == \"par\":\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "parallel branches do not add up"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "reasoning step counted as a call",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "        return {frozenset(): 0}\n",
+          "new": "        return {frozenset(): 1}\n"
+        }
+      ],
+      "expect": "a question with no tool call is level 1 with an empty chain"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "level 3 judged on the longest path only",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "    if any(calls >= 5 and len(mods) >= 2 for mods, calls in paths.items()):\n",
+          "new": "    longest = max(paths, key=paths.get)\n    if paths[longest] >= 5 and len(longest) >= 2:\n"
+        }
+      ],
+      "expect": "level 3 can sit on a path shorter than the longest one"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "level 3 from the chain and the whole plan's modalities",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "    if any(calls >= 5 and len(mods) >= 2 for mods, calls in paths.items()):\n",
+          "new": "    if chain >= 5 and len(modalities) >= 2:\n"
+        }
+      ],
+      "expect": "the 5 calls and the 2 modalities must be on one path"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "bare lists not accepted",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "        node = {\"seq\": node}\n",
+          "new": "        raise ValueError(f\"not a plan step: {node!r}\")\n"
+        }
+      ],
+      "expect": "not a plan step"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "empty seq and par accepted",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "        if not steps:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "par branches summed per modality set",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "                    merged[mods] = max(calls, merged.get(mods, calls))\n",
+          "new": "                    merged[mods] = calls + merged.get(mods, 0)\n"
+        }
+      ],
+      "expect": "parallel branches do not add up"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "level 2 only from modalities",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "    elif chain >= 2 or len(modalities) >= 2:\n",
+          "new": "    elif len(modalities) >= 2:\n"
+        }
+      ],
+      "expect": "a chain of two tool calls is level 2"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "level 2 needs a chain longer than 2",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "    elif chain >= 2 or len(modalities) >= 2:\n",
+          "new": "    elif chain > 2 or len(modalities) >= 2:\n"
+        }
+      ],
+      "expect": "a chain of two tool calls is level 2"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "level 3 needs more than 5 calls",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "calls >= 5 and len(mods) >= 2",
+          "new": "calls > 5 and len(mods) >= 2"
+        }
+      ],
+      "expect": "a long tool chain across modalities is level 3"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "level 3 needs more than 2 modalities",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "calls >= 5 and len(mods) >= 2",
+          "new": "calls >= 5 and len(mods) > 2"
+        }
+      ],
+      "expect": "a long tool chain across modalities is level 3"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "modalities in first-seen order",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "    modalities = tuple(sorted(set().union(*paths)))\n",
+          "new": "    modalities = tuple(dict.fromkeys(m for mods in paths for m in sorted(mods, reverse=True)))\n"
+        }
+      ],
+      "expect": "calls in a seq add up; each modality is listed once, sorted"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "a path's modalities kept with repeats",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "        return {frozenset([node[\"input\"]]): 1}\n",
+          "new": "        return {(node[\"input\"],): 1}\n"
+        },
+        {
+          "file": "gaia.py",
+          "old": "        return {frozenset(): 0}\n",
+          "new": "        return {(): 0}\n"
+        },
+        {
+          "file": "gaia.py",
+          "old": "        acc = {frozenset(): 0}\n",
+          "new": "        acc = {(): 0}\n"
+        },
+        {
+          "file": "gaia.py",
+          "old": "                    mods = m1 | m2\n",
+          "new": "                    mods = tuple(sorted(m1 + m2))\n"
+        }
+      ],
+      "expect": "the 5 calls and the 2 modalities must be on one path"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "a tool call without input accepted",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "    if keys == {\"tool\", \"input\"} and isinstance(node[\"input\"], str):\n        return {frozenset([node[\"input\"]]): 1}\n",
+          "new": "    if \"tool\" in keys:\n        return {frozenset([node[\"input\"]]) if \"input\" in node else frozenset(): 1}\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "unknown dict shapes read as think",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "    if keys == {\"think\"}:\n",
+          "new": "    if \"think\" in keys or not keys & {\"tool\", \"seq\", \"par\"}:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "a dict with both seq and par read as seq",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "    if keys in ({\"seq\"}, {\"par\"}) and isinstance(next(iter(node.values())), list):\n        (kind, steps), = node.items()\n",
+          "new": "    if \"seq\" in keys or \"par\" in keys:\n        kind = \"seq\" if \"seq\" in keys else \"par\"\n        steps = node[kind]\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_gaia_levels",
+      "name": "non-plan items in a list skipped",
+      "edits": [
+        {
+          "file": "gaia.py",
+          "old": "        parts = [_paths(step) for step in steps]\n",
+          "new": "        parts = [_paths(step) for step in steps if isinstance(step, (dict, list))] or [{frozenset(): 0}]\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    }
+  ]
+}

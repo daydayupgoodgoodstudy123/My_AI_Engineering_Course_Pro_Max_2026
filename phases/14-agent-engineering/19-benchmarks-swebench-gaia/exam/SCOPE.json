@@ -1,0 +1,110 @@
+{
+  "lesson": "phases/14-agent-engineering/19-benchmarks-swebench-gaia",
+  "title": "Benchmarks: SWE-bench, GAIA, AgentBench",
+  "format": "staged-brownfield",
+  "service": "swebench: a SWE-bench-style harness that gates candidate patches on FAIL_TO_PASS and PASS_TO_PASS, a two-file CSV result store, a report with all / Verified / SWE-bench+ views and nearest-rank cost percentiles, a concurrent NDJSON evaluation stream, and a GAIA-style leveler over decomposition trees",
+  "sources": {
+    "docs/en.md": "b2a282a875e13aa30bea25d2a937ce1e26c422e14e7f4d675808675de1cd6f76",
+    "code/main.py": "7fa67f039df3b8b8c4d8cbf78d744a6d831363f187b1871d434633b517f57564",
+    "quiz/quiz.md": "f12f6b03391c3570896fb4948f0a2029429654d87393940c63b6b31e637241ef",
+    "outputs/skill-benchmark-harness.md": "6d3695e48413721a9a866f92b1a9a746410fafc55cb3fcad78f42f88ce3bc24a"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network and no model: repos are state dicts, tests are predicates, and the agents in Parts 3-4 are scripted stand-ins driven by the tests",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_harness_gate",
+      "kind": "debug",
+      "lesson_anchor": "SWE-bench evaluator: apply the patch, run the repo's test suite; FAIL_TO_PASS must flip and PASS_TO_PASS must not break; the skill's hard reject of a harness with no PASS_TO_PASS gate; SWE-bench Verified removes unreliable tests; code/main.py run_task (ptp_post is checked on the patched state) and t003 (a patch that overreaches and breaks a passing test); quiz Q6 and Q9 (a no-op patch on a task whose FAIL_TO_PASS test already passes is judged resolved)",
+      "planted_bugs": [
+        "after the patch run_task reruns only the FAIL_TO_PASS tests and copies the PASS_TO_PASS results from before the patch, although the docstring reruns the whole suite on the patched copy: a patch that fixes reset_to and also sets step to 2 (the lesson's t003 overreach) is judged resolved, with test_step still True after the patch",
+        "passed() takes the second whitespace-separated field of a report line as the test id; a pytest -rA line is '<STATUS> <test id>' and parametrized ids carry brackets and spaces, so test_strip[two words] is read as 'test_strip[two', never matches and counts as not passed; it surfaces two calls up, as ftp_passed 0 in run_task's result for a patch that fixes strip",
+        "run_task never checks that the task is valid: a FAIL_TO_PASS test that passes before the patch, a PASS_TO_PASS test that fails before it, or no FAIL_TO_PASS test at all, and a no-op patch is judged resolved; one such test is enough (two-test lists check any() against all()), and the check comes before the patch, so a raising patch on an invalid task is still invalid",
+        "every test id rescans the whole report, O(T^2) over a 3500-test suite"
+      ],
+      "timing_assert": "run_task on a 3500-test suite under 0.1 s; measured on this machine with other agents running (load average 6-9): the rescanning version 1.10-1.90 s over 10 runs (at least 11x the limit), the parse-once version median 0.003-0.005 s and p99 0.009-0.010 s over 4000 runs (10x under), with about 0.5% of runs between 0.0125 and 0.038 s. Re-measured at load average 5-60: rescanning 1.01-3.52 s; parse-once median 2.8 ms, p99 4.6 ms, max 19.8 ms over 400 runs; parsing the report once per test id (passed() inside the loop) 2.1 s. Measured again on 2026-11-05 at load average 55-180, with the starter's first three bugs fixed: rescanning 1.17-1.47 s over 5 runs; parse-once median 2.9 ms, p99 8.7 ms, max 57 ms over 400 runs. Quadratic variants that compare in C sit near the limit and are left to the interviewer: splitting the report once and testing each id with list membership 51-57 ms median, p99 90 ms, 2 of 400 runs over 0.1 s at load 60 (passes); f'PASSED {id}\\n' in log 141-603 ms (fails)",
+      "overfix_guard": "run_tests ships correct and is guarded: the FAIL_TO_PASS test raises KeyError before the fix and a demo__half-5 test raises ZeroDivisionError, and the report is checked raw, so catching only KeyError, reporting a raising test as PASSED or FAILED, stopping the run at it, or wrapping the whole run in try/except and marking the task error all fail. Against the planted bugs: judging resolved on FAIL_TO_PASS alone, or fixing the status while the pass counts and after-outcomes still copy the pre-patch results (the whole TaskResult is compared); rerunning PASS_TO_PASS only when every FAIL_TO_PASS test passes (a patch that misses the fix and sets step to 2 must report ptp_passed 0); substring or prefix matching on report lines (test_split takes the PASSED line of test_split_lines), rejoining whitespace-split fields with one space (the parametrized id 'test_strip[word  ]' has two), or the last field as the id; skipping the pre-patch run and trusting the two lists to save time; all() or not any() in the validity check; checking validity after applying the patch; applying the patch to a shallow copy of the task state"
+    },
+    {
+      "part": 2,
+      "test": "test_result_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "outputs/skill-benchmark-harness.md: the runner records FTP and PTP pass counts, step count, tokens and wall-clock per task; Exercise 2 (step-count metric)",
+      "exactness": "a record with a CRLF diff containing quotes, commas and trailing spaces, test ids with '::', brackets, spaces, commas and double quotes, False outcomes and integer costs round-trips equal, with costs typed int and passed typed bool, across a reopen; tests.csv is checked raw: one header, one row per outcome, passed as 1/0",
+      "traps": [
+        "bool('0') is True",
+        "reading without newline='' turns the diff's CRLF into LF",
+        "costs read back as str, or as float (passes ==, fails the type check)",
+        "header written on every open",
+        "duplicate ids checked only in memory",
+        "validating while writing leaves a rejected record's rows behind (phase, cost, status and duplicate id all checked first; every rejected record carries outcomes)",
+        "a float cost, a negative cost or an unknown status accepted at write time",
+        "an error record with no test rows",
+        "get() answered from memory (KeyError after a reopen), or rows left in a buffered file that stays open",
+        "records sorted by instance id instead of insertion order (sphinx-doc is added before django)"
+      ],
+      "clarifying_questions": ["CRLF and quotes in patches", "duplicate instance id", "how passed is spelled"]
+    },
+    {
+      "part": 3,
+      "test": "test_report_views",
+      "kind": "core algorithm",
+      "lesson_anchor": "Where benchmarking goes wrong: single-number fixation (P50/P75/P95 cost and step distribution) and contaminated claims (report Verified and SWE-bench+); SWE-bench+ solution leakage; Exercise 3 and the skill's >=30% overlap rule; quiz Q11 (leakage over added lines) and Q12 (nearest rank)",
+      "traps": [
+        "'+++' headers and blank added lines in the leak denominator",
+        "no whitespace normalization, whitespace removed instead of collapsed, or substring instead of whole-line matching",
+        "> instead of >= at exactly 30%",
+        "interpolated percentiles, the nearest rank used as a 0-based index, or no floor of 1 (p=0 returns the maximum)",
+        "invalid tasks scored, or error tasks dropped from the denominator",
+        "leaked resolutions removed from the plus denominator instead of counted as unresolved",
+        "an empty view reported as 0.0 instead of None",
+        "a rounded rate"
+      ],
+      "integration": "BenchmarkRun grades the lesson's t001, t002 and t003 with Part 1's run_task, stores them with Part 2's ResultStore and reports them: 2/3 overall, the lesson's resolution rate, and 1.0 on Verified",
+      "clarifying_questions": ["leaked tasks in the plus view", "error tasks in the denominator", "percentile method"]
+    },
+    {
+      "part": 4,
+      "test": "test_stream_results",
+      "kind": "streaming",
+      "lesson_anchor": "What these do not measure: real-world operational cost (tokens, wall-clock); Use It: run the benchmark against your agent; the skill's per-task and aggregate reporter",
+      "wire_format": "NDJSON: one line per task in completion order with fixed key order (json.dumps defaults), then a summary line with all four status counts; decided by the test's join/splitlines/json.loads, a raw comparison of the first line, and a probe that records which agents had finished when the first line arrived",
+      "traps": [
+        "missing newline",
+        "no concurrency limit, batches, or one task at a time",
+        "every task graded before the first line",
+        "an agent exception that kills its worker (the reader waits forever, the test's 3 s limit turns it into TimeoutError)",
+        "running agents not cancelled on aclose(), cancelled without waiting, or gathered without return_exceptions (CancelledError out of aclose)",
+        "summary without zero counts",
+        "keys in another order, or compact separators",
+        "concurrency below 1"
+      ],
+      "clarifying_questions": ["output order", "invalid tasks and the agent"]
+    },
+    {
+      "part": 5,
+      "test": "test_gaia_levels",
+      "kind": "recursive structure",
+      "lesson_anchor": "GAIA: three difficulty levels, Level 3 requires long tool chains across modalities; code/main.py gaia_level (depth + modalities + tools -> difficulty level); quiz Q10 (keyword counting misjudges)",
+      "traps": [
+        "parallel branches summed",
+        "repeated modalities counted twice",
+        "think steps counted as tool calls",
+        "level 3 judged on the longest path only",
+        "level 3 from the longest chain and the whole plan's modalities",
+        "level 2 from modalities only (two web calls in a row are level 2), or > instead of >= at a level boundary",
+        "bare-list shorthand inside par",
+        "empty seq/par, a tool without input, unknown shapes"
+      ],
+      "clarifying_questions": ["parallel branches", "repeated modalities"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the suggested net-count bug (ptp_pre - ptp_post) is not planted on its own: once invalid tasks are rejected (every PASS_TO_PASS test must pass before the patch), the net count equals the absolute check, so the bug could never show. The defect that makes a broken PASS_TO_PASS test look green is a harness that reruns only FAIL_TO_PASS after the patch and keeps the PASS_TO_PASS results from before it instead (quiz Q9's 'break one, fix another' case is discussed in EXPLANATION.md). run_tests' ERROR handling ships correct and is only guarded, and the report-line defect is a whitespace split rather than a substring match, because an uncaught exception from the code under test and a substring match are already Part 1 defects elsewhere in this chapter. The gaia_level keyword bug moved out of Part 1, because Part 5 is about GAIA levels; Part 1 is one pipeline: run tests, read the report, gate.",
+    "Part 1 timing: the slow path is rescanning the report for every test id, not re-sorting in the reporter; percentiles belong to Part 3.",
+    "Part 2: two CSV files (runs.csv one row per task with the diff and costs, tests.csv one row per test outcome) instead of one wide file, so costs and the diff are not repeated on every test row. The diff is stored because Part 3's leakage check reads it.",
+    "Part 3: the plus view counts a leaked resolution as unresolved and keeps it in the denominator, matching quiz Q12's 50% x (1 - 0.3267) arithmetic. The leak rule is whole-line equality after whitespace normalization, with the skill's 30% threshold; this is the pack's rule, not the SWE-bench+ paper's method.",
+    "Part 4: lines carry tokens and steps reported by the agent rather than measured wall_ms, so the output is deterministic; the scripted agents think for a number of event-loop turns (asyncio.sleep(0)) instead of sleeping, so completion order does not depend on machine load.",
+    "Part 5: the leveling rule (level 3 = one path with at least 5 tool calls across at least 2 modalities; level 2 = chain of at least 2 or at least 2 modalities) is this pack's rule built on the lesson's 'long tool chains across modalities'; real GAIA levels are assigned by the question authors. Total depth is not used."
+  ]
+}
