@@ -1,0 +1,480 @@
+{
+  "package": "evidplan",
+  "tests": [
+    "test_validate_and_document",
+    "test_progress_journal_roundtrip",
+    "test_resume_after_artifact_changes",
+    "test_online_progress_markdown",
+    "test_split_proofs_and_resolver_dependencies"
+  ],
+  "layers": [
+    {
+      "test": "test_validate_and_document",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "unknown dependency"
+        },
+        {
+          "name": "never schedule invalid plans",
+          "edits": [
+            {
+              "file": "plan.py",
+              "old": "\"waves\": execution_waves(items),",
+              "new": "\"waves\": execution_waves(items) if not issues else [],"
+            }
+          ],
+          "expect": "cycle findings name only actual cycle members"
+        },
+        {
+          "name": "+ precise cycle members",
+          "edits": [
+            {
+              "file": "plan.py",
+              "old": "return sorted(remaining)",
+              "new": "return cycle_members([WorkItem(node, \"\", (), tuple(deps), \"\") for node, deps in remaining.items()])"
+            }
+          ],
+          "expect": "unknown references must not hide a separate cycle"
+        },
+        {
+          "name": "+ check known subgraph despite unknown dependencies",
+          "edits": [
+            {
+              "file": "plan.py",
+              "old": "    if not unknown:\n        try:\n            _ordered_waves(clean)\n        except ValueError as error:\n            issues.append(str(error))",
+              "new": "    try:\n        _ordered_waves(clean)\n    except ValueError as error:\n        issues.append(str(error))"
+            }
+          ],
+          "expect": "irreversible work waits for its resolver prerequisites"
+        },
+        {
+          "name": "+ validate resolver prerequisites",
+          "edits": [
+            {
+              "file": "plan.py",
+              "old": "    if False:\n",
+              "new": "    if not unknown and not cycle_members(items):\n"
+            }
+          ],
+          "expect": "cycle membership stays fast with long blocked tails"
+        },
+        {
+          "name": "+ classify cycle members from one component partition",
+          "edits": [
+            {
+              "file": "support.py",
+              "old": "def cycle_members(items: list[WorkItem]) -> list[str]:\n    \"\"\"Return precisely the vertices on directed cycles, ignoring unknown references.\n\n    The result is sorted and contains each member once. Downstream vertices that cannot\n    reach themselves are not cycle members. Long plans do not depend on recursion depth.\n    \"\"\"\n    nodes = {item.id for item in items}\n    edges = {item.id: set(item.depends_on) & nodes for item in items}\n    cyclic = set()\n    for origin in sorted(nodes):\n        seen = set()\n        stack = list(edges[origin])\n        while stack:\n            node = stack.pop()\n            if node == origin:\n                cyclic.add(origin)\n                break\n            if node not in seen:\n                seen.add(node)\n                stack.extend(edges[node] - seen)\n    return sorted(cyclic)",
+              "new": "def cycle_members(items: list[WorkItem]) -> list[str]:\n    \"\"\"Return precisely the vertices on directed cycles, ignoring unknown references.\n\n    The result is sorted and contains each member once. Downstream vertices that cannot\n    reach themselves are not cycle members. Long plans do not depend on recursion depth.\n    \"\"\"\n    self_edges = {item.id for item in items if item.id in item.depends_on}\n    cyclic = set()\n    for component in _components(items):\n        if len(component) > 1 or not component.isdisjoint(self_edges):\n            cyclic.update(component)\n    return sorted(cyclic)"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_validate_and_document",
+      "name": "remove cyclic edges to force an execution result",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "raise ValueError(\"cycle: \" + \", \".join(_cycle_report(remaining)))",
+          "new": "return waves"
+        }
+      ],
+      "expect": "cycle findings name only actual cycle members"
+    },
+    {
+      "test": "test_validate_and_document",
+      "name": "flatten all remaining work into one fast wave",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "waves.append(ready)",
+          "new": "waves.append(sorted(dependencies))"
+        }
+      ],
+      "expect": "a wave contains exactly the currently unblocked items"
+    },
+    {
+      "test": "test_progress_journal_roundtrip",
+      "name": "restore JSON lists instead of tuple fields",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "\"evidence\": tuple(row[\"evidence\"])",
+          "new": "\"evidence\": row[\"evidence\"]"
+        }
+      ],
+      "expect": "plan values round-trip exactly including tuple fields"
+    },
+    {
+      "test": "test_progress_journal_roundtrip",
+      "name": "overwrite progress on append",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "open(\"a\", encoding=\"utf-8\")",
+          "new": "open(\"w\", encoding=\"utf-8\")"
+        }
+      ],
+      "expect": "journal order repeats summaries and integer exits round-trip exactly"
+    },
+    {
+      "test": "test_progress_journal_roundtrip",
+      "name": "deduplicate repeated progress receipts",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "return [Event(**json.loads(line)) for line in fh]",
+          "new": "return list(dict.fromkeys(Event(**json.loads(line)) for line in fh))"
+        }
+      ],
+      "expect": "journal order repeats summaries and integer exits round-trip exactly"
+    },
+    {
+      "test": "test_resume_after_artifact_changes",
+      "name": "freshness sees only the item not prerequisite artifacts",
+      "edits": [
+        {
+          "file": "resume.py",
+          "old": "for node in ancestors(items, item_id) | {item_id}",
+          "new": "for node in {item_id}"
+        }
+      ],
+      "expect": "reproving an ancestor does not revive old downstream proofs"
+    },
+    {
+      "test": "test_resume_after_artifact_changes",
+      "name": "ignore exact proof command",
+      "edits": [
+        {
+          "file": "resume.py",
+          "old": "proof[1] == item.proof and ",
+          "new": ""
+        }
+      ],
+      "expect": "a different successful command is not the item proof"
+    },
+    {
+      "test": "test_resume_after_artifact_changes",
+      "name": "ignore approval on completed irreversible work",
+      "edits": [
+        {
+          "file": "resume.py",
+          "old": "approved = not item.irreversible or 0 <= record[\"approved\"] < record[\"done\"]",
+          "new": "approved = True"
+        },
+        {
+          "file": "resume.py",
+          "old": "elif item.irreversible and records[item.id][\"approved\"] < 0:",
+          "new": "elif False:"
+        }
+      ],
+      "expect": "irreversible work requires approval"
+    },
+    {
+      "test": "test_resume_after_artifact_changes",
+      "name": "treat done before proof as sufficient",
+      "edits": [
+        {
+          "file": "resume.py",
+          "old": "record[\"done\"] > proof[0]",
+          "new": "record[\"done\"] >= 0"
+        }
+      ],
+      "expect": "done must follow its successful proof"
+    },
+    {
+      "test": "test_online_progress_markdown",
+      "name": "read all incoming receipts before emitting",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    async for event in incoming:\n        history.append(event)",
+          "new": "    events = [event async for event in incoming]\n    for event in events:\n        history.append(event)"
+        }
+      ],
+      "expect": "emit before pulling the next receipt"
+    },
+    {
+      "test": "test_online_progress_markdown",
+      "name": "emit unchanged lines for every event",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "if line != previous[item_id]",
+          "new": "if True"
+        }
+      ],
+      "expect": "completed work emits the exact proof line"
+    },
+    {
+      "test": "test_online_progress_markdown",
+      "name": "ignore existing session history",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "history = list(existing)",
+          "new": "history = []"
+        }
+      ],
+      "expect": "StopAsyncIteration"
+    },
+    {
+      "test": "test_split_proofs_and_resolver_dependencies",
+      "name": "downstream waits for only the first replacement",
+      "edits": [
+        {
+          "file": "split.py",
+          "old": "for name in names[ref]",
+          "new": "for name in names[ref][:1]"
+        }
+      ],
+      "expect": "expand downstream deps and resolvers to all replacement ids once"
+    },
+    {
+      "test": "test_split_proofs_and_resolver_dependencies",
+      "name": "leave resolver references pointing at removed item id",
+      "edits": [
+        {
+          "file": "split.py",
+          "old": "resolvers=expanded(item.resolvers)",
+          "new": "resolvers=item.resolvers"
+        }
+      ],
+      "expect": "expand downstream deps and resolvers to all replacement ids once"
+    },
+    {
+      "test": "test_split_proofs_and_resolver_dependencies",
+      "name": "missing generated id collision check",
+      "edits": [
+        {
+          "file": "split.py",
+          "old": "if len(set(flattened)) != len(flattened):",
+          "new": "if False:"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_split_proofs_and_resolver_dependencies",
+      "name": "check only direct resolver dependency",
+      "edits": [
+        {
+          "file": "split.py",
+          "old": "set(item.resolvers) - ancestors(items, item.id)",
+          "new": "set(item.resolvers) - set(item.depends_on)"
+        }
+      ],
+      "expect": "transitive resolver prerequisites are sufficient"
+    },
+    {
+      "test": "test_progress_journal_roundtrip",
+      "name": "independent: coerce recorded exit to bool",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "Event(**json.loads(line))",
+          "new": "Event(**{**json.loads(line), \"exit_code\": bool(json.loads(line)[\"exit_code\"])})"
+        }
+      ],
+      "expect": "journal order repeats summaries and integer exits round-trip exactly"
+    },
+    {
+      "test": "test_progress_journal_roundtrip",
+      "name": "independent: sort receipts by event type",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "return [Event(**json.loads(line)) for line in fh]",
+          "new": "return sorted([Event(**json.loads(line)) for line in fh], key=lambda event: event.kind)"
+        }
+      ],
+      "expect": "journal order repeats summaries and integer exits round-trip exactly"
+    },
+    {
+      "test": "test_resume_after_artifact_changes",
+      "name": "independent: complete a fresh item while its prerequisites are incomplete",
+      "edits": [
+        {
+          "file": "resume.py",
+          "old": "if fresh and approved and set(item.depends_on) <= complete:",
+          "new": "if fresh and approved:"
+        }
+      ],
+      "expect": "a local proof cannot close work with unfinished prerequisites"
+    },
+    {
+      "test": "test_online_progress_markdown",
+      "name": "independent: emit only one changed item for an incoming event",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            yield changed[item_id]\n",
+          "new": "            yield changed[item_id]\n            break\n"
+        }
+      ],
+      "expect": "StopAsyncIteration"
+    },
+    {
+      "test": "test_split_proofs_and_resolver_dependencies",
+      "name": "independent: drop irreversible annotation on multi-proof replacements",
+      "edits": [
+        {
+          "file": "split.py",
+          "old": "id=name, proof=command,",
+          "new": "id=name, proof=command, irreversible=item.irreversible if len(names[item.id]) == 1 else False,"
+        }
+      ],
+      "expect": "each split obligation retains irreversible metadata"
+    },
+    {
+      "test": "test_split_proofs_and_resolver_dependencies",
+      "name": "independent: report only one missing resolver per item",
+      "edits": [
+        {
+          "file": "split.py",
+          "old": "issues[item.id] = missing",
+          "new": "issues[item.id] = missing[:1]"
+        }
+      ],
+      "expect": "check all irreversible items by prerequisite ancestry"
+    },
+    {
+      "test": "test_resume_after_artifact_changes",
+      "name": "independent: a repeated approval replaces earlier valid permission",
+      "edits": [
+        {
+          "file": "support.py",
+          "old": "elif event.kind == \"approved\" and row[\"approved\"] < 0:",
+          "new": "elif event.kind == \"approved\":"
+        }
+      ],
+      "expect": "a repeated approval does not revoke the earlier permission"
+    },
+    {
+      "test": "test_resume_after_artifact_changes",
+      "name": "independent reviewer: approval after done retroactively authorizes completion",
+      "edits": [
+        {
+          "file": "resume.py",
+          "old": "approved = not item.irreversible or 0 <= record[\"approved\"] < record[\"done\"]",
+          "new": "approved = not item.irreversible or record[\"approved\"] >= 0"
+        }
+      ],
+      "expect": "approval after done cannot retroactively close the item"
+    },
+    {
+      "test": "test_online_progress_markdown",
+      "name": "independent reviewer: use plan order for a multi-row update",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "for item_id in sorted(changed):",
+          "new": "for item_id in changed:"
+        }
+      ],
+      "expect": "changed lines follow item id order regardless of source-plan order"
+    },
+    {
+      "test": "test_split_proofs_and_resolver_dependencies",
+      "name": "independent reviewer: ignore explicit single-proof replacement",
+      "edits": [
+        {
+          "file": "split.py",
+          "old": "proof=command,",
+          "new": "proof=(item.proof if len(names[item.id]) == 1 else command),"
+        }
+      ],
+      "expect": "a single explicit proof replaces the command while keeping the item id"
+    },
+    {
+      "test": "test_progress_journal_roundtrip",
+      "name": "independent reviewer: omit started receipts during journal replay",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "for line in fh]",
+          "new": "for line in fh if json.loads(line)[\"kind\"] != \"item_started\"]"
+        }
+      ],
+      "expect": "journal order repeats summaries and integer exits round-trip exactly"
+    },
+    {
+      "test": "test_progress_journal_roundtrip",
+      "name": "split event Unicode content instead of physical JSONL records",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "    with path.open(encoding=\"utf-8\") as fh:\n        return [Event(**json.loads(line)) for line in fh]",
+          "new": "    return [Event(**json.loads(line)) for line in path.read_text(encoding=\"utf-8\").splitlines()]"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_validate_and_document",
+      "name": "discard singleton components including explicit self loops",
+      "edits": [
+        {
+          "file": "support.py",
+          "old": "if len(component) > 1 or not component.isdisjoint(self_edges):",
+          "new": "if len(component) > 1:"
+        }
+      ],
+      "expect": "cycle membership keeps every disjoint cycle and self-loop, never downstream tails"
+    },
+    {
+      "test": "test_validate_and_document",
+      "name": "stop after the first cyclic component",
+      "edits": [
+        {
+          "file": "support.py",
+          "old": "            cyclic.update(component)",
+          "new": "            cyclic.update(component)\n            break"
+        }
+      ],
+      "expect": "cycle membership keeps every disjoint cycle and self-loop, never downstream tails"
+    },
+    {
+      "test": "test_validate_and_document",
+      "name": "report only one representative of each cyclic component",
+      "edits": [
+        {
+          "file": "support.py",
+          "old": "            cyclic.update(component)",
+          "new": "            cyclic.add(min(component))"
+        }
+      ],
+      "expect": "cycle findings name only actual cycle members"
+    },
+    {
+      "test": "test_validate_and_document",
+      "name": "search independently from every vertex for a return path",
+      "edits": [
+        {
+          "file": "support.py",
+          "old": "def cycle_members(items: list[WorkItem]) -> list[str]:\n    \"\"\"Return precisely the vertices on directed cycles, ignoring unknown references.\n\n    The result is sorted and contains each member once. Downstream vertices that cannot\n    reach themselves are not cycle members. Long plans do not depend on recursion depth.\n    \"\"\"\n    self_edges = {item.id for item in items if item.id in item.depends_on}\n    cyclic = set()\n    for component in _components(items):\n        if len(component) > 1 or not component.isdisjoint(self_edges):\n            cyclic.update(component)\n    return sorted(cyclic)",
+          "new": "def cycle_members(items: list[WorkItem]) -> list[str]:\n    \"\"\"Return precisely the vertices on directed cycles, ignoring unknown references.\n\n    The result is sorted and contains each member once. Downstream vertices that cannot\n    reach themselves are not cycle members. Long plans do not depend on recursion depth.\n    \"\"\"\n    nodes = {item.id for item in items}\n    edges = {item.id: set(item.depends_on) & nodes for item in items}\n    cyclic = set()\n    for origin in sorted(nodes):\n        seen = set()\n        stack = list(edges[origin])\n        while stack:\n            node = stack.pop()\n            if node == origin:\n                cyclic.add(origin)\n                break\n            if node not in seen:\n                seen.add(node)\n                stack.extend(edges[node] - seen)\n    return sorted(cyclic)"
+        }
+      ],
+      "expect": "cycle membership stays fast with long blocked tails"
+    },
+    {
+      "test": "test_validate_and_document",
+      "name": "helper guard: rescan all remaining items for each wave",
+      "edits": [
+        {
+          "file": "plan.py",
+          "old": "def _ordered_waves(items: list[WorkItem]) -> list[list[str]]:\n    dependencies = {item.id: set(item.depends_on) for item in items}\n    followers = {item.id: set() for item in items}\n    for node, deps in dependencies.items():\n        for dep in deps:\n            followers[dep].add(node)\n    ready = sorted(node for node, deps in dependencies.items() if not deps)\n    waves = []\n    completed = set()\n    while ready:\n        waves.append(ready)\n        following = set()\n        for node in ready:\n            completed.add(node)\n            for child in followers[node]:\n                dependencies[child].discard(node)\n                if not dependencies[child]:\n                    following.add(child)\n        ready = sorted(following)\n    if len(completed) != len(items):\n        remaining = {node: deps for node, deps in dependencies.items() if node not in completed}\n        raise ValueError(\"cycle: \" + \", \".join(_cycle_report(remaining)))\n    return waves",
+          "new": "def _ordered_waves(items: list[WorkItem]) -> list[list[str]]:\n    remaining = {item.id: set(item.depends_on) for item in items}\n    waves = []\n    completed = set()\n    while remaining:\n        ready = sorted(node for node, deps in remaining.items() if deps <= completed)\n        if not ready:\n            raise ValueError(\"cycle: \" + \", \".join(_cycle_report(remaining)))\n        waves.append(ready)\n        completed.update(ready)\n        for node in ready:\n            del remaining[node]\n    return waves"
+        }
+      ],
+      "expect": "long plans must not rescan every remaining item per wave"
+    }
+  ]
+}
