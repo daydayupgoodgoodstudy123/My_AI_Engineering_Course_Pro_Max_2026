@@ -1,0 +1,110 @@
+{
+  "lesson": "phases/14-agent-engineering/24-agent-observability-platforms",
+  "title": "Agent Observability: Langfuse, Phoenix, Opik",
+  "format": "staged-brownfield",
+  "service": "TraceJudge: a stdlib agent-observability backend with retry-safe span ingest, the lesson's scripted LLM judge per trace, a SQLite annotation queue, prompt-version regression bisection, batch ingestion of out-of-order span events pushed as SSE, and trace clustering by span-tree signature",
+  "sources": {
+    "docs/en.md": "aa3f70277a5ad92c61142f4be10b0c68df38981115001dcc870d7987d827751b",
+    "code/main.py": "504e3a4b65c32863d67555b99f848560f8889dc1fd4485ec00cf9e5eaa7cd894"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network and no LLM: the judge is the lesson's scripted rubric",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_session_dashboard",
+      "kind": "debug",
+      "lesson_anchor": "Build It: ingest GenAI-shaped spans, group by session, scripted LLM judge, dashboard summary; code/main.py TraceCollector, scripted_llm_judge, summarize",
+      "planted_bugs": [
+        "load_spans keeps \"tokens\": \"800\" as a string although its docstring promises an int; the TypeError surfaces three calls later in scripted_llm_judge, and coercing only in the judge moves it to the token sum",
+        "TraceCollector.ingest does not dedupe, so a span the exporter retried is counted twice (errors, tokens, span count)",
+        "trace_count is len(spans), as in the lesson's code",
+        "eval_score_mean judges the whole session as one trace, as in the lesson's code, instead of judging each trace and averaging",
+        "summarize calls by_session() once per session, regrouping every span each time: O(sessions x spans)"
+      ],
+      "timing_assert": "two asserts, measured on this machine (Apple M5, Python 3.12, other agents running, load 8 to 11). A whole batch of 8000 spans resent once must ingest under 0.05 s: reference 1.2-3 ms (7 ms at worst under load), a dedupe that scans the stored spans 1.2 s, keys kept in a list 0.43-0.48 s. 5000 one-span sessions ingested and summarized under 0.15 s: quadratic version 1.9 s (3.4 s under heavy load), fixed version 11-14 ms (up to 39 ms under load 11)",
+      "overfix_guard": "two chat spans in one trace stay separate (rules out deduping on trace_id and name); span ids 1, 2, 3 repeat in every trace of sess-b (rules out deduping on span_id alone); load_spans is checked directly, so coercing tokens in the judge and the sum instead fails; a scan- or list-based dedupe fails the resend timing assert"
+    },
+    {
+      "part": 2,
+      "test": "test_annotation_queue",
+      "kind": "model and persistence",
+      "lesson_anchor": "Langfuse: annotation queues and user feedback (open-sourced under MIT in June 2025)",
+      "exactness": "annotations round-trip exactly across close and reopen: a 19-digit created_ns, a score of 0.0 next to a missing score, 1/3 and 0.1 + 0.2, notes with newlines, CRLF and leading spaces",
+      "traps": [
+        "created_ns in a REAL column loses the last digits",
+        "score or None turns 0.0 into None",
+        "ORDER BY created_ns instead of recording order (annotator clocks drift)",
+        "INSERT OR REPLACE moves a re-queued trace to the back",
+        "pending sorted by trace id (tr-10 before tr-9)",
+        "NaN and out-of-range scores rejected without writing anything"
+      ],
+      "clarifying_questions": ["same annotator twice", "0.0 versus no score", "order by clock", "re-queue an annotated trace"]
+    },
+    {
+      "part": 3,
+      "test": "test_bisect_prompt_versions",
+      "kind": "core algorithm",
+      "lesson_anchor": "Where this pattern goes wrong: prompt versions not tied to traces, so you cannot bisect to the prompt that caused a regression; Key Terms: prompt management, versioned prompts tied to traces",
+      "traps": [
+        "versions sorted as strings (v1.10 before v1.9), or compared as floats",
+        "WARN counted as a pass",
+        "each version compared with the previous one, so a slow drift never trips",
+        "the drop compared in floats: 68% - 58% is 0.10000000000000009; percentages computed first are exact there, so 9/14 against 19/35 is tested too",
+        "the drop or the pass rates rounded to whole points: 10/11 against 21/26 drops 10.14 points",
+        "a drop of exactly max_drop counted as a regression",
+        "inconclusive versions (fewer than min_traces) blamed, or a version with exactly min_traces treated as inconclusive",
+        "versions older than known_good scanned, or versions walked in arrival order",
+        "suspects missing the inconclusive versions between last_good and the culprit, or collected since known_good"
+      ],
+      "integration": "none; the pairs are (prompt_version, verdict) as the Part 1 judge would produce them",
+      "clarifying_questions": ["WARN", "version format", "absolute points", "older versions", "float tolerance"]
+    },
+    {
+      "part": 4,
+      "test": "test_ingest_stream",
+      "kind": "streaming",
+      "lesson_anchor": "The Problem: the platform ingests spans; Key Terms: tracing (ingest spans, index by session); the lesson's summary per session, updated live",
+      "wire_format": "SSE: id, event and data lines and a blank line per event, one event per yielded string; session events carry the SessionSummary as JSON, dropped events carry {\"updates\": n}; parsed by the test the way EventSource does",
+      "traps": [
+        "updates applied in arrival order instead of latest ts per field",
+        "one ts per span instead of per field, or update attributes replacing the stored ones",
+        "an update that arrives before its create is lost",
+        "a waiting update older than its create overriding the create's values",
+        "orphan TTL off by one batch, in either direction",
+        "updates still waiting at the end of the stream not reported",
+        "an event for a session that was touched but did not change",
+        "session events in the order sessions were touched instead of session_id order",
+        "a retried create resetting an updated span",
+        "every batch read before anything is written (probe counts pulled batches)",
+        "ids restarting per batch"
+      ],
+      "clarifying_questions": ["update whose span never arrives", "retried create", "update older than its create", "equal ts", "reconnect"]
+    },
+    {
+      "part": 5,
+      "test": "test_trace_clusters",
+      "kind": "recursive structure",
+      "lesson_anchor": "Arize Phoenix: trace clustering and anomaly detection; Key Terms: trace clustering (cluster similar runs for drift detection)",
+      "traps": [
+        "children in input order, by span_id alone, or by start_ns without the span_id tie-break",
+        "roots in input order",
+        "span ids resolved across traces",
+        "a span whose parent is missing not treated as a root",
+        "names not escaped, so chat(retry) collides with chat > retry; the backslash escaped after the brackets",
+        "a share of exactly min_share flagged",
+        "the share taken over the number of clusters instead of the number of traces",
+        "trace ids sorted inside a cluster instead of kept in first-seen order",
+        "spans on a parent cycle (including a self-parent) silently left out"
+      ],
+      "clarifying_questions": ["missing parent", "collapse repeated chats", "min_share denominator", "cycles"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the three suggested defects are kept (retry dedupe on (trace_id, span_id), per-trace judging averaged over the session, string tokens failing in the judge). trace_count = len(spans), also straight from the lesson's code, is a fourth layer. The suggested 'two chats in one trace' guard is kept, and a second guard, span ids repeating across traces, rules out deduping on span_id alone. The timing case is 5000 one-span sessions so the quadratic version stays near two seconds; a second timing case resends a whole batch of 8000 spans, because a scanning dedupe is only about twice as slow as the limit on the first case.",
+    "Part 1: the lesson's Span has no span_id, parent_id or start_ns; the exam's Span adds them (Part 5 needs the tree). The span names, the gen_ai.output.reference_id, gen_ai.tool.name, error.reason and tokens attributes and the judge's rubric are the lesson's.",
+    "Part 2: SQLite as assigned. Missing commit is not a designed trap because chapter 14 already uses it more than twice. The designed exactness trap is a 19-digit created_ns in a REAL column, next to 0.0 versus None for the score. Re-annotation by the same person keeps both rows instead of replacing, so the queue has one INSERT OR REPLACE trap only.",
+    "Part 3: the threshold is an integer number of percentage points so that 'exactly max_drop' has an exact meaning; the bisection compares every version with the known-good rate, and 'last good' names the start of the suspect range rather than a moving baseline. The verdict pairs are given directly instead of being read from span attributes, because the lesson names no attribute for the prompt version.",
+    "Part 4: SSE as assigned. The create/update event shape is this exam's own convention, not a Langfuse or OTel format. Per-field last-writer-wins by ts replaces the suggested per-span merge so that two updates touching different fields are both kept. Session events are written in session_id order after each batch, and a dropped count follows them.",
+    "Part 5: as suggested, except that repeated chat spans are simply kept (a clarifying question) instead of being a trap, and parent cycles were added because a top-down walk silently leaves those spans out."
+  ]
+}

@@ -1,0 +1,833 @@
+{
+  "package": "tracejudge",
+  "tests": [
+    "test_session_dashboard",
+    "test_annotation_queue",
+    "test_bisect_prompt_versions",
+    "test_ingest_stream",
+    "test_trace_clusters"
+  ],
+  "layers": [
+    {
+      "test": "test_session_dashboard",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "not supported between instances of 'str' and 'int'"
+        },
+        {
+          "name": "fix load_spans",
+          "edits": [
+            {
+              "file": "spans.py",
+              "old": "        attributes = dict(obj.get(\"attributes\", {}))\n",
+              "new": "        attributes = dict(obj.get(\"attributes\", {}))\n        if \"tokens\" in attributes:\n            attributes[\"tokens\"] = int(attributes[\"tokens\"])\n"
+            }
+          ],
+          "expect": "a span the exporter sent twice is stored once"
+        },
+        {
+          "name": "+ dedupe on (trace_id, span_id)",
+          "edits": [
+            {
+              "file": "spans.py",
+              "old": "        self._spans: list[Span] = []\n",
+              "new": "        self._spans: list[Span] = []\n        self._seen: set[tuple[str, str]] = set()\n"
+            },
+            {
+              "file": "spans.py",
+              "old": "        self._spans.append(span)\n        return True\n",
+              "new": "        key = (span.trace_id, span.span_id)\n        if key in self._seen:\n            return False\n        self._seen.add(key)\n        self._spans.append(span)\n        return True\n"
+            }
+          ],
+          "expect": "trace_count counts traces, not spans"
+        },
+        {
+          "name": "+ count distinct traces",
+          "edits": [
+            {
+              "file": "summary.py",
+              "old": "    score, _ = scripted_llm_judge(spans)\n    return SessionSummary(\n        session_id=session_id,\n        trace_count=len(spans),\n",
+              "new": "    traces: dict[str, list[Span]] = {}\n    for span in spans:\n        traces.setdefault(span.trace_id, []).append(span)\n    score, _ = scripted_llm_judge(spans)\n    return SessionSummary(\n        session_id=session_id,\n        trace_count=len(traces),\n"
+            }
+          ],
+          "expect": "judge each trace on its own spans, then average over the session"
+        },
+        {
+          "name": "+ judge per trace, then average",
+          "edits": [
+            {
+              "file": "summary.py",
+              "old": "    score, _ = scripted_llm_judge(spans)\n",
+              "new": "    scores = [scripted_llm_judge(trace)[0] for trace in traces.values()]\n"
+            },
+            {
+              "file": "summary.py",
+              "old": "        eval_score_mean=score,\n",
+              "new": "        eval_score_mean=sum(scores) / len(scores),\n"
+            }
+          ],
+          "expect": "ingest and summarize must stay fast with many sessions"
+        },
+        {
+          "name": "+ group the spans once",
+          "edits": [
+            {
+              "file": "summary.py",
+              "old": "        summarize_session(session_id, collector.by_session()[session_id])\n        for session_id in collector.sessions()\n",
+              "new": "        summarize_session(session_id, spans)\n        for session_id, spans in collector.by_session().items()\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_session_dashboard",
+      "name": "dedupe on (trace_id, name)",
+      "edits": [
+        {
+          "file": "spans.py",
+          "old": "        key = (span.trace_id, span.span_id)\n",
+          "new": "        key = (span.trace_id, span.name)\n"
+        }
+      ],
+      "expect": "spans that share a name are still separate spans"
+    },
+    {
+      "test": "test_session_dashboard",
+      "name": "dedupe on span_id alone",
+      "edits": [
+        {
+          "file": "spans.py",
+          "old": "        self._seen: set[tuple[str, str]] = set()\n",
+          "new": "        self._seen: set[str] = set()\n"
+        },
+        {
+          "file": "spans.py",
+          "old": "        key = (span.trace_id, span.span_id)\n",
+          "new": "        key = span.span_id\n"
+        }
+      ],
+      "expect": "span ids are unique within a trace, not across traces"
+    },
+    {
+      "test": "test_session_dashboard",
+      "name": "tokens coerced inside the judge instead of at load",
+      "edits": [
+        {
+          "file": "spans.py",
+          "old": "        if \"tokens\" in attributes:\n            attributes[\"tokens\"] = int(attributes[\"tokens\"])\n",
+          "new": ""
+        },
+        {
+          "file": "judge.py",
+          "old": "s.attributes.get(\"tokens\", 0) > 2000",
+          "new": "int(s.attributes.get(\"tokens\", 0)) > 2000"
+        }
+      ],
+      "expect": "unsupported operand type"
+    },
+    {
+      "test": "test_session_dashboard",
+      "name": "dedupe by scanning the stored spans",
+      "edits": [
+        {
+          "file": "spans.py",
+          "old": "        key = (span.trace_id, span.span_id)\n        if key in self._seen:\n            return False\n        self._seen.add(key)\n",
+          "new": "        if any(s.trace_id == span.trace_id and s.span_id == span.span_id for s in self._spans):\n            return False\n"
+        }
+      ],
+      "expect": "ingest must stay fast when an exporter resends a whole batch"
+    },
+    {
+      "test": "test_session_dashboard",
+      "name": "tokens coerced in the judge and in the sum instead of at load",
+      "edits": [
+        {
+          "file": "spans.py",
+          "old": "        if \"tokens\" in attributes:\n            attributes[\"tokens\"] = int(attributes[\"tokens\"])\n",
+          "new": ""
+        },
+        {
+          "file": "judge.py",
+          "old": "s.attributes.get(\"tokens\", 0) > 2000",
+          "new": "int(s.attributes.get(\"tokens\", 0)) > 2000"
+        },
+        {
+          "file": "summary.py",
+          "old": "tokens=sum(s.attributes.get(\"tokens\", 0) for s in spans),",
+          "new": "tokens=sum(int(s.attributes.get(\"tokens\", 0)) for s in spans),"
+        }
+      ],
+      "expect": "load_spans returns tokens as ints"
+    },
+    {
+      "test": "test_session_dashboard",
+      "name": "tokens converted with float() at load",
+      "edits": [
+        {
+          "file": "spans.py",
+          "old": "attributes[\"tokens\"] = int(attributes[\"tokens\"])",
+          "new": "attributes[\"tokens\"] = float(attributes[\"tokens\"])"
+        }
+      ],
+      "expect": "tokens add up as ints"
+    },
+    {
+      "test": "test_session_dashboard",
+      "name": "eval_score_mean weighted by span count",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "scores = [scripted_llm_judge(trace)[0] for trace in traces.values()]",
+          "new": "scores = [scripted_llm_judge(trace)[0] for trace in traces.values() for _ in trace]"
+        }
+      ],
+      "expect": "judge each trace on its own spans, then average over the session"
+    },
+    {
+      "test": "test_session_dashboard",
+      "name": "dedupe keys kept in a list",
+      "edits": [
+        {
+          "file": "spans.py",
+          "old": "        self._seen: set[tuple[str, str]] = set()\n",
+          "new": "        self._seen: list[tuple[str, str]] = []\n"
+        },
+        {
+          "file": "spans.py",
+          "old": "        self._seen.add(key)\n",
+          "new": "        self._seen.append(key)\n"
+        }
+      ],
+      "expect": "ingest must stay fast when an exporter resends a whole batch"
+    },
+    {
+      "test": "test_annotation_queue",
+      "name": "created_ns column declared REAL",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "    created_ns INTEGER NOT NULL\n",
+          "new": "    created_ns REAL NOT NULL\n"
+        }
+      ],
+      "expect": "a reopened queue gives back every annotation exactly"
+    },
+    {
+      "test": "test_annotation_queue",
+      "name": "score stored as `score or None`",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "(trace_id, annotator, label, score, note, created_ns),\n",
+          "new": "(trace_id, annotator, label, score or None, note, created_ns),\n"
+        }
+      ],
+      "expect": "a reopened queue gives back every annotation exactly"
+    },
+    {
+      "test": "test_annotation_queue",
+      "name": "annotations ordered by the annotators' clocks",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": " WHERE trace_id = ? ORDER BY seq\",",
+          "new": " WHERE trace_id = ? ORDER BY created_ns\","
+        }
+      ],
+      "expect": "annotations come back in the order they were made"
+    },
+    {
+      "test": "test_annotation_queue",
+      "name": "enqueue with INSERT OR REPLACE",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "INSERT OR IGNORE INTO queue",
+          "new": "INSERT OR REPLACE INTO queue"
+        }
+      ],
+      "expect": "pending traces keep their queue order"
+    },
+    {
+      "test": "test_annotation_queue",
+      "name": "pending sorted by trace id",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": " (SELECT trace_id FROM annotations) ORDER BY seq\"",
+          "new": " (SELECT trace_id FROM annotations) ORDER BY trace_id\""
+        }
+      ],
+      "expect": "pending traces keep their queue order"
+    },
+    {
+      "test": "test_annotation_queue",
+      "name": "score range checked with < and >, so NaN gets in",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "if score is not None and not 0.0 <= score <= 1.0:",
+          "new": "if score is not None and (score < 0.0 or score > 1.0):"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_annotation_queue",
+      "name": "annotate takes the trace off the queue",
+      "edits": [
+        {
+          "file": "annotations.py",
+          "old": "                (trace_id, annotator, label, score, note, created_ns),\n            )\n",
+          "new": "                (trace_id, annotator, label, score, note, created_ns),\n            )\n            self._db.execute(\"DELETE FROM queue WHERE trace_id = ?\", (trace_id,))\n"
+        }
+      ],
+      "expect": "KeyError: 'tr-10'"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "versions sorted as strings",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "    for version in sorted(counts, key=version_key):\n        if version_key(version) <= good_key:\n",
+          "new": "    for version in sorted(counts):\n        if version <= known_good:\n"
+        }
+      ],
+      "expect": "v1.10 comes after v1.9"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "WARN counted as a pass",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "tally[0] += verdict == \"PASS\"",
+          "new": "tally[0] += verdict != \"FAIL\""
+        }
+      ],
+      "expect": "only a PASS verdict counts as a pass"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "each version compared with the previous good one",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "        last_good = version\n        since_good = []\n",
+          "new": "        last_good = version\n        since_good = []\n        base_pass, base_n = passed, n\n"
+        }
+      ],
+      "expect": "so a slow drift shows up"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "drop compared in floats",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "        if 100 * (base_pass * n - passed * base_n) > max_drop * base_n * n:\n",
+          "new": "        if base_pass / base_n - passed / n > max_drop / 100:\n"
+        }
+      ],
+      "expect": "a drop of exactly max_drop points is not a regression"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "a drop of exactly max_drop counts",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "        if 100 * (base_pass * n - passed * base_n) > max_drop * base_n * n:\n",
+          "new": "        if 100 * (base_pass * n - passed * base_n) >= max_drop * base_n * n:\n"
+        }
+      ],
+      "expect": "a drop of exactly max_drop points is not a regression"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "inconclusive versions judged anyway",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "        if n < min_traces:\n            continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "only a conclusive version after the known-good one can be the culprit"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "exactly min_traces treated as inconclusive",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "        if n < min_traces:\n            continue\n",
+          "new": "        if n <= min_traces:\n            continue\n"
+        }
+      ],
+      "expect": "exactly min_traces traces is conclusive"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "scan starts at the oldest version",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "        if version_key(version) <= good_key:\n            continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "only a conclusive version after the known-good one can be the culprit"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "suspects hold only the culprit",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "            return Bisection(last_good, version, since_good)\n",
+          "new": "            return Bisection(last_good, version, [version])\n"
+        }
+      ],
+      "expect": "suspects run from just after the last good version to the culprit"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "percentages computed first, in floats",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "        if 100 * (base_pass * n - passed * base_n) > max_drop * base_n * n:\n",
+          "new": "        if 100 * base_pass / base_n - 100 * passed / n > max_drop:\n"
+        }
+      ],
+      "expect": "a drop of exactly max_drop points is not a regression"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "drop truncated with int()",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "        if 100 * (base_pass * n - passed * base_n) > max_drop * base_n * n:\n",
+          "new": "        if int((base_pass / base_n - passed / n) * 100) > max_drop:\n"
+        }
+      ],
+      "expect": "a drop of a fraction of a point more than max_drop is a regression"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "drop rounded to whole points",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "        if 100 * (base_pass * n - passed * base_n) > max_drop * base_n * n:\n",
+          "new": "        if round((base_pass / base_n - passed / n) * 100) > max_drop:\n"
+        }
+      ],
+      "expect": "a drop of a fraction of a point more than max_drop is a regression"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "pass rates as whole percentages",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "        if 100 * (base_pass * n - passed * base_n) > max_drop * base_n * n:\n",
+          "new": "        if 100 * base_pass // base_n - 100 * passed // n > max_drop:\n"
+        }
+      ],
+      "expect": "a drop of a fraction of a point more than max_drop is a regression"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "versions walked in the order they arrive",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "    for version in sorted(counts, key=version_key):\n",
+          "new": "    for version in counts:\n"
+        }
+      ],
+      "expect": "last_good is the newest conclusive version before the culprit"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "version compared as a float (1.10 < 1.9)",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "        return tuple(int(part) for part in version[1:].split(\".\"))\n",
+          "new": "        return (float(version[1:]),)\n"
+        }
+      ],
+      "expect": "v1.10 comes after v1.9"
+    },
+    {
+      "test": "test_bisect_prompt_versions",
+      "name": "suspects collected since known_good",
+      "edits": [
+        {
+          "file": "regress.py",
+          "old": "        last_good = version\n        since_good = []\n",
+          "new": "        last_good = version\n"
+        }
+      ],
+      "expect": "suspects run from just after the last good version to the culprit"
+    },
+    {
+      "test": "test_ingest_stream",
+      "name": "updates applied in arrival order",
+      "edits": [
+        {
+          "file": "ingest.py",
+          "old": "if \"status\" in update and stamp > self.stamps.get(\"status\", (-1, -1)):",
+          "new": "if \"status\" in update:"
+        },
+        {
+          "file": "ingest.py",
+          "old": "            if stamp > self.stamps.get(field, (-1, -1)):\n",
+          "new": "            if True:\n"
+        }
+      ],
+      "expect": "each field keeps the value with the latest ts"
+    },
+    {
+      "test": "test_ingest_stream",
+      "name": "orphans kept one batch too long",
+      "edits": [
+        {
+          "file": "ingest.py",
+          "old": "batch_no - w[0] >= orphan_ttl]",
+          "new": "batch_no - w[0] > orphan_ttl]"
+        },
+        {
+          "file": "ingest.py",
+          "old": "batch_no - w[0] < orphan_ttl]",
+          "new": "batch_no - w[0] <= orphan_ttl]"
+        }
+      ],
+      "expect": "an update still waiting after orphan_ttl more batches is dropped"
+    },
+    {
+      "test": "test_ingest_stream",
+      "name": "waiting updates forgotten at the end",
+      "edits": [
+        {
+          "file": "ingest.py",
+          "old": "    if waiting:\n        yield sse(",
+          "new": "    if False:\n        yield sse("
+        }
+      ],
+      "expect": "updates still waiting when the batches run out are dropped too"
+    },
+    {
+      "test": "test_ingest_stream",
+      "name": "an event for every session the batch touched",
+      "edits": [
+        {
+          "file": "ingest.py",
+          "old": "            if sent.get(session_id) != summary:\n",
+          "new": "            if True:\n"
+        }
+      ],
+      "expect": "a session whose summary did not change gets no event"
+    },
+    {
+      "test": "test_ingest_stream",
+      "name": "ids restart every batch",
+      "edits": [
+        {
+          "file": "ingest.py",
+          "old": "        batch_no += 1\n",
+          "new": "        batch_no += 1\n        next_id = 1\n"
+        }
+      ],
+      "expect": "ids count up across the whole stream"
+    },
+    {
+      "test": "test_ingest_stream",
+      "name": "every batch read before anything is written",
+      "edits": [
+        {
+          "file": "ingest.py",
+          "old": "    async for batch in batches:\n",
+          "new": "    everything = [b async for b in batches]\n    for batch in everything:\n"
+        }
+      ],
+      "expect": "write a batch's events before reading the next batch"
+    },
+    {
+      "test": "test_ingest_stream",
+      "name": "early updates dropped when the span arrives",
+      "edits": [
+        {
+          "file": "ingest.py",
+          "old": "                for _, early, update in [w for w in waiting if _key(w[2]) == key]:\n                    entry.apply(update, early)\n",
+          "new": ""
+        }
+      ],
+      "expect": "an update that arrived before its span is applied when the span arrives"
+    },
+    {
+      "test": "test_ingest_stream",
+      "name": "one ts per span instead of per field",
+      "edits": [
+        {
+          "file": "ingest.py",
+          "old": "        status = self.span.status\n        attributes = dict(self.span.attributes)\n        if \"status\" in update and stamp > self.stamps.get(\"status\", (-1, -1)):\n            status = update[\"status\"]\n            self.stamps[\"status\"] = stamp\n        for key, value in update.get(\"attributes\", {}).items():\n            field = \"attributes.\" + key\n            if stamp > self.stamps.get(field, (-1, -1)):\n                attributes[key] = value\n                self.stamps[field] = stamp\n        self.span = replace(self.span, status=status, attributes=attributes)\n",
+          "new": "        if stamp < self.stamps[\"status\"]:\n            return\n        self.stamps[\"status\"] = stamp\n        status = update.get(\"status\", self.span.status)\n        attributes = {**self.span.attributes, **update.get(\"attributes\", {})}\n        self.span = replace(self.span, status=status, attributes=attributes)\n"
+        }
+      ],
+      "expect": "the status and each attribute keep their own latest ts"
+    },
+    {
+      "test": "test_ingest_stream",
+      "name": "one ts per span, attributes replaced wholesale",
+      "edits": [
+        {
+          "file": "ingest.py",
+          "old": "        status = self.span.status\n        attributes = dict(self.span.attributes)\n        if \"status\" in update and stamp > self.stamps.get(\"status\", (-1, -1)):\n            status = update[\"status\"]\n            self.stamps[\"status\"] = stamp\n        for key, value in update.get(\"attributes\", {}).items():\n            field = \"attributes.\" + key\n            if stamp > self.stamps.get(field, (-1, -1)):\n                attributes[key] = value\n                self.stamps[field] = stamp\n        self.span = replace(self.span, status=status, attributes=attributes)\n",
+          "new": "        if stamp < self.stamps[\"status\"]:\n            return\n        self.stamps[\"status\"] = stamp\n        status = update.get(\"status\", self.span.status)\n        attributes = dict(update.get(\"attributes\", self.span.attributes))\n        self.span = replace(self.span, status=status, attributes=attributes)\n"
+        }
+      ],
+      "expect": "the status and each attribute keep their own latest ts"
+    },
+    {
+      "test": "test_ingest_stream",
+      "name": "a create's fields carry no ts",
+      "edits": [
+        {
+          "file": "ingest.py",
+          "old": "        self.stamps: dict[str, tuple[int, int]] = {\"status\": stamp}\n        for key in span.attributes:\n            self.stamps[\"attributes.\" + key] = stamp\n",
+          "new": "        self.stamps: dict[str, tuple[int, int]] = {}\n"
+        }
+      ],
+      "expect": "an update older than its span's create does not override it"
+    },
+    {
+      "test": "test_ingest_stream",
+      "name": "orphans dropped one batch early",
+      "edits": [
+        {
+          "file": "ingest.py",
+          "old": "batch_no - w[0] >= orphan_ttl]",
+          "new": "batch_no - w[0] + 1 >= orphan_ttl]"
+        },
+        {
+          "file": "ingest.py",
+          "old": "batch_no - w[0] < orphan_ttl]",
+          "new": "batch_no - w[0] + 1 < orphan_ttl]"
+        }
+      ],
+      "expect": "an update waits orphan_ttl more batches before it is dropped"
+    },
+    {
+      "test": "test_ingest_stream",
+      "name": "orphans expired before the batch is applied",
+      "edits": [
+        {
+          "file": "ingest.py",
+          "old": "        batch_no += 1\n",
+          "new": "        batch_no += 1\n        early = [w for w in waiting if batch_no - w[0] >= orphan_ttl]\n        waiting = [w for w in waiting if batch_no - w[0] < orphan_ttl]\n"
+        },
+        {
+          "file": "ingest.py",
+          "old": "        expired = [w for w in waiting if batch_no - w[0] >= orphan_ttl]\n        if expired:\n            waiting = [w for w in waiting if batch_no - w[0] < orphan_ttl]\n",
+          "new": "        expired = early\n        if expired:\n"
+        }
+      ],
+      "expect": "an update that arrived before its span is applied when the span arrives"
+    },
+    {
+      "test": "test_ingest_stream",
+      "name": "session events in the order sessions were touched",
+      "edits": [
+        {
+          "file": "ingest.py",
+          "old": "        touched: set[str] = set()\n",
+          "new": "        touched: dict[str, None] = {}\n"
+        },
+        {
+          "file": "ingest.py",
+          "old": "                touched.add(span.session_id)\n",
+          "new": "                touched[span.session_id] = None\n"
+        },
+        {
+          "file": "ingest.py",
+          "old": "                touched.add(entry.span.session_id)\n",
+          "new": "                touched[entry.span.session_id] = None\n"
+        },
+        {
+          "file": "ingest.py",
+          "old": "        for session_id in sorted(touched):\n",
+          "new": "        for session_id in touched:\n"
+        }
+      ],
+      "expect": "one event per changed session, in session_id order"
+    },
+    {
+      "test": "test_ingest_stream",
+      "name": "a retried create replaces the stored span",
+      "edits": [
+        {
+          "file": "ingest.py",
+          "old": "                if key in stored:\n                    continue\n",
+          "new": "                if key in stored:\n                    stored[key] = _Stored(span, stamp)\n                    touched.add(span.session_id)\n                    continue\n"
+        }
+      ],
+      "expect": "a retried create changes nothing"
+    },
+    {
+      "test": "test_trace_clusters",
+      "name": "children kept in input order",
+      "edits": [
+        {
+          "file": "clusters.py",
+          "old": "        kids = sorted(children.get(span.span_id, []), key=order)\n",
+          "new": "        kids = children.get(span.span_id, [])\n"
+        }
+      ],
+      "expect": "children are ordered by start_ns"
+    },
+    {
+      "test": "test_trace_clusters",
+      "name": "children sorted by start_ns only",
+      "edits": [
+        {
+          "file": "clusters.py",
+          "old": "        return (span.start_ns, span.span_id)\n",
+          "new": "        return (span.start_ns,)\n"
+        }
+      ],
+      "expect": "children are ordered by start_ns, then span_id"
+    },
+    {
+      "test": "test_trace_clusters",
+      "name": "names not escaped",
+      "edits": [
+        {
+          "file": "clusters.py",
+          "old": "        return _escape(span.name) + ",
+          "new": "        return span.name + "
+        }
+      ],
+      "expect": "names are escaped, so different trees never share a signature"
+    },
+    {
+      "test": "test_trace_clusters",
+      "name": "orphan spans not treated as roots",
+      "edits": [
+        {
+          "file": "clusters.py",
+          "old": "        if span.parent_id is not None and span.parent_id in by_id:\n            children.setdefault(span.parent_id, []).append(span)\n        else:\n            roots.append(span)\n",
+          "new": "        if span.parent_id is None:\n            roots.append(span)\n        elif span.parent_id in by_id:\n            children.setdefault(span.parent_id, []).append(span)\n"
+        }
+      ],
+      "expect": "spans on a parent cycle: ['3']"
+    },
+    {
+      "test": "test_trace_clusters",
+      "name": "exactly min_share flagged",
+      "edits": [
+        {
+          "file": "clusters.py",
+          "old": "len(ids) / total < min_share",
+          "new": "len(ids) / total <= min_share"
+        }
+      ],
+      "expect": "exactly min_share is not anomalous"
+    },
+    {
+      "test": "test_trace_clusters",
+      "name": "spans on a cycle silently left out",
+      "edits": [
+        {
+          "file": "clusters.py",
+          "old": "    if stuck:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_trace_clusters",
+      "name": "children sorted by span_id only",
+      "edits": [
+        {
+          "file": "clusters.py",
+          "old": "        return (span.start_ns, span.span_id)\n",
+          "new": "        return (span.span_id,)\n"
+        }
+      ],
+      "expect": "children are ordered by start_ns"
+    },
+    {
+      "test": "test_trace_clusters",
+      "name": "roots kept in input order",
+      "edits": [
+        {
+          "file": "clusters.py",
+          "old": "    text = \",\".join(render(root) for root in sorted(roots, key=order))\n",
+          "new": "    text = \",\".join(render(root) for root in roots)\n"
+        }
+      ],
+      "expect": "roots are ordered like children"
+    },
+    {
+      "test": "test_trace_clusters",
+      "name": "share computed over the number of clusters",
+      "edits": [
+        {
+          "file": "clusters.py",
+          "old": "    total = len(traces)\n",
+          "new": "    total = len(groups)\n"
+        }
+      ],
+      "expect": "a cluster's share is its traces out of all the traces"
+    },
+    {
+      "test": "test_trace_clusters",
+      "name": "trace ids sorted inside a cluster",
+      "edits": [
+        {
+          "file": "clusters.py",
+          "old": "        Cluster(sig, ids, len(ids) / total < min_share)",
+          "new": "        Cluster(sig, sorted(ids), len(ids) / total < min_share)"
+        }
+      ],
+      "expect": "trace ids keep the order they first appear in"
+    },
+    {
+      "test": "test_trace_clusters",
+      "name": "backslash escaped after the brackets",
+      "edits": [
+        {
+          "file": "clusters.py",
+          "old": "def _escape(name: str) -> str:\n    out = []\n    for ch in name:\n        if ch in \"\\\\(),\":\n            out.append(\"\\\\\")\n        out.append(ch)\n    return \"\".join(out)\n",
+          "new": "def _escape(name: str) -> str:\n    for ch in \"(),\\\\\":\n        name = name.replace(ch, \"\\\\\" + ch)\n    return name\n"
+        }
+      ],
+      "expect": "names are escaped, so different trees never share a signature"
+    },
+    {
+      "test": "test_trace_clusters",
+      "name": "a span that is its own parent treated as a root",
+      "edits": [
+        {
+          "file": "clusters.py",
+          "old": "        if span.parent_id is not None and span.parent_id in by_id:\n",
+          "new": "        if span.parent_id is not None and span.parent_id in by_id and span.parent_id != span.span_id:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    }
+  ]
+}
