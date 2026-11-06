@@ -1,0 +1,1253 @@
+{
+  "package": "reactloop",
+  "tests": [
+    "test_agent_loop",
+    "test_transcript_snapshot",
+    "test_react_text",
+    "test_stream_events",
+    "test_nested_observation"
+  ],
+  "layers": [
+    {
+      "test": "test_agent_loop",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "KeyError: 'tool_calls'"
+        },
+        {
+          "name": "a turn without tool calls ends the run",
+          "edits": [
+            {
+              "file": "loop.py",
+              "old": "for c in reply[\"tool_calls\"]]",
+              "new": "for c in reply.get(\"tool_calls\", [])]"
+            },
+            {
+              "file": "loop.py",
+              "old": "            message = self.record(self.model.respond(self.messages()))\n",
+              "new": "            message = self.record(self.model.respond(self.messages()))\n            if not message.tool_calls:\n                return Outcome(message.content, \"no_tool_calls\", self.history)\n"
+            }
+          ],
+          "expect": "missing reasoning item for assistant turn 1"
+        },
+        {
+          "name": "+ record keeps the reasoning item",
+          "edits": [
+            {
+              "file": "loop.py",
+              "old": "            thinking=reply.get(\"thinking\", \"\"),\n",
+              "new": "            reasoning=reply.get(\"reasoning\"),\n            thinking=reply.get(\"thinking\", \"\"),\n"
+            }
+          ],
+          "expect": "a TypeError raised inside the tool is the tool's own error, not bad args"
+        },
+        {
+          "name": "+ dispatch binds the arguments before it runs the tool",
+          "edits": [
+            {
+              "file": "tools.py",
+              "old": "import ast\nimport operator\n",
+              "new": "import ast\nimport inspect\nimport operator\n"
+            },
+            {
+              "file": "tools.py",
+              "old": "        try:\n            if isinstance(call.args, dict):\n                return fn(**call.args)\n            return fn(*call.args)\n        except TypeError as e:\n            return f\"error: bad args for {call.name}: {e}\"\n        except Exception as e:\n",
+              "new": "        try:\n            signature = inspect.signature(fn)\n            if isinstance(call.args, dict):\n                bound = signature.bind(**call.args)\n            else:\n                bound = signature.bind(*call.args)\n        except TypeError as e:\n            return f\"error: bad args for {call.name}: {e}\"\n        try:\n            return fn(*bound.args, **bound.kwargs)\n        except Exception as e:\n"
+            }
+          ],
+          "expect": "a long run must not slow down as its history grows"
+        },
+        {
+          "name": "+ each observation formatted once, when the tool returns",
+          "edits": [
+            {
+              "file": "loop.py",
+              "old": "from dataclasses import dataclass, replace\n",
+              "new": "from dataclasses import dataclass\n"
+            },
+            {
+              "file": "loop.py",
+              "old": "        return [replace(m, content=self.observe(m.result)) if m.role == \"tool\" else m for m in self.history]\n",
+              "new": "        return list(self.history)\n"
+            },
+            {
+              "file": "loop.py",
+              "old": "        message = Message(\"tool\", name=call.name, result=self.tools.dispatch(call))\n",
+              "new": "        result = self.tools.dispatch(call)\n        message = Message(\"tool\", self.observe(result), name=call.name, result=result)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_agent_loop",
+      "name": "a turn with any text is taken as the answer",
+      "edits": [
+        {
+          "file": "loop.py",
+          "old": "            if not message.tool_calls:\n",
+          "new": "            if message.content or not message.tool_calls:\n"
+        }
+      ],
+      "expect": "text next to a tool call is not the answer yet"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "only a reply without a tool_calls key ends the run",
+      "edits": [
+        {
+          "file": "loop.py",
+          "old": "            message = self.record(self.model.respond(self.messages()))\n            if not message.tool_calls:\n",
+          "new": "            reply = self.model.respond(self.messages())\n            message = self.record(reply)\n            if \"tool_calls\" not in reply:\n"
+        }
+      ],
+      "expect": "no scripted reply left for request 4"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "the finish tool dispatched like any other tool",
+      "edits": [
+        {
+          "file": "loop.py",
+          "old": "                if call.name == FINISH:\n                    return Outcome(finish_answer(call), \"finish\", self.history)\n",
+          "new": ""
+        }
+      ],
+      "expect": "no scripted reply left for request 2"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "a TypeError that mentions an argument taken for bad args",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        try:\n            signature = inspect.signature(fn)\n            if isinstance(call.args, dict):\n                bound = signature.bind(**call.args)\n            else:\n                bound = signature.bind(*call.args)\n        except TypeError as e:\n            return f\"error: bad args for {call.name}: {e}\"\n        try:\n            return fn(*bound.args, **bound.kwargs)\n        except Exception as e:\n",
+          "new": "        try:\n            if isinstance(call.args, dict):\n                return fn(**call.args)\n            return fn(*call.args)\n        except TypeError as e:\n            if \"argument\" in str(e):\n                return f\"error: bad args for {call.name}: {e}\"\n            return f\"error: TypeError: {e}\"\n        except Exception as e:\n"
+        }
+      ],
+      "expect": "a TypeError raised inside the tool is the tool's own error, not bad args"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "formatted views cached, the history left without observations",
+      "edits": [
+        {
+          "file": "loop.py",
+          "old": "        return list(self.history)\n",
+          "new": "        from dataclasses import replace\n\n        views = self.__dict__.setdefault(\"_views\", [])\n        for m in self.history[len(views):]:\n            views.append(replace(m, content=self.observe(m.result)) if m.role == \"tool\" else m)\n        return list(views)\n"
+        },
+        {
+          "file": "loop.py",
+          "old": "        message = Message(\"tool\", self.observe(result), name=call.name, result=result)\n",
+          "new": "        message = Message(\"tool\", name=call.name, result=result)\n"
+        }
+      ],
+      "expect": "the history keeps every observation the model read"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "the tool turn keeps only the observation",
+      "edits": [
+        {
+          "file": "loop.py",
+          "old": "        message = Message(\"tool\", self.observe(result), name=call.name, result=result)\n",
+          "new": "        message = Message(\"tool\", self.observe(result), name=call.name)\n"
+        }
+      ],
+      "expect": "the history keeps the raw result behind each observation"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "arguments checked with bind_partial",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "                bound = signature.bind(**call.args)\n",
+          "new": "                bound = signature.bind_partial(**call.args)\n"
+        }
+      ],
+      "expect": "arguments that do not fit the tool are bad args"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "a turn ends the run only when it has text",
+      "edits": [
+        {
+          "file": "loop.py",
+          "old": "            if not message.tool_calls:\n",
+          "new": "            if message.content and not message.tool_calls:\n"
+        }
+      ],
+      "expect": "no scripted reply left for request 2"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "only missing parameters checked, by hand",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        try:\n            signature = inspect.signature(fn)\n            if isinstance(call.args, dict):\n                bound = signature.bind(**call.args)\n            else:\n                bound = signature.bind(*call.args)\n        except TypeError as e:\n            return f\"error: bad args for {call.name}: {e}\"\n        try:\n            return fn(*bound.args, **bound.kwargs)\n        except Exception as e:\n",
+          "new": "        required = [p.name for p in inspect.signature(fn).parameters.values() if p.default is p.empty]\n        if isinstance(call.args, dict):\n            missing = [name for name in required if name not in call.args]\n        else:\n            missing = required[len(call.args):]\n        if missing:\n            return f\"error: bad args for {call.name}: missing {', '.join(missing)}\"\n        try:\n            if isinstance(call.args, dict):\n                return fn(**call.args)\n            return fn(*call.args)\n        except Exception as e:\n"
+        }
+      ],
+      "expect": "arguments that do not fit the tool are bad args"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "argument count compared with the signature",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        try:\n            signature = inspect.signature(fn)\n            if isinstance(call.args, dict):\n                bound = signature.bind(**call.args)\n            else:\n                bound = signature.bind(*call.args)\n        except TypeError as e:\n            return f\"error: bad args for {call.name}: {e}\"\n        try:\n            return fn(*bound.args, **bound.kwargs)\n        except Exception as e:\n",
+          "new": "        if len(call.args) != len(inspect.signature(fn).parameters):\n            return f\"error: bad args for {call.name}: expected {len(inspect.signature(fn).parameters)} arguments\"\n        try:\n            if isinstance(call.args, dict):\n                return fn(**call.args)\n            return fn(*call.args)\n        except Exception as e:\n"
+        }
+      ],
+      "expect": "arguments that do not fit the tool are bad args"
+    },
+    {
+      "test": "test_agent_loop",
+      "name": "only keyword arguments bound",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        try:\n            signature = inspect.signature(fn)\n            if isinstance(call.args, dict):\n                bound = signature.bind(**call.args)\n            else:\n                bound = signature.bind(*call.args)\n        except TypeError as e:\n            return f\"error: bad args for {call.name}: {e}\"\n        try:\n            return fn(*bound.args, **bound.kwargs)\n        except Exception as e:\n",
+          "new": "        try:\n            if isinstance(call.args, dict):\n                inspect.signature(fn).bind(**call.args)\n        except TypeError as e:\n            return f\"error: bad args for {call.name}: {e}\"\n        try:\n            if isinstance(call.args, dict):\n                return fn(**call.args)\n            return fn(*call.args)\n        except Exception as e:\n"
+        }
+      ],
+      "expect": "positional arguments are checked the same way"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "reasoning bytes handed to json as they are",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "        if message.reasoning is not None:\n            record[\"reasoning\"] = base64.b64encode(message.reasoning).decode(\"ascii\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "is not JSON serializable"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "reasoning stored as UTF-8 text",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "base64.b64encode(message.reasoning).decode(\"ascii\")",
+          "new": "message.reasoning.decode(\"utf-8\")"
+        },
+        {
+          "file": "transcript.py",
+          "old": "base64.b64decode(record[\"reasoning\"], validate=True)",
+          "new": "record[\"reasoning\"].encode(\"utf-8\")"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "reasoning decoded with errors='replace'",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "base64.b64encode(message.reasoning).decode(\"ascii\")",
+          "new": "message.reasoning.decode(\"utf-8\", \"replace\")"
+        },
+        {
+          "file": "transcript.py",
+          "old": "base64.b64decode(record[\"reasoning\"], validate=True)",
+          "new": "record[\"reasoning\"].encode(\"utf-8\")"
+        }
+      ],
+      "expect": "a transcript reads back exactly"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "reasoning stored as hex",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "base64.b64encode(message.reasoning).decode(\"ascii\")",
+          "new": "message.reasoning.hex()"
+        },
+        {
+          "file": "transcript.py",
+          "old": "base64.b64decode(record[\"reasoning\"], validate=True)",
+          "new": "bytes.fromhex(record[\"reasoning\"])"
+        }
+      ],
+      "expect": "the snapshot keeps the layout the trace viewer reads"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "reasoning stored as URL-safe base64",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "base64.b64encode(message.reasoning).decode(\"ascii\")",
+          "new": "base64.urlsafe_b64encode(message.reasoning).decode(\"ascii\")"
+        },
+        {
+          "file": "transcript.py",
+          "old": "base64.b64decode(record[\"reasoning\"], validate=True)",
+          "new": "base64.urlsafe_b64decode(record[\"reasoning\"])"
+        }
+      ],
+      "expect": "the snapshot keeps the layout the trace viewer reads"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "reasoning stored as latin-1 text",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "base64.b64encode(message.reasoning).decode(\"ascii\")",
+          "new": "message.reasoning.decode(\"latin-1\")"
+        },
+        {
+          "file": "transcript.py",
+          "old": "base64.b64decode(record[\"reasoning\"], validate=True)",
+          "new": "record[\"reasoning\"].encode(\"latin-1\")"
+        }
+      ],
+      "expect": "the snapshot keeps the layout the trace viewer reads"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "no reasoning written as an empty item",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "        if message.reasoning is not None:\n            record[\"reasoning\"] = base64.b64encode(message.reasoning).decode(\"ascii\")\n",
+          "new": "        record[\"reasoning\"] = base64.b64encode(message.reasoning or b\"\").decode(\"ascii\")\n"
+        }
+      ],
+      "expect": "a transcript reads back exactly"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "tool calls read back as dicts",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "        record[\"tool_calls\"] = [ToolCall(**call) for call in record[\"tool_calls\"]]\n",
+          "new": ""
+        }
+      ],
+      "expect": "a transcript reads back exactly"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "non-ASCII written as is",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    text = json.dumps({\"version\": VERSION, \"messages\": records})\n",
+          "new": "    text = json.dumps({\"version\": VERSION, \"messages\": records}, ensure_ascii=False)\n"
+        }
+      ],
+      "expect": "UnicodeEncodeError"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "the snapshot rewritten in place",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f\".{target.name}.\", suffix=\".tmp\")\n    try:\n        with os.fdopen(fd, \"w\", encoding=\"utf-8\") as f:\n            f.write(text)\n            f.flush()\n            os.fsync(f.fileno())\n        os.replace(tmp, target)\n    except BaseException:\n        os.unlink(tmp)\n        raise\n",
+          "new": "    target.write_text(text, encoding=\"utf-8\")\n"
+        }
+      ],
+      "expect": "a reader of the old one still reads the old one"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "json.dump straight into the snapshot",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    text = json.dumps({\"version\": VERSION, \"messages\": records})\n    target = Path(path)\n",
+          "new": "    target = Path(path)\n    with open(target, \"w\", encoding=\"utf-8\") as f:\n        json.dump({\"version\": VERSION, \"messages\": records}, f)\n    return\n"
+        }
+      ],
+      "expect": "a reader of the old one still reads the old one"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "a temporary file left behind when a save fails",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    text = json.dumps({\"version\": VERSION, \"messages\": records})\n    target = Path(path)\n    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f\".{target.name}.\", suffix=\".tmp\")\n    try:\n        with os.fdopen(fd, \"w\", encoding=\"utf-8\") as f:\n            f.write(text)\n            f.flush()\n            os.fsync(f.fileno())\n        os.replace(tmp, target)\n    except BaseException:\n        os.unlink(tmp)\n        raise\n",
+          "new": "    target = Path(path)\n    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f\".{target.name}.\", suffix=\".tmp\")\n    with os.fdopen(fd, \"w\", encoding=\"utf-8\") as f:\n        json.dump({\"version\": VERSION, \"messages\": records}, f)\n    os.replace(tmp, target)\n"
+        }
+      ],
+      "expect": "a save that fails leaves nothing behind"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "a result JSON cannot hold saved as its str()",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    text = json.dumps({\"version\": VERSION, \"messages\": records})\n",
+          "new": "    text = json.dumps({\"version\": VERSION, \"messages\": records}, default=str)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "half an emoji written with surrogatepass",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "    text = json.dumps({\"version\": VERSION, \"messages\": records})\n",
+          "new": "    text = json.dumps({\"version\": VERSION, \"messages\": records}, ensure_ascii=False)\n"
+        },
+        {
+          "file": "transcript.py",
+          "old": "        with os.fdopen(fd, \"w\", encoding=\"utf-8\") as f:\n",
+          "new": "        with os.fdopen(fd, \"w\", encoding=\"utf-8\", errors=\"surrogatepass\") as f:\n"
+        },
+        {
+          "file": "transcript.py",
+          "old": "    data = json.loads(Path(path).read_text(encoding=\"utf-8\"))\n",
+          "new": "    data = json.loads(Path(path).read_text(encoding=\"utf-8\", errors=\"surrogatepass\"))\n"
+        }
+      ],
+      "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "reasoning written with base64.encodebytes",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "base64.b64encode(message.reasoning).decode(\"ascii\")",
+          "new": "base64.encodebytes(message.reasoning).decode(\"ascii\")"
+        },
+        {
+          "file": "transcript.py",
+          "old": "base64.b64decode(record[\"reasoning\"], validate=True)",
+          "new": "base64.decodebytes(record[\"reasoning\"].encode(\"ascii\"))"
+        }
+      ],
+      "expect": "the snapshot keeps the layout the trace viewer reads"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "reasoning written as base64 without padding",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "base64.b64encode(message.reasoning).decode(\"ascii\")",
+          "new": "base64.b64encode(message.reasoning).decode(\"ascii\").rstrip(\"=\")"
+        },
+        {
+          "file": "transcript.py",
+          "old": "base64.b64decode(record[\"reasoning\"], validate=True)",
+          "new": "base64.b64decode(record[\"reasoning\"] + \"=\" * (-len(record[\"reasoning\"]) % 4))"
+        }
+      ],
+      "expect": "the snapshot keeps the layout the trace viewer reads"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "reasoning written as a list of byte values",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "base64.b64encode(message.reasoning).decode(\"ascii\")",
+          "new": "list(message.reasoning)"
+        },
+        {
+          "file": "transcript.py",
+          "old": "base64.b64decode(record[\"reasoning\"], validate=True)",
+          "new": "bytes(record[\"reasoning\"])"
+        }
+      ],
+      "expect": "the snapshot keeps the layout the trace viewer reads"
+    },
+    {
+      "test": "test_transcript_snapshot",
+      "name": "raw results left out of the snapshot",
+      "edits": [
+        {
+          "file": "transcript.py",
+          "old": "        record = asdict(message)\n",
+          "new": "        record = asdict(message)\n        record[\"result\"] = None\n"
+        }
+      ],
+      "expect": "a transcript reads back exactly"
+    },
+    {
+      "test": "test_react_text",
+      "name": "arguments split on commas",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "def _read_action(source: str) -> tuple[str, list[str]]:\n",
+          "new": "def _read_action(source: str) -> tuple[str, list[str]]:\n    match = re.fullmatch(r\"([A-Za-z_][A-Za-z0-9_.]*)\\((.*)\\)\", source)\n    if match is None:\n        raise ValueError(\"expected name(arguments)\")\n    inner = match.group(2).strip()\n    args = [json.loads(part) for part in inner.split(\",\")] if inner else []\n    if not all(isinstance(arg, str) for arg in args):\n        raise ValueError(\"arguments are strings\")\n    if match.group(1) == FINISH and len(args) != 1:\n        raise ValueError(\"finish takes exactly one argument\")\n    return match.group(1), args\n\n\ndef _old_read_action(source: str) -> tuple[str, list[str]]:\n"
+        }
+      ],
+      "expect": "commas and parentheses inside an argument belong to it"
+    },
+    {
+      "test": "test_react_text",
+      "name": "arguments read as a Python list literal",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "def _read_action(source: str) -> tuple[str, list[str]]:\n",
+          "new": "def _read_action(source: str) -> tuple[str, list[str]]:\n    import ast\n\n    match = re.fullmatch(r\"([A-Za-z_][A-Za-z0-9_.]*)\\((.*)\\)\", source)\n    if match is None:\n        raise ValueError(\"expected name(arguments)\")\n    try:\n        args = ast.literal_eval(f\"[{match.group(2)}]\")\n    except SyntaxError as e:\n        raise ValueError(str(e)) from e\n    if not all(isinstance(arg, str) for arg in args):\n        raise ValueError(\"arguments are strings\")\n    if match.group(1) == FINISH and len(args) != 1:\n        raise ValueError(\"finish takes exactly one argument\")\n    return match.group(1), args\n\n\ndef _old_read_action(source: str) -> tuple[str, list[str]]:\n"
+        }
+      ],
+      "expect": "no readable action in \"Action: search('capital of France')\""
+    },
+    {
+      "test": "test_react_text",
+      "name": "an Observation the model wrote before its Action kept",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "        if line.startswith(\"Observation:\"):\n            break\n",
+          "new": ""
+        }
+      ],
+      "expect": "no readable action in 'Thought: I know this one."
+    },
+    {
+      "test": "test_react_text",
+      "name": "only the first line of a Thought kept",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "    thought = \"\\n\".join(kept).strip()\n",
+          "new": "    thought = kept[0].strip() if kept else \"\"\n"
+        }
+      ],
+      "expect": "a Thought goes on until the Action line"
+    },
+    {
+      "test": "test_react_text",
+      "name": "Action: found anywhere in a line",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "        if line.startswith(\"Action:\"):\n",
+          "new": "        if \"Action:\" in line:\n"
+        },
+        {
+          "file": "react.py",
+          "old": "_read_action(action_line[len(\"Action:\") :].strip())",
+          "new": "_read_action(action_line.split(\"Action:\", 1)[1].strip())"
+        }
+      ],
+      "expect": "a Thought goes on until the Action line"
+    },
+    {
+      "test": "test_react_text",
+      "name": "a number accepted as an argument",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "            if source[pos : pos + 1] != '\"':\n                raise ValueError(\"arguments are double-quoted strings\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "no readable action in 'Action: kv_get(42)'"
+    },
+    {
+      "test": "test_react_text",
+      "name": "text after the closing parenthesis ignored",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "    if source[pos:].strip():\n        raise ValueError(\"text after the closing parenthesis\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "no readable action in 'Action: search(\"Paris\") and then finish'"
+    },
+    {
+      "test": "test_react_text",
+      "name": "finish with any number of arguments",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "    if name == FINISH and len(args) != 1:\n        raise ValueError(\"finish takes exactly one argument\")\n",
+          "new": ""
+        },
+        {
+          "file": "react.py",
+          "old": "            return ReactRun(step.args[0], steps)\n",
+          "new": "            return ReactRun(\", \".join(step.args), steps)\n"
+        }
+      ],
+      "expect": "no readable action in 'Action: finish(\"Paris\", \"France\")'"
+    },
+    {
+      "test": "test_react_text",
+      "name": "the whole completion copied into the scratchpad",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "        step = parse_step(model.complete(prompt))\n",
+          "new": "        completion = model.complete(prompt)\n        step = parse_step(completion)\n"
+        },
+        {
+          "file": "react.py",
+          "old": "        prompt += f\"{step.text}\\nObservation: {observation}\\n\"\n",
+          "new": "        prompt += f\"{completion}\\nObservation: {observation}\\n\"\n"
+        }
+      ],
+      "expect": "each prompt carries every step so far, with the runtime's observations"
+    },
+    {
+      "test": "test_react_text",
+      "name": "a step without a readable action ends the run",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "        if step.action is None:\n            observation = FORMAT_ERROR\n",
+          "new": "        if step.action is None:\n            return ReactRun(None, steps)\n"
+        }
+      ],
+      "expect": "finish's argument is the answer"
+    },
+    {
+      "test": "test_react_text",
+      "name": "a step without a readable action skipped",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "        if step.action is None:\n            observation = FORMAT_ERROR\n",
+          "new": "        if step.action is None:\n            continue\n"
+        }
+      ],
+      "expect": "each prompt carries every step so far, with the runtime's observations"
+    },
+    {
+      "test": "test_react_text",
+      "name": "arguments read as a JSON array of any values",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "def _read_action(source: str) -> tuple[str, list[str]]:\n",
+          "new": "def _read_action(source: str) -> tuple[str, list[str]]:\n    match = re.fullmatch(r\"([A-Za-z_][A-Za-z0-9_.]*)\\((.*)\\)\", source)\n    if match is None:\n        raise ValueError(\"expected name(arguments)\")\n    args = json.loads(f\"[{match.group(2)}]\")\n    if match.group(1) == FINISH and len(args) != 1:\n        raise ValueError(\"finish takes exactly one argument\")\n    return match.group(1), args\n\n\ndef _old_read_action(source: str) -> tuple[str, list[str]]:\n"
+        }
+      ],
+      "expect": "no readable action in 'Action: kv_get(42)'"
+    },
+    {
+      "test": "test_react_text",
+      "name": "the completion cut only at a newline before Observation:",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "    for line in completion.split(\"\\n\"):\n",
+          "new": "    for line in completion.split(\"\\nObservation:\")[0].split(\"\\n\"):\n"
+        },
+        {
+          "file": "react.py",
+          "old": "        if line.startswith(\"Observation:\"):\n            break\n",
+          "new": ""
+        }
+      ],
+      "expect": "no readable action in 'Observation: Paris is the capital."
+    },
+    {
+      "test": "test_react_text",
+      "name": "the completion cut at Observation: anywhere in a line",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "    for line in completion.split(\"\\n\"):\n",
+          "new": "    for line in completion.split(\"Observation:\")[0].split(\"\\n\"):\n"
+        }
+      ],
+      "expect": "a Thought goes on until the Action line"
+    },
+    {
+      "test": "test_react_text",
+      "name": "escapes decoded with unicode_escape",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "def _read_action(source: str) -> tuple[str, list[str]]:\n",
+          "new": "def _read_action(source: str) -> tuple[str, list[str]]:\n    string = r'\"(?:[^\"\\\\]|\\\\.)*\"'\n    match = re.fullmatch(rf\"([A-Za-z_][A-Za-z0-9_.]*)\\(\\s*((?:{string}\\s*(?:,\\s*{string}\\s*)*)?)\\)\", source)\n    if match is None:\n        raise ValueError(\"expected name(\\\"argument\\\", ...)\")\n    args = [raw[1:-1].encode().decode(\"unicode_escape\") for raw in re.findall(string, match.group(2))]\n    if match.group(1) == FINISH and len(args) != 1:\n        raise ValueError(\"finish takes exactly one argument\")\n    return match.group(1), args\n\n\ndef _old_read_action(source: str) -> tuple[str, list[str]]:\n"
+        }
+      ],
+      "expect": "read the action in 'Action: search(\"Zürich, 東京\")'"
+    },
+    {
+      "test": "test_react_text",
+      "name": "finish() without an answer accepted",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "    if name == FINISH and len(args) != 1:\n",
+          "new": "    if name == FINISH and len(args) > 1:\n"
+        }
+      ],
+      "expect": "no readable action in 'Action: finish()'"
+    },
+    {
+      "test": "test_react_text",
+      "name": "the last Action line taken",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "    kept: list[str] = []\n    action_line = None\n    for line in completion.split(\"\\n\"):\n        if line.startswith(\"Observation:\"):\n            break\n        kept.append(line)\n        if line.startswith(\"Action:\"):\n            action_line = kept.pop()\n            break\n    thought = \"\\n\".join(kept).strip()\n    if thought.startswith(\"Thought:\"):\n        thought = thought[len(\"Thought:\") :].strip()\n    text = \"\\n\".join(kept + ([action_line] if action_line is not None else [])).rstrip()\n",
+          "new": "    lines: list[str] = []\n    for line in completion.split(\"\\n\"):\n        if line.startswith(\"Observation:\"):\n            break\n        lines.append(line)\n    actions = [i for i, line in enumerate(lines) if line.startswith(\"Action:\")]\n    action_line = lines[actions[-1]] if actions else None\n    kept = lines[: actions[-1]] if actions else lines\n    thought = \"\\n\".join(kept).strip()\n    if thought.startswith(\"Thought:\"):\n        thought = thought[len(\"Thought:\") :].strip()\n    text = \"\\n\".join(kept + ([action_line] if action_line is not None else [])).rstrip()\n"
+        }
+      ],
+      "expect": "only the first Action line counts, and the step ends with it"
+    },
+    {
+      "test": "test_react_text",
+      "name": "the lines after the Action line kept in the step",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "    kept: list[str] = []\n    action_line = None\n    for line in completion.split(\"\\n\"):\n        if line.startswith(\"Observation:\"):\n            break\n        kept.append(line)\n        if line.startswith(\"Action:\"):\n            action_line = kept.pop()\n            break\n    thought = \"\\n\".join(kept).strip()\n    if thought.startswith(\"Thought:\"):\n        thought = thought[len(\"Thought:\") :].strip()\n    text = \"\\n\".join(kept + ([action_line] if action_line is not None else [])).rstrip()\n",
+          "new": "    kept: list[str] = []\n    rest: list[str] = []\n    action_line = None\n    for line in completion.split(\"\\n\"):\n        if line.startswith(\"Observation:\"):\n            break\n        if action_line is None and line.startswith(\"Action:\"):\n            action_line = line\n            continue\n        (kept if action_line is None else rest).append(line)\n    thought = \"\\n\".join(kept).strip()\n    if thought.startswith(\"Thought:\"):\n        thought = thought[len(\"Thought:\") :].strip()\n    text = \"\\n\".join(kept + ([action_line] if action_line is not None else []) + rest).rstrip()\n"
+        }
+      ],
+      "expect": "only the first Action line counts, and the step ends with it"
+    },
+    {
+      "test": "test_react_text",
+      "name": "an Observation line skipped, the lines after it kept",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "        if line.startswith(\"Observation:\"):\n            break\n        kept.append(line)",
+          "new": "        if line.startswith(\"Observation:\"):\n            continue\n        kept.append(line)"
+        }
+      ],
+      "expect": "no readable action in 'Thought: I know this one."
+    },
+    {
+      "test": "test_react_text",
+      "name": "each argument decoded as a Python string literal",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "            value, pos = _STRING.raw_decode(source, pos)\n",
+          "new": "            import ast\n            token = re.compile(r'\"(?:[^\"\\\\]|\\\\.)*\"').match(source, pos)\n            if token is None:\n                raise ValueError(\"unterminated string\")\n            value, pos = ast.literal_eval(token.group()), token.end()\n"
+        }
+      ],
+      "expect": "an escaped surrogate pair is one character, as in JSON"
+    },
+    {
+      "test": "test_react_text",
+      "name": "the raw result written into the prompt instead of observe(result)",
+      "edits": [
+        {
+          "file": "react.py",
+          "old": "            observation = observe(tools.dispatch(ToolCall(step.action, list(step.args))))\n",
+          "new": "            observation = str(tools.dispatch(ToolCall(step.action, list(step.args))))\n"
+        }
+      ],
+      "expect": "each prompt carries every step so far, with the runtime's observations"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "lines split with str.splitlines()",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "for line in _LINE_BREAK.split(text))",
+          "new": "for line in text.splitlines())"
+        }
+      ],
+      "expect": "each on its own channel, line for line"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "lines split on \\n only",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "for line in _LINE_BREAK.split(text))",
+          "new": "for line in text.split(\"\\n\"))"
+        }
+      ],
+      "expect": "each on its own channel, line for line"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "data: written without its space",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "f\"data: {line}\\n\"",
+          "new": "f\"data:{line}\\n\""
+        }
+      ],
+      "expect": "each on its own channel, line for line"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "the thinking folded into the final answer",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            yield _event(\"final\", message.content)\n",
+          "new": "            yield _event(\"final\", message.thinking + message.content)\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "                yield _event(\"final\", finish_answer(call))\n",
+          "new": "                yield _event(\"final\", message.thinking + finish_answer(call))\n"
+        }
+      ],
+      "expect": "each on its own channel, line for line"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "text that comes with tool calls sent as final",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        message = loop.record(reply)\n",
+          "new": "        message = loop.record(reply)\n        if message.content and message.tool_calls:\n            yield _event(\"final\", message.content)\n"
+        }
+      ],
+      "expect": "each on its own channel, line for line"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "a turn's thinking sent once the model is done",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        reply = None\n        async for kind, value in loop.model.stream(loop.messages()):\n            if kind == \"thinking\":\n                yield _event(\"reasoning\", value)\n            else:\n                reply = value\n",
+          "new": "        reply, pieces = None, []\n        async for kind, value in loop.model.stream(loop.messages()):\n            if kind == \"thinking\":\n                pieces.append(value)\n            else:\n                reply = value\n        for piece in pieces:\n            yield _event(\"reasoning\", piece)\n"
+        }
+      ],
+      "expect": "each event is sent as soon as it happens"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "the tool run before its action is sent",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            yield _event(\"action\", json.dumps({\"name\": call.name, \"args\": call.args}))\n            yield _event(\"observation\", loop.act(call).content)\n",
+          "new": "            observation = loop.act(call).content\n            yield _event(\"action\", json.dumps({\"name\": call.name, \"args\": call.args}))\n            yield _event(\"observation\", observation)\n"
+        }
+      ],
+      "expect": "each event is sent as soon as it happens"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "the assistant turn rebuilt without its reasoning item",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        message = loop.record(reply)\n",
+          "new": "        message = loop.record({key: value for key, value in reply.items() if key != \"reasoning\"})\n"
+        }
+      ],
+      "expect": "missing reasoning item for assistant turn 1"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "an action and its observation sent as one item",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            yield _event(\"action\", json.dumps({\"name\": call.name, \"args\": call.args}))\n            yield _event(\"observation\", loop.act(call).content)\n",
+          "new": "            yield _event(\"action\", json.dumps({\"name\": call.name, \"args\": call.args})) + _event(\"observation\", loop.act(call).content)\n"
+        }
+      ],
+      "expect": "each item is one event, ending in a blank line"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "no blank line after an event",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    return f\"event: {kind}\\n{data}\\n\"\n",
+          "new": "    return f\"event: {kind}\\n{data}\"\n"
+        }
+      ],
+      "expect": "each item is one event, ending in a blank line"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "an empty text sent without a data line",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    data = \"\".join(f\"data: {line}\\n\" for line in _LINE_BREAK.split(text))\n",
+          "new": "    data = \"\".join(f\"data: {line}\\n\" for line in _LINE_BREAK.split(text)) if text else \"\"\n"
+        }
+      ],
+      "expect": "each on its own channel, line for line"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "line breaks matched CR first",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "_LINE_BREAK = re.compile(r\"\\r\\n|\\r|\\n\")",
+          "new": "_LINE_BREAK = re.compile(r\"\\r|\\n|\\r\\n\")"
+        }
+      ],
+      "expect": "each on its own channel, line for line"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "CRLF and LF split, a bare CR kept",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "_LINE_BREAK = re.compile(r\"\\r\\n|\\r|\\n\")",
+          "new": "_LINE_BREAK = re.compile(r\"\\r?\\n\")"
+        }
+      ],
+      "expect": "each on its own channel, line for line"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "the finish call streamed as an action",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if call.name == FINISH:\n                yield _event(\"final\", finish_answer(call))\n                return\n",
+          "new": ""
+        }
+      ],
+      "expect": "no scripted reply left for request 4"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "a streamed turn without tool calls not taken as the answer",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        if not message.tool_calls:\n            yield _event(\"final\", message.content)\n            return\n",
+          "new": ""
+        }
+      ],
+      "expect": "no scripted reply left for request 2"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "line breaks split with [\\r\\n]+",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "_LINE_BREAK = re.compile(r\"\\r\\n|\\r|\\n\")",
+          "new": "_LINE_BREAK = re.compile(r\"[\\r\\n]+\")"
+        }
+      ],
+      "expect": "each on its own channel, line for line"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "data lines made with replace('\\n', '\\ndata: ')",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    data = \"\".join(f\"data: {line}\\n\" for line in _LINE_BREAK.split(text))\n",
+          "new": "    data = \"data: \" + text.replace(\"\\n\", \"\\ndata: \") + \"\\n\"\n"
+        }
+      ],
+      "expect": "each on its own channel, line for line"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "thinking pieces stripped",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "                yield _event(\"reasoning\", value)\n",
+          "new": "                yield _event(\"reasoning\", value.strip())\n"
+        }
+      ],
+      "expect": "each on its own channel, line for line"
+    },
+    {
+      "test": "test_stream_events",
+      "name": "an action event sent for finish too",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if call.name == FINISH:\n                yield _event(\"final\", finish_answer(call))",
+          "new": "            if call.name == FINISH:\n                yield _event(\"action\", json.dumps({\"name\": call.name, \"args\": call.args}))\n                yield _event(\"final\", finish_answer(call))"
+        }
+      ],
+      "expect": "each on its own channel, line for line"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "keys in insertion order",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "keys = sorted(value)[:max_items]",
+          "new": "keys = list(value)[:max_items]"
+        }
+      ],
+      "expect": "keys in sorted order, values as JSON"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "scalars written with str()",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "    if value is None or isinstance(value, (bool, int, float, str)):\n        return json.dumps(value, ensure_ascii=False)\n",
+          "new": "    if isinstance(value, str):\n        return json.dumps(value, ensure_ascii=False)\n    if value is None or isinstance(value, (bool, int, float)):\n        return str(value)\n"
+        }
+      ],
+      "expect": "keys in sorted order, values as JSON"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "strings written with repr()",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "    if value is None or isinstance(value, (bool, int, float, str)):\n        return json.dumps(value, ensure_ascii=False)\n",
+          "new": "    if isinstance(value, str):\n        return repr(value)\n    if value is None or isinstance(value, (bool, int, float)):\n        return json.dumps(value)\n"
+        },
+        {
+          "file": "formatter.py",
+          "old": "f\"{json.dumps(key, ensure_ascii=False)}: \"",
+          "new": "f\"{key!r}: \""
+        }
+      ],
+      "expect": "keys in sorted order, values as JSON"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "non-ASCII escaped in strings",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "    if value is None or isinstance(value, (bool, int, float, str)):\n        return json.dumps(value, ensure_ascii=False)\n",
+          "new": "    if value is None or isinstance(value, (bool, int, float, str)):\n        return json.dumps(value)\n"
+        }
+      ],
+      "expect": "strings inside a result are JSON strings"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "the marker added when a container is exactly full",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "        if len(value) > max_items:\n",
+          "new": "        if len(value) >= max_items:\n"
+        }
+      ],
+      "expect": "nothing is left out when everything fits"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "a tuple taken for a scalar",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "    if isinstance(value, (dict, list, tuple)):\n",
+          "new": "    if isinstance(value, (dict, list)):\n"
+        }
+      ],
+      "expect": "a container shows at most max_items entries"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "depth counted from 0",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "        if depth > max_depth:\n",
+          "new": "        if depth >= max_depth:\n"
+        }
+      ],
+      "expect": "containers below max_depth are elided"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "empty containers elided below max_depth too",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "        if not value:\n            return opening + closing\n        if depth > max_depth:\n            return opening + \"…\" + closing\n",
+          "new": "        if depth > max_depth:\n            return opening + \"…\" + closing\n        if not value:\n            return opening + closing\n"
+        }
+      ],
+      "expect": "containers below max_depth are elided, empty ones are not"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "one seen set for the whole result",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "        finally:\n            path.discard(id(value))\n",
+          "new": "        finally:\n            pass\n"
+        }
+      ],
+      "expect": "the same object reached twice is not a cycle"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "a string result quoted like the strings inside",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "    text = value if isinstance(value, str) else _render(value, 1, max_items, max_depth, set())\n",
+          "new": "    text = _render(value, 1, max_items, max_depth, set())\n"
+        }
+      ],
+      "expect": "a string result is the observation as it is"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "the marker added after cutting to the budget",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "        text = text[: budget - len(TRUNCATED)] + TRUNCATED\n",
+          "new": "        text = text[:budget] + TRUNCATED\n"
+        }
+      ],
+      "expect": "an observation is at most budget characters, marker included"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "the budget counted in UTF-8 bytes",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "    if len(text) > budget:\n        text = text[: budget - len(TRUNCATED)] + TRUNCATED\n",
+          "new": "    if len(text.encode()) > budget:\n        room = budget - len(TRUNCATED.encode())\n        text = text.encode()[:room].decode(errors=\"ignore\") + TRUNCATED\n"
+        }
+      ],
+      "expect": "an observation is at most budget characters, marker included"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "a rendering that just fits cut anyway",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "    if len(text) > budget:\n",
+          "new": "    if len(text) >= budget:\n"
+        }
+      ],
+      "expect": "a result that fits is not cut"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "keys sorted without regard to case",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "keys = sorted(value)[:max_items]",
+          "new": "keys = sorted(value, key=str.lower)[:max_items]"
+        }
+      ],
+      "expect": "keys in plain sorted() order"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "a string result returned whole",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "    text = value if isinstance(value, str) else _render(value, 1, max_items, max_depth, set())\n",
+          "new": "    if isinstance(value, str):\n        return value\n    text = _render(value, 1, max_items, max_depth, set())\n"
+        }
+      ],
+      "expect": "a string result is held to the budget too"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "keys escaped to ASCII",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "f\"{json.dumps(key, ensure_ascii=False)}: \"",
+          "new": "f\"{json.dumps(key)}: \""
+        }
+      ],
+      "expect": "strings inside a result are JSON strings"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "keys quoted with an f-string",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "f\"{json.dumps(key, ensure_ascii=False)}: \"",
+          "new": "f'\"{key}\": '"
+        }
+      ],
+      "expect": "keys are JSON strings too"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "max_items keys taken before sorting",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "keys = sorted(value)[:max_items]",
+          "new": "keys = sorted(list(value)[:max_items])"
+        }
+      ],
+      "expect": "a dict shows its first keys in sorted order"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "depth counted for dicts only",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "parts = [_render(item, depth + 1, max_items, max_depth, path) for item in value[:max_items]]",
+          "new": "parts = [_render(item, depth, max_items, max_depth, path) for item in value[:max_items]]"
+        }
+      ],
+      "expect": "containers below max_depth are elided, empty ones are not"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "cut with a one-character ellipsis instead of TRUNCATED",
+      "edits": [
+        {
+          "file": "formatter.py",
+          "old": "        text = text[: budget - len(TRUNCATED)] + TRUNCATED\n",
+          "new": "        text = text[: budget - 1] + \"…\"\n"
+        }
+      ],
+      "expect": "an observation is at most budget characters, marker included"
+    },
+    {
+      "test": "test_nested_observation",
+      "name": "the loop formats with to_observation instead of observe",
+      "edits": [
+        {
+          "file": "loop.py",
+          "old": "Message(\"tool\", self.observe(result),",
+          "new": "Message(\"tool\", to_observation(result),"
+        }
+      ],
+      "expect": "Circular reference detected"
+    }
+  ]
+}

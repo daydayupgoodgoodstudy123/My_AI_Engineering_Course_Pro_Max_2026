@@ -1,0 +1,113 @@
+{
+  "lesson": "phases/14-agent-engineering/01-the-agent-loop",
+  "title": "The Agent Loop: Observe, Think, Act",
+  "format": "staged-brownfield",
+  "service": "ReactLoop: a ReAct agent loop over a native-reasoning model, with a tool registry, JSON transcript snapshots, a text front end for prompt-based ReAct models, an SSE stream for the UI and a nested observation formatter",
+  "sources": {
+    "docs/en.md": "5f40298b9c1cbabd41a85ede8679c80c55b9a6c9ed92ac661ecd1f9aba18b83e",
+    "code/main.py": "5fc9514531f6c088b593da55a99877887d8aa96cc0acbb63376fe1787230e534"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_agent_loop",
+      "kind": "debug",
+      "lesson_anchor": "The five ingredients (3 stop condition: no tool calls; 5 observation formatter); The 2026 shift: native reasoning (passed through turns); 2026 pitfalls: Loop length explosion; Exercise 2; code/main.py AgentLoop.run and ToolRegistry.dispatch; quiz Q9",
+      "planted_bugs": [
+        "record reads reply['tool_calls'], so a reply that just answers is a KeyError, and run has no 'no tool calls -> done' stop at all",
+        "record keeps the readable thinking but drops the opaque reasoning item; the error surfaces one turn later inside ScriptedModel.respond as 'missing reasoning item for assistant turn 1'",
+        "dispatch wraps the tool call in except TypeError, so int(None) inside a tool is reported as bad args (the model would keep changing its arguments)",
+        "messages() re-renders every past tool result into a new Message on every turn, so the history never holds its observations and a long run is quadratic"
+      ],
+      "timing_assert": "1000 tool turns with 481-496-character results under 0.12 s; the per-turn re-rendering version takes 1.67-1.93 s on this machine (2.8-3.0 s with ten busy processes on ten cores), the fixed loop 8.1-8.8 ms (8.7-16.4 ms under the same load)",
+      "overfix_guard": "text next to tool calls is not the answer (stop-on-any-text fails); an explicit empty tool_calls list and a reply without text both end the run; finish never reaches the registry; bind_partial and sniffing the TypeError message for 'argument' both fail, and so does a hand-written check that looks only at missing parameters (an extra warehouse argument), only at the argument count (a misnamed item argument) or only at keyword arguments (positional ones, as ReAct text gives them); a cached view that leaves the history without observations, or an observation without its raw result, fails"
+    },
+    {
+      "part": 2,
+      "test": "test_transcript_snapshot",
+      "kind": "model and persistence",
+      "lesson_anchor": "The five ingredients 1 (message buffer); 2026 pitfalls: Loop length explosion (debugging step 38 of a 40-400 step run); The 2026 shift: native reasoning (encrypted reasoning passed through turns)",
+      "exactness": "a real run's history reads back exactly (exact() tells -0.0 from 0.0, 1 from 1.0 and True, bytes from str, ToolCall from dict): reasoning items that are not valid UTF-8, a 61-bit order id, 0.1 + 0.2, -0.0, a courier note cut in half an emoji (a lone surrogate), and a fresh ScriptedModel with the same key accepts the loaded reasoning items and continues the run",
+      "traps": [
+        "bytes handed to json as they are",
+        "reasoning decoded as UTF-8, or with errors='replace'",
+        "hex, latin-1, URL-safe base64 or base64.encodebytes instead of standard base64 (pinned with +/8AcnM=)",
+        "no reasoning written as an empty item instead of null",
+        "ToolCall not rebuilt from its dict",
+        "ensure_ascii=False on the lone surrogate (UnicodeEncodeError), or surrogatepass (the viewer cannot read the file as UTF-8)",
+        "write_text or json.dump into the snapshot itself instead of a temporary file and os.replace (a reader of the old file sees the new one)",
+        "a temporary file left behind when a save fails",
+        "default=str hides a result JSON cannot hold"
+      ],
+      "clarifying_questions": ["hex or latin-1 for the reasoning", "a result JSON cannot hold", "fsync", "pretty-printed or compact", "version check on load"]
+    },
+    {
+      "part": 3,
+      "test": "test_react_text",
+      "kind": "core algorithm",
+      "lesson_anchor": "ReAct: the canonical format (Thought, Action: search(\"...\"), Observation, Action: finish(\"...\")); Exercise 3 (a malformed Action answered with an error observation); Build It tool names such as kv_store.get",
+      "traps": [
+        "a model-written Observation: line kept, before or after the Action, or at the very start of the completion",
+        "the completion cut only at a newline before Observation:, or at Observation: in the middle of a line",
+        "a multi-line Thought cut to its first line; Action: in the middle of a line taken as the action",
+        "the last of two Action lines taken, or the lines after the first Action line kept in the step",
+        "arguments split on commas, or parentheses matched lazily",
+        "ast.literal_eval accepting single quotes and trailing commas; json.loads of the argument list accepting numbers",
+        "escapes decoded with unicode_escape (breaks non-Latin-1 text), or as Python string literals (an escaped surrogate pair stays two surrogates)",
+        "finish with no argument or two",
+        "text after the closing parenthesis",
+        "a malformed step ending the run or skipped instead of answered with FORMAT_ERROR",
+        "the whole completion copied into the scratchpad",
+        "the raw tool result written into the prompt instead of observe(result)"
+      ],
+      "integration": "a scripted text model runs through run_react end to end: a hallucinated observation is dropped, a single-quoted action and an observation-before-action step both get FORMAT_ERROR, the search tool's list result reaches the prompt as JSON, and the exact prompts are checked",
+      "clarifying_questions": ["single-quoted arguments", "two actions in one completion", "keywords in the middle of a line", "unknown tools", "the reason behind FORMAT_ERROR"]
+    },
+    {
+      "part": 4,
+      "test": "test_stream_events",
+      "kind": "streaming",
+      "lesson_anchor": "The 2026 shift: native reasoning (reasoning content on a separate channel); Key Terms: Reasoning channel (native reasoning output on a separate stream)",
+      "wire_format": "server-sent events: one event per yielded item, event: reasoning / action / observation / final, a data: line per line of text, decided by the test's EventSource-style parser (CR, LF and CRLF line ends, one space stripped after the colon, no dispatch without data)",
+      "traps": [
+        "split('\\n') or \\r?\\n leaving a bare CR from progress output inside a data line",
+        "a line-break regex that tries CR before CRLF",
+        "str.splitlines() splitting on U+2028 and sending no data line for an empty observation",
+        "[\\r\\n]+ swallowing the blank line in the answer",
+        "data: without its space losing indentation",
+        "thinking folded into the final answer; text that comes with tool calls sent as final",
+        "a turn's thinking sent after the model finished; a tool run before its action is sent",
+        "the finish call streamed as an action; a turn without tool calls not taken as the answer",
+        "the reasoning item left out of the history",
+        "two events in one item, or no blank line"
+      ],
+      "clarifying_questions": ["text that comes with tool calls", "one reasoning event per piece", "LF or CRLF", "the encrypted item", "final when max_turns runs out"]
+    },
+    {
+      "part": 5,
+      "test": "test_nested_observation",
+      "kind": "recursive structure",
+      "lesson_anchor": "The five ingredients 5 (observation formatter: tool outputs into something the model can read); Key Terms: Observation",
+      "traps": [
+        "keys in insertion order, or sorted without regard to case",
+        "the '… k more' marker when a container is exactly full",
+        "depth counted from 0; empty containers elided below max_depth",
+        "a tuple taken for a scalar",
+        "one seen set for the whole result, so a shared object is written [cycle]",
+        "scalars with str() or strings with repr(); keys or values escaped to ASCII; keys quoted with an f-string instead of written as JSON strings",
+        "a string result quoted, or returned whole past the budget",
+        "the budget in UTF-8 bytes, the marker added after cutting, or a rendering that just fits cut anyway"
+      ],
+      "integration": "the formatter plugged into AgentLoop as observe: a page tree with parent pointers, which the default JSON observation cannot encode, reaches the model as [cycle], and error strings pass through as they are",
+      "clarifying_questions": ["key order and case", "what counts as a cycle", "which containers count for depth", "bytes or characters", "sets and datetimes"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the reply format is a dict with text, tool_calls, thinking and an opaque reasoning item, and the stand-in provider is strict on purpose: it refuses a conversation whose assistant turn lost or changed its reasoning item, so the missing item surfaces one call away from record. The timing defect is not a prompt rebuilt with string +=: the model reads a message list, so the quadratic work is messages() re-rendering every past tool result into a new Message on every turn. The fix (format each observation once, when the tool returns, and keep it in the history) also makes the transcript show what the model actually read, which Part 2 relies on. Besides the suggested stop-on-any-text guard, the test pins finish as an explicit stop and the raw result next to each observation.",
+    "Part 2: messages are saved as dataclasses.asdict fields with reasoning in standard base64, the layout a trace viewer shares. Atomic replacement is checked through a reader that keeps the old file open and a save that fails on a set, not through crash injection, which lesson 34 covers. The tricky tool results are a 61-bit order id, -0.0, 0.1 + 0.2 and a lone surrogate from a note cut in half an emoji; a loaded transcript must also be accepted by a fresh ScriptedModel, so the reasoning bytes have to be exact.",
+    "Part 3: arguments are double-quoted strings with JSON escapes, tool names may contain dots (the lesson's kv_store.get), and a step without a readable Action gets one fixed FORMAT_ERROR observation while the reason stays in Step.error. A completion ends at its first Action line as well as at its first Observation line, so text after the action never reaches the scratchpad.",
+    "Part 4: stream_run drives the same AgentLoop through the stand-in's stream(), which yields thinking pieces before the reply. Assistant text that comes with tool calls is kept in the history but not streamed, so final is the answer only. The run ends once through finish and once through a turn without tool calls, and the timing probe uses the stand-in's sent counter and the number of tools run.",
+    "Part 5: a string result is the observation as it is (only strings inside a structure are JSON-quoted), the budget is cut so that the result with its marker is exactly budget characters, and [cycle] versus {…} is never tested where both would apply."
+  ]
+}
