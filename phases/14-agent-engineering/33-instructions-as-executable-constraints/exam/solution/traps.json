@@ -1,0 +1,1563 @@
+{
+  "package": "rulecheck",
+  "tests": [
+    "test_rule_report",
+    "test_rule_file",
+    "test_turn_judgement",
+    "test_runtime_tap",
+    "test_router_reachability"
+  ],
+  "layers": [
+    {
+      "test": "test_rule_report",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "KeyError: 'startup/state-file-fresh'"
+        },
+        {
+          "name": "split at every line that starts with '## '",
+          "edits": [
+            {
+              "file": "rules.py",
+              "old": "    for block in re.split(r\"\\n## \", text)[1:]:\n",
+              "new": "    for block in re.split(r\"^## \", text, flags=re.MULTILINE)[1:]:\n"
+            }
+          ],
+          "expect": "a description is every prose line of the rule, joined with spaces"
+        },
+        {
+          "name": "+ join every prose line of the rule",
+          "edits": [
+            {
+              "file": "rules.py",
+              "old": "        description = \"\"\n        for raw in body.splitlines():\n",
+              "new": "        prose: list[str] = []\n        for raw in body.splitlines():\n"
+            },
+            {
+              "file": "rules.py",
+              "old": "                description = line[1:]\n",
+              "new": "                prose.append(line[1:])\n"
+            },
+            {
+              "file": "rules.py",
+              "old": "            elif line:\n                description = line\n        rules.append(_rule(slug, fields, description))\n",
+              "new": "            elif line:\n                prose.append(line)\n        rules.append(_rule(slug, fields, \" \".join(prose)))\n"
+            }
+          ],
+          "expect": "DID NOT RAISE"
+        },
+        {
+          "name": "+ BrokenRule before any check runs",
+          "edits": [
+            {
+              "file": "checker.py",
+              "old": "from .rules import SEVERITIES, Rule\n",
+              "new": "from .rules import SEVERITIES, BrokenRule, Rule\n"
+            },
+            {
+              "file": "checker.py",
+              "old": "    results = []\n    for rule in rules:\n        check_fn = getattr(checker, rule.check, None)\n        passed = bool(check_fn(trace)) if check_fn else False\n        results.append(Result(rule.slug, rule.category, rule.severity, passed))\n    return Report(tuple(results))\n",
+              "new": "    checks = []\n    for rule in rules:\n        check = None if rule.check.startswith(\"_\") else getattr(checker, rule.check, None)\n        if not callable(check):\n            raise BrokenRule(\n                f\"{rule.slug}: check {rule.check!r} is not a method of {type(checker).__name__}\"\n            )\n        checks.append(check)\n    return Report(tuple(\n        Result(rule.slug, rule.category, rule.severity, bool(check(trace)))\n        for rule, check in zip(rules, checks)\n    ))\n"
+            }
+          ],
+          "expect": "dependencies are compared by normalized name and reported as the agent wrote them"
+        },
+        {
+          "name": "+ '.' among the PEP 503 separators",
+          "edits": [
+            {
+              "file": "checker.py",
+              "old": "    return re.sub(r\"[-_]+\", \"-\", name).lower()\n",
+              "new": "    return re.sub(r\"[-_.]+\", \"-\", name).lower()\n"
+            }
+          ],
+          "expect": "score stays fast on a year of rules and a long turn"
+        },
+        {
+          "name": "+ compute each summary field once",
+          "edits": [
+            {
+              "file": "turn.py",
+              "old": "from dataclasses import dataclass\n",
+              "new": "from dataclasses import dataclass\nfrom functools import cached_property\n"
+            },
+            {
+              "file": "turn.py",
+              "old": "    @property\n    def read_state_file(",
+              "new": "    @cached_property\n    def read_state_file("
+            },
+            {
+              "file": "turn.py",
+              "old": "    @property\n    def edited_files(",
+              "new": "    @cached_property\n    def edited_files("
+            },
+            {
+              "file": "turn.py",
+              "old": "    @property\n    def confidence(",
+              "new": "    @cached_property\n    def confidence("
+            },
+            {
+              "file": "turn.py",
+              "old": "    @property\n    def asked_for_help(",
+              "new": "    @cached_property\n    def asked_for_help("
+            },
+            {
+              "file": "turn.py",
+              "old": "    @property\n    def tests_exit_code(",
+              "new": "    @cached_property\n    def tests_exit_code("
+            },
+            {
+              "file": "turn.py",
+              "old": "    @property\n    def added_dependencies(",
+              "new": "    @cached_property\n    def added_dependencies("
+            },
+            {
+              "file": "turn.py",
+              "old": "    @property\n    def approvals(",
+              "new": "    @cached_property\n    def approvals("
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_rule_report",
+      "name": "description lines joined with newlines",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "rules.append(_rule(slug, fields, \" \".join(prose)))",
+          "new": "rules.append(_rule(slug, fields, \"\\n\".join(prose)))"
+        }
+      ],
+      "expect": "a description is every prose line of the rule, joined with spaces"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "description keeps the first prose line only",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "rules.append(_rule(slug, fields, \" \".join(prose)))",
+          "new": "rules.append(_rule(slug, fields, prose[0] if prose else \"\"))"
+        }
+      ],
+      "expect": "a description is every prose line of the rule, joined with spaces"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "the escaping backslash kept in the description",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "                prose.append(line[1:])\n",
+          "new": "                prose.append(line)\n"
+        }
+      ],
+      "expect": "a description is every prose line of the rule, joined with spaces"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "field lines counted as description too",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "                fields[name] = value\n",
+          "new": "                fields[name] = value\n                prose.append(line)\n"
+        }
+      ],
+      "expect": "a description is every prose line of the rule, joined with spaces"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "BrokenRule raised when the loop reaches the rule (earlier checks already ran)",
+      "edits": [
+        {
+          "file": "checker.py",
+          "old": "    checks = []\n    for rule in rules:\n        check = None if rule.check.startswith(\"_\") else getattr(checker, rule.check, None)\n        if not callable(check):\n            raise BrokenRule(\n                f\"{rule.slug}: check {rule.check!r} is not a method of {type(checker).__name__}\"\n            )\n        checks.append(check)\n    return Report(tuple(\n        Result(rule.slug, rule.category, rule.severity, bool(check(trace)))\n        for rule, check in zip(rules, checks)\n    ))\n",
+          "new": "    results = []\n    for rule in rules:\n        check = getattr(checker, rule.check, None)\n        if not callable(check):\n            raise BrokenRule(f\"{rule.slug}: check {rule.check!r} is not a method of {type(checker).__name__}\")\n        results.append(Result(rule.slug, rule.category, rule.severity, bool(check(trace))))\n    return Report(tuple(results))\n"
+        }
+      ],
+      "expect": "a check that no longer resolves stops the run before any check runs"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "BrokenRule names the check but not the rule",
+      "edits": [
+        {
+          "file": "checker.py",
+          "old": "f\"{rule.slug}: check {rule.check!r} is not a method",
+          "new": "f\"check {rule.check!r} is not a method"
+        }
+      ],
+      "expect": "BrokenRule names the rule and its check"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "normalize: lowercase and '_' to '-' only",
+      "edits": [
+        {
+          "file": "checker.py",
+          "old": "    return re.sub(r\"[-_.]+\", \"-\", name).lower()\n",
+          "new": "    return name.lower().replace(\"_\", \"-\")\n"
+        }
+      ],
+      "expect": "dependencies are compared by normalized name and reported as the agent wrote them"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "normalize: each separator replaced on its own, runs kept",
+      "edits": [
+        {
+          "file": "checker.py",
+          "old": "return re.sub(r\"[-_.]+\", \"-\", name).lower()",
+          "new": "return re.sub(r\"[-_.]\", \"-\", name).lower()"
+        }
+      ],
+      "expect": "dependencies are compared by normalized name and reported as the agent wrote them"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "normalize: separators dropped (pythondateutil matches python-dateutil)",
+      "edits": [
+        {
+          "file": "checker.py",
+          "old": "return re.sub(r\"[-_.]+\", \"-\", name).lower()",
+          "new": "return re.sub(r\"[-_.]+\", \"\", name).lower()"
+        }
+      ],
+      "expect": "dependencies are compared by normalized name and reported as the agent wrote them"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "normalize: '.' left out of the separators",
+      "edits": [
+        {
+          "file": "checker.py",
+          "old": "return re.sub(r\"[-_.]+\", \"-\", name).lower()",
+          "new": "return re.sub(r\"[-_]+\", \"-\", name).lower()"
+        }
+      ],
+      "expect": "dependencies are compared by normalized name and reported as the agent wrote them"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "normalize: case kept",
+      "edits": [
+        {
+          "file": "checker.py",
+          "old": "return re.sub(r\"[-_.]+\", \"-\", name).lower()",
+          "new": "return re.sub(r\"[-_.]+\", \"-\", name)"
+        }
+      ],
+      "expect": "an approval names a dependency by its PEP 503 normalized name"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "unapproved dependencies reported in normalized form (over-fix)",
+      "edits": [
+        {
+          "file": "checker.py",
+          "old": "    return [dep for dep in trace.added_dependencies if normalize(dep) not in approved]\n",
+          "new": "    return [normalize(dep) for dep in trace.added_dependencies if normalize(dep) not in approved]\n"
+        }
+      ],
+      "expect": "dependencies are compared by normalized name and reported as the agent wrote them"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "tests_exit_code taken from the first acceptance run",
+      "edits": [
+        {
+          "file": "turn.py",
+          "old": "        return codes[-1] if codes else None\n",
+          "new": "        return codes[0] if codes else None\n"
+        }
+      ],
+      "expect": "the last acceptance run decides tests_pass"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "confidence taken from the last decision",
+      "edits": [
+        {
+          "file": "turn.py",
+          "old": "        return min((e.confidence for e in self.events if e.kind == \"decide\"), default=1.0)\n",
+          "new": "        return next((e.confidence for e in reversed(self.events) if e.kind == \"decide\"), 1.0)\n"
+        }
+      ],
+      "expect": "the lesson's bad turn breaks all five rules; its confidence is its lowest decision"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "summary cached on the checker instead of the turn (over-fix for speed)",
+      "edits": [
+        {
+          "file": "checker.py",
+          "old": "        return RELEASE_SCRIPT not in trace.edited_files\n",
+          "new": "        if \"_edited\" not in self.__dict__:\n            self._edited = trace.edited_files\n        return RELEASE_SCRIPT not in self._edited\n"
+        }
+      ],
+      "expect": "a checker keeps nothing from one turn to the next"
+    },
+    {
+      "test": "test_rule_report",
+      "name": "summary recomputed on every read (the shipped speed)",
+      "edits": [
+        {
+          "file": "turn.py",
+          "old": "from functools import cached_property\n",
+          "new": "cached_property = property\n"
+        }
+      ],
+      "expect": "score stays fast on a year of rules and a long turn"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "no escaping at all",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "    if line.startswith((\"## \", \"\\\\\")) or FIELD.fullmatch(line):\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "BrokenRule"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "heading-like description lines not escaped",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "if line.startswith((\"## \", \"\\\\\")) or FIELD.fullmatch(line):",
+          "new": "if line.startswith(\"\\\\\") or FIELD.fullmatch(line):"
+        }
+      ],
+      "expect": "BrokenRule"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "field-like description lines not escaped",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "if line.startswith((\"## \", \"\\\\\")) or FIELD.fullmatch(line):",
+          "new": "if line.startswith((\"## \", \"\\\\\")):"
+        }
+      ],
+      "expect": "is set twice"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "a leading backslash not escaped",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "if line.startswith((\"## \", \"\\\\\")) or FIELD.fullmatch(line):",
+          "new": "if line.startswith(\"## \") or FIELD.fullmatch(line):"
+        }
+      ],
+      "expect": "every rule reads back exactly, whatever its description looks like"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "every line that starts with # or - escaped",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "if line.startswith((\"## \", \"\\\\\")) or FIELD.fullmatch(line):",
+          "new": "if line.startswith((\"#\", \"-\", \"\\\\\")):"
+        }
+      ],
+      "expect": "only a description line that would read back differently gets a backslash"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "FIELD.match instead of fullmatch decides what to escape",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "if line.startswith((\"## \", \"\\\\\")) or FIELD.fullmatch(line):",
+          "new": "if line.startswith((\"## \", \"\\\\\")) or FIELD.match(line):"
+        }
+      ],
+      "expect": "only a description line that would read back differently gets a backslash"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "severity left out when it is the default",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "        f\"- severity: {rule.severity}\",\n    ]\n",
+          "new": "    ]\n    if rule.severity != \"block\":\n        lines.append(f\"- severity: {rule.severity}\")\n"
+        }
+      ],
+      "expect": "one block per rule, every field written, in the documented layout"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "rules sorted by slug inside a category",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "    ordered = sorted(rules, key=lambda rule: CATEGORIES.index(rule.category))\n",
+          "new": "    ordered = sorted(rules, key=lambda rule: (CATEGORIES.index(rule.category), rule.slug))\n"
+        }
+      ],
+      "expect": "rules are grouped by category in a fixed order and keep their order inside it"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "rules written in the order given",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "    ordered = sorted(rules, key=lambda rule: CATEGORIES.index(rule.category))\n",
+          "new": "    ordered = list(rules)\n"
+        }
+      ],
+      "expect": "rules are grouped by category in a fixed order and keep their order inside it"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "categories in alphabetical order",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "    ordered = sorted(rules, key=lambda rule: CATEGORIES.index(rule.category))\n",
+          "new": "    ordered = sorted(rules, key=lambda rule: rule.category)\n"
+        }
+      ],
+      "expect": "one block per rule, every field written, in the documented layout"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "an empty description written as a blank line",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "    if rule.description:\n        lines.append(_escape(rule.description))\n",
+          "new": "    lines.append(_escape(rule.description))\n"
+        }
+      ],
+      "expect": "a rule without a description has no description line"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "line breaks checked with '\\n' only",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "(text and text.splitlines() != [text])",
+          "new": "\"\\n\" in text"
+        }
+      ],
+      "expect": "write_rules rejects a description with a line separator"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "surrounding whitespace checked for spaces only",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "if text != text.strip() or",
+          "new": "if text != text.strip(\" \") or"
+        }
+      ],
+      "expect": "write_rules rejects a description with trailing whitespace"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "two rules with one slug accepted",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "        if rule.slug in seen:\n            raise ValueError(f\"two rules are called {rule.slug}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "write_rules rejects two rules with one slug"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "add_rule puts the new rule at the bottom of its category",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "        if CATEGORIES.index(other.category) >= rank:\n",
+          "new": "        if CATEGORIES.index(other.category) > rank:\n"
+        }
+      ],
+      "expect": "a new rule goes at the top of its category"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "add_rule leaves an empty category's rule at the end of the file",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "        if CATEGORIES.index(other.category) >= rank:\n",
+          "new": "        if CATEGORIES.index(other.category) == rank:\n"
+        }
+      ],
+      "expect": "a rule of an empty category goes where its category starts"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "add_rule writes the whole file again from the parsed rules",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "    rank = CATEGORIES.index(rule.category)\n",
+          "new": "    rank = CATEGORIES.index(rule.category)\n    at = next((k for k, other in enumerate(existing) if CATEGORIES.index(other.category) >= rank), len(existing))\n    return write_rules(existing[:at] + [rule] + existing[at:])\n"
+        }
+      ],
+      "expect": "adding a rule adds one block and changes nothing else in the file"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "add_rule finds an existing slug by substring",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "    if any(other.slug == rule.slug for other in existing):\n",
+          "new": "    if f\"## {rule.slug}\" in text:\n"
+        }
+      ],
+      "expect": "is already a rule"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "add_rule ignores a slug that is already there",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "        raise ValueError(f\"{rule.slug} is already a rule\")\n",
+          "new": "        return text\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "add_rule without the blank line after the new block",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "            return text[:start] + _block(rule) + \"\\n\" + text[start:]\n",
+          "new": "            return text[:start] + _block(rule) + text[start:]\n"
+        }
+      ],
+      "expect": "a new rule goes at the top of its category"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "remove_rule keeps the blank line before the last rule",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "        head = text[:start].rstrip(\"\\n\")\n        return head + \"\\n\" if head else \"\"\n",
+          "new": "        return text[:start]\n"
+        }
+      ],
+      "expect": "removing the last rule takes the blank line before it too"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "remove_rule finds the heading with str.find",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "    existing = parse_rules(text)\n    starts = [match.start() for match in HEADING.finditer(text)]\n    for k, (start, rule) in",
+          "new": "    found = text.find(f\"## {slug}\")\n    after = text.find(\"\\n## \", found + 1)\n    if found >= 0 and after >= 0:\n        return text[:found] + text[after + 1:]\n    existing = parse_rules(text)\n    starts = [match.start() for match in HEADING.finditer(text)]\n    for k, (start, rule) in"
+        }
+      ],
+      "expect": "removing a rule deletes its block, the one with exactly that slug, and nothing else"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "remove_rule returns the text unchanged for an unknown slug",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "    raise KeyError(slug)\n",
+          "new": "    return text\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "each startup rule starts work at the first tool call it does not watch itself",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "            ok = work is None or any(match(event) for event in events[:work])\n            verdicts.append(Verdict(rule.slug, True) if ok else Verdict(rule.slug, False, work))\n",
+          "new": "            mine = next((i for i, event in enumerate(events) if event.kind in TOOL_KINDS and not match(event)), None)\n            ok = mine is None or any(match(event) for event in events[:mine])\n            verdicts.append(Verdict(rule.slug, True) if ok else Verdict(rule.slug, False, mine))\n"
+        }
+      ],
+      "expect": "each category reads the turn its own way"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "decisions and approvals start work",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "         if event.kind in TOOL_KINDS and not any(match(event) for match in startup)),\n",
+          "new": "         if not any(match(event) for match in startup)),\n"
+        }
+      ],
+      "expect": "each category reads the turn its own way"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "a question note is not a tool call",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "         if event.kind in TOOL_KINDS and not any(match(event) for match in startup)),\n",
+          "new": "         if event.kind in TOOL_KINDS and event.kind != \"ask\" and not any(match(event) for match in startup)),\n"
+        }
+      ],
+      "expect": "opening a question note is a tool call"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "the state file may be read anywhere in the turn",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "            ok = work is None or any(match(event) for event in events[:work])\n",
+          "new": "            ok = work is None or any(match(event) for event in events)\n"
+        }
+      ],
+      "expect": "work starts at the first tool call that no startup rule watches"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "a turn without tool calls fails its startup rules",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "            ok = work is None or any(match(event) for event in events[:work])\n",
+          "new": "            ok = work is not None and any(match(event) for event in events[:work])\n"
+        }
+      ],
+      "expect": "a turn that calls no tool never starts work"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "forbidden rule fails at the last event it watches",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "        else:\n            at = _first_break(rule.category, events, match, threshold)\n",
+          "new": "        elif rule.category == \"forbidden\":\n            hits = [i for i, event in enumerate(events) if match(event)]\n            verdicts.append(Verdict(rule.slug, not hits, hits[-1] if hits else None))\n        else:\n            at = _first_break(rule.category, events, match, threshold)\n"
+        }
+      ],
+      "expect": "a forbidden rule fails at the first event it watches"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "the first acceptance run is the proof",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    last = proofs[-1]\n",
+          "new": "    last = proofs[0]\n"
+        }
+      ],
+      "expect": "each category reads the turn its own way"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "any passing acceptance run is a proof",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    if events[last].exit_code != 0:\n",
+          "new": "    if all(events[i].exit_code != 0 for i in proofs):\n"
+        }
+      ],
+      "expect": "the last acceptance run is the proof"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "a change after the proof does not make it stale",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "        if events[i].kind in CHANGES:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "each category reads the turn its own way"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "only a write makes the proof stale",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "CHANGES = (\"write\", \"install\")\n",
+          "new": "CHANGES = (\"write\",)\n"
+        }
+      ],
+      "expect": "a write or install after the proof makes it stale"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "a stale proof is reported at the proof",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "        if events[i].kind in CHANGES:\n            return Verdict(slug, False, i)\n",
+          "new": "        if events[i].kind in CHANGES:\n            return Verdict(slug, False, last)\n"
+        }
+      ],
+      "expect": "each category reads the turn its own way"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "no proof passes",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    if not proofs:\n        return Verdict(slug, False, None)\n",
+          "new": "    if not proofs:\n        return Verdict(slug, True)\n"
+        }
+      ],
+      "expect": "no acceptance run is no proof"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "any command counts as the proof",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    proofs = [i for i, event in enumerate(events) if match(event)]\n",
+          "new": "    proofs = [i for i, event in enumerate(events) if event.kind == \"run\"]\n"
+        }
+      ],
+      "expect": "only the acceptance command proves anything"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "a decision at the threshold needs a note",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "if event.confidence < threshold and not asked:",
+          "new": "if event.confidence <= threshold and not asked:"
+        }
+      ],
+      "expect": "0.7 is not below a 0.7 threshold"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "any earlier question note covers every decision",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "                    return i\n                asked = False\n",
+          "new": "                    return i\n"
+        }
+      ],
+      "expect": "each category reads the turn its own way"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "only an unsure decision uses up the note",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "                if event.confidence < threshold and not asked:\n                    return i\n                asked = False\n",
+          "new": "                if event.confidence < threshold:\n                    if not asked:\n                        return i\n                    asked = False\n"
+        }
+      ],
+      "expect": "the note comes after the previous decision"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "the threshold parameter ignored",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "if event.confidence < threshold and not asked:",
+          "new": "if event.confidence < THRESHOLD and not asked:"
+        }
+      ],
+      "expect": "the threshold is a parameter"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "approvals collected from the whole turn",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    approved: set[str] = set()\n",
+          "new": "    approved = {normalize(e.subject) for e in events if e.kind == \"approve\"}\n"
+        }
+      ],
+      "expect": "each category reads the turn its own way"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "package names compared as written",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "            if watched and normalize(event.subject) not in approved:\n",
+          "new": "            if watched and event.subject not in approved:\n"
+        },
+        {
+          "file": "timeline.py",
+          "old": "                approved.add(normalize(event.subject))\n",
+          "new": "                approved.add(event.subject)\n"
+        }
+      ],
+      "expect": "each category reads the turn its own way"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "package names compared with lower() only",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "            if watched and normalize(event.subject) not in approved:\n",
+          "new": "            if watched and event.subject.lower() not in approved:\n"
+        },
+        {
+          "file": "timeline.py",
+          "old": "                approved.add(normalize(event.subject))\n",
+          "new": "                approved.add(event.subject.lower())\n"
+        }
+      ],
+      "expect": "names compare the way Part 1's normalize compares them"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "any approval approves every install",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "            if watched and normalize(event.subject) not in approved:\n",
+          "new": "            if watched and not approved:\n"
+        }
+      ],
+      "expect": "each category reads the turn its own way"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "a check that does not resolve watches nothing",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "        if not callable(method):\n            raise BrokenRule(",
+          "new": "        if not callable(method):\n            method = lambda event: False\n        if False:\n            raise BrokenRule("
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "an unknown category judged as passing",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "        if rule.category not in CATEGORIES:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "the watch argument ignored",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    matchers = watchers(rules, watch if watch is not None else Watch())\n",
+          "new": "    matchers = watchers(rules, Watch())\n"
+        }
+      ],
+      "expect": "BrokenRule"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "every event read before the first line",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        async for event in events:\n",
+          "new": "        for event in [event async for event in events]:\n"
+        }
+      ],
+      "expect": "a broken rule is reported the moment its event arrives"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "refused events kept in the record",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            if not any(rules[k].severity == \"block\" for k in broken):\n",
+          "new": "            if True:\n"
+        }
+      ],
+      "expect": "one line per rule as soon as its verdict is known, numbered in output order, then the plan"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "a warn break refuses the event too",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            if not any(rules[k].severity == \"block\" for k in broken):\n",
+          "new": "            if not broken:\n"
+        }
+      ],
+      "expect": "refused events stay out of the record; what breaks only a warn rule goes through"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "lines numbered by rule position",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "                yield f\"{status} {number} - {rules[k].slug}{note}\\n\"\n",
+          "new": "                yield f\"{status} {k + 1} - {rules[k].slug}{note}\\n\"\n"
+        }
+      ],
+      "expect": "one line per rule as soon as its verdict is known, numbered in output order, then the plan"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "a line for every break, not only the first",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            for k in broken:\n                if k not in reported:\n",
+          "new": "            for k in broken:\n                if True:\n"
+        }
+      ],
+      "expect": "one line per rule as soon as its verdict is known, numbered in output order, then the plan"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "the plan written first",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        yield f\"1..{len(rules)}\\n\"\n",
+          "new": ""
+        },
+        {
+          "file": "runtime.py",
+          "old": "        index = -1\n        async for event in events:\n",
+          "new": "        index = -1\n        yield f\"1..{len(rules)}\\n\"\n        async for event in events:\n"
+        }
+      ],
+      "expect": "one line per rule as soon as its verdict is known, numbered in output order, then the plan"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "event numbers counted in the record",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            index += 1\n",
+          "new": "            index = len(self.record)\n"
+        }
+      ],
+      "expect": "one line per rule as soon as its verdict is known, numbered in output order, then the plan"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "a refused tool call starts work",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            if not any(rules[k].severity == \"block\" for k in broken):\n                self.record.append(event)\n                working = working or starts\n",
+          "new": "            working = working or starts\n            if not any(rules[k].severity == \"block\" for k in broken):\n                self.record.append(event)\n"
+        }
+      ],
+      "expect": "a refused tool call does not start work"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "startup rules reported only when the stream ends",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "                            seen.add(k)\n                            if k not in reported:\n",
+          "new": "                            seen.add(k)\n                            if False:\n"
+        }
+      ],
+      "expect": "a startup rule is reported as soon as its event is let through"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "a startup rule reported again when its event comes late",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "                            seen.add(k)\n                            if k not in reported:\n",
+          "new": "                            seen.add(k)\n                            if True:\n"
+        }
+      ],
+      "expect": "one line per rule as soon as its verdict is known, numbered in output order, then the plan"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "a definition_of_done break marked refused",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "                yield f\"not ok {number} - {rule.slug} # event {stale[k]}\\n\"\n",
+          "new": "                yield f\"not ok {number} - {rule.slug} # event {stale[k]} refused\\n\"\n"
+        }
+      ],
+      "expect": "a warn rule reports its break and lets the event through, so the proof goes stale"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "no proof at the end reported as ok",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "                yield f\"not ok {number} - {rule.slug} # end of turn\\n\"\n",
+          "new": "                yield f\"ok {number} - {rule.slug}\\n\"\n"
+        }
+      ],
+      "expect": "rules still open when the stream ends are reported then, in rule order"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "open rules reported by slug at the end",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        for k, rule in enumerate(rules):\n            if k in reported:\n",
+          "new": "        for k, rule in sorted(enumerate(rules), key=lambda item: item[1].slug):\n            if k in reported:\n"
+        }
+      ],
+      "expect": "rules still open when the stream ends are reported then, in rule order"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "package names compared as written",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "                    hit = watched and normalize(event.subject) not in approved\n",
+          "new": "                    hit = watched and event.subject not in approved\n"
+        }
+      ],
+      "expect": "refused events stay out of the record; what breaks only a warn rule goes through"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "lines without a newline",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "                yield f\"{status} {number} - {rules[k].slug}{note}\\n\"\n",
+          "new": "                yield f\"{status} {number} - {rules[k].slug}{note}\"\n"
+        }
+      ],
+      "expect": "one line per rule as soon as its verdict is known, numbered in output order, then the plan"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "checks resolved only when the turn starts",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "        self._match = watchers(self.rules, self.watch)\n",
+          "new": ""
+        },
+        {
+          "file": "runtime.py",
+          "old": "        rules, match = self.rules, self._match\n",
+          "new": "        rules, match = self.rules, watchers(self.rules, self.watch)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "a proof kept stale after a newer proof",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "                            proof[k] = (index, event.exit_code)\n                            stale.pop(k, None)\n",
+          "new": "                            proof[k] = (index, event.exit_code)\n"
+        }
+      ],
+      "expect": "the last proof decides: a newer passing run replaces a stale or failed one"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "a proof numbered by its place in the record",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "                            proof[k] = (index, event.exit_code)\n",
+          "new": "                            proof[k] = (len(self.record) - 1, event.exit_code)\n"
+        }
+      ],
+      "expect": "a line reported at the end names its event by its place in the stream, refused events counted"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "a stale proof reported at the last change after it",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "                        elif event.kind in CHANGES and k in proof and k not in stale:\n",
+          "new": "                        elif event.kind in CHANGES and k in proof:\n"
+        }
+      ],
+      "expect": "a warn rule reports its break and lets the event through, so the proof goes stale"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "a refused acceptance run still counts as the proof",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "            if not any(rules[k].severity == \"block\" for k in broken):\n                self.record.append(event)\n                working = working or starts\n",
+          "new": "            for k, rule in enumerate(rules):\n                if rule.category == \"definition_of_done\" and match[k](event):\n                    proof[k] = (index, event.exit_code)\n                    stale.pop(k, None)\n            if not any(rules[k].severity == \"block\" for k in broken):\n                self.record.append(event)\n                working = working or starts\n"
+        }
+      ],
+      "expect": "rules still open when the stream ends are reported then, in rule order"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "lines on one event ordered by category instead of by rule",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "from .rules import Rule\n",
+          "new": "from .rules import CATEGORIES, Rule\n"
+        },
+        {
+          "file": "runtime.py",
+          "old": "            for k, status, note in sorted(out):\n",
+          "new": "            for k, status, note in sorted(out, key=lambda item: CATEGORIES.index(rules[item[0]].category)):\n"
+        }
+      ],
+      "expect": "lines that come out on the same event follow rule order"
+    },
+    {
+      "test": "test_runtime_tap",
+      "name": "the threshold argument ignored",
+      "edits": [
+        {
+          "file": "runtime.py",
+          "old": "hit = watched and event.confidence < self.threshold and not asked[k]",
+          "new": "hit = watched and event.confidence < THRESHOLD and not asked[k]"
+        }
+      ],
+      "expect": "the threshold is a parameter"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "depth-first walk keeps the first depth it finds",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "    depth = {router: 0}\n    queue = deque([router])\n    broken: set[tuple[str, str]] = set()\n    while queue:\n        current = queue.popleft()\n        if not current.endswith(\".md\"):\n            continue\n        for target in _links(text(current)):\n",
+          "new": "    depth: dict[str, int] = {}\n    stack = [(router, 0)]\n    broken: set[tuple[str, str]] = set()\n    while stack:\n        current, here = stack.pop()\n        if current in depth:\n            continue\n        depth[current] = here\n        if not current.endswith(\".md\"):\n            continue\n        found = []\n        for target in _links(text(current)):\n"
+        },
+        {
+          "file": "router.py",
+          "old": "            if resolved not in depth:\n                depth[resolved] = depth[current] + 1\n                queue.append(resolved)\n",
+          "new": "            found.append(resolved)\n        stack.extend((nxt, here + 1) for nxt in reversed(found))\n"
+        }
+      ],
+      "expect": "a rule is as many links away as its file: the fewest links from the router, each relative to its own file"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "links resolved against the repo root",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "posixpath.normpath(posixpath.join(posixpath.dirname(current), path)) if path else current",
+          "new": "posixpath.normpath(path) if path else current"
+        }
+      ],
+      "expect": "a rule is as many links away as its file: the fewest links from the router, each relative to its own file"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "the #anchor kept in the path",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "            path, _, anchor = target.partition(\"#\")\n",
+          "new": "            path, anchor = target, \"\"\n"
+        }
+      ],
+      "expect": "a rule is as many links away as its file: the fewest links from the router, each relative to its own file"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "a link whose anchor is broken not followed",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "            if anchor and is_rule_file(resolved) and anchor not in rules_in(resolved):\n                broken.add((current, target))\n",
+          "new": "            if anchor and is_rule_file(resolved) and anchor not in rules_in(resolved):\n                broken.add((current, target))\n                continue\n"
+        }
+      ],
+      "expect": "a rule is as many links away as its file: the fewest links from the router, each relative to its own file"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "anchors never checked",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "            if anchor and is_rule_file(resolved) and anchor not in rules_in(resolved):\n",
+          "new": "            if False:\n"
+        }
+      ],
+      "expect": "a link the router's walk meets is broken when its path (inside the repo) or its anchor into a rule file does not resolve"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "anchors checked in topic docs too",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "            if anchor and is_rule_file(resolved) and anchor not in rules_in(resolved):\n",
+          "new": "            if anchor and anchor not in rules_in(resolved):\n"
+        }
+      ],
+      "expect": "a link the router's walk meets is broken when its path (inside the repo) or its anchor into a rule file does not resolve"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "links inside inline code followed",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "        targets.extend(LINK.findall(CODE_SPAN.sub(\"\", line)))\n",
+          "new": "        targets.extend(LINK.findall(line))\n"
+        }
+      ],
+      "expect": "a link the router's walk meets is broken when its path (inside the repo) or its anchor into a rule file does not resolve"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "https: links treated as repo paths",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "            if SCHEME.match(target):\n                continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "a link the router's walk meets is broken when its path (inside the repo) or its anchor into a rule file does not resolve"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "a broken link reported by its resolved path",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "            if outside or not (root / resolved).is_file():\n                broken.add((current, target))\n",
+          "new": "            if outside or not (root / resolved).is_file():\n                broken.add((current, resolved))\n"
+        }
+      ],
+      "expect": "a link the router's walk meets is broken when its path (inside the repo) or its anchor into a rule file does not resolve"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "topic docs searched in every folder under docs/",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "for path in (docs.glob(\"*.md\") if docs.is_dir() else [])",
+          "new": "for path in (docs.rglob(\"*.md\") if docs.is_dir() else [])"
+        }
+      ],
+      "expect": "the router links every topic doc itself, by path; prose and inline code are not links"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "a topic doc reachable through another doc counts as linked",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "        unlinked=[topic for topic in topics if depth.get(topic) != 1],\n",
+          "new": "        unlinked=[topic for topic in topics if topic not in depth],\n"
+        }
+      ],
+      "expect": "the router links every topic doc itself, by path; prose and inline code are not links"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "rule files looked for in docs/ only",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "    for found in sorted(root.rglob(\"agent-rules*.md\")):\n",
+          "new": "    for found in sorted((root / \"docs\").glob(\"agent-rules*.md\")):\n"
+        }
+      ],
+      "expect": "a rule file that nothing links to is unreachable"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "two hops counted as too deep",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "too_deep=sorted(slug for slug, n in hops.items() if n > MAX_HOPS),",
+          "new": "too_deep=sorted(slug for slug, n in hops.items() if n >= MAX_HOPS),"
+        }
+      ],
+      "expect": "rules more than two links from the router are too deep"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "every broken link is a startup violation",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "startup_violations=sorted(target for source, target in broken if source == router),",
+          "new": "startup_violations=sorted(target for source, target in broken),"
+        }
+      ],
+      "expect": "a broken link in the router is a startup violation"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "lines counted with split('\\n')",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "        lines=len(text(router).splitlines()),\n",
+          "new": "        lines=len(text(router).split(\"\\n\")),\n"
+        }
+      ],
+      "expect": "the router's line count, under its 50-line budget"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "lines counted as newline characters",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "        lines=len(text(router).splitlines()),\n",
+          "new": "        lines=text(router).count(\"\\n\"),\n"
+        }
+      ],
+      "expect": "a 49-line router without a final newline"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "links outside the repo accepted",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "            outside = path.startswith(\"/\") or resolved == \"..\" or resolved.startswith(\"../\")\n",
+          "new": "            outside = False\n"
+        }
+      ],
+      "expect": "a link the router's walk meets is broken when its path (inside the repo) or its anchor into a rule file does not resolve"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "an empty rule set written as an empty file",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "    ordered = sorted(rules, key=lambda rule: CATEGORIES.index(rule.category))\n",
+          "new": "    if not rules:\n        return \"\"\n    ordered = sorted(rules, key=lambda rule: CATEGORIES.index(rule.category))\n"
+        }
+      ],
+      "expect": "a file without rules is the title line alone"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "add_rule does not check the new rule",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "    _check(rule)\n    existing = parse_rules(text)\n",
+          "new": "    existing = parse_rules(text)\n"
+        }
+      ],
+      "expect": "DID NOT RAISE ValueError"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "field-like lines escaped by a stricter pattern than FIELD",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "if line.startswith((\"## \", \"\\\\\")) or FIELD.fullmatch(line):",
+          "new": "if line.startswith((\"## \", \"\\\\\")) or re.fullmatch(r\"- (category|check|severity): \\S+\", line):"
+        }
+      ],
+      "expect": "is set twice"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "every line that starts with ## escaped, space or not",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "if line.startswith((\"## \", \"\\\\\")) or FIELD.fullmatch(line):",
+          "new": "if line.startswith((\"##\", \"\\\\\")) or FIELD.fullmatch(line):"
+        }
+      ],
+      "expect": "only a description line that would read back differently gets a backslash"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "line breaks checked for \\n, \\r and \\u2028 only",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "(text and text.splitlines() != [text])",
+          "new": "any(ch in text for ch in \"\\n\\r\\u2028\")"
+        }
+      ],
+      "expect": "write_rules rejects a description with a form feed"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "whitespace inside a description collapsed on reading",
+      "edits": [
+        {
+          "file": "rules.py",
+          "old": "rules.append(_rule(slug, fields, \" \".join(prose)))",
+          "new": "rules.append(_rule(slug, fields, \" \".join(\" \".join(prose).split())))"
+        }
+      ],
+      "expect": "every rule reads back exactly, whatever its description looks like"
+    },
+    {
+      "test": "test_rule_file",
+      "name": "add_rule builds its block without escaping the description",
+      "edits": [
+        {
+          "file": "rulefile.py",
+          "old": "            return text[:start] + _block(rule) + \"\\n\" + text[start:]\n",
+          "new": "            raw = [f\"## {rule.slug}\", f\"- category: {rule.category}\", f\"- check: {rule.check}\", f\"- severity: {rule.severity}\"]\n            block = \"\\n\".join(raw + ([rule.description] if rule.description else [])) + \"\\n\"\n            return text[:start] + block + \"\\n\" + text[start:]\n"
+        }
+      ],
+      "expect": "the new block is written the way write_rules writes it"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "the note must be the event right before the decision",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "            elif event.kind == \"ask\":\n                asked = True\n",
+          "new": "            else:\n                asked = event.kind == \"ask\"\n"
+        }
+      ],
+      "expect": "the note may come any time after the previous decision"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "only the latest approval is remembered",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "                approved.add(normalize(event.subject))\n",
+          "new": "                approved = {normalize(event.subject)}\n"
+        }
+      ],
+      "expect": "every earlier approval counts, not only the latest"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "work starts at the first tool call that no rule of any category watches",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "    startup = [match for rule, match in zip(rules, matchers) if rule.category == \"startup\"]\n",
+          "new": "    startup = list(matchers)\n"
+        }
+      ],
+      "expect": "a tool call another category watches still starts work"
+    },
+    {
+      "test": "test_turn_judgement",
+      "name": "an approval after the proof makes it stale",
+      "edits": [
+        {
+          "file": "timeline.py",
+          "old": "CHANGES = (\"write\", \"install\")\n",
+          "new": "CHANGES = (\"write\", \"install\", \"approve\")\n"
+        }
+      ],
+      "expect": "notes, decisions, approvals and reads change nothing"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "broken links collected from every Markdown file, reached or not",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "    hops: dict[str, int] = {}\n",
+          "new": "    for found in sorted(root.rglob(\"*.md\")):\n        rel = found.relative_to(root).as_posix()\n        if rel in depth:\n            continue\n        for target in _links(text(rel)):\n            if SCHEME.match(target):\n                continue\n            path = target.partition(\"#\")[0]\n            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(rel), path)) if path else rel\n            if not (root / resolved).is_file():\n                broken.add((rel, target))\n    hops: dict[str, int] = {}\n"
+        }
+      ],
+      "expect": "a link the router's walk meets is broken when its path (inside the repo) or its anchor into a rule file does not resolve"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "a fragment-only link resolved as a path",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "posixpath.normpath(posixpath.join(posixpath.dirname(current), path)) if path else current",
+          "new": "posixpath.normpath(posixpath.join(posixpath.dirname(current), path))"
+        }
+      ],
+      "expect": "a link the router's walk meets is broken when its path (inside the repo) or its anchor into a rule file does not resolve"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "fragment-only links skipped",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "            path, _, anchor = target.partition(\"#\")\n",
+          "new": "            path, _, anchor = target.partition(\"#\")\n            if not path:\n                continue\n"
+        }
+      ],
+      "expect": "a link the router's walk meets is broken when its path (inside the repo) or its anchor into a rule file does not resolve"
+    },
+    {
+      "test": "test_router_reachability",
+      "name": "rule files looked for under docs/ only, recursively",
+      "edits": [
+        {
+          "file": "router.py",
+          "old": "    for found in sorted(root.rglob(\"agent-rules*.md\")):\n",
+          "new": "    for found in sorted((root / \"docs\").rglob(\"agent-rules*.md\")):\n"
+        }
+      ],
+      "expect": "a rule file that nothing links to is unreachable"
+    }
+  ]
+}

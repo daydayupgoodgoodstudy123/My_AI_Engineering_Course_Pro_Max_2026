@@ -1,0 +1,146 @@
+{
+  "lesson": "phases/14-agent-engineering/33-instructions-as-executable-constraints",
+  "title": "Agent Instructions as Executable Constraints",
+  "format": "staged-brownfield",
+  "service": "RuleCheck: the lesson's agent-rules.md parser and summary checker, a diff-friendly writer for the rule file, a judge that reads a turn's events in order the way each of the five categories does, a severity-aware runtime that refuses block violations and reports every rule as TAP, and a reachability audit of the AGENTS.md router",
+  "sources": {
+    "docs/en.md": "6ba9752ebfeb92b1a187a7cbace37940438fb57ad11f5518e8688195b5796f6a",
+    "code/main.py": "b83585e1db0e17c7ea3e645202c164f76364a188061f61e075f1686cd0736388",
+    "code/agent-rules.md": "1708c58cc89529f38aa7d5bad7b85679e11bed08084bc2fa6e12e281e6e1805c",
+    "outputs/skill-rule-set-builder.md": "5dfe900dda51853c7edf9b888ec17dc20e012e980eabd65a6d5f20a58e30ac43",
+    "quiz/quiz.md": "e5028e05363f0b3e81e3dd1ae615cf8db29a41708357f9fed8a6dd206a74ccf6"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network and no model: a turn is a list of events the tests write",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_rule_report",
+      "kind": "debug",
+      "lesson_anchor": "Rules are machine-readable (slug, category, one-line description, a check that names a function on the checker); Five categories; Progressive disclosure ('a pointer that no longer resolves is a worse failure than a missing rule'); code/main.py parse_rules, RuleChecker and score; quiz Q4 (a check name that does not resolve is silently scored as failed), Q9 (a file that starts with '## a/b' loses its first rule, a two-line description keeps its last line)",
+      "planted_bugs": [
+        "parse_rules splits on re.split(r'\\n## ', text)[1:], so a rule file without a title, whose first line is the first rule heading, loses that rule; the failure surfaces as KeyError: 'startup/state-file-fresh' inside Report.verdict, two calls from the parser (parse_rules -> score -> Report.verdict)",
+        "every prose line overwrites the description, so a two-line description keeps only its last line ('outside an approved release task.', '- do not guess.'); the docstring joins all prose lines with spaces, before or after the fields, with a leading backslash removed",
+        "score keeps the lesson's getattr(checker, rule.check, None) and scores a check that does not resolve as failed; the docstring requires BrokenRule naming the rule and the check before any check runs",
+        "normalize's character class is [-_]+ and leaves out '.'; the docstring is PEP 503 (lowercase, every run of '-', '_' and '.' becomes one '-') and its own example, zope.interface and zope__interface, does not hold, so zope__interface approved as zope.interface and ruamel.yaml approved as RUAMEL_YAML count as unapproved; the good turn has no dotted name, so the mixed-turn assertion is the one that fails",
+        "TurnTrace's summary fields (the lesson's TurnTrace fields, read from the event log) are plain properties that scan every event on every read"
+      ],
+      "timing_assert": "score over 2,000 rules (a year of incident rules cycling the five checks) and a 50,000-event turn under 0.1 s. Measured on an Apple M5 with other jobs running (load average 4 to 10). Starter: 0.93-0.98 s on Python 3.14, 1.01-1.60 s on 3.12, 1.82-2.87 s on 3.10, so at least 9.3 times the limit. Fixed with cached_property: median 3.5-5.3 ms on 3.14, 3.9-5.0 ms on 3.12, 6.8-10.1 ms on 3.10, so at least 10 times under it (p99 under 21 ms). One scheduling stall of 0.47 s showed up in about 1,100 fixed runs under that load, hence the note to rerun once before judging a timeout",
+      "overfix_guard": "unapproved_dependencies reports the names as the agent wrote them (Requests, not requests); PEP 503 shortcuts each miss a case: '_' to '-' only (zope__interface against zope.interface, ruamel.yaml against RUAMEL_YAML), one '-' per separator (zope--interface), separators dropped (pythondateutil accepted as python-dateutil), case kept (FastAPI); BrokenRule raised lazily is caught by a recording checker; a summary cached on the RuleChecker instance leaks the first turn into the second; a rewritten summary must keep the last acceptance run and the lowest decision confidence"
+    },
+    {
+      "part": 2,
+      "test": "test_rule_file",
+      "kind": "model and persistence",
+      "lesson_anchor": "Rules are diff-friendly (one per heading, renames visible in diffs, new rules at the top of their category, stale rules deleted, not commented out); Production patterns: severity tagged at write time, Markdown as the reviewable source; outputs/skill-rule-set-builder.md (docs/agent-rules.md with one ## heading per rule)",
+      "exactness": "write_rules -> file on disk -> parse_rules gives back the same Rule objects, field for field, for descriptions that look like a heading ('## approval/always-ok'), like a field ('- check: always_ok', '-check:always_ok'), start with a backslash (a Windows share), start with '##' and no space ('##__VA_ARGS__ ...'), hold two spaces in a row, hold non-ASCII text, or are empty; only the lines the parser would misread get one backslash; add_rule writes its block the way write_rules does; add_rule and remove_rule change exactly one contiguous block of a hand-edited file",
+      "traps": [
+        "no escaping: a heading-like description becomes a rule with no category, a field-like one sets check twice (both BrokenRule); field lines recognised by a stricter pattern than FIELD itself ('-check:always_ok' is a field line too)",
+        "a leading backslash left unescaped loses a character on the way back",
+        "over-escaping every line that starts with '#' or '-', or FIELD.match instead of fullmatch ('- check: run the linter before you push.'), or every line that starts with '##' ('##__VA_ARGS__' is not a heading)",
+        "severity omitted when it is the default; rules sorted by slug, left in input order, or categories sorted alphabetically",
+        "an empty description written as a blank line; an empty rule set written as an empty file",
+        "line breaks checked with '\\n' only or with a hand-made list (\\u2028 and a form feed split the line in str.splitlines); surrounding whitespace checked for spaces only; duplicate slugs accepted",
+        "whitespace inside a description collapsed when it is read back (two spaces after a period)",
+        "add_rule at the bottom of the category, at the end of the file for an empty category, without the blank line after the block, by rewriting the whole file from parsed rules, with a substring duplicate check (done/tests against done/tests-pass), without validating the rule, building its own block without the escaping write_rules does, or ignoring a duplicate",
+        "remove_rule keeping the blank line before the last rule, finding the heading with str.find (done/tests-pass-fast comes first), or ignoring an unknown slug"
+      ],
+      "clarifying_questions": [
+        "order inside a category",
+        "writing the default severity",
+        "a description with a line break",
+        "two spaces inside a description",
+        "rewriting the whole file",
+        "where a rule of an empty category goes",
+        "removing an unknown slug"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_turn_judgement",
+      "kind": "core algorithm",
+      "lesson_anchor": "Five categories that cover most rules (what must be true before work begins, what must never happen, what proves the task is complete, what the agent does when unsure, what requires human approval); the seed rules (read agent_state.json before any tool call; the acceptance command exits zero; a question note instead of guessing below the threshold; a new dependency needs approval); quiz Q16 (stricter: read before the first tool call)",
+      "traps": [
+        "work start computed per startup rule instead of 'the first tool call that no startup rule watches'; decisions or approvals starting work; a question note not counted as a tool call; the state file accepted anywhere in the turn; a turn with no tool call failing its startup rules; work start taken as the first tool call that no rule of any category watches (an install before the state read)",
+        "a forbidden rule reported at its last watched event",
+        "the first acceptance run taken as the proof, any passing run accepted, a write or install after the proof ignored, only writes making it stale, the stale proof reported at the run, no proof passing, any command counted as the proof, an approval making the proof stale",
+        "<= instead of < at the threshold, any earlier note covering every decision, only unsure decisions using up a note, the note required right before the decision, the threshold parameter ignored",
+        "approvals collected from the whole turn, names compared as written or with lower() only (Python_DateUtil against python-dateutil), any approval approving every install, only the latest approval remembered",
+        "an unresolved check watching nothing, an unknown category passing, the watch argument ignored"
+      ],
+      "integration": "approvals compare names with Part 1's normalize; a Watch subclass adds two checks (rules_read, no_lockfile_edits), so the category, not a list of known check names, decides the timing",
+      "clarifying_questions": [
+        "is reading the state file a tool call",
+        "decisions and approvals",
+        "two startup rules",
+        "an install that the approval rule watches",
+        "a confidence equal to the threshold",
+        "one note for two decisions",
+        "approval after the install",
+        "an install after the passing run",
+        "no acceptance run at all"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_runtime_tap",
+      "kind": "streaming",
+      "lesson_anchor": "Rules versus framework guardrails (the runtime catches violations during a turn, the rule set proves the runtime is doing the right thing); Severity tagging at write time (the checker reports all three, the runtime only refuses on block); Use It (agents quote the rules when refusing; guardrails and interrupts implement the same checks)",
+      "wire_format": "TAP: one line per rule the moment its verdict is known ('not ok N - <slug> # event <i> refused' for a block rule, '# event <i>' for warn and info, '# end of turn' for a definition_of_done rule without a proof, 'ok N - <slug>'), lines on one event in rule order, rules still open reported at the end in rule order, then the plan '1..R'; N counts output lines, i counts every received event including refused ones; decided by the test's join and split('\\n') plus a probe that records how many events had been pulled when each line arrived",
+      "traps": [
+        "refused events kept in the record (a refused write after the passing run makes the proof stale), warn breaks refused too",
+        "a refused tool call starting work, so the writes before the state read get through; a refused acceptance run counted as the proof (done reported at event 4 instead of end of turn)",
+        "lines numbered by rule position, a line for every break, the plan first, lines without a newline, event numbers counted in the record (event 3 instead of 4), a proof numbered by its place in the record, lines on one event put in category order instead of rule order (forbidden listed before startup)",
+        "every event read before the first line (the probe expects [2, 2, 5, 6, 11, 11])",
+        "startup rules reported only at the end, or again when their event comes late",
+        "a definition_of_done line marked refused, no proof reported as ok, open rules reported by slug, a stale proof not replaced by a newer passing run, a stale proof reported at its last change instead of its first",
+        "package names compared as written (the retried install of FastAPI after approving fastapi is refused)",
+        "the threshold argument ignored (a 0.6 decision with threshold 0.5)",
+        "checks resolved only when the turn starts instead of in Runtime()"
+      ],
+      "clarifying_questions": [
+        "do event numbers count refused events",
+        "do warn rules refuse",
+        "a rule broken twice",
+        "does a refused tool call start work",
+        "one event breaking two rules",
+        "where the plan goes"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_router_reachability",
+      "kind": "graph",
+      "lesson_anchor": "Progressive disclosure: a map, not an encyclopedia (router under ~50 lines, rules in docs/agent-rules.md, topic docs in docs/<topic>.md loaded on demand); the reachability test (any rule within two hops of the router, the router links every topic doc by path, not in prose); 'a broken link in the router is itself a startup-check violation'; outputs/skill-rule-set-builder.md (rule files over 200 lines split by category into agent-rules.<category>.md behind a parent index)",
+      "traps": [
+        "anchors never checked, or checked in topic docs too (deploy.md#approvals), a broken anchor not followed (the approval rules become unreachable instead of too deep), fragment-only links skipped (the startup rule file's #startup/state-file-read points at a renamed rule)",
+        "two hops counted as too deep, every broken link counted as a startup violation",
+        "topic docs searched in subfolders (docs/adr), a topic doc reachable through another doc counted as linked, rule files looked for in docs/ only, one level or recursively (legacy/agent-rules.old.md sits at the repo root)",
+        "a depth-first walk keeping the first depth found (done 2, forbidden 2, uncertainty 3 instead of 1, 1, 2)",
+        "links resolved against the repo root instead of the linking file, the #anchor kept in the path (slugs hold '/'), a fragment-only link resolved as a path",
+        "inline code followed as a link, https: links treated as paths, links outside the repo accepted when the file exists, broken links reported by resolved path, broken links collected from files the router never reaches (the legacy file's runbook link)",
+        "router lines counted with split('\\n') or as newline characters (49 and 50 lines, with and without a final newline)"
+      ],
+      "integration": "rule files are read with Part 1's parse_rules; the split category files start with a rule heading, so Part 1's first defect drops a rule from every one of them",
+      "clarifying_questions": [
+        "GitHub heading anchors",
+        "a broken anchor still reaching the file",
+        "fragment-only links",
+        "rule files outside docs/",
+        "links in inline code",
+        "topic docs reached through other docs",
+        "docs in subfolders",
+        "exactly 50 lines",
+        "fenced code blocks",
+        "links outside the repo",
+        "broken links in unreachable files"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the four suggested defects are kept. The description defect is that every prose line overwrites the description, so it shows on the two-line descriptions; a one-line description written before the fields comes out right, because field lines are recognised line by line. The KeyError in Report.verdict is the error that surfaces away from its cause. The timing defect lives in TurnTrace: the lesson's summary fields are read from an event log through plain properties, so every rule's check rescans the turn; the fix is to compute each field once (cached_property on a frozen trace) rather than to group events by kind inside score. Rules also carry a severity (block, warn, info, default block) from the lesson's production patterns, used by Parts 2 and 4. The normalization defect is a character class that leaves out '.', not a bare lower(): lesson 27's Part 1 already plants a normalize that only lowercases.",
+    "Part 2: as suggested (Markdown file, categories in a fixed order, newest first inside a category, escaping, one contiguous diff block). remove_rule was added for 'stale rules get deleted, not commented out', with the same one-block property. Escaping is exactly the set of lines parse_rules would misread (a '## ' heading, a whole-line FIELD, a leading backslash), so over-escaping is also wrong; descriptions holding any str.splitlines boundary such as \\u2028 are rejected.",
+    "Part 3: a check names an event predicate on a Watch class and the category supplies the timing, so the five categories work for checks the tests add. Startup work begins at the first tool call that no startup rule watches (several startup rules together form the startup phase). definition_of_done uses the last acceptance run and also fails when a write or install follows a passing proof. Each unsure decision needs its own note after the previous decision. Approvals reuse Part 1's normalize.",
+    "Part 4: 'forbidden events are refused on the spot' became the lesson's severity rule: an event that breaks any block rule is refused and later verdicts ignore it; warn and info breaks are reported and let through. The suggested 'insert a write-a-question-note requirement' was dropped: a block uncertainty rule already refuses the unsure decision until a note exists, and the tests' uncertainty rule is warn. Output is one TAP line per rule, as soon as its verdict is known, then the plan. The interviewer notes lead with refusal and the record; the async-generator stub and the pull probe come later, since most streaming parts in this chapter share them.",
+    "Part 5: to stay clear of chapter 13 lesson 24 (file-level reference graph, fenced code, fragments dropped), the audit works on rules: hops per rule through its rule file, anchors that must name a rule in rule files (the router's anchor goes stale once the rule file is split), a broken anchor that still reaches its file, router-only startup violations, topic docs linked by the router itself, rule files found anywhere in the repo, and the router's line budget. Relative paths and fewest hops stay as supporting traps; inline code spans are in scope and fenced blocks are out (a clarifying answer). The interviewer notes lead with the anchor traps; fewest hops by breadth-first search stays a supporting trap, since lessons 25 and 34 already build their Part 5 around it."
+  ]
+}
