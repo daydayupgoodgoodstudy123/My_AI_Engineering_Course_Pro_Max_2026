@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Iterator
+from dataclasses import dataclass
 import json
 import struct
 from typing import Any
@@ -21,7 +23,68 @@ RESOURCE_BLOB = 6
 _LENGTH = struct.Struct(">I")
 
 
-def pack_content(content: list[dict[str, Any]]) -> bytes:
+@dataclass(frozen=True)
+class PayloadLimits:
+    """Local per-block payload limits in bytes; None leaves that content kind unlimited.
+
+    These are exercise/deployment settings, not MCP protocol maxima. image and audio count
+    decoded media bytes; resource counts its embedded text's UTF-8 or decoded blob bytes.
+    Plain text and resource_link have no embedded-media limit. A link is never fetched.
+    """
+
+    image: int | None = None
+    audio: int | None = None
+    resource: int | None = None
+
+    def __post_init__(self) -> None:
+        for value in (self.image, self.audio, self.resource):
+            if value is not None and (type(value) is not int or value < 0):
+                raise ValueError("a payload limit is a non-negative byte count or None")
+
+
+def _pack_record(tag: int, meta: dict[str, Any], body: bytes) -> bytes:
+    """Provided physical codec: one tag and two byte-counted fields."""
+    head = json.dumps(meta).encode("utf-8")
+    return b"".join([bytes([tag]), _LENGTH.pack(len(head)), head, _LENGTH.pack(len(body)), body])
+
+
+def _read_records(data: bytes) -> Iterator[tuple[int, dict[str, Any], bytes]]:
+    """Provided physical codec: strict MCB1 framing and UTF-8 object metadata."""
+    if data[: len(MAGIC)] != MAGIC:
+        raise ContractViolation("not a content container")
+    pos = len(MAGIC)
+    while pos < len(data):
+        tag = data[pos]
+        head, pos = _field(data, pos + 1)
+        body, pos = _field(data, pos)
+        try:
+            meta = json.loads(head.decode("utf-8"))
+        except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
+            raise ContractViolation("record metadata is not UTF-8 JSON") from exc
+        if not isinstance(meta, dict):
+            raise ContractViolation("record metadata must be a JSON object")
+        yield tag, meta, body
+
+
+def _field(data: bytes, pos: int) -> tuple[bytes, int]:
+    start = pos + _LENGTH.size
+    if start > len(data):
+        raise ContractViolation("container is truncated")
+    (length,) = _LENGTH.unpack_from(data, pos)
+    end = start + length
+    if end > len(data):
+        raise ContractViolation("container is truncated")
+    return data[start:end], end
+
+
+def _text(body: bytes) -> str:
+    try:
+        return body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ContractViolation("text is not UTF-8") from exc
+
+
+def pack_content(content: list[dict[str, Any]], limits: PayloadLimits | None = None) -> bytes:
     """Serialize a content array into the archive's binary container.
 
     Layout: MAGIC, then one record per block, in order:
@@ -31,7 +94,8 @@ def pack_content(content: list[dict[str, Any]]) -> bytes:
                and without the field that goes in body
         body   4-byte big-endian length, then the payload
 
-    Lengths count bytes. The payload of each kind of block:
+    Use the supplied _pack_record for physical framing; it writes byte lengths correctly.
+    The payload of each kind of block:
 
         text           the UTF-8 bytes of "text"
         image, audio   the decoded bytes of "data"
@@ -42,6 +106,10 @@ def pack_content(content: list[dict[str, Any]]) -> bytes:
     Every block must pass validate_content_block. Base64 must be canonical standard base64,
     exactly what base64.b64encode writes: anything else could not be given back unchanged, so
     it raises ContractViolation. The blocks passed in are left unchanged.
+
+    limits applies independently to each image, audio or embedded resource, after decoding
+    its payload. Exactly the configured byte limit is allowed. Text blocks and links are
+    unaffected; links stay references, without a fetch. None preserves unlimited archiving.
     """
     parts = [MAGIC]
     for index, block in enumerate(content):
@@ -61,35 +129,26 @@ def pack_content(content: list[dict[str, Any]]) -> bytes:
             else:
                 tag, body = RESOURCE_BLOB, _decoded(resource.pop("blob"))
             meta["resource"] = resource
-        head = json.dumps(meta).encode("utf-8")
-        parts += [bytes([tag]), _LENGTH.pack(len(head)), head, _LENGTH.pack(len(body)), body]
+        _check_limit(kind, body, limits)
+        parts.append(_pack_record(tag, meta, body))
     return b"".join(parts)
 
 
-def unpack_content(data: bytes) -> list[dict[str, Any]]:
+def unpack_content(data: bytes, limits: PayloadLimits | None = None) -> list[dict[str, Any]]:
     """Read a container written by pack_content back into the blocks that were packed.
 
     Base64 comes back as standard base64 with padding and without line breaks. Wrong magic,
     an unknown tag, a length that runs past the end, metadata that is not a UTF-8 JSON object,
     text that is not UTF-8, a block that fails validate_content_block, or bytes left after the
-    last record raise ContractViolation.
+    last record raise ContractViolation. Use the supplied _read_records to read physical
+    records. Apply the same local per-block limits as pack_content before returning a block,
+    including when this container was written by a caller with no limits.
     """
-    if data[: len(MAGIC)] != MAGIC:
-        raise ContractViolation("not a content container")
     blocks: list[dict[str, Any]] = []
-    pos = len(MAGIC)
-    while pos < len(data):
-        tag = data[pos]
-        head, pos = _field(data, pos + 1)
-        body, pos = _field(data, pos)
-        try:
-            meta = json.loads(head.decode("utf-8"))
-        except ValueError as exc:  # UnicodeDecodeError and JSONDecodeError are ValueErrors
-            raise ContractViolation("record metadata is not UTF-8 JSON") from exc
-        if not isinstance(meta, dict):
-            raise ContractViolation("record metadata must be a JSON object")
+    for tag, meta, body in _read_records(data):
         block = _block(tag, meta, body)
         validate_content_block(block, f"$.content[{len(blocks)}]")
+        _check_limit(block["type"], body, limits)
         blocks.append(block)
     return blocks
 
@@ -101,22 +160,13 @@ def _decoded(value: str) -> bytes:
     return raw
 
 
-def _field(data: bytes, pos: int) -> tuple[bytes, int]:
-    start = pos + _LENGTH.size
-    if start > len(data):
-        raise ContractViolation("container is truncated")
-    (length,) = _LENGTH.unpack_from(data, pos)
-    end = start + length
-    if end > len(data):
-        raise ContractViolation("container is truncated")
-    return data[start:end], end
+def _check_limit(kind: str, body: bytes, limits: PayloadLimits | None) -> None:
+    if limits is None or kind not in ("image", "audio", "resource"):
+        return
+    maximum = getattr(limits, kind)
+    if maximum is not None and len(body) > maximum:
+        raise ContractViolation(f"{kind} payload exceeds its local byte limit")
 
-
-def _text(body: bytes) -> str:
-    try:
-        return body.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ContractViolation("text is not UTF-8") from exc
 
 
 def _block(tag: int, meta: dict[str, Any], body: bytes) -> dict[str, Any]:

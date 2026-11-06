@@ -29,25 +29,24 @@
       "part": 2,
       "test": "test_content_container_roundtrip",
       "kind": "model and persistence",
-      "lesson_anchor": "Content Blocks Carry Different Costs: text, image and audio as base64, resource_link as a reference the client reauthorizes later, resource embedded now; code/main.py validate_content_block",
+      "lesson_anchor": "Content Blocks Carry Different Costs: text, image and audio as base64, resource_link as a reference the client reauthorizes later, resource embedded now; code/main.py validate_content_block; image media type/size, audio media/duration policy and embedded payload/content limits are distinct in the lesson table; this exercise implements only caller-configured decoded-byte limits, not duration inference",
       "storage": "binary container: MAGIC b'MCB1', then one record per block: 1-byte tag, 4-byte big-endian length and UTF-8 JSON meta, 4-byte big-endian length and body; image, audio and blob stored as their decoded bytes",
-      "exactness": "a content array of text (CRLF, U+2028, NUL, emoji, and an empty text), a 514-byte image whose base64 has + and / and == padding and runs past 76 characters, a 101-byte audio clip, two resource_links (one without mimeType, one with non-ASCII fields), an embedded text resource and a 70,000-byte embedded blob is written to a file and read back equal; the test also reads every record with its own parser",
+      "exactness": "a content array of text (CRLF, U+2028, NUL, emoji, and an empty text), a 514-byte image whose base64 has + and / and == padding and runs past 76 characters, a 101-byte audio clip, two resource_links (one without mimeType, one with non-ASCII fields), an embedded text resource and a 70,000-byte embedded blob is written to a file and read back equal; the test also reads every record with its own parser; caller-configured image/audio/resource limits preserve the exact bytes, independent kind selection, per-block rather than aggregate accounting, exact/zero boundaries, and reader-side enforcement; a resource_link with a long unreachable URI remains unchanged without a fetch",
       "traps": [
+        "local limits must select image, audio or embedded resource independently; a limit applies per block, never summed across a type",
+        "base64 transport length or metadata counted instead of the decoded media or embedded payload",
+        "unpack trusts limits used by the writer instead of applying the reader own local configuration",
+        "zero treated as unlimited, or exact cap refused; text and resource_link treated as bounded embedded payloads",
         "base64.encodebytes adds line breaks, with or without strip()",
         "urlsafe_b64encode",
         "padding stripped",
-        "lengths counted in characters, for text or for meta written with ensure_ascii=False",
-        "little-endian or two-byte lengths",
-        "the tag written as a digit",
         "base64 text stored instead of decoded bytes, for media or blobs",
         "non-canonical base64 (QR==, AAB=) accepted, for data or for blobs",
         "the caller's nested resource mutated",
         "resource_link cut down to uri and name, or given a null mimeType",
         "text kept in meta as well",
         "no MAGIC",
-        "pack skips validate_content_block, so binascii.Error escapes",
-        "wrong magic, a short last field, a stray trailing byte, an unknown tag, invalid UTF-8, a non-object meta or a block that fails validation read without ContractViolation (struct.error, UnicodeDecodeError, TypeError or silently)",
-        "meta parsed from the raw bytes with json.loads, which accepts UTF-16 with a BOM, or only JSONDecodeError caught, so UnicodeDecodeError escapes"
+        "pack skips validate_content_block, so binascii.Error escapes"
       ],
       "clarifying_questions": [
         "storing the base64 text",
@@ -56,7 +55,14 @@
         "non-canonical padding bits",
         "extra block fields"
       ],
-      "deviation": "The suggested trap 'resource_link saved as given, not dereferenced' has no API that could dereference, so the test checks that the link's fields come back exactly and dereferencing is a follow-up. Non-canonical base64 is refused when packing because stored bytes cannot reproduce it."
+      "deviation": "The physical MCB1 codec (_pack_record, _read_records, _field, _text) is complete and supplied; the candidate maps content types to tags/metadata/raw body and calls those helpers. PayloadLimits is an optional local exercise/deployment configuration, not an MCP-wide numerical maximum: per image/audio decoded bytes, per resource UTF-8 text or decoded blob bytes; None is unlimited, each block is independent, equality passes, resource_link is stored without fetching. Both pack and unpack apply the calling side limits. All original golden assertions and codec mutations remain as provided-helper guards.",
+      "provided_codec_guards": [
+        "lengths counted in characters, for text or for meta written with ensure_ascii=False",
+        "little-endian or two-byte lengths",
+        "the tag written as a digit",
+        "wrong magic, a short last field, a stray trailing byte, an unknown tag, invalid UTF-8, a non-object meta or a block that fails validation read without ContractViolation (struct.error, UnicodeDecodeError, TypeError or silently)",
+        "meta parsed from the raw bytes with json.loads, which accepts UTF-16 with a BOM, or only JSONDecodeError caught, so UnicodeDecodeError escapes"
+      ]
     },
     {
       "part": 3,
@@ -64,12 +70,13 @@
       "kind": "core algorithm",
       "lesson_anchor": "x-mcp-header Is Routing Metadata; Encode values before building HTTP headers (plain only for non-empty visible ASCII ! through ~ that does not start with =?base64?, otherwise =?base64?{Base64UTF8}?=; booleans lowercase; integers base 10 within the JavaScript safe range); The server checks the mirrored copy (case-insensitive names, exact sentinel decoding, exact comparison, missing, duplicated, unexpected, malformed or mismatched is HTTP 400 with -32020, the audit records the name and the category only)",
       "traps": [
+        "present false, zero or empty text skipped by client or server truthiness; omitted bindings filled with default headers",
+        "multiple bad bindings reported in header arrival order instead of descriptor bindings order; unexpected checked before duplicated within an absent binding",
+        "unrecognized malformed headers decoded or included in the audit; empty builds fail to record an empty name-only audit",
         "isprintable() or isascii() plus isprintable() instead of visible ASCII, which lets spaces, the empty string or non-ASCII through",
         "space or DEL counted as visible",
         "sentinel-looking text sent plain",
         "text stripped or NFC-normalized first",
-        "str(True) for booleans; bool accepted as an integer; floats, numeric strings or truthiness accepted",
-        "safe bounds exclusive, -2**53 as the lower bound, or no range check",
         "the sentinel's prefix and suffix allowed to overlap (=?base64?=), the suffix not checked, non-canonical base64 accepted",
         "Latin-1 or errors='replace' decoding, UnicodeDecodeError escaping, decoding more than once",
         "plain values accepted without the visible-ASCII check",
@@ -91,7 +98,11 @@
         "Unicode case folding",
         "an out-of-range body integer"
       ],
-      "deviation": "http_tool_call, the boundary that turns a rejection into HTTP 400 with -32020, is provided; the candidate writes the encoder, decoder, argument_text, build and check. Headers are (name, value) pairs so repeated and case-variant names can be expressed. The error's data carries the header and the reason category. Headers that match no binding are left alone, since the lesson checks recognized names only."
+      "deviation": "http_tool_call and the complete argument_text primitive are provided. The primitive includes bool rejection for numeric fields, exact declared types and the safe integer range; all old typed-value assertions and mutations remain as guards. The candidate writes encode, decode, build and check; bindings use key presence rather than truthiness, preserve omission, report the first faulty binding, and never record values. Headers remain (name,value) pairs; unknown bindings stay unexamined. Local refusal precedence is explicit in the docstring and exercised by multi-fault requests.",
+      "provided_primitive_guards": [
+        "str(True) for booleans; bool accepted as an integer; floats, numeric strings or truthiness accepted",
+        "safe bounds exclusive, -2**53 as the lower bound, or no range check"
+      ]
     },
     {
       "part": 4,

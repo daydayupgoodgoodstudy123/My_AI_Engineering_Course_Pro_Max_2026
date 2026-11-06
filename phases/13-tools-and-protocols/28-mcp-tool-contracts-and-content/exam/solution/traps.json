@@ -378,8 +378,8 @@
         },
         {
           "file": "archive.py",
-          "old": "        parts += [bytes([tag]), _LENGTH.pack(len(head)), head, _LENGTH.pack(len(body)), body]\n",
-          "new": "        size = len(body)\n        if isinstance(body, str):\n            body = body.encode(\"utf-8\")\n        parts += [bytes([tag]), _LENGTH.pack(len(head)), head, _LENGTH.pack(size), body]\n"
+          "old": "    return b\"\".join([bytes([tag]), _LENGTH.pack(len(head)), head, _LENGTH.pack(len(body)), body])\n",
+          "new": "    size = len(body)\n    if isinstance(body, str):\n        body = body.encode(\"utf-8\")\n    return b\"\".join([bytes([tag]), _LENGTH.pack(len(head)), head, _LENGTH.pack(size), body])\n"
         }
       ],
       "expect": "each after its length in bytes"
@@ -390,8 +390,8 @@
       "edits": [
         {
           "file": "archive.py",
-          "old": "        head = json.dumps(meta).encode(\"utf-8\")\n        parts += [bytes([tag]), _LENGTH.pack(len(head)), head, _LENGTH.pack(len(body)), body]\n",
-          "new": "        meta_text = json.dumps(meta, ensure_ascii=False)\n        head = meta_text.encode(\"utf-8\")\n        parts += [bytes([tag]), _LENGTH.pack(len(meta_text)), head, _LENGTH.pack(len(body)), body]\n"
+          "old": "    head = json.dumps(meta).encode(\"utf-8\")\n    return b\"\".join([bytes([tag]), _LENGTH.pack(len(head)), head, _LENGTH.pack(len(body)), body])\n",
+          "new": "    meta_text = json.dumps(meta, ensure_ascii=False)\n    head = meta_text.encode(\"utf-8\")\n    return b\"\".join([bytes([tag]), _LENGTH.pack(len(meta_text)), head, _LENGTH.pack(len(body)), body])\n"
         }
       ],
       "expect": "one record per block: meta holds its other fields, body its payload"
@@ -657,8 +657,8 @@
       "edits": [
         {
           "file": "archive.py",
-          "old": "        validate_content_block(block, f\"$.content[{len(blocks)}]\")\n        blocks.append(block)\n",
-          "new": "        blocks.append(block)\n"
+          "old": "        validate_content_block(block, f\"$.content[{len(blocks)}]\")\n        _check_limit(block[\"type\"], body, limits)\n        blocks.append(block)\n",
+          "new": "        _check_limit(block[\"type\"], body, limits)\n        blocks.append(block)\n"
         }
       ],
       "expect": "a damaged container raises ContractViolation: an image without a mimeType"
@@ -1794,8 +1794,8 @@
       "edits": [
         {
           "file": "archive.py",
-          "old": "        parts += [bytes([tag]), _LENGTH.pack(len(head)), head, _LENGTH.pack(len(body)), body]\n",
-          "new": "        parts += [str(tag).encode(\"ascii\"), _LENGTH.pack(len(head)), head, _LENGTH.pack(len(body)), body]\n"
+          "old": "    return b\"\".join([bytes([tag]), _LENGTH.pack(len(head)), head, _LENGTH.pack(len(body)), body])\n",
+          "new": "    return b\"\".join([str(tag).encode(\"ascii\"), _LENGTH.pack(len(head)), head, _LENGTH.pack(len(body)), body])\n"
         }
       ],
       "expect": "each after its length in bytes"
@@ -2075,6 +2075,107 @@
         }
       ],
       "expect": "UnicodeDecodeError"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "local media limit measured as base64 text size",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    if maximum is not None and len(body) > maximum:\n",
+          "new": "    size = len(base64.b64encode(body)) if kind in (\"image\", \"audio\") else len(body)\n    if maximum is not None and size > maximum:\n"
+        }
+      ],
+      "expect": "image payload exceeds its local byte limit"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "local limits checked when writing but not when reading",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "        _check_limit(block[\"type\"], body, limits)\n",
+          "new": ""
+        }
+      ],
+      "expect": "reading independently enforces the local image payload limit"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "embedded resource limits omitted",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "kind not in (\"image\", \"audio\", \"resource\")",
+          "new": "kind not in (\"image\", \"audio\")"
+        }
+      ],
+      "expect": "packing refuses an oversized local resource payload"
+    },
+    {
+      "test": "test_content_container_roundtrip",
+      "name": "zero local limits treated as unlimited",
+      "edits": [
+        {
+          "file": "archive.py",
+          "old": "    if maximum is not None and len(body) > maximum:\n",
+          "new": "    if maximum and len(body) > maximum:\n"
+        }
+      ],
+      "expect": "packing refuses an oversized local image payload"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "client skips mirrored arguments by truthiness",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        if binding.argument not in arguments:\n",
+          "new": "        if not arguments.get(binding.argument):\n"
+        }
+      ],
+      "expect": "one header per mirrored argument, in property order, booleans in lowercase"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "server treats present zero or false as omitted",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        present = binding.argument in arguments\n",
+          "new": "        present = bool(arguments.get(binding.argument))\n"
+        }
+      ],
+      "expect": "headers that mirror the body pass"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "bindings checked in received-header order",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "    for binding in bindings(tool):\n        copies = received.get(binding.header.lower(), [])\n",
+          "new": "    order = [name.lower() for name, _ in headers]\n    for binding in sorted(bindings(tool), key=lambda b: order.index(b.header.lower()) if b.header.lower() in order else len(order)):\n        copies = received.get(binding.header.lower(), [])\n"
+        },
+        {
+          "file": "headers.py",
+          "old": "    audit.append({\"event\": \"parameter_headers_checked\", \"headers\": checked})",
+          "new": "    canonical = [binding.header for binding in bindings(tool)]\n    checked.sort(key=canonical.index)\n    audit.append({\"event\": \"parameter_headers_checked\", \"headers\": checked})"
+        }
+      ],
+      "expect": "multiple faults use bindings order and duplicate precedes unexpected"
+    },
+    {
+      "test": "test_parameter_headers",
+      "name": "unexpected checked before duplicate for an omitted binding",
+      "edits": [
+        {
+          "file": "headers.py",
+          "old": "        elif len(copies) > 1:\n            reason = \"duplicated\"\n        elif copies and not present:\n            reason = \"unexpected\"\n",
+          "new": "        elif copies and not present:\n            reason = \"unexpected\"\n        elif len(copies) > 1:\n            reason = \"duplicated\"\n"
+        }
+      ],
+      "expect": "multiple faults use bindings order and duplicate precedes unexpected"
     }
   ]
 }

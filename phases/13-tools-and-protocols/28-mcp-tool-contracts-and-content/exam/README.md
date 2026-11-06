@@ -14,11 +14,11 @@ Comment out `@pytest.mark.skip("Part 1")`, run pytest, and work out why the clie
 
 ## Pt 2 `test_content_container_roundtrip`
 
-Archive the content blocks of a tool result in a binary container.
+Archive content blocks with the supplied binary framing and enforce the caller's local media and embedded-resource payload limits.
 
 ## Pt 3 `test_parameter_headers`
 
-Mirror arguments into headers on the client, and check the mirror on the server.
+Mirror present arguments into headers and check the mirror in bindings order. Primitive argument rendering is provided.
 
 ## Pt 4 `test_completion_debounce`
 

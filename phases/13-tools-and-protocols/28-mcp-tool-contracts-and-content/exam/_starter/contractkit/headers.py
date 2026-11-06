@@ -73,7 +73,15 @@ def argument_text(value: Any, declared: str) -> str:
     JS_SAFE_INTEGER_MIN..JS_SAFE_INTEGER_MAX inclusive. A value that is not of the declared
     type (a bool is not an integer), or an integer outside that range, raises ContractViolation.
     """
-    raise NotImplementedError
+    if declared == "string" and isinstance(value, str):
+        return value
+    if declared == "boolean" and isinstance(value, bool):
+        return "true" if value else "false"
+    if declared == "integer" and isinstance(value, int) and not isinstance(value, bool):
+        if not JS_SAFE_INTEGER_MIN <= value <= JS_SAFE_INTEGER_MAX:
+            raise ContractViolation("integer is outside the JavaScript safe range")
+        return str(value)
+    raise ContractViolation(f"value does not match the declared {declared} type")
 
 
 def build_parameter_headers(

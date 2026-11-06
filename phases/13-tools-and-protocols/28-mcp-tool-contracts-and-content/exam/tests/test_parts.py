@@ -7,7 +7,7 @@ import time
 
 import pytest
 from contractkit.annotations import Finding, audit_header_annotations
-from contractkit.archive import MAGIC, pack_content, unpack_content
+from contractkit.archive import MAGIC, PayloadLimits, pack_content, unpack_content
 from contractkit.client import ContractClient
 from contractkit.completion import CompletionBox
 from contractkit.headers import (
@@ -403,6 +403,44 @@ def test_content_container_roundtrip(tmp_path) -> None:
         assert raises(ContractViolation, unpack_content, data), f"a damaged container raises ContractViolation: {label}"
 
 
+    # Limits are local settings, not fixed MCP maxima; they apply to each decoded payload.
+    image = {"type": "image", "data": "AAE=", "mimeType": "image/png"}
+    audio = {"type": "audio", "data": "AAECAw==", "mimeType": "audio/wav"}
+    embedded_text = {"type": "resource", "resource": {"uri": "evidence://local/text", "text": "λ"}}
+    embedded_blob = {"type": "resource", "resource": {"uri": "evidence://local/blob", "blob": "AAE="}}
+    link = {"type": "resource_link", "uri": "https://unreachable.invalid/" + "x" * 2000, "name": "not fetched"}
+    limits = PayloadLimits(image=2, audio=4, resource=2)
+    bounded = [image, audio, embedded_text, embedded_blob, link, text("prose " * 100)]
+    encoded = pack_content(bounded, limits)
+    assert unpack_content(encoded, limits) == bounded, "local limits count decoded payloads per kind, not base64 or metadata"
+    assert pack_content(bounded, limits) == pack_content(bounded), "limits do not change the archive's bytes"
+    assert unpack_content(pack_content([image, image]), PayloadLimits(image=2)) == [image, image], (
+        "a local payload limit applies per block, not to the sum of a kind"
+    )
+    zero = PayloadLimits(image=0, audio=0, resource=0)
+    empty = [
+        {"type": "image", "data": "", "mimeType": "image/png"},
+        {"type": "audio", "data": "", "mimeType": "audio/wav"},
+        {"type": "resource", "resource": {"uri": "evidence://empty-text", "text": ""}},
+        {"type": "resource", "resource": {"uri": "evidence://empty-blob", "blob": ""}},
+        link, text("unbounded prose"),
+    ]
+    assert unpack_content(pack_content(empty, zero), zero) == empty, "zero admits empty embedded payloads and never fetches a resource_link"
+    one_byte_image = {"type": "image", "data": "AA==", "mimeType": "image/png"}
+    assert raises(ContractViolation, pack_content, [one_byte_image], zero), "packing refuses an oversized local image payload at zero"
+    for kind, block, size in (("image", image, 2), ("audio", audio, 4), ("resource", embedded_text, 2), ("resource", embedded_blob, 2)):
+        exact_limit = PayloadLimits(**{kind: size})
+        over_limit = PayloadLimits(**{kind: size - 1})
+        assert unpack_content(pack_content([block], exact_limit), exact_limit) == [block], (
+            f"an exact local {kind} payload limit is inclusive"
+        )
+        assert raises(ContractViolation, pack_content, [block], over_limit), f"packing refuses an oversized local {kind} payload"
+        assert raises(ContractViolation, unpack_content, pack_content([block]), over_limit), (
+            f"reading independently enforces the local {kind} payload limit"
+        )
+    assert unpack_content(pack_content([audio]), PayloadLimits(image=0)) == [audio], "one kind's local limit does not constrain another"
+
+
 TOOL = {
     "name": "route_report",
     "inputSchema": {
@@ -558,6 +596,41 @@ def test_parameter_headers() -> None:
         assert body["error"]["data"] == {"header": header, "reason": reason}, f"the refusal names the reason: {headers}"
         assert audit == [{"event": "parameter_headers_rejected", "header": header, "reason": reason}], (
             "the server audit records the header name and the reason, never a value"
+        )
+
+
+    present = {"region": "", "shard": 0, "dry_run": False, "report": "private-evidence"}
+    present_headers = [("Mcp-Param-Region", "=?base64??="), ("Mcp-Param-Shard", "0"), ("Mcp-Param-Dry-Run", "false")]
+    presence_audit = []
+    assert build_parameter_headers(TOOL, present, presence_audit) == present_headers, (
+        "empty text, zero and false are present mirrored arguments"
+    )
+    assert presence_audit == [{"event": "parameter_headers_built", "headers": [name for name, _ in present_headers], "encoded": ["Mcp-Param-Region"]}], (
+        "the presence audit names only emitted headers and their actual encoding"
+    )
+    for argument, name in (("region", "Mcp-Param-Region"), ("shard", "Mcp-Param-Shard"), ("dry_run", "Mcp-Param-Dry-Run")):
+        headers = [(n, v) for n, v in present_headers if n != name]
+        status, body, audit, dispatched = post(present, headers)
+        assert (status, body["error"]["data"], dispatched) == (400, {"header": name, "reason": "missing"}, []), (
+            f"a present falsy argument still requires its header: {argument}"
+        )
+    omitted_audit = []
+    assert build_parameter_headers(TOOL, {"report": "private-evidence"}, omitted_audit) == [], "omitted bindings are not filled with defaults"
+    assert omitted_audit == [{"event": "parameter_headers_built", "headers": [], "encoded": []}], "an empty header build still records an empty name-only audit"
+    status, body, audit, dispatched = post(present, list(reversed(present_headers)) + [("Mcp-Param-Unbound", "=?base64?malformed")])
+    assert (status, len(dispatched), audit) == (200, 1, [{"event": "parameter_headers_checked", "headers": [name for name, _ in present_headers]}]), (
+        "unrecognized malformed headers do not affect recognized falsy mirrors or the audit"
+    )
+    for arguments, headers, name, reason in (
+        (present, [("Mcp-Param-Dry-Run", "=?base64?malformed"), ("Mcp-Param-Shard", "wrong")], "Mcp-Param-Region", "missing"),
+        ({"report": "private-evidence"}, [("Mcp-Param-Region", "first-secret"), ("mcp-param-region", "second-secret")], "Mcp-Param-Region", "duplicated"),
+    ):
+        status, body, audit, dispatched = post(arguments, headers)
+        assert (status, body["error"]["data"], dispatched) == (400, {"header": name, "reason": reason}, []), (
+            "multiple faults use bindings order and duplicate precedes unexpected within one binding"
+        )
+        assert audit == [{"event": "parameter_headers_rejected", "header": name, "reason": reason}], (
+            "only the first canonical rejection is audited without either offending value"
         )
 
 

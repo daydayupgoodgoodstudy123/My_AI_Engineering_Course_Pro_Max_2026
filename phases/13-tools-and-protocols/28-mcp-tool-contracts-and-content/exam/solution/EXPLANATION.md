@@ -25,7 +25,8 @@
 
 参考实现的每条记录是 `tag`（1 字节）、meta（4 字节大端长度加 UTF-8 JSON 对象）、body（4 字节大端长度加负载）。meta 是去掉 type 和负载字段之后的块，body 是 text 的 UTF-8 字节，或者 image、audio、blob 解码后的字节。
 
-- **按字节算长度**：先把 meta 和 body 都编码成 bytes，再取长度。`"λ"` 是一个字符、两个字节。
+- **物理 codec 已给定**：`_pack_record` 和 `_read_records` 负责 MCB1 字段长度、UTF-8 meta 与截断检查，pack/unpack 真实调用它们；`_text` 负责严格文本解码。golden 和全部 codec 错误修法继续覆盖这些护栏。
+- **本地负载配置**：`PayloadLimits` 的 image、audio、resource 分别限制单块已解码负载；嵌入文本先转 UTF-8。`_check_limit` 在 pack 和 unpack 都执行，不相信写入方的限额。None 不设限，0 不等于缺省，恰好等于限制通过。普通 text 和 resource_link 不在这个媒体/嵌入负载策略里，链接不跟随，metadata 不计负载。数值由调用者配置，不是 MCP 规定。
 - **规范 base64**：打包时 `b64decode(validate=True)` 之后再 `b64encode` 一次，必须和原文完全相同，否则拒绝。`QR==` 和 `AAB=` 能解码，但字节还原回去是 `QQ==` 和 `AAA=`，存进去就再也给不回原文。读回时用 `base64.b64encode`：标准字母表、带填充、不换行。`encodebytes` 会插换行，`urlsafe_b64encode` 用 `-` 和 `_`。
 - **不改调用方的数据**：meta 是新 dict，嵌套的 resource 也要先复制再 pop。嵌入资源用 `"text" in resource` 区分 text 和 blob，空字符串的 text 也是 text。
 - **resource_link 原样保存**：整个链接留在 meta 里，有 mimeType 就有，没有就没有。容器不跟随链接；课里说链接只是这次调用返回的引用，以后读取时要重新授权。
@@ -33,7 +34,7 @@
 
 ## Part 3 参数头
 
-客户端三步：`argument_text` 把值按声明类型变成文本，`encode_header_value` 决定明文还是哨兵，`build_parameter_headers` 按 bindings 顺序组装头部，审计只记头名和哪些用了哨兵。
+客户端调用已给定的 `argument_text` 把值按声明类型变成文本，`encode_header_value` 决定明文还是哨兵，`build_parameter_headers` 按 bindings 顺序组装头部，审计只记头名和哪些用了哨兵。
 
 ```python
 def encode_header_value(text):
@@ -44,10 +45,11 @@ def encode_header_value(text):
 
 - 明文的条件是课里的原话：非空、全部是 `!` 到 `~` 的可见 ASCII、不像哨兵。`isprintable()` 会放过空格和非 ASCII。
 - 看起来像哨兵的原值再编码一次，接收方才能还原出字面文本，而不是把它当成传输语法解码。
-- 布尔小写；bool 不是整数；整数在 ±9007199254740991 之内，两端包含，超出就拒绝，不交给中间件去舍入。
+- `argument_text` 的严格类型、布尔小写和安全范围是给定 primitive 的护栏；候选人不重写它。绑定参数通过键是否存在区分缺省与 false、0、空字符串，不能用真值跳过，也不能给缺省参数补默认头。
 
 服务器端 `check_parameter_headers`：先把收到的头按小写名分组，再按 bindings 顺序逐个判断。
 
+- 多个问题先按 bindings 选第一个；同一绑定 duplicated 先于 unexpected。未声明的头不解码，畸形值也不进入 checked 审计。
 - 遍历的是 bindings，不是收到的头，所以 checked 事件按 bindings 顺序列出规范头名，和头到达的顺序、大小写无关。
 - 有 body 参数却没有头是 missing；两份以上是 duplicated（只差大小写的也算）；有头却没有 body 参数是 unexpected；`decode_header_value` 拒绝的是 malformed；解码后的文本和 `argument_text(body 值)` 不完全相同，或者 body 值根本没有头部形式，是 mismatched。
 - 解码要求完全规范的哨兵：先检查长度，`=?base64?=` 的前缀和后缀共用了一个问号，不是空串的编码；后缀必须在；base64 必须规范；字节必须是 UTF-8；只解一次。
@@ -101,4 +103,4 @@ def _annotated(node, parts):
 
 ## 这套题证明了什么，没证明什么
 
-通过了说明你能在一个 MCP 客户端里找出让分页提前结束、让合法结果被拒、让错误结果绕过输出契约的缺陷，并把 descriptor 校验放回发现阶段而不丢掉每次调用的参数和结果校验；能设计一个按字节计长、按规范 base64 往返的二进制容器；能实现 `x-mcp-header` 的编码规则和服务器端的精确比对；能写一个按时间驱动、丢弃过期答案的防抖客户端；能用一次完整的树遍历审计注解位置并给出 JSON Pointer。它没有用真实的 Streamable HTTP 或官方 SDK，JSON Schema 也只是课里的小子集，没有覆盖课里 completion 的服务器端授权与限流、内容块的大小限制，也没有覆盖 Practice Lab 里的 `search_evidence` 工具，这些需要另外动手做。
+通过了说明你能在一个 MCP 客户端里找出让分页提前结束、让合法结果被拒、让错误结果绕过输出契约的缺陷，并把 descriptor 校验放回发现阶段而不丢掉每次调用的参数和结果校验；能使用给定物理 codec 映射内容块、按规范 base64 往返，并对媒体和嵌入资源执行调用方配置的本地负载上限；能实现 `x-mcp-header` 的编码规则和服务器端的精确比对；能写一个按时间驱动、丢弃过期答案的防抖客户端；能用一次完整的树遍历审计注解位置并给出 JSON Pointer。它没有用真实的 Streamable HTTP 或官方 SDK，JSON Schema 也只是课里的小子集，没有覆盖课里 completion 的服务器端授权与限流、生产媒体类型/音频时长策略或统一部署的负载配置，也没有覆盖 Practice Lab 里的 `search_evidence` 工具，这些需要另外动手做。

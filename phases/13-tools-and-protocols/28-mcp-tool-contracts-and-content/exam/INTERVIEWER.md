@@ -23,10 +23,12 @@
 | 2 | meta 的 JSON 用什么分隔符、要不要 ensure_ascii？ | "Any UTF-8 JSON object. Lengths count its bytes." |
 | 2 | resource_link 要不要顺手把内容取回来一起存？ | "No. A link is stored as given. Whoever follows it later goes through its own authorization." |
 | 2 | base64 末尾的填充位不为零（比如 QR==），算合法吗？ | "It decodes, but we couldn't give it back unchanged. Refuse it." |
+| 2 | PayloadLimits 的数值是 MCP 协议上限吗？ | "No. They are local exercise settings, independently per block and per content kind. None is unlimited." |
+| 2 | 刚好等于上限呢？ | "Accept it. Count decoded bytes for media and UTF-8 or decoded blob bytes for an embedded resource." |
 | 2 | 内容块里要是有别的字段？ | "Keep every field the block has. The tests use the lesson's fields." |
 | 3 | 工具没声明的 Mcp-Param-* 头要不要拒绝？ | "No. Leave them alone. Only recognized names are checked." |
 | 3 | 明文就能表示的值被包成了 base64，服务器要拒绝吗？ | "No. Decode it and compare. The tests don't cover it." |
-| 3 | 好几个头都不对，报哪一个？ | "The first problem in bindings order. Each test request has one problem." |
+| 3 | 好几个头都不对，报哪一个？ | "The first problem in bindings order. Within one binding use missing, duplicated, unexpected, malformed, then mismatched." |
 | 3 | 头名比较要不要做 Unicode 大小写折叠？ | "Header names are ASCII tokens. lower() is fine here." |
 | 3 | body 里的整数超出安全范围，服务器报什么？ | "mismatched. That value has no header form, so no header can match it." |
 | 4 | 同一个值隔一会儿又打了一遍，要再发请求吗？ | "Yes, after the pause, with a new id." |
@@ -77,9 +79,15 @@
 ### Part 2 内容块容器（目标 12 分钟）
 
 坑：
+- 配置按内容类型分别生效：image、audio、resource 各自有上限，不能把 image 的配置套到 audio 或 resource 上。每块单独判断，不按同一类型的所有块求和。
+- 媒体按解码后的负载算，不能按 base64 文本长度或整条记录的 metadata 算。嵌入资源的 text 按 UTF-8 负载，blob 按解码负载；meta 里的 URI、MIME type 不占该负载额度。
+- pack 和 unpack 都执行调用者这次传入的 limits。不能认为“写的人检查过了”就信任外来容器；默认 None 保留无上限的既有 API。
+- 0 是有效上限，空负载能通过，非空负载被拒。恰好等于上限也通过。resource_link 只保留引用，没有嵌入负载，长 URI 不受这些 payload 上限影响，也不触发读取。普通 text 没有媒体/嵌入资源上限。
+
+给定 codec 的护栏与内容映射：
 - `base64.encodebytes` 每 76 个字符插一个换行，末尾还总有一个换行。读回来的 data 不再是标准 base64，`validate_content_block` 会拒绝。只 `strip()` 掉末尾那个也不够，514 字节的图片中间还有换行。
 - `urlsafe_b64encode` 用的是 `-` 和 `_`，图片里有 `+` 和 `/` 的地方会变。去掉 `=` 填充也不行。
-- 长度按字节算。golden 检查用的是 `"λ"`：一个字符、两个字节。按 `len(str)` 写长度，或者 meta 用 `ensure_ascii=False` 却按字符数写长度（`"raw λ"` 那个链接），都会读错位。
+- `_pack_record`、`_read_records`、`_field`、`_text` 已完整给定；候选人调用这些 helper，不重写物理 framing。长度按字节算。golden 检查用的是 `"λ"`：一个字符、两个字节。按 `len(str)` 写长度，或者 meta 用 `ensure_ascii=False` 却按字符数写长度（`"raw λ"` 那个链接），都会读错位。
 - 长度是 4 字节大端。小端或 2 字节都过不了 golden 检查；70,000 字节的 blob 本来也装不进 2 字节。
 - image、audio 和 blob 存的是解码后的字节。测试自己按布局把每条记录读出来比对，把 base64 文本原样存进 body 会挂。
 - 规范 base64：`QR==` 和 `AAB=` 能解码，但重新编码得到的是 `QQ==` 和 `AAA=`，存成字节以后就还原不了原文。打包时必须拒绝，data 和 blob 都要查。只查 image 不查 audio、只查 data 不查 blob，都会挂。
@@ -93,17 +101,20 @@
 - "Why keep decoded bytes instead of the base64 text?"（小三分之一；base64 只是传输编码。代价是必须能按规范形式重新编码，所以要拒绝非规范输入）
 - "A disk flips one bit inside an image. Does your reader notice?"（长度检查只能发现截断；要发现损坏得加校验和，每条记录或整个文件一个）
 - "Should the archive follow resource_link and store what it points to?"（不应该。课里说链接只是这次调用返回的引用，跟随时要重新授权；要原子地带走的小证据，用嵌入资源）
-- "Where would you enforce size limits?"（课里说 image、audio 要校验媒体类型和大小，嵌入资源现在就要执行负载限制；在打包前按解码后的字节数限制）
+- "Does this prove production audio-duration limits?"（没有。本题只按本地配置检查已解码负载字节，没有编造 duration 字段，也没有统一的 MCP 数字上限）
 
 ### Part 3 参数头（目标 14 分钟）
 
 坑（客户端）：
+- 参数在不在看键，不看真值：false、0、空字符串都要生成对应的头，缺省才不生成。没有一个绑定参数时，头列表为空，但仍记一条空的 name-only 审计；不能用默认值补头。
 - 明文的条件是“非空，而且每个字符都在 `!` 到 `~` 之间”。`str.isprintable()` 会放过空格和非 ASCII 字母，`isascii() and isprintable()` 还会放过空字符串。空字符串编码成 `=?base64??=`；DEL（0x7F）不算可见字符。
 - 以 `=?base64?` 开头的原值要再编码一次，否则服务器会把它当成编码去解，还原不出原文。
 - 不能 strip，也不能做 Unicode 规范化。`"A"` 加组合上圈和预组合的 `"Å"` 是两个不同的值。
-- 布尔值是小写的 `true`/`false`，`str(True)` 是 `"True"`。`isinstance(True, int)` 为真，所以 bool 不能当整数放过。整数的安全范围是 ±9007199254740991，两端包含在内；超出就拒绝。float 和数字字符串都不是整数。
+- `argument_text` 已完整给定，负责布尔小写、严格类型和安全整数范围。bool、float、数字字符串与边界断言和错误修法验证这个 primitive，候选人直接调用它。
 
 坑（服务器）：
+- 先按 bindings 顺序选第一个有问题的绑定；同一绑定先判 missing，再 duplicated、unexpected、malformed、mismatched。测试同时给出多个坏头，以及缺省参数带两份头的情况，不能按头到达顺序或先判 unexpected。
+- false、0、空字符串都是存在的 body 参数，仍然要求头；未声明的畸形 Mcp-Param-* 头不解码、不列入 checked 审计。通过和拒绝都只记实际检查的规范头名，不能收进别的头或值。
 - 头名不区分大小写地识别。只差大小写的两个头算重复，完全相同的两个头也算重复。把头放进以小写名为键的 dict，后一个会覆盖前一个。按名字前缀匹配会把 `Mcp-Param-Region-Backup` 也当成 Region。
 - `=?base64?=` 的前缀和后缀共用了中间的问号。只看 startswith 和 endswith 的解码器会把它解成空串，而空串的规范编码是 `=?base64??=`。要先检查长度，后缀也必须在。用正则 `=\?base64\?(.*)\?=$` 也不行：`$` 能匹配末尾换行之前的位置，结尾多一个 `\n` 的值会被当成合法哨兵。
 - 非规范 base64（`=?base64?QR==?=`）、错误的填充、解出来不是 UTF-8 的字节（`/w==` 是 0xFF），都是 malformed。用 Latin-1 解码会把 0xFF 变成 `ÿ`，正好等于 body。
