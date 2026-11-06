@@ -1,0 +1,466 @@
+{
+  "package": "wbpack",
+  "tests": [
+    "test_install_contract",
+    "test_manifest_roundtrip",
+    "test_release_and_three_way_upgrade",
+    "test_incremental_install_log",
+    "test_component_reference_closure"
+  ],
+  "layers": [
+    {
+      "test": "test_install_contract",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "FileNotFoundError"
+        },
+        {
+          "name": "require workflows directory",
+          "edits": [
+            {
+              "file": "install.py",
+              "old": "return (target / \".github\").is_dir()",
+              "new": "return (target / \".github/workflows\").is_dir()"
+            }
+          ],
+          "expect": "refuse to replace any managed file without force"
+        },
+        {
+          "name": "+ refuse every owned overwrite",
+          "edits": [
+            {
+              "file": "install.py",
+              "old": "        if \"AGENTS.md\" in pack and (target / \"AGENTS.md\").exists():\n            raise FileExistsError(\"AGENTS.md\")",
+              "new": "        for rel in pack:\n            if (target / rel).exists():\n                raise FileExistsError(rel)"
+            }
+          ],
+          "expect": "report every unmanaged relative path"
+        },
+        {
+          "name": "+ inventory relative paths",
+          "edits": [
+            {
+              "file": "install.py",
+              "old": "owned = {Path(rel).name for rel in pack}",
+              "new": "owned = set(pack)"
+            },
+            {
+              "file": "install.py",
+              "old": "p.name not in owned",
+              "new": "p.relative_to(target).as_posix() not in owned"
+            }
+          ],
+          "expect": "a failed copy must not publish the new version"
+        },
+        {
+          "name": "+ publish lock after successful copies",
+          "edits": [
+            {
+              "file": "install.py",
+              "old": "    (target / \".workbench-version\").write_text(version + \"\\n\", encoding=\"utf-8\")\n    for rel, body in selected.items():\n        writer(target / rel, body)",
+              "new": "    for rel, body in selected.items():\n        writer(target / rel, body)\n    (target / \".workbench-version\").write_text(version + \"\\n\", encoding=\"utf-8\")"
+            }
+          ],
+          "expect": "preview must scale with the inventory plus the pack"
+        },
+        {
+          "name": "+ index the inventory once",
+          "edits": [
+            {
+              "file": "install.py",
+              "old": "    return {rel: any(item == rel for item in inventory) for rel in managed}",
+              "new": "    known = set(inventory)\n    return {rel: rel in known for rel in managed}"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_install_contract",
+      "name": "preview indexed by basename",
+      "edits": [
+        {
+          "file": "install.py",
+          "old": "known = set(inventory)",
+          "new": "known = {Path(rel).name for rel in inventory}"
+        },
+        {
+          "file": "install.py",
+          "old": "return {rel: rel in known for rel in managed}",
+          "new": "return {rel: Path(rel).name in known for rel in managed}"
+        }
+      ],
+      "expect": "a basename match is not a managed-path match"
+    },
+    {
+      "test": "test_install_contract",
+      "name": "force removes unlisted files",
+      "edits": [
+        {
+          "file": "install.py",
+          "old": "    unmanaged = _unmanaged(target, selected)\n",
+          "new": "    unmanaged = _unmanaged(target, selected)\n    if force:\n        for rel in unmanaged:\n            (target / rel).unlink()\n"
+        }
+      ],
+      "expect": "force retains user files"
+    },
+    {
+      "test": "test_manifest_roundtrip",
+      "name": "parse octal permissions as decimal",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "int(mode, 8)",
+          "new": "int(mode, 10)"
+        }
+      ],
+      "expect": "manifest fields must round-trip exactly"
+    },
+    {
+      "test": "test_manifest_roundtrip",
+      "name": "split paths on spaces",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "rows.writerow([row.path,",
+          "new": "rows.writerow([row.path.split()[0],"
+        }
+      ],
+      "expect": "manifest fields must round-trip exactly"
+    },
+    {
+      "test": "test_manifest_roundtrip",
+      "name": "report only the first bad hash",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "mismatches.append(row.path)",
+          "new": "return [row.path]"
+        }
+      ],
+      "expect": "report every digest mismatch or missing path"
+    },
+    {
+      "test": "test_manifest_roundtrip",
+      "name": "append manifest rows on save",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "open(\"w\", encoding=\"utf-8\", newline=\"\")",
+          "new": "open(\"a\", encoding=\"utf-8\", newline=\"\")"
+        }
+      ],
+      "expect": "saving replaces the manifest rather than appending"
+    },
+    {
+      "test": "test_release_and_three_way_upgrade",
+      "name": "ignore removals when classifying release",
+      "edits": [
+        {
+          "file": "upgrade.py",
+          "old": "for p in old.keys() | new.keys()",
+          "new": "for p in new.keys()"
+        }
+      ],
+      "expect": "schema removal is still a schema change"
+    },
+    {
+      "test": "test_release_and_three_way_upgrade",
+      "name": "all runtime changes are breaking",
+      "edits": [
+        {
+          "file": "upgrade.py",
+          "old": "return \"patch\" if all(row.component == \"docs\" for row in rows) else \"minor\"",
+          "new": "return \"patch\" if all(row.component == \"docs\" for row in rows) else \"major\""
+        }
+      ],
+      "expect": "non-migrating runtime changes require a minor"
+    },
+    {
+      "test": "test_release_and_three_way_upgrade",
+      "name": "compare version text lexicographically",
+      "edits": [
+        {
+          "file": "upgrade.py",
+          "old": "return new == expected",
+          "new": "return proposed > installed and new == expected"
+        }
+      ],
+      "expect": "version fields are numeric"
+    },
+    {
+      "test": "test_release_and_three_way_upgrade",
+      "name": "delete upstream-removed local edits",
+      "edits": [
+        {
+          "file": "upgrade.py",
+          "old": "status = \"removed\" if current == old else \"locally-modified\"",
+          "new": "status = \"removed\""
+        }
+      ],
+      "expect": "three-way statuses must distinguish upstream changes from local changes"
+    },
+    {
+      "test": "test_release_and_three_way_upgrade",
+      "name": "treat convergent local and upstream edits as conflict",
+      "edits": [
+        {
+          "file": "upgrade.py",
+          "old": "if current == new:",
+          "new": "if current == new and current == old:"
+        }
+      ],
+      "expect": "three-way statuses must distinguish upstream changes from local changes"
+    },
+    {
+      "test": "test_incremental_install_log",
+      "name": "undo in forward order",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "for rel, before in reversed(done):",
+          "new": "for rel, before in done:"
+        }
+      ],
+      "expect": "rollback reverses completed non-skip operations"
+    },
+    {
+      "test": "test_incremental_install_log",
+      "name": "truncate a space-bearing script path in log",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "{op.path}{suffix}",
+          "new": "{op.path.replace('init agent', 'init')}{suffix}"
+        }
+      ],
+      "expect": "preserve full paths in itemize lines"
+    },
+    {
+      "test": "test_incremental_install_log",
+      "name": "dry-run performs real writes",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "if not dry_run and op.kind != \"skip\":",
+          "new": "if op.kind != \"skip\":"
+        }
+      ],
+      "expect": "dry-run called hook"
+    },
+    {
+      "test": "test_incremental_install_log",
+      "name": "forget original mode when undoing removal",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "path.chmod(before[1])",
+          "new": "path.chmod(0o644)"
+        }
+      ],
+      "expect": "a rollback line follows the completed restoration"
+    },
+    {
+      "test": "test_component_reference_closure",
+      "name": "dependants before dependencies",
+      "edits": [
+        {
+          "file": "components.py",
+          "old": "        for dependency in component.requires:\n            visit(dependency, route)\n        done.add(name)\n        output.append(name)",
+          "new": "        done.add(name)\n        output.append(name)\n        for dependency in component.requires:\n            visit(dependency, route)"
+        }
+      ],
+      "expect": "include every dependency once"
+    },
+    {
+      "test": "test_component_reference_closure",
+      "name": "validate exclusions only on explicit requests",
+      "edits": [
+        {
+          "file": "components.py",
+          "old": "if path in excluded:",
+          "new": "if path in excluded and not chain:"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_component_reference_closure",
+      "name": "only report the excluded leaf component",
+      "edits": [
+        {
+          "file": "components.py",
+          "old": "\"excluded: \" + \" -> \".join(route) + \": \" + path",
+          "new": "\"excluded: \" + name + \": \" + path"
+        }
+      ],
+      "expect": "excluded files need the full reference path"
+    },
+    {
+      "test": "test_component_reference_closure",
+      "name": "sort dependencies rather than preserving router reference order",
+      "edits": [
+        {
+          "file": "components.py",
+          "old": "for dependency in component.requires:",
+          "new": "for dependency in sorted(component.requires, reverse=True):"
+        }
+      ],
+      "expect": "include every dependency once"
+    },
+    {
+      "test": "test_manifest_roundtrip",
+      "name": "independent: lose component ownership on load",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "FileEntry(path, digest, int(mode, 8), component)",
+          "new": "FileEntry(path, digest, int(mode, 8), \"\")"
+        }
+      ],
+      "expect": "manifest fields must round-trip exactly"
+    },
+    {
+      "test": "test_release_and_three_way_upgrade",
+      "name": "independent: ignore executable-bit-only release change",
+      "edits": [
+        {
+          "file": "upgrade.py",
+          "old": "if old.get(p) != new.get(p)",
+          "new": "if getattr(old.get(p), \"sha256\", None) != getattr(new.get(p), \"sha256\", None)"
+        }
+      ],
+      "expect": "permission-only runtime changes still need a release"
+    },
+    {
+      "test": "test_release_and_three_way_upgrade",
+      "name": "independent: incoming new file overwrites an unrelated local file",
+      "edits": [
+        {
+          "file": "upgrade.py",
+          "old": "status = \"added\" if current is None else \"conflict\"",
+          "new": "status = \"added\""
+        }
+      ],
+      "expect": "three-way statuses must distinguish upstream changes from local changes"
+    },
+    {
+      "test": "test_incremental_install_log",
+      "name": "independent: keep newly added files during rollback",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            if before is None:\n                path.unlink()",
+          "new": "            if before is None:\n                pass"
+        }
+      ],
+      "expect": "a rollback line follows the completed restoration"
+    },
+    {
+      "test": "test_component_reference_closure",
+      "name": "independent: validate every component instead of requested closure",
+      "edits": [
+        {
+          "file": "components.py",
+          "old": "for name in requested:",
+          "new": "for name in components:"
+        }
+      ],
+      "expect": "excluded: project: task_board.json"
+    },
+    {
+      "test": "test_component_reference_closure",
+      "name": "independent: sort explicit requests alphabetically",
+      "edits": [
+        {
+          "file": "components.py",
+          "old": "for name in requested:",
+          "new": "for name in sorted(requested):"
+        }
+      ],
+      "expect": "request order breaks independent ties"
+    },
+    {
+      "test": "test_release_and_three_way_upgrade",
+      "name": "independent reviewer: local deletion plus upstream edit misclassified",
+      "edits": [
+        {
+          "file": "upgrade.py",
+          "old": "        else:\n            status = \"conflict\"\n",
+          "new": "        else:\n            status = \"locally-modified\" if current is None else \"conflict\"\n"
+        }
+      ],
+      "expect": "a local deletion conflicts with an upstream content change"
+    },
+    {
+      "test": "test_incremental_install_log",
+      "name": "independent reviewer: emit rollback before restoring disk",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        for rel, before in reversed(done):\n            path = root / rel\n",
+          "new": "        for rel, before in reversed(done):\n            yield f\"rollback {rel}\\n\"\n            path = root / rel\n"
+        },
+        {
+          "file": "stream.py",
+          "old": "            yield f\"rollback {rel}\\n\"\n        raise\n",
+          "new": "        raise\n"
+        }
+      ],
+      "expect": "a rollback line follows the completed restoration"
+    },
+    {
+      "test": "test_component_reference_closure",
+      "name": "independent reviewer: inspect only the first file per component",
+      "edits": [
+        {
+          "file": "components.py",
+          "old": "for path in component.files:",
+          "new": "for path in component.files[:1]:"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_manifest_roundtrip",
+      "name": "independent reviewer: p2_missing_ignored",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != row.sha256:\n",
+          "new": "        if path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() != row.sha256:\n"
+        }
+      ],
+      "expect": "report every digest mismatch or missing path"
+    },
+    {
+      "test": "test_manifest_roundtrip",
+      "name": "independent reviewer: p2_last_row_lost",
+      "edits": [
+        {
+          "file": "manifest.py",
+          "old": "        for row in manifest.files:\n",
+          "new": "        for row in manifest.files[:-1]:\n"
+        }
+      ],
+      "expect": "manifest fields must round-trip exactly"
+    },
+    {
+      "test": "test_component_reference_closure",
+      "name": "independent reviewer: shared component emitted repeatedly",
+      "edits": [
+        {
+          "file": "components.py",
+          "old": "        if name in done:\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "include every dependency once, before its dependant, preserving reference order"
+    }
+  ]
+}
