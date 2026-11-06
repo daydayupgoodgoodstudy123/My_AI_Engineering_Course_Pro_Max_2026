@@ -1,0 +1,1770 @@
+{
+  "package": "memgpt",
+  "tests": [
+    "test_tools_and_budget",
+    "test_archive_roundtrip",
+    "test_bm25_recall",
+    "test_pager_stream",
+    "test_typed_core"
+  ],
+  "layers": [
+    {
+      "test": "test_tools_and_budget",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "a retrieved fact cites the session and the turn it was stored at"
+        },
+        {
+          "name": "forward session and turn",
+          "edits": [
+            {
+              "file": "tools.py",
+              "old": "        rid = self.archival.insert(text, tags=tags)\n",
+              "new": "        rid = self.archival.insert(text, tags=tags, session_id=self.session_id, turn_id=self.main.turn)\n"
+            }
+          ],
+          "expect": "a replace whose old text occurs more than once is refused and changes nothing"
+        },
+        {
+          "name": "+ refuse an ambiguous replace",
+          "edits": [
+            {
+              "file": "tools.py",
+              "old": "        self.main.core[section] = current.replace(old, new)\n",
+              "new": "        if current.count(old) > 1:\n            return f\"error: {old!r} occurs more than once in core[{section}]\"\n        self.main.core[section] = current.replace(old, new)\n"
+            }
+          ],
+          "expect": "every message costs approx_tokens(text), and the messages kept fit max_tokens"
+        },
+        {
+          "name": "+ cost each message on its own",
+          "edits": [
+            {
+              "file": "context.py",
+              "old": "        return approx_tokens(\" \".join([self.summary] + [m.text for m in self.messages]))\n",
+              "new": "        return approx_tokens(self.summary) + sum(approx_tokens(m.text) for m in self.messages)\n"
+            }
+          ],
+          "expect": "archival search should stay fast on a large archive"
+        },
+        {
+          "name": "+ index tokens at insert",
+          "edits": [
+            {
+              "file": "archival.py",
+              "old": "        self._records: list[ArchivalRecord] = []\n        self._counter = 0\n",
+              "new": "        self._records: list[ArchivalRecord] = []\n        self._counter = 0\n        self._terms: list[frozenset[str]] = []\n        self._postings: dict[str, list[int]] = {}\n"
+            },
+            {
+              "file": "archival.py",
+              "old": "        self._records.append(record)\n",
+              "new": "        terms = frozenset(tokenize(record.text))\n        for term in terms:\n            self._postings.setdefault(term, []).append(len(self._records))\n        self._terms.append(terms)\n        self._records.append(record)\n"
+            },
+            {
+              "file": "archival.py",
+              "old": "        q_tokens = set(tokenize(query))\n        scored: list[tuple[float, ArchivalRecord]] = []\n        for record in self._records:\n            r_tokens = set(tokenize(record.text))\n            if not r_tokens:\n                continue\n            overlap = len(q_tokens & r_tokens)\n            if overlap == 0:\n                continue\n            score = overlap / (len(q_tokens) + len(r_tokens) - overlap)\n            scored.append((score, record))\n        scored.sort(key=lambda x: -x[0])\n        return scored[:top_k]\n",
+              "new": "        q_tokens = set(tokenize(query))\n        shared: dict[int, int] = {}\n        for term in q_tokens:\n            for position in self._postings.get(term, ()):\n                shared[position] = shared.get(position, 0) + 1\n        scored = [\n            (overlap / (len(q_tokens) + len(self._terms[position]) - overlap), position)\n            for position, overlap in shared.items()\n        ]\n        scored.sort(key=lambda item: (-item[0], item[1]))\n        return [(score, self._records[position]) for score, position in scored[:top_k]]\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_tools_and_budget",
+      "name": "turn taken from the number of messages in context",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "turn_id=self.main.turn)",
+          "new": "turn_id=len(self.main.messages))"
+        }
+      ],
+      "expect": "a retrieved fact cites the session and the turn it was stored at"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "turn forwarded, session left at its default",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "session_id=self.session_id, turn_id=self.main.turn)",
+          "new": "turn_id=self.main.turn)"
+        }
+      ],
+      "expect": "a retrieved fact cites the session and the turn it was stored at"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "an ambiguous old text replaces its first occurrence",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        if current.find(old, first + 1) != -1:\n            return f\"error: {old!r} occurs more than once in core[{section}]; quote more of it\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "a replace whose old text occurs more than once is refused and changes nothing"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "the ambiguity is reported after replacing anyway",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        if current.find(old, first + 1) != -1:\n            return",
+          "new": "        if current.find(old, first + 1) != -1:\n            self.main.core[section] = current.replace(old, new)\n            return"
+        }
+      ],
+      "expect": "a replace whose old text occurs more than once is refused and changes nothing"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "approx_tokens truncates instead of rounding up",
+      "edits": [
+        {
+          "file": "tokens.py",
+          "old": "return math.ceil(len(text.split()) * 1.3)",
+          "new": "return int(len(text.split()) * 1.3)"
+        }
+      ],
+      "expect": "every message costs approx_tokens(text), and the messages kept fit max_tokens"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "summed word counts rounded once, not per message",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "sum(approx_tokens(m.text) for m in self.messages)",
+          "new": "__import__('math').ceil(sum(len(m.text.split()) * 1.3 for m in self.messages))"
+        }
+      ],
+      "expect": "every message costs approx_tokens(text), and the messages kept fit max_tokens"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "evict lets the newest message go too",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "while self.tokens() > self.max_tokens and len(self.messages) > 1:",
+          "new": "while self.tokens() > self.max_tokens and self.messages:"
+        }
+      ],
+      "expect": "the newest message stays, even when it alone is over budget"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "evict drops the newest message first",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "message = self.messages.pop(0)",
+          "new": "message = self.messages.pop()"
+        }
+      ],
+      "expect": "every message costs approx_tokens(text), and the messages kept fit max_tokens"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "conversation_search reads only what is still in context",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "reversed(self.main.recall + self.main.messages)",
+          "new": "reversed(self.main.messages)"
+        }
+      ],
+      "expect": "paged-out messages stay searchable"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "pre-tokenized, but still a full scan per query",
+      "edits": [
+        {
+          "file": "archival.py",
+          "old": "        for term in query_terms:\n            for position in self._postings.get(term, ()):\n                shared[position] = shared.get(position, 0) + 1\n",
+          "new": "        for position, terms in enumerate(self._terms):\n            overlap = len(query_terms & terms)\n            if overlap:\n                shared[position] = overlap\n"
+        }
+      ],
+      "expect": "archival search should stay fast on a large archive"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "postings list every occurrence of a token",
+      "edits": [
+        {
+          "file": "archival.py",
+          "old": "        for term in terms:\n            self._postings.setdefault(term, []).append(position)\n",
+          "new": "        for term in tokenize(record.text):\n            self._postings.setdefault(term, []).append(position)\n"
+        }
+      ],
+      "expect": "scores are what they were: the Jaccard overlap of distinct tokens, split as before"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "query tokens counted with repeats",
+      "edits": [
+        {
+          "file": "archival.py",
+          "old": "        query_terms = set(tokenize(query))\n",
+          "new": "        query_terms = tokenize(query)\n"
+        }
+      ],
+      "expect": "scores are what they were: the Jaccard overlap of distinct tokens, split as before"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "punctuation stripped while building the index",
+      "edits": [
+        {
+          "file": "archival.py",
+          "old": "        terms = frozenset(tokenize(record.text))\n",
+          "new": "        terms = frozenset(__import__('re').findall(r'[a-z0-9-]+', record.text.lower()))\n"
+        },
+        {
+          "file": "archival.py",
+          "old": "        query_terms = set(tokenize(query))\n",
+          "new": "        query_terms = set(__import__('re').findall(r'[a-z0-9-]+', query.lower()))\n"
+        }
+      ],
+      "expect": "scores are what they were: the Jaccard overlap of distinct tokens, split as before"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "score is the share of the query covered",
+      "edits": [
+        {
+          "file": "archival.py",
+          "old": "(overlap / (len(query_terms) + len(self._terms[position]) - overlap), position)",
+          "new": "(overlap / len(query_terms), position)"
+        }
+      ],
+      "expect": "scores are what they were: the Jaccard overlap of distinct tokens, split as before"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "identical texts merged in the results",
+      "edits": [
+        {
+          "file": "archival.py",
+          "old": "        return [(score, self._records[position]) for score, position in scored[:top_k]]\n",
+          "new": "        seen: set[str] = set()\n        unique = []\n        for score, position in scored:\n            if self._records[position].text not in seen:\n                seen.add(self._records[position].text)\n                unique.append((score, self._records[position]))\n        return unique[:top_k]\n"
+        }
+      ],
+      "expect": "the same fact from two sessions stays two records, each with its own citation"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "candidates gathered in a set, ranked by score alone",
+      "edits": [
+        {
+          "file": "archival.py",
+          "old": "        query_terms = set(tokenize(query))\n        shared: dict[int, int] = {}\n        for term in query_terms:\n            for position in self._postings.get(term, ()):\n                shared[position] = shared.get(position, 0) + 1\n        scored = [\n            (overlap / (len(query_terms) + len(self._terms[position]) - overlap), position)\n            for position, overlap in shared.items()\n        ]\n        scored.sort(key=lambda item: (-item[0], item[1]))\n",
+          "new": "        query_terms = set(tokenize(query))\n        candidates = {p for term in query_terms for p in self._postings.get(term, ())}\n        scored = []\n        for position in candidates:\n            overlap = len(query_terms & self._terms[position])\n            scored.append((overlap / (len(query_terms) + len(self._terms[position]) - overlap), position))\n        scored.sort(key=lambda item: -item[0])\n"
+        }
+      ],
+      "expect": "results are what they were, ties in insertion order"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "ranked by score alone, in the order postings were read",
+      "edits": [
+        {
+          "file": "archival.py",
+          "old": "        scored.sort(key=lambda item: (-item[0], item[1]))\n",
+          "new": "        scored.sort(key=lambda item: -item[0])\n"
+        }
+      ],
+      "expect": "results are what they were, ties in insertion order"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "no AUTOINCREMENT, so the newest id comes back after a delete",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "seq INTEGER PRIMARY KEY AUTOINCREMENT,",
+          "new": "seq INTEGER PRIMARY KEY,"
+        }
+      ],
+      "expect": "a deleted id is never handed out again: old answers cite it"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "next id from COUNT(*) + 1",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "\"INSERT INTO archival (text, tags, session_id, turn_id) VALUES (?, ?, ?, ?)\"",
+          "new": "\"INSERT INTO archival (seq, text, tags, session_id, turn_id)\"\n                \" VALUES ((SELECT COUNT(*) + 1 FROM archival), ?, ?, ?, ?)\""
+        }
+      ],
+      "expect": "a deleted id is never handed out again: old answers cite it"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "next id from MAX(seq) + 1",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "\"INSERT INTO archival (text, tags, session_id, turn_id) VALUES (?, ?, ?, ?)\"",
+          "new": "\"INSERT INTO archival (seq, text, tags, session_id, turn_id)\"\n                \" VALUES ((SELECT COALESCE(MAX(seq), 0) + 1 FROM archival), ?, ?, ?, ?)\""
+        }
+      ],
+      "expect": "a deleted id is never handed out again: old answers cite it"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "ids counted in memory, from zero after a reopen",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "        rid = _rid(cursor.lastrowid)\n",
+          "new": "        self._counter += 1\n        rid = _rid(self._counter)\n"
+        }
+      ],
+      "expect": "a deleted id is never handed out again: old answers cite it"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "insert never commits",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "        with self._db:\n            cursor = self._db.execute(",
+          "new": "        if True:\n            cursor = self._db.execute("
+        }
+      ],
+      "expect": "another connection sees every insert as soon as insert returns"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "commit only in close()",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "        with self._db:\n            cursor = self._db.execute(",
+          "new": "        if True:\n            cursor = self._db.execute("
+        },
+        {
+          "file": "archive_db.py",
+          "old": "    def close(self) -> None:\n        self._db.close()\n",
+          "new": "    def close(self) -> None:\n        self._db.commit()\n        self._db.close()\n"
+        }
+      ],
+      "expect": "another connection sees every insert as soon as insert returns"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "CREATE TABLE IF NOT EXISTS archival",
+          "new": "CREATE TABLE archival"
+        }
+      ],
+      "expect": "already exists"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "tags joined with commas",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "(text, json.dumps(list(tags)), session_id, turn_id)",
+          "new": "(text, \",\".join(tags), session_id, turn_id)"
+        },
+        {
+          "file": "archive_db.py",
+          "old": "tuple(json.loads(tags))",
+          "new": "tuple(tags.split(\",\"))"
+        }
+      ],
+      "expect": "exactly as it went in"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "tags come back as a list",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "tuple(json.loads(tags))",
+          "new": "json.loads(tags)"
+        }
+      ],
+      "expect": "exactly as it went in"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "tags stored sorted",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "json.dumps(list(tags))",
+          "new": "json.dumps(sorted(tags))"
+        }
+      ],
+      "expect": "exactly as it went in"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "turn_id column declared TEXT",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "turn_id INTEGER NOT NULL",
+          "new": "turn_id TEXT NOT NULL"
+        }
+      ],
+      "expect": "exactly as it went in"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "text stripped on the way in",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "(text, json.dumps(list(tags)), session_id, turn_id)",
+          "new": "(text.strip(), json.dumps(list(tags)), session_id, turn_id)"
+        }
+      ],
+      "expect": "exactly as it went in"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "records ordered by their id string",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "FROM archival ORDER BY seq",
+          "new": "FROM archival ORDER BY printf('a%03d', seq)"
+        }
+      ],
+      "expect": "ids keep counting past a999, and records come back in insertion order"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "stored records not loaded when the file is opened",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "            self._db.execute(SCHEMA)\n        self._load()\n",
+          "new": "            self._db.execute(SCHEMA)\n"
+        }
+      ],
+      "expect": "another connection sees every insert as soon as insert returns"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "delete leaves the record in memory",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "            self._db.execute(\"DELETE FROM archival WHERE seq = ?\", (int(rid[1:]),))\n        self._load()\n",
+          "new": "            self._db.execute(\"DELETE FROM archival WHERE seq = ?\", (int(rid[1:]),))\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "deleting an unknown id passes silently",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "        self.get(rid)\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "classic idf, negative for common tokens",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "return math.log(1 + (len(self.records) - n + 0.5) / (n + 0.5))",
+          "new": "return math.log((len(self.records) - n + 0.5) / (n + 0.5))"
+        }
+      ],
+      "expect": "scores follow the docstring"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "empty records left out of N and avgdl",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "        self.records = list(records)\n",
+          "new": "        self.records = [r for r in records if r.text.strip()]\n"
+        }
+      ],
+      "expect": "scores follow the docstring"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "avgdl skips empty records",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "self._avgdl = sum(self._len) / len(self.records) if self.records else 0.0",
+          "new": "self._avgdl = sum(self._len) / max(1, sum(1 for n in self._len if n))"
+        }
+      ],
+      "expect": "scores follow the docstring"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "tf counted once per record",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "self._tf = [Counter(tokenize(record.text)) for record in self.records]",
+          "new": "self._tf = [Counter(set(tokenize(record.text))) for record in self.records]"
+        }
+      ],
+      "expect": "scores follow the docstring"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "document frequency counts every occurrence",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "self._df.update(tf.keys())",
+          "new": "self._df.update(tf)"
+        }
+      ],
+      "expect": "scores follow the docstring"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "k1 = 1.5",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "k1: float = 1.2",
+          "new": "k1: float = 1.5"
+        }
+      ],
+      "expect": "scores follow the docstring"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "b = 1",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "b: float = 0.75",
+          "new": "b: float = 1.0"
+        }
+      ],
+      "expect": "scores follow the docstring"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "query tokens deduplicated",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "for term in tokenize(query):",
+          "new": "for term in set(tokenize(query)):"
+        }
+      ],
+      "expect": "a token repeated in the query counts twice"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "equal scores in reverse order",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "scored.sort(key=lambda item: (-item[0], item[1]))",
+          "new": "scored.sort(reverse=True)"
+        }
+      ],
+      "expect": "equal scores keep their order"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "zero scores returned too",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "            if score > 0:\n                scored.append((score, position))\n",
+          "new": "            scored.append((score, position))\n"
+        }
+      ],
+      "expect": "only records that contain a query token come back"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "punctuation stripped from tokens",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "self._tf = [Counter(tokenize(record.text)) for record in self.records]",
+          "new": "self._tf = [Counter(__import__('re').findall(r'[a-z0-9-]+', record.text.lower())) for record in self.records]"
+        },
+        {
+          "file": "bm25.py",
+          "old": "for term in tokenize(query):",
+          "new": "for term in __import__('re').findall(r'[a-z0-9-]+', query.lower()):"
+        }
+      ],
+      "expect": "only records that contain a query token come back"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "tokens not lowercased",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "self._tf = [Counter(tokenize(record.text)) for record in self.records]",
+          "new": "self._tf = [Counter(record.text.split()) for record in self.records]"
+        },
+        {
+          "file": "bm25.py",
+          "old": "for term in tokenize(query):",
+          "new": "for term in query.split():"
+        }
+      ],
+      "expect": "a token found in most records still scores above zero"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "top_k ignored",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "return [(score, self.records[position]) for score, position in scored[:top_k]]",
+          "new": "return [(score, self.records[position]) for score, position in scored]"
+        }
+      ],
+      "expect": "at most top_k results"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "avgdl divides by zero on an empty archive",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "self._avgdl = sum(self._len) / len(self.records) if self.records else 0.0",
+          "new": "self._avgdl = sum(self._len) / len(self.records)"
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "length norms precomputed for every record",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "self._avgdl = sum(self._len) / len(self.records) if self.records else 0.0\n",
+          "new": "self._avgdl = sum(self._len) / len(self.records) if self.records else 0.0\n        self._norms = [k1 * (1 - b + b * n / self._avgdl) for n in self._len]\n"
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "recall counted as a hit rate",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "        total += len(found & relevant) / len(relevant)\n",
+          "new": "        total += 1.0 if found & relevant else 0.0\n"
+        }
+      ],
+      "expect": "a case's recall is the fraction of its relevant records found"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "recall divided by k",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "        total += len(found & relevant) / len(relevant)\n",
+          "new": "        total += len(found & relevant) / k\n"
+        }
+      ],
+      "expect": "a case's recall is the fraction of its relevant records found"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "cases without results left out of the mean",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "        raise ValueError(\"no cases to measure\")\n    total = 0.0\n",
+          "new": "        raise ValueError(\"no cases to measure\")\n    total = 0.0\n    skipped = 0\n"
+        },
+        {
+          "file": "bm25.py",
+          "old": "        total += len(found & relevant) / len(relevant)\n    return total / len(cases)\n",
+          "new": "        if not found:\n            skipped += 1\n            continue\n        total += len(found & relevant) / len(relevant)\n    return total / (len(cases) - skipped)\n"
+        }
+      ],
+      "expect": "recall@k looks at the first k results, averaged over every case"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "search called with its own default top_k",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "search(query, k)[:k]",
+          "new": "search(query)"
+        }
+      ],
+      "expect": "recall@k looks at the first k results, averaged over every case"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "a case with no relevant records divides by zero",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "        if not relevant:\n            raise ValueError(f\"case {query!r} has no relevant records\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "ZeroDivisionError"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "no newline after each event",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "return json.dumps(event) + \"\\n\"",
+          "new": "return json.dumps(event)"
+        }
+      ],
+      "expect": "Extra data"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "a blank line after each event",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "return json.dumps(event) + \"\\n\"",
+          "new": "return json.dumps(event) + \"\\n\\n\""
+        }
+      ],
+      "expect": "Expecting value"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "pressure on every message at or above warn_tokens",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "if before < warn_tokens <= ctx.tokens():",
+          "new": "if ctx.tokens() >= warn_tokens:"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "pressure needs more than warn_tokens",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "if before < warn_tokens <= ctx.tokens():",
+          "new": "if before < warn_tokens < ctx.tokens():"
+        }
+      ],
+      "expect": "reaching warn_tokens is pressure; once only the newest message is left, the pager moves on"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "pressure reported after paging out",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "        if before < warn_tokens <= ctx.tokens():\n            yield _line({\"event\": \"memory_pressure\", \"turn\": message.turn, \"tokens\": ctx.tokens()})\n        while ctx.tokens() > ctx.max_tokens and len(ctx.messages) > 1:\n            paged = ctx.evict()\n            freed = sum(approx_tokens(m.text) for m in paged)\n            yield _line({\"event\": \"page_out\", \"turns\": [m.turn for m in paged], \"freed\": freed})\n            ctx.summary = await summarize(ctx.summary, paged)\n            yield _line({\"event\": \"summary\", \"tokens\": approx_tokens(ctx.summary), \"text\": ctx.summary})\n",
+          "new": "        pushed = ctx.tokens()\n        while ctx.tokens() > ctx.max_tokens and len(ctx.messages) > 1:\n            paged = ctx.evict()\n            freed = sum(approx_tokens(m.text) for m in paged)\n            yield _line({\"event\": \"page_out\", \"turns\": [m.turn for m in paged], \"freed\": freed})\n            ctx.summary = await summarize(ctx.summary, paged)\n            yield _line({\"event\": \"summary\", \"tokens\": approx_tokens(ctx.summary), \"text\": ctx.summary})\n        if before < warn_tokens <= pushed:\n            yield _line({\"event\": \"memory_pressure\", \"turn\": message.turn, \"tokens\": pushed})\n"
+        }
+      ],
+      "expect": "memory_pressure comes before anything is paged out"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "a message's events collected, then yielded together",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "        if before < warn_tokens <= ctx.tokens():\n            yield _line({\"event\": \"memory_pressure\", \"turn\": message.turn, \"tokens\": ctx.tokens()})\n        while ctx.tokens() > ctx.max_tokens and len(ctx.messages) > 1:\n            paged = ctx.evict()\n            freed = sum(approx_tokens(m.text) for m in paged)\n            yield _line({\"event\": \"page_out\", \"turns\": [m.turn for m in paged], \"freed\": freed})\n            ctx.summary = await summarize(ctx.summary, paged)\n            yield _line({\"event\": \"summary\", \"tokens\": approx_tokens(ctx.summary), \"text\": ctx.summary})\n",
+          "new": "        out = []\n        if before < warn_tokens <= ctx.tokens():\n            out.append(_line({\"event\": \"memory_pressure\", \"turn\": message.turn, \"tokens\": ctx.tokens()}))\n        while ctx.tokens() > ctx.max_tokens and len(ctx.messages) > 1:\n            paged = ctx.evict()\n            freed = sum(approx_tokens(m.text) for m in paged)\n            out.append(_line({\"event\": \"page_out\", \"turns\": [m.turn for m in paged], \"freed\": freed}))\n            ctx.summary = await summarize(ctx.summary, paged)\n            out.append(_line({\"event\": \"summary\", \"tokens\": approx_tokens(ctx.summary), \"text\": ctx.summary}))\n        for line in out:\n            yield line\n"
+        }
+      ],
+      "expect": "memory_pressure comes before anything is paged out"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "summary written before page_out is reported",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "            yield _line({\"event\": \"page_out\", \"turns\": [m.turn for m in paged], \"freed\": freed})\n            ctx.summary = await summarize(ctx.summary, paged)\n",
+          "new": "            ctx.summary = await summarize(ctx.summary, paged)\n            yield _line({\"event\": \"page_out\", \"turns\": [m.turn for m in paged], \"freed\": freed})\n"
+        }
+      ],
+      "expect": "page_out is reported as soon as messages leave, before the summary is written"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "every message read before any is paged",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "    async for role, text in arrivals:\n",
+          "new": "    for role, text in [item async for item in arrivals]:\n"
+        }
+      ],
+      "expect": "report each event as soon as it happens"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "one page-out per message",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "        while ctx.tokens() > ctx.max_tokens and len(ctx.messages) > 1:\n",
+          "new": "        if ctx.tokens() > ctx.max_tokens and len(ctx.messages) > 1:\n"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "summary left out of the budget",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "return approx_tokens(self.summary) + sum(approx_tokens(m.text) for m in self.messages)",
+          "new": "return sum(approx_tokens(m.text) for m in self.messages)"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "approx_tokens rounds to the nearest token",
+      "edits": [
+        {
+          "file": "tokens.py",
+          "old": "return math.ceil(len(text.split()) * 1.3)",
+          "new": "return round(len(text.split()) * 1.3)"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "summarize given only the newly paged messages",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "ctx.summary = await summarize(ctx.summary, paged)",
+          "new": "ctx.summary = await summarize(\"\", paged)"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "summary appended to instead of replaced",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "ctx.summary = await summarize(ctx.summary, paged)",
+          "new": "ctx.summary = (ctx.summary + \" \" + await summarize(ctx.summary, paged)).strip()"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "summarize not awaited",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "ctx.summary = await summarize(ctx.summary, paged)",
+          "new": "ctx.summary = summarize(ctx.summary, paged)"
+        }
+      ],
+      "expect": "coroutine"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "freed reports what is left in context",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "freed = sum(approx_tokens(m.text) for m in paged)",
+          "new": "freed = ctx.tokens()"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "every older message paged out at once",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "            paged = ctx.evict()\n",
+          "new": "            paged = ctx.messages[:-1]\n            del ctx.messages[:-1]\n            ctx.recall.extend(paged)\n"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "paged-out messages dropped instead of kept in recall",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "            paged = ctx.evict()\n",
+          "new": "            paged = []\n            while ctx.tokens() > ctx.max_tokens and len(ctx.messages) > 1:\n                paged.append(ctx.messages.pop(0))\n"
+        }
+      ],
+      "expect": "paged-out messages move to recall"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "keeps paging while over budget, with nothing older left",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "        while ctx.tokens() > ctx.max_tokens and len(ctx.messages) > 1:\n",
+          "new": "        while ctx.tokens() > ctx.max_tokens:\n"
+        }
+      ],
+      "expect": "reaching warn_tokens is pressure; once only the newest message is left, the pager moves on"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "sections rendered in alphabetical order",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "            for section in sections.values():\n",
+          "new": "            for section in sorted(sections.values(), key=lambda s: s.name):\n"
+        }
+      ],
+      "expect": "every section renders in schema order, empty ones included"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "empty sections left out of the render",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "            for section in sections.values():\n",
+          "new": "            for section in sections.values():\n                if not section.used():\n                    continue\n"
+        }
+      ],
+      "expect": "every section renders in schema order, empty ones included"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "an empty text section keeps its colon",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "lines.append(f\"{head}: {section.text}\" if section.text else head)",
+          "new": "lines.append(f\"{head}: {section.text}\")"
+        }
+      ],
+      "expect": "every section renders in schema order, empty ones included"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "limits checked in bytes",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "        grow = len(new_text) - len(section.text)\n",
+          "new": "        grow = len(new_text.encode()) - len(section.text.encode())\n"
+        },
+        {
+          "file": "core.py",
+          "old": "            return len(self.text)\n",
+          "new": "            return len(self.text.encode())\n"
+        }
+      ],
+      "expect": "CoreLimitError"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "usage counted in bytes",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "            return len(self.text)\n",
+          "new": "            return len(self.text.encode())\n"
+        }
+      ],
+      "expect": "limits count characters, not bytes"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "a group counts only the text sections right under it",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "        return sum(child.used() for child in self.children.values())\n",
+          "new": "        return sum(len(child.text) for child in self.children.values())\n"
+        }
+      ],
+      "expect": "a group holds the text of every section anywhere below it"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "only the section's own limit is checked",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "            node = node.parent\n",
+          "new": "            node = None\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "only the section and its parent are checked",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "        while node is not None:\n            if node.used() + grow > node.limit:\n",
+          "new": "        for _ in range(2):\n            if node is None:\n                break\n            if node.used() + grow > node.limit:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "the outermost limit is reported",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "        grow = len(new_text) - len(section.text)\n        node: _Section | None = section\n        while node is not None:\n            if node.used() + grow > node.limit:\n                raise CoreLimitError(node.path, node.limit, node.used() + grow)\n            node = node.parent\n        section.text = new_text\n",
+          "new": "        grow = len(new_text) - len(section.text)\n        chain = []\n        node: _Section | None = section\n        while node is not None:\n            chain.append(node)\n            node = node.parent\n        for node in reversed(chain):\n            if node.used() + grow > node.limit:\n                raise CoreLimitError(node.path, node.limit, node.used() + grow)\n        section.text = new_text\n"
+        }
+      ],
+      "expect": "when several limits are hit, name the innermost"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "a refused write keeps the new text",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "        grow = len(new_text) - len(section.text)\n        node: _Section | None = section\n        while node is not None:\n            if node.used() + grow > node.limit:\n                raise CoreLimitError(node.path, node.limit, node.used() + grow)\n            node = node.parent\n        section.text = new_text\n",
+          "new": "        section.text = new_text\n        node: _Section | None = section\n        while node is not None:\n            if node.used() > node.limit:\n                raise CoreLimitError(node.path, node.limit, node.used())\n            node = node.parent\n"
+        }
+      ],
+      "expect": "a refused write changes nothing"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "append joins without a space",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "self._write(section, f\"{section.text} {text}\" if section.text else text)",
+          "new": "self._write(section, section.text + text)"
+        }
+      ],
+      "expect": "the error names the section whose limit is hit, and the size the write would make"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "a limit counts as exceeded when it is reached",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "            if node.used() + grow > node.limit:\n",
+          "new": "            if node.used() + grow >= node.limit:\n"
+        }
+      ],
+      "expect": "CoreLimitError"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "replace changes every occurrence",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "        if section.text.find(old, first + 1) != -1:\n            raise ValueError(f\"{old!r} occurs more than once in core[{path}]\")\n        self._write(section, section.text[:first] + new + section.text[first + len(old) :])\n",
+          "new": "        self._write(section, section.text.replace(old, new))\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "replace skips the limit check",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "        self._write(section, section.text[:first] + new + section.text[first + len(old) :])\n",
+          "new": "        section.text = section.text[:first] + new + section.text[first + len(old) :]\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "a path that runs past a text section stops there",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "            if sections is None or name not in sections:\n",
+          "new": "            if sections is None:\n                break\n            if name not in sections:\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "empty path segments skipped",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "        names = path.split(\".\")\n",
+          "new": "        names = [name for name in path.split(\".\") if name]\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "paths matched without case",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "            if sections is None or name not in sections:\n",
+          "new": "            name = name.lower()\n            if sections is None or name not in sections:\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "a group accepts text",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "        if section.children is not None:\n            raise TypeError(f\"core[{path}] is a group of sections, not a text section\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "evict also when the context costs exactly max_tokens",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "while self.tokens() > self.max_tokens and len(self.messages) > 1:",
+          "new": "while self.tokens() >= self.max_tokens and len(self.messages) > 1:"
+        }
+      ],
+      "expect": "a context that costs exactly max_tokens fits"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "equal scores ordered by rid string",
+      "edits": [
+        {
+          "file": "archival.py",
+          "old": "        scored.sort(key=lambda item: (-item[0], item[1]))\n",
+          "new": "        scored.sort(key=lambda item: (-item[0], self._records[item[1]].rid))\n"
+        }
+      ],
+      "expect": "results are what they were, ties in insertion order"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "turn_id column declared REAL",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "turn_id INTEGER NOT NULL",
+          "new": "turn_id REAL NOT NULL"
+        }
+      ],
+      "expect": "session_id comes back a str and turn_id an int"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "stored records loaded without going through _keep",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "            self._keep(ArchivalRecord(_rid(seq), text, tuple(json.loads(tags)), session_id, turn_id))\n",
+          "new": "            self._records.append(ArchivalRecord(_rid(seq), text, tuple(json.loads(tags)), session_id, turn_id))\n"
+        }
+      ],
+      "expect": "KeyError: 'a002'"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "pretty-printed JSON",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "return json.dumps(event) + \"\\n\"",
+          "new": "return json.dumps(event, indent=2) + \"\\n\""
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "events yielded as bytes",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "return json.dumps(event) + \"\\n\"",
+          "new": "return (json.dumps(event) + \"\\n\").encode()"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "paged-out messages added to recall twice",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "            paged = ctx.evict()\n",
+          "new": "            paged = ctx.evict()\n            ctx.recall.extend(paged)\n"
+        }
+      ],
+      "expect": "paged-out messages move to recall"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "pressure re-armed only by a page-out",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "    async for role, text in arrivals:\n        before = ctx.tokens()\n",
+          "new": "    armed = True\n    async for role, text in arrivals:\n        before = ctx.tokens()\n"
+        },
+        {
+          "file": "pager.py",
+          "old": "        if before < warn_tokens <= ctx.tokens():\n",
+          "new": "        if armed and ctx.tokens() >= warn_tokens:\n            armed = False\n"
+        },
+        {
+          "file": "pager.py",
+          "old": "            paged = ctx.evict()\n",
+          "new": "            paged = ctx.evict()\n            armed = True\n"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "recall pooled over every relevant record",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "        raise ValueError(\"no cases to measure\")\n    total = 0.0\n",
+          "new": "        raise ValueError(\"no cases to measure\")\n    total = 0.0\n    pooled = 0\n"
+        },
+        {
+          "file": "bm25.py",
+          "old": "        total += len(found & relevant) / len(relevant)\n    return total / len(cases)\n",
+          "new": "        total += len(found & relevant)\n        pooled += len(relevant)\n    return total / pooled\n"
+        }
+      ],
+      "expect": "recall@k looks at the first k results, averaged over every case"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "pressure predicted before the message is pushed",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "        message = ctx.push(role, text)\n        if before < warn_tokens <= ctx.tokens():\n            yield _line({\"event\": \"memory_pressure\", \"turn\": message.turn, \"tokens\": ctx.tokens()})\n",
+          "new": "        after = before + approx_tokens(text)\n        if before < warn_tokens <= after:\n            yield _line({\"event\": \"memory_pressure\", \"turn\": ctx.turn + 1, \"tokens\": after})\n        ctx.push(role, text)\n"
+        }
+      ],
+      "expect": "a fact saved on memory_pressure is cited to the turn that raised it"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "equal scores ordered by turn",
+      "edits": [
+        {
+          "file": "archival.py",
+          "old": "        scored.sort(key=lambda item: (-item[0], item[1]))\n",
+          "new": "        scored.sort(key=lambda item: (-item[0], self._records[item[1]].turn_id))\n"
+        }
+      ],
+      "expect": "the same fact from two sessions stays two records, each with its own citation, in insertion order"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "top_k taken with heapq.nlargest on the score alone",
+      "edits": [
+        {
+          "file": "archival.py",
+          "old": "        scored.sort(key=lambda item: (-item[0], item[1]))\n        return [(score, self._records[position]) for score, position in scored[:top_k]]\n",
+          "new": "        scored = __import__('heapq').nlargest(top_k, scored, key=lambda item: item[0])\n        return [(score, self._records[position]) for score, position in scored]\n"
+        }
+      ],
+      "expect": "results are what they were, ties in insertion order"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "a text already indexed is left out of the index",
+      "edits": [
+        {
+          "file": "archival.py",
+          "old": "        self._terms.append(terms)\n        for term in terms:\n",
+          "new": "        self._terms.append(terms)\n        seen = self.__dict__.setdefault('_seen_texts', set())\n        if record.text in seen:\n            return\n        seen.add(record.text)\n        for term in terms:\n"
+        }
+      ],
+      "expect": "the same fact from two sessions stays two records, each with its own citation, in insertion order"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "old matched as a whole word",
+      "edits": [
+        {
+          "file": "tools.py",
+          "old": "        first = current.find(old) if old else -1\n        if first == -1:\n            return f\"error: {old!r} not in core[{section}]\"\n        if current.find(old, first + 1) != -1:\n            return f\"error: {old!r} occurs more than once in core[{section}]; quote more of it\"\n        self.main.core[section] = current[:first] + new + current[first + len(old) :]\n",
+          "new": "        import re\n        hits = list(re.finditer(r\"\\b\" + re.escape(old) + r\"\\b\", current))\n        if not hits:\n            return f\"error: {old!r} not in core[{section}]\"\n        if len(hits) > 1:\n            return f\"error: {old!r} occurs more than once in core[{section}]; quote more of it\"\n        first = hits[0].start()\n        self.main.core[section] = current[:first] + new + current[first + len(old) :]\n"
+        }
+      ],
+      "expect": "a replace whose old text occurs more than once is refused and changes nothing"
+    },
+    {
+      "test": "test_tools_and_budget",
+      "name": "core sections counted toward max_tokens",
+      "edits": [
+        {
+          "file": "context.py",
+          "old": "return approx_tokens(self.summary) + sum(approx_tokens(m.text) for m in self.messages)",
+          "new": "return approx_tokens(self.summary) + sum(approx_tokens(m.text) for m in self.messages) + sum(approx_tokens(t) for t in self.core.values())"
+        }
+      ],
+      "expect": "core sections do not count toward max_tokens"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "tags lowercased on the way in",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "(text, json.dumps(list(tags)), session_id, turn_id)",
+          "new": "(text, json.dumps([t.lower() for t in tags]), session_id, turn_id)"
+        }
+      ],
+      "expect": "exactly as it went in"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "records loaded in turn order",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "FROM archival ORDER BY seq",
+          "new": "FROM archival ORDER BY turn_id"
+        }
+      ],
+      "expect": "exactly as it went in"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "delete never commits",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "        with self._db:\n            self._db.execute(\"DELETE FROM archival",
+          "new": "        if True:\n            self._db.execute(\"DELETE FROM archival"
+        }
+      ],
+      "expect": "a deleted record stays deleted after a reopen"
+    },
+    {
+      "test": "test_archive_roundtrip",
+      "name": "delete drops the record from the list but not from the index",
+      "edits": [
+        {
+          "file": "archive_db.py",
+          "old": "            self._db.execute(\"DELETE FROM archival WHERE seq = ?\", (int(rid[1:]),))\n        self._load()\n",
+          "new": "            self._db.execute(\"DELETE FROM archival WHERE seq = ?\", (int(rid[1:]),))\n        self._records = [r for r in self._records if r.rid != rid]\n        self._positions = {r.rid: i for i, r in enumerate(self._records)}\n"
+        }
+      ],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "equal scores ordered by rid",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "        scored.sort(key=lambda item: (-item[0], item[1]))\n",
+          "new": "        scored.sort(key=lambda item: (-item[0], self.records[item[1]].rid))\n"
+        }
+      ],
+      "expect": "equal scores keep the order of the list BM25 was built from"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "numerator without (k1 + 1)",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "total += self.idf(term) * freq * (self.k1 + 1) / (freq + norm)",
+          "new": "total += self.idf(term) * freq / (freq + norm)"
+        }
+      ],
+      "expect": "scores follow the docstring"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "idf with log10",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "return math.log(1 + (len(self.records) - n + 0.5) / (n + 0.5))",
+          "new": "return math.log10(1 + (len(self.records) - n + 0.5) / (n + 0.5))"
+        }
+      ],
+      "expect": "scores follow the docstring"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "document length counts distinct tokens",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "self._len = [sum(tf.values()) for tf in self._tf]",
+          "new": "self._len = [len(tf) for tf in self._tf]"
+        }
+      ],
+      "expect": "scores follow the docstring"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "N leaves out empty records, avgdl keeps them",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "return math.log(1 + (len(self.records) - n + 0.5) / (n + 0.5))",
+          "new": "return math.log(1 + (sum(1 for d in self._len if d) - n + 0.5) / (n + 0.5))"
+        }
+      ],
+      "expect": "scores follow the docstring"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "length normalization without (1 - b)",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "norm = self.k1 * (1 - self.b + self.b * self._len[position] / self._avgdl)",
+          "new": "norm = self.k1 * self.b * self._len[position] / self._avgdl"
+        }
+      ],
+      "expect": "scores follow the docstring"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "recall capped at min(k, relevant)",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "        total += len(found & relevant) / len(relevant)\n",
+          "new": "        total += len(found & relevant) / min(k, len(relevant))\n"
+        }
+      ],
+      "expect": "one of two relevant records found is a recall of 1/2, also when k is 1"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "cases without relevant rids dropped from the mean",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "    if not cases:\n        raise ValueError(\"no cases to measure\")\n",
+          "new": "    cases = [(q, r) for q, r in cases if r]\n    if not cases:\n        raise ValueError(\"no cases to measure\")\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "search asked for its default top_k, then cut to k",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "search(query, k)[:k]",
+          "new": "search(query)[:k]"
+        }
+      ],
+      "expect": "recall@k reads the first k results of search(query, k)"
+    },
+    {
+      "test": "test_bm25_recall",
+      "name": "an empty list of cases scores 0",
+      "edits": [
+        {
+          "file": "bm25.py",
+          "old": "    if not cases:\n        raise ValueError(\"no cases to measure\")\n",
+          "new": "    if not cases:\n        return 0.0\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "crossing measured from the size right after the previous push",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "    async for role, text in arrivals:\n        before = ctx.tokens()\n        message = ctx.push(role, text)\n        if before < warn_tokens <= ctx.tokens():\n",
+          "new": "    before = 0\n    async for role, text in arrivals:\n        message = ctx.push(role, text)\n        before_now, before = before, ctx.tokens()\n        if before_now < warn_tokens <= ctx.tokens():\n"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "pressure also when the context already sat at warn_tokens",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "if before < warn_tokens <= ctx.tokens():",
+          "new": "if before <= warn_tokens <= ctx.tokens():"
+        }
+      ],
+      "expect": "reaching warn_tokens is pressure; once only the newest message is left, the pager moves on"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "one message per page_out",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "            paged = ctx.evict()\n",
+          "new": "            paged = [ctx.messages.pop(0)]\n            ctx.recall.extend(paged)\n"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "summarize given all of recall",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "ctx.summary = await summarize(ctx.summary, paged)",
+          "new": "ctx.summary = await summarize(ctx.summary, list(ctx.recall))"
+        }
+      ],
+      "expect": "each summary folds the newly paged-out messages into the previous summary"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "freed estimated on the joined text",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "freed = sum(approx_tokens(m.text) for m in paged)",
+          "new": "freed = approx_tokens(\" \".join(m.text for m in paged))"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "pressure reports the size before the push",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "\"turn\": message.turn, \"tokens\": ctx.tokens()}",
+          "new": "\"turn\": message.turn, \"tokens\": before}"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "page_out lists the newest turn first",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "\"turns\": [m.turn for m in paged]",
+          "new": "\"turns\": [m.turn for m in reversed(paged)]"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "pressure reported once per stream",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "    async for role, text in arrivals:\n        before = ctx.tokens()\n        message = ctx.push(role, text)\n        if before < warn_tokens <= ctx.tokens():\n",
+          "new": "    warned = False\n    async for role, text in arrivals:\n        before = ctx.tokens()\n        message = ctx.push(role, text)\n        if not warned and before < warn_tokens <= ctx.tokens():\n            warned = True\n"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_pager_stream",
+      "name": "paged out down to the warning line",
+      "edits": [
+        {
+          "file": "pager.py",
+          "old": "            paged = ctx.evict()\n",
+          "new": "            paged = []\n            while ctx.tokens() >= warn_tokens and len(ctx.messages) > 1:\n                paged.append(ctx.messages.pop(0))\n            ctx.recall.extend(paged)\n"
+        }
+      ],
+      "expect": "warn once per crossing, page out only until it fits, and count the summary in the budget"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "the text section's own limit skipped",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "        node: _Section | None = section\n",
+          "new": "        node: _Section | None = section.parent\n"
+        }
+      ],
+      "expect": "when several limits are hit, name the innermost"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "the limit check leaves out the separating space",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "        self._write(section, f\"{section.text} {text}\" if section.text else text)\n",
+          "new": "        self._write(section, f\"{section.text} {text}\" if section.text else text, len(text))\n"
+        },
+        {
+          "file": "core.py",
+          "old": "    def _write(self, section: _Section, new_text: str) -> None:\n        grow = len(new_text) - len(section.text)\n",
+          "new": "    def _write(self, section: _Section, new_text: str, grow: int | None = None) -> None:\n        grow = len(new_text) - len(section.text) if grow is None else grow\n"
+        }
+      ],
+      "expect": "the error names the section whose limit is hit, and the size the write would make"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "append adds the space to an empty section too",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "self._write(section, f\"{section.text} {text}\" if section.text else text)",
+          "new": "self._write(section, f\"{section.text} {text}\")"
+        }
+      ],
+      "expect": "CoreLimitError"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "the error names the section, not its path",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "raise CoreLimitError(node.path, node.limit, node.used() + grow)",
+          "new": "raise CoreLimitError(node.name, node.limit, node.used() + grow)"
+        }
+      ],
+      "expect": "the error names the section whose limit is hit, and the size the write would make"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "the error reports the text section's new length",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "raise CoreLimitError(node.path, node.limit, node.used() + grow)",
+          "new": "raise CoreLimitError(node.path, node.limit, len(new_text))"
+        }
+      ],
+      "expect": "the error names the section whose limit is hit, and the size the write would make"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "a path past a text section raises TypeError",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "            if sections is None or name not in sections:\n                raise KeyError(path)\n",
+          "new": "            if sections is None:\n                raise TypeError(path)\n            if name not in sections:\n                raise KeyError(path)\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "unknown paths raise ValueError",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "            if sections is None or name not in sections:\n                raise KeyError(path)\n",
+          "new": "            if sections is None or name not in sections:\n                raise ValueError(path)\n"
+        }
+      ],
+      "expect": "ValueError"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "replace refuses a missing old but takes the first of several",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "        if section.text.find(old, first + 1) != -1:\n            raise ValueError(f\"{old!r} occurs more than once in core[{path}]\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_typed_core",
+      "name": "group usage summed by path prefix without the dot",
+      "edits": [
+        {
+          "file": "core.py",
+          "old": "    def used(self) -> int:\n        if self.children is None:\n            return len(self.text)\n        return sum(child.used() for child in self.children.values())\n",
+          "new": "    registry: list = []\n\n    def used(self) -> int:\n        if self.children is None:\n            return len(self.text)\n        return sum(len(s.text) for s in _Section.registry if s.path.startswith(self.path))\n"
+        },
+        {
+          "file": "core.py",
+          "old": "        self._top = {name: _Section(name, spec, None) for name, spec in schema.items()}\n",
+          "new": "        self._top = {name: _Section(name, spec, None) for name, spec in schema.items()}\n        texts = []\n\n        def collect(sections):\n            for s in sections.values():\n                if s.children is None:\n                    texts.append(s)\n                else:\n                    collect(s.children)\n\n        collect(self._top)\n        _Section.registry = texts\n"
+        }
+      ],
+      "expect": "a group holds the text of the sections below it, and nothing else"
+    }
+  ]
+}

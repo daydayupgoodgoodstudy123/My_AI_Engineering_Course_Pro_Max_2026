@@ -1,0 +1,108 @@
+{
+  "lesson": "phases/14-agent-engineering/07-memory-virtual-context-memgpt",
+  "title": "Agent Memory — Virtual Context and Memory Paging",
+  "format": "staged-brownfield",
+  "service": "memgpt: a MemGPT-style memory layer with a token-budgeted main context, cited archival memory and the five memory tools, a SQLite archive, BM25 archival search with recall@k, an interrupt-driven pager with a rolling summary, and typed nested core memory",
+  "sources": {
+    "docs/en.md": "71b0ba93e4d737f64c1c7a90408489676e35aaa75418050ca42c5a68a95e355d",
+    "code/main.py": "3a6805e353b14ef3fa9bf5ec3af1fad986ad95bd29f789b6c1c6f4c77ba00501"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_tools_and_budget",
+      "kind": "debug",
+      "lesson_anchor": "Two tiers; The interrupt pattern (the canonical memory tool surface); Where this pattern goes wrong: Citation loss; Exercise 1 (a token cap approximated with len(text.split()) * 1.3); code/main.py MainContext, ArchivalStore.search, MemoryTools",
+      "planted_bugs": [
+        "MemoryTools.archival_memory_insert passes only tags to ArchivalStore.insert, so every record is cited s0#0; it surfaces one call later, in the citations archival_memory_search prints",
+        "core_memory_replace uses str.replace on every occurrence although the docstring requires old to occur exactly once; replacing ava in 'name=ava, stack=java' also turns java into jeva",
+        "MainContext.tokens estimates the joined text, ceil(total words * 1.3), instead of summing approx_tokens per message, so three two-word messages cost 8 instead of 9 and one message too many stays",
+        "ArchivalStore.search re-tokenizes every record on every query"
+      ],
+      "timing_assert": "150 queries over 20000 records under 0.08 s (the shipped scan takes 1.38 to 1.39 s on this machine, a pre-tokenized full scan 0.17 to 0.21 s, the inverted index 3.5 to 4.6 ms)",
+      "overfix_guard": "scores stay the exact Jaccard of distinct tokens split by tokenize (postings per occurrence, a query counted with repeats, stripped punctuation or another score all fail); ties keep insertion order (a set of candidates, heapq.nlargest on the score, ranking by score alone or by rid string all fail on the large archive; ranking by turn fails on one fact stored at turn 9 of s1 and turn 2 of s3); the same text from two sessions stays two records; a context costing exactly max_tokens is not paged; the newest message always stays; core sections stay out of max_tokens; paged-out messages stay searchable",
+      "deviation": "The suggested 20000 records x 300 queries would make the shipped scan run about 3 s, at the 3 s ceiling, so the timing uses 150 queries (about 1.4 s). Pre-tokenizing alone does not reach the 0.08 s limit; the fix is the inverted index the suggestion names. The class already budgets tokens, so the token bug is the estimate of the joined text against the docstring's per-message sum. The replace check covers repeated occurrences only; the empty old string belongs to lesson 08."
+    },
+    {
+      "part": 2,
+      "test": "test_archive_roundtrip",
+      "kind": "model and persistence",
+      "lesson_anchor": "Two tiers: external context is unbounded and searchable; Citation loss: store session ID and turn ID with every archival write; outputs/skill-virtual-memory.md (records carry id, text, tags, session_id, turn_id; expose delete(id))",
+      "exactness": "records come back equal and typed after a reopen: text with non-ASCII, a newline and a trailing space; tags as an ordered tuple, including a tag with a comma and capitals (lang:zh-Hans,en) and an empty tuple; session_id a str and turn_id an int, the types checked in passing (40.0 == 40) since the module docstring declares the turn_id column INTEGER",
+      "traps": [
+        "INTEGER PRIMARY KEY without AUTOINCREMENT, COUNT(*) + 1, MAX(seq) + 1 or an in-memory counter reuse a deleted id",
+        "insert not committed, or committed only in close(), while a second connection reads",
+        "tags joined with commas, returned as a list, stored sorted or lowercased",
+        "text stripped",
+        "records ordered by rid string, which breaks after a999, or by turn_id, which each session numbers on its own",
+        "records not loaded on open, or loaded without _keep so search has no index",
+        "delete that leaves the record in memory, leaves the search index on old positions, is not committed, or ignores an unknown id",
+        "CREATE TABLE without IF NOT EXISTS"
+      ],
+      "clarifying_questions": ["the table schema", "reusing deleted ids", "normalizing tags", "soft delete", "several writers", "keeping records in memory"],
+      "deviation": "delete(rid) is added (the lesson's skill file asks for delete(id)) so that id reuse can be tested; citations are the reason ids must never be reused. The module docstring declares the turn_id column INTEGER, so SQLite type affinity, which other lessons in this phase test, is not one of this part's traps; the test still checks the types in passing."
+    },
+    {
+      "part": 3,
+      "test": "test_bm25_recall",
+      "kind": "core algorithm",
+      "lesson_anchor": "Exercise 2 (implement BM25 with term frequency and inverse document frequency, measure recall on a toy fact set against the token-overlap baseline); Build It: the archival store scores by token overlap",
+      "traps": [
+        "classic idf, negative for a token in most records",
+        "empty records left out of N or avgdl",
+        "tf counted once per record, or document frequency counted per occurrence",
+        "a repeated query token counted once",
+        "tokens split differently from the archive (punctuation stripped, no lowercasing)",
+        "zero scores returned, top_k ignored, ties reversed or ordered by rid instead of the order of the list BM25 was built from",
+        "division by zero for an empty archive or a single empty record",
+        "recall as a hit rate, divided by k or by min(k, relevant), skipping cases without results, or using the search function's own default top_k (also when cut to k)",
+        "a case with no relevant records, also among other cases, or an empty list of cases, accepted instead of a ValueError"
+      ],
+      "integration": "the same 12 facts in an ArchivalStore and in BM25: recall@1 is 4/9 for token overlap and 7/9 for BM25, recall@3 6.5/9 and 8/9, recall@5 8/9 for both; one case has no query token in its relevant record and stays unfound by both",
+      "clarifying_questions": ["tokenizer", "repeated query tokens", "k1 and b", "cases without results", "more relevant records than k", "cases without relevant records", "updating after inserts"]
+    },
+    {
+      "part": 4,
+      "test": "test_pager_stream",
+      "kind": "streaming",
+      "lesson_anchor": "The interrupt pattern (the runtime serves a memory call and the result splices into the next turn); Exercise 1 (compact the oldest messages into a summary when the cap is exceeded); Build It: MainContext auto-compacts the oldest messages; conversation_search scans past turns",
+      "wire_format": "NDJSON events memory_pressure, page_out and summary, one per yield, decided by the test's per-chunk json.loads, join, splitlines and json.loads",
+      "traps": [
+        "missing newline, blank lines, pretty-printed JSON or bytes",
+        "pressure on every message above the line, re-armed only by a page-out, once per stream, not at exactly warn_tokens, measured from the size right after the previous push, or raised when the context already sat at warn_tokens",
+        "pressure reported after paging out, or a message's events yielded together",
+        "summary awaited before page_out is reported",
+        "every message read before paging",
+        "one page-out per message, so a grown summary leaves the context over budget",
+        "summary left out of the budget, or approx_tokens rounded",
+        "summarize given only the new messages, the summary appended instead of replaced, or summarize not awaited",
+        "paged-out messages dropped from recall or added twice",
+        "every older message paged out at once",
+        "a pager that keeps paging when only the newest message is left"
+      ],
+      "clarifying_questions": ["is the summary a message", "pressure on every message", "how much to page out", "newest message over budget", "paging before the pressure report"],
+      "deviation": "The lesson names the interrupt pattern and summary compaction but no warning threshold, so memory_pressure, warn_tokens and the crossing rule are this service's design, stated in the page_stream docstring. The summary is ctx.summary rather than a message, and the summarizer is an async function the test supplies. A second short stream checks the exact warn_tokens boundary and a message bigger than the whole budget, read through a bounded consumer so a looping pager fails instead of hanging."
+    },
+    {
+      "part": 5,
+      "test": "test_typed_core",
+      "kind": "tree",
+      "lesson_anchor": "Exercise 5 (from flat strings to typed sections); Key Terms: core memory is named sections pinned inside the main context; code/main.py MainContext.render and core_memory_append",
+      "traps": [
+        "limits or usage counted in bytes",
+        "a group's usage counting only the text sections right under it, or every text section whose path merely starts with the group's (human_notes counted under human)",
+        "only the section, only the section and its parent, or only the groups above the text section checked",
+        "the outermost limit reported instead of the innermost, or the section named without its dotted path",
+        "the separating space left out of the size",
+        "a write that lands exactly on a limit refused",
+        "a refused write that keeps the new text",
+        "replace on every occurrence, or without the limit check",
+        "paths: an empty segment, a path running past a text section, case-insensitive names, text written to a group",
+        "render sorted like the lesson's render, empty sections left out, or an empty text section with a trailing colon"
+      ],
+      "clarifying_questions": ["bytes or characters", "which limit to report", "text on a group", "the separating space", "case of paths"],
+      "deviation": "The lesson points Exercise 5 at the research repo's core-memory JSON schema without describing it, so the schema shape, the (used/limit) render and the innermost-section error are this service's own design, stated in the TypedCore docstrings. Lesson 08 owns flat block limits; this part is about limits that nest."
+    }
+  ]
+}
