@@ -1,0 +1,432 @@
+{
+  "package": "sourceweave",
+  "tests": [
+    "test_corpus_generation_and_context",
+    "test_complete_snapshot_sqlite",
+    "test_extractive_answer_with_original_citation",
+    "test_markdown_evidence_replay",
+    "test_boundary_first_recursive_chunks"
+  ],
+  "layers": [
+    {
+      "test": "test_corpus_generation_and_context",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "retrieved identity disagrees with source provenance"
+        },
+        {
+          "name": "retain the flat identity",
+          "edits": [
+            {
+              "file": "index.py",
+              "old": "return Hit(chunk.ordinal,",
+              "new": "return Hit(chunk.flat_id,"
+            }
+          ],
+          "expect": "corpus vectors and chunks must share one snapshot"
+        },
+        {
+          "name": "+ replace the complete fitted vector set",
+          "edits": [
+            {
+              "file": "index.py",
+              "old": "vectors = (self.snapshot.vectors if self.snapshot is not None else ()) + fitted.vectors",
+              "new": "vectors = fitted.vectors"
+            }
+          ],
+          "expect": "queries over an indexed corpus should stay responsive"
+        },
+        {
+          "name": "+ reuse the fitted generation for queries",
+          "edits": [
+            {
+              "file": "index.py",
+              "old": "        snapshot = fit_snapshot(snapshot.generation,snapshot.documents,snapshot.chunks)\n",
+              "new": ""
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_corpus_generation_and_context",
+      "name": "discard every retrieved hit to suppress identity errors",
+      "edits": [
+        {
+          "file": "index.py",
+          "old": "hits = [project_hit(snapshot,index,score) for index,score in results]",
+          "new": "hits = []"
+        }
+      ],
+      "expect": "retrieved hits preserve original flat identity and source provenance"
+    },
+    {
+      "test": "test_corpus_generation_and_context",
+      "name": "serve the first query results for every question",
+      "edits": [
+        {
+          "file": "index.py",
+          "old": "results = search(question,snapshot,k)",
+          "new": "results = search(\"w0 w1\",snapshot,k) if len(snapshot.chunks)>40 else search(question,snapshot,k)"
+        }
+      ],
+      "expect": "different questions retain their own retrieval results"
+    },
+    {
+      "test": "test_complete_snapshot_sqlite",
+      "name": "round stored vector coordinates",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "pack_vector(snapshot.vectors[chunk.flat_id])",
+          "new": "pack_vector(tuple(round(value,6) for value in snapshot.vectors[chunk.flat_id]))"
+        }
+      ],
+      "expect": "reopened storage preserves ordered documents, byte spans, vocabulary, IDF and binary64 vectors exactly"
+    },
+    {
+      "test": "test_complete_snapshot_sqlite",
+      "name": "merge chunks by identical text",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "for chunk in snapshot.chunks])",
+          "new": "for chunk in snapshot.chunks if chunk.flat_id==next(row.flat_id for row in snapshot.chunks if row.text==chunk.text)])"
+        }
+      ],
+      "expect": "reopened storage preserves ordered documents, byte spans, vocabulary, IDF and binary64 vectors exactly"
+    },
+    {
+      "test": "test_complete_snapshot_sqlite",
+      "name": "commit deletion before the replacement is complete",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            self._db.execute(\"INSERT INTO meta VALUES (?)\",(snapshot.generation,))",
+          "new": "            self._db.commit()\n            self._db.execute(\"INSERT INTO meta VALUES (?)\",(snapshot.generation,))"
+        }
+      ],
+      "expect": "a failed replacement retains the entire previously committed snapshot"
+    },
+    {
+      "test": "test_complete_snapshot_sqlite",
+      "name": "persist document rows sorted by key",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "for i,row in enumerate(snapshot.documents)])",
+          "new": "for i,row in enumerate(sorted(snapshot.documents,key=lambda row:row.key))])"
+        }
+      ],
+      "expect": "reopened storage preserves ordered documents, byte spans, vocabulary, IDF and binary64 vectors exactly"
+    },
+    {
+      "test": "test_extractive_answer_with_original_citation",
+      "name": "score repeated sentence occurrences",
+      "edits": [
+        {
+          "file": "answer.py",
+          "old": "score = len(keywords & set(word_tokens(sentence.text)))",
+          "new": "score = sum(word in keywords for word in word_tokens(sentence.text))"
+        }
+      ],
+      "expect": "distinct query terms select evidence rather than repeated occurrences or prompt suffix text"
+    },
+    {
+      "test": "test_extractive_answer_with_original_citation",
+      "name": "replace an equal-support winner",
+      "edits": [
+        {
+          "file": "answer.py",
+          "old": "if score > best_score:",
+          "new": "if score > 0 and score >= best_score:"
+        }
+      ],
+      "expect": "distinct query terms select evidence rather than repeated occurrences or prompt suffix text"
+    },
+    {
+      "test": "test_extractive_answer_with_original_citation",
+      "name": "accept short matching fragments",
+      "edits": [
+        {
+          "file": "answer.py",
+          "old": "if len(sentence.text) < 10:",
+          "new": "if len(sentence.text) < 1:"
+        }
+      ],
+      "expect": "stripped evidence shorter than ten Python characters is ineligible"
+    },
+    {
+      "test": "test_extractive_answer_with_original_citation",
+      "name": "cite the global chunk id as the local label",
+      "edits": [
+        {
+          "file": "answer.py",
+          "old": "citation_for(label,hit,sentence)",
+          "new": "citation_for(hit.chunk_id,hit,sentence)"
+        }
+      ],
+      "expect": "the winner keeps original chunk identity, absolute byte span and retrieved-local display label"
+    },
+    {
+      "test": "test_markdown_evidence_replay",
+      "name": "export every retrieved source",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "labels=list(dict.fromkeys(int(match.group(1)) for match in CITATION_MARKER.finditer(\"\".join(body))))",
+          "new": "labels=list(references)"
+        }
+      ],
+      "expect": "only cited source labels appear once in first-use order"
+    },
+    {
+      "test": "test_markdown_evidence_replay",
+      "name": "recognize markers within each fragment only",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "CITATION_MARKER.finditer(\"\".join(body))",
+          "new": "[match for fragment in body for match in CITATION_MARKER.finditer(fragment)]"
+        }
+      ],
+      "expect": "only cited source labels appear once in first-use order"
+    },
+    {
+      "test": "test_markdown_evidence_replay",
+      "name": "sort citation labels instead of first-use order",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "if any(label not in references for label in labels):",
+          "new": "labels.sort()\n    if any(label not in references for label in labels):"
+        }
+      ],
+      "expect": "only cited source labels appear once in first-use order"
+    },
+    {
+      "test": "test_markdown_evidence_replay",
+      "name": "buffer the answer before releasing fragments",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        yield fragment\n    appendix=",
+          "new": "    for fragment in body:yield fragment\n    appendix="
+        }
+      ],
+      "expect": "the first body fragment is available before later source fragments are pulled"
+    },
+    {
+      "test": "test_boundary_first_recursive_chunks",
+      "name": "split fitting sections into their children",
+      "edits": [
+        {
+          "file": "chunking.py",
+          "old": "if span_words(document,span) <= max_words:",
+          "new": "if not span.children and span_words(document,span) <= max_words:"
+        }
+      ],
+      "expect": "a complete section at the exact boundary remains one raw interval"
+    },
+    {
+      "test": "test_boundary_first_recursive_chunks",
+      "name": "drop an incomplete final token window",
+      "edits": [
+        {
+          "file": "chunking.py",
+          "old": "emit(span,batch[0][0],batch[-1][1])",
+          "new": "if len(batch)==max_words:emit(span,batch[0][0],batch[-1][1])"
+        }
+      ],
+      "expect": "oversized sections descend through paragraphs and sentences before bounded leaf windows"
+    },
+    {
+      "test": "test_boundary_first_recursive_chunks",
+      "name": "locate repeated text at its first source occurrence",
+      "edits": [
+        {
+          "file": "chunking.py",
+          "old": "output.append({\"source_id\":document.key,\"start\":left,\"end\":right,",
+          "new": "left=document.text.encode(\"utf-8\").find(text.encode(\"utf-8\"));right=left+len(text.encode(\"utf-8\"))\n        output.append({\"source_id\":document.key,\"start\":left,\"end\":right,"
+        }
+      ],
+      "expect": "repeated paragraph contents retain distinct original intervals"
+    },
+    {
+      "test": "test_boundary_first_recursive_chunks",
+      "name": "discard inherited section metadata",
+      "edits": [
+        {
+          "file": "chunking.py",
+          "old": "\"section_path\":span.section_path",
+          "new": "\"section_path\":()"
+        }
+      ],
+      "expect": "section metadata follows descendants without duplicating heading text"
+    },
+    {
+      "test": "test_complete_snapshot_sqlite",
+      "name": "refit saved coordinates from text during load",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        return validate_snapshot(snapshot)\n",
+          "new": "        from .backend import fit_snapshot\n        return validate_snapshot(fit_snapshot(generation,snapshot.documents,snapshot.chunks))\n"
+        }
+      ],
+      "expect": "reopened storage preserves ordered documents, byte spans, vocabulary, IDF and binary64 vectors exactly"
+    },
+    {
+      "test": "test_complete_snapshot_sqlite",
+      "name": "sort loaded vocabulary without permuting its fitted coordinates",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "SELECT term,idf,generation FROM terms ORDER BY pos",
+          "new": "SELECT term,idf,generation FROM terms ORDER BY term"
+        }
+      ],
+      "expect": "nonalphabetical vocabulary coordinates survive a separate exact snapshot roundtrip"
+    },
+    {
+      "test": "test_extractive_answer_with_original_citation",
+      "name": "retain source stopwords as answer support",
+      "edits": [
+        {
+          "file": "answer.py",
+          "old": "keywords = set(word_tokens(question)) - STOPWORDS",
+          "new": "keywords = set(word_tokens(question))"
+        }
+      ],
+      "expect": "stopword-only overlap cannot support an eligible evidence sentence"
+    },
+    {
+      "test": "test_extractive_answer_with_original_citation",
+      "name": "exclude an evidence sentence at exactly ten characters",
+      "edits": [
+        {
+          "file": "answer.py",
+          "old": "if len(sentence.text) < 10:",
+          "new": "if len(sentence.text) <= 10:"
+        }
+      ],
+      "expect": "exactly ten stripped Python characters remain eligible evidence"
+    },
+    {
+      "test": "test_markdown_evidence_replay",
+      "name": "suppress empty replay fragments instead of preserving each source yield",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "        yield fragment\n    appendix=",
+          "new": "        if fragment:yield fragment\n    appendix="
+        }
+      ],
+      "expect": "empty source fragments retain their exact positions around a cited singleton body"
+    },
+    {
+      "test": "test_boundary_first_recursive_chunks",
+      "name": "split fitting paragraphs into their sentence children",
+      "edits": [
+        {
+          "file": "chunking.py",
+          "old": "if span_words(document,span) <= max_words:",
+          "new": "if span_words(document,span) <= max_words and span.kind != \"paragraph\":"
+        }
+      ],
+      "expect": "a fitting multi-sentence paragraph remains intact inside an oversized section"
+    },
+    {
+      "test": "test_complete_snapshot_sqlite",
+      "name": "restore SQLite REAL IDF storage and lose signed zero",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "term TEXT, idf BLOB, generation",
+          "new": "term TEXT, idf REAL, generation"
+        },
+        {
+          "file": "store.py",
+          "old": "(i,term,pack_vector((snapshot.idf[i],)),snapshot.generation)",
+          "new": "(i,term,snapshot.idf[i],snapshot.generation)"
+        },
+        {
+          "file": "store.py",
+          "old": "tuple(unpack_vector(row[1],1)[0] for row in terms)",
+          "new": "tuple(row[1] for row in terms)"
+        }
+      ],
+      "expect": "IDF binary64 sign bits and mantissa survive a closed-store roundtrip"
+    },
+    {
+      "test": "test_complete_snapshot_sqlite",
+      "name": "narrow IDF coordinates to float32 before exact encoding",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "import sqlite3\n",
+          "new": "import sqlite3\nimport struct\n"
+        },
+        {
+          "file": "store.py",
+          "old": "pack_vector((snapshot.idf[i],))",
+          "new": "pack_vector((struct.unpack(\"<f\",struct.pack(\"<f\",snapshot.idf[i]))[0],))"
+        }
+      ],
+      "expect": "reopened storage preserves ordered documents, byte spans, vocabulary, IDF and binary64 vectors exactly"
+    },
+    {
+      "test": "test_complete_snapshot_sqlite",
+      "name": "cast IDF coordinates to integers before binary64 encoding",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "pack_vector((snapshot.idf[i],))",
+          "new": "pack_vector((float(int(snapshot.idf[i])),))"
+        }
+      ],
+      "expect": "reopened storage preserves ordered documents, byte spans, vocabulary, IDF and binary64 vectors exactly"
+    },
+    {
+      "test": "test_markdown_evidence_replay",
+      "name": "append a second terminal LF to the citation appendix",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "for label in labels)+\"\\n\"",
+          "new": "for label in labels)+\"\\n\\n\""
+        }
+      ],
+      "expect": "the citation appendix has exactly one terminal LF"
+    },
+    {
+      "test": "test_markdown_evidence_replay",
+      "name": "separate the citation appendix by only one LF",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "return \"\\n\\n\"+",
+          "new": "return \"\\n\"+"
+        }
+      ],
+      "expect": "a citation appendix begins with exactly two separator LF characters"
+    },
+    {
+      "test": "test_markdown_evidence_replay",
+      "name": "silently discard an appendix with an unknown complete cited label",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "raise ValueError(\"answer cites an unavailable retrieved label\")",
+          "new": "return \"\""
+        }
+      ],
+      "expect": "an unavailable complete citation label is rejected"
+    }
+  ]
+}
