@@ -1,0 +1,1742 @@
+{
+  "package": "verifygate",
+  "tests": [
+    "test_acceptance_and_overrides",
+    "test_override_log",
+    "test_verdict_and_report",
+    "test_summary_stream",
+    "test_pr_stack"
+  ],
+  "layers": [
+    {
+      "test": "test_acceptance_and_overrides",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "an argv record is a run of the acceptance command"
+        },
+        {
+          "name": "command_text joins argv with shlex",
+          "edits": [
+            {
+              "file": "commands.py",
+              "old": "    return str(command)\n",
+              "new": "    return shlex.join(command)\n"
+            }
+          ],
+          "expect": "the latest run of an acceptance command decides"
+        },
+        {
+          "name": "+ latest_run keeps the last match",
+          "edits": [
+            {
+              "file": "commands.py",
+              "old": "    for record in feedback:\n        if command_text(record[\"command\"]) == target:\n            return record\n    return None\n",
+              "new": "    found = None\n    for record in feedback:\n        if command_text(record[\"command\"]) == target:\n            found = record\n    return found\n"
+            }
+          ],
+          "expect": "a signed override clears its own block finding, and no other"
+        },
+        {
+          "name": "+ make_override signs ts too",
+          "edits": [
+            {
+              "file": "signing.py",
+              "old": "        \"head_commit\": head_commit,\n    }\n    entry[\"signature\"] = sign(entry, secret)\n    entry[\"ts\"] = time.time() if ts is None else ts\n",
+              "new": "        \"head_commit\": head_commit,\n        \"ts\": time.time() if ts is None else ts,\n    }\n    entry[\"signature\"] = sign(entry, secret)\n"
+            }
+          ],
+          "expect": "an override recorded at an older HEAD is stale"
+        },
+        {
+          "name": "+ apply_overrides compares head_commit",
+          "edits": [
+            {
+              "file": "gate.py",
+              "old": "        if entry.get(\"task_id\") == task_id and verify_signature(entry, secret):\n",
+              "new": "        if entry.get(\"task_id\") == task_id and entry.get(\"head_commit\") == head_commit and verify_signature(entry, secret):\n"
+            }
+          ],
+          "expect": "acceptance_findings reads the feedback log once"
+        },
+        {
+          "name": "+ acceptance_findings indexes the log once",
+          "edits": [
+            {
+              "file": "checks.py",
+              "old": "from .commands import latest_run\n",
+              "new": "from .commands import command_text\n"
+            },
+            {
+              "file": "checks.py",
+              "old": "    findings: list[Finding] = []\n    for cmd in art.acceptance_commands:\n        run = latest_run(art.feedback, cmd)\n",
+              "new": "    runs = {command_text(record[\"command\"]): record for record in art.feedback}\n    findings: list[Finding] = []\n    for cmd in art.acceptance_commands:\n        run = runs.get(command_text(cmd))\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "argv joined with plain spaces",
+      "edits": [
+        {
+          "file": "commands.py",
+          "old": "    return shlex.join(command)\n",
+          "new": "    return \" \".join(command)\n"
+        }
+      ],
+      "expect": "an argv record is a run of the acceptance command"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "both sides joined with plain spaces, so a different argv collides",
+      "edits": [
+        {
+          "file": "commands.py",
+          "old": "        return shlex.join(shlex.split(command))\n    return shlex.join(command)\n",
+          "new": "        return \" \".join(shlex.split(command))\n    return \" \".join(command)\n"
+        }
+      ],
+      "expect": "a different argv is a different command"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "contract string compared as typed",
+      "edits": [
+        {
+          "file": "commands.py",
+          "old": "        return shlex.join(shlex.split(command))\n",
+          "new": "        return command\n"
+        }
+      ],
+      "expect": "an argv record is a run of the acceptance command"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "argv compared with str.split() of the contract string",
+      "edits": [
+        {
+          "file": "commands.py",
+          "old": "        return shlex.join(shlex.split(command))\n",
+          "new": "        return shlex.join(command.split())\n"
+        }
+      ],
+      "expect": "an argv record is a run of the acceptance command"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "first run of a command kept",
+      "edits": [
+        {
+          "file": "commands.py",
+          "old": "        runs[command_text(record[\"command\"])] = record\n",
+          "new": "        runs.setdefault(command_text(record[\"command\"]), record)\n"
+        }
+      ],
+      "expect": "the latest run of an acceptance command decides"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "any failed run blocks, as in the lesson's loop",
+      "edits": [
+        {
+          "file": "checks.py",
+          "old": "        run = runs.get(command_text(cmd))\n",
+          "new": "        run = next((r for r in art.feedback if command_text(r[\"command\"]) == command_text(cmd) and r.get(\"exit_code\") != 0), runs.get(command_text(cmd)))\n"
+        }
+      ],
+      "expect": "the latest run of an acceptance command decides"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "a null exit counted as a pass",
+      "edits": [
+        {
+          "file": "checks.py",
+          "old": "        elif run.get(\"exit_code\") is None:\n            findings.append(Finding(\"feedback.null_exit\", \"block\", f\"no exit code: {cmd}\"))\n        elif run[\"exit_code\"] != 0:\n",
+          "new": "        elif run.get(\"exit_code\") not in (0, None):\n"
+        }
+      ],
+      "expect": "a latest run without an exit code blocks"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "a null exit reported as a failed exit",
+      "edits": [
+        {
+          "file": "checks.py",
+          "old": "        elif run.get(\"exit_code\") is None:\n            findings.append(Finding(\"feedback.null_exit\", \"block\", f\"no exit code: {cmd}\"))\n",
+          "new": ""
+        }
+      ],
+      "expect": "a latest run without an exit code blocks"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "one override clears every block finding",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        entry = signed_off.get(finding.code)\n",
+          "new": "        entry = next(iter(signed_off.values()), None)\n"
+        }
+      ],
+      "expect": "a signed override clears its own block finding, and no other"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "overridden finding dropped from the report",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            out.append(\n                replace(finding, severity=\"overridden\", overridden_by=entry[\"user_id\"], override_reason=entry[\"reason\"])\n            )\n",
+          "new": "            continue\n"
+        }
+      ],
+      "expect": "a signed override clears its own block finding, and no other"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "findings overridden in the list that was passed in",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    out: list[Finding] = []\n    for finding in findings:\n",
+          "new": "    out = findings\n    for i, finding in enumerate(list(findings)):\n"
+        },
+        {
+          "file": "gate.py",
+          "old": "            out.append(\n                replace(finding, severity=\"overridden\", overridden_by=entry[\"user_id\"], override_reason=entry[\"reason\"])\n            )\n        else:\n            out.append(finding)\n",
+          "new": "            out[i] = replace(finding, severity=\"overridden\", overridden_by=entry[\"user_id\"], override_reason=entry[\"reason\"])\n"
+        }
+      ],
+      "expect": "apply_overrides leaves the findings it was given alone"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "HEAD not compared",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            and entry.get(\"head_commit\") == head_commit\n",
+          "new": ""
+        }
+      ],
+      "expect": "an override recorded at an older HEAD is stale"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "task not compared",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            entry.get(\"task_id\") == task_id\n            and entry.get(\"head_commit\")",
+          "new": "            entry.get(\"head_commit\")"
+        }
+      ],
+      "expect": "an override belongs to its own task"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "signature not checked",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            and verify_signature(entry, secret)\n",
+          "new": ""
+        }
+      ],
+      "expect": "an entry changed after signing is refused"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "signature over the five strings only (ts left out on both sides)",
+      "edits": [
+        {
+          "file": "signing.py",
+          "old": "        \"head_commit\": head_commit,\n        \"ts\": time.time() if ts is None else ts,\n    }\n    entry[\"signature\"] = sign(entry, secret)\n",
+          "new": "        \"head_commit\": head_commit,\n    }\n    entry[\"signature\"] = sign(entry, secret)\n    entry[\"ts\"] = time.time() if ts is None else ts\n"
+        },
+        {
+          "file": "signing.py",
+          "old": "        body = canonical({k: v for k, v in entry.items() if k != \"signature\"})\n",
+          "new": "        body = canonical({k: v for k, v in entry.items() if k not in (\"signature\", \"ts\")})\n"
+        }
+      ],
+      "expect": "the timestamp is signed too"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "a null exit can be overridden",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "NOT_OVERRIDABLE = frozenset({\"feedback.null_exit\"})\n",
+          "new": "NOT_OVERRIDABLE = frozenset()\n"
+        }
+      ],
+      "expect": "a null exit cannot be overridden"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "warn findings overridden too",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        if entry is not None and finding.severity == \"block\" and",
+          "new": "        if entry is not None and finding.severity in (\"block\", \"warn\") and"
+        }
+      ],
+      "expect": "only block findings are overridden"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "first override of a finding kept",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            signed_off[entry.get(\"finding_code\")] = entry\n",
+          "new": "            signed_off.setdefault(entry.get(\"finding_code\"), entry)\n"
+        }
+      ],
+      "expect": "the last signed override of a finding counts"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "entry without a signature crashes the check",
+      "edits": [
+        {
+          "file": "signing.py",
+          "old": "    signature = entry.get(\"signature\")\n",
+          "new": "    signature = entry[\"signature\"]\n"
+        }
+      ],
+      "expect": "KeyError: 'signature'"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "blank reason accepted",
+      "edits": [
+        {
+          "file": "signing.py",
+          "old": "    if not all(isinstance(v, str) and v.strip() for v in values):\n",
+          "new": "    if not all(isinstance(v, str) for v in values):\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "empty secret accepted",
+      "edits": [
+        {
+          "file": "signing.py",
+          "old": "    if not secret:\n        raise ValueError(\"no override secret: refusing to sign or check overrides (fail closed)\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "reversed scan with an early return, once per acceptance command",
+      "edits": [
+        {
+          "file": "checks.py",
+          "old": "from .commands import command_text, latest_runs\n",
+          "new": "from .commands import command_text, latest_run, latest_runs\n"
+        },
+        {
+          "file": "checks.py",
+          "old": "        run = runs.get(command_text(cmd))\n",
+          "new": "        run = latest_run(art.feedback, cmd)\n"
+        }
+      ],
+      "expect": "acceptance_findings reads the feedback log once"
+    },
+    {
+      "test": "test_acceptance_and_overrides",
+      "name": "the last entry for a code picked before it is checked",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    signed_off: dict[str, dict] = {}\n    for entry in entries:\n        if (\n            entry.get(\"task_id\") == task_id\n            and entry.get(\"head_commit\") == head_commit\n            and verify_signature(entry, secret)\n        ):\n            signed_off[entry.get(\"finding_code\")] = entry\n",
+          "new": "    latest: dict[str, dict] = {}\n    for entry in entries:\n        latest[entry.get(\"finding_code\")] = entry\n    signed_off = {\n        code: entry\n        for code, entry in latest.items()\n        if entry.get(\"task_id\") == task_id and entry.get(\"head_commit\") == head_commit and verify_signature(entry, secret)\n    }\n"
+        }
+      ],
+      "expect": "an entry that does not count for this task leaves the one that does"
+    },
+    {
+      "test": "test_override_log",
+      "name": "empty secret accepted",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        if not secret:\n            raise ValueError(\"no override secret: refusing to open the override log (fail closed)\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_override_log",
+      "name": "missing file read as an error",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        if not self.path.exists():\n            return []\n",
+          "new": ""
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_override_log",
+      "name": "directory not created",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        self.path.parent.mkdir(parents=True, exist_ok=True)\n",
+          "new": ""
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_override_log",
+      "name": "file opened for writing, not appending",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        with self.path.open(\"a+b\") as fh:\n",
+          "new": "        with self.path.open(\"w+b\") as fh:\n"
+        }
+      ],
+      "expect": "append returns the new entry's line number"
+    },
+    {
+      "test": "test_override_log",
+      "name": "no newline after an entry",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        line = (json.dumps(entry) + \"\\n\").encode(\"utf-8\")\n",
+          "new": "        line = json.dumps(entry).encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "append returns the new entry's line number"
+    },
+    {
+      "test": "test_override_log",
+      "name": "entries pretty-printed over several lines",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        line = (json.dumps(entry) + \"\\n\").encode(\"utf-8\")\n",
+          "new": "        line = (json.dumps(entry, indent=2) + \"\\n\").encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "append returns the new entry's line number"
+    },
+    {
+      "test": "test_override_log",
+      "name": "ts written as a float",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        line = (json.dumps(entry) + \"\\n\").encode(\"utf-8\")\n",
+          "new": "        line = (json.dumps({**entry, \"ts\": float(entry[\"ts\"])}) + \"\\n\").encode(\"utf-8\")\n"
+        }
+      ],
+      "expect": "override log line 2"
+    },
+    {
+      "test": "test_override_log",
+      "name": "line numbers counted per instance",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        self.path = Path(path)\n        self.secret = secret\n",
+          "new": "        self.path = Path(path)\n        self.secret = secret\n        self._lines = self.path.read_bytes().count(b\"\\n\") if self.path.exists() else 0\n"
+        },
+        {
+          "file": "overridelog.py",
+          "old": "            fh.seek(0)\n            number = fh.read().count(b\"\\n\") + 1\n",
+          "new": "            self._lines += 1\n            number = self._lines\n"
+        }
+      ],
+      "expect": "line numbers count what is in the file, whoever wrote it"
+    },
+    {
+      "test": "test_override_log",
+      "name": "whole file rewritten on every append",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        with self.path.open(\"a+b\") as fh:\n            fh.seek(0)\n            number = fh.read().count(b\"\\n\") + 1\n            fh.write(line)\n        return number\n",
+          "new": "        kept = self.entries()\n        self.path.write_text(\"\".join(json.dumps(e, sort_keys=True) + \"\\n\" for e in kept + [entry]), encoding=\"utf-8\")\n        return len(kept) + 1\n"
+        }
+      ],
+      "expect": "earlier lines are never rewritten"
+    },
+    {
+      "test": "test_override_log",
+      "name": "split on newlines without dropping the last empty piece",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        if lines[-1] == b\"\":\n            lines.pop()\n",
+          "new": ""
+        }
+      ],
+      "expect": "override log line 4"
+    },
+    {
+      "test": "test_override_log",
+      "name": "append does not check the entry",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        problem = self._problem(entry)\n        if problem:\n            raise ValueError(f\"refusing to append an override: {problem}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "append must refuse an entry unsigned"
+    },
+    {
+      "test": "test_override_log",
+      "name": "only the signature checked, not the fields",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        if set(entry) != _ENTRY_KEYS:\n            return \"fields are not the six override fields and a signature\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "append must refuse an entry carrying an extra field"
+    },
+    {
+      "test": "test_override_log",
+      "name": "entry written before it is checked",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        problem = self._problem(entry)\n        if problem:\n            raise ValueError(f\"refusing to append an override: {problem}\")\n        line = (json.dumps(entry) + \"\\n\").encode(\"utf-8\")\n        self.path.parent.mkdir(parents=True, exist_ok=True)\n        with self.path.open(\"a+b\") as fh:\n            fh.seek(0)\n            number = fh.read().count(b\"\\n\") + 1\n            fh.write(line)\n        return number\n",
+          "new": "        line = (json.dumps(entry) + \"\\n\").encode(\"utf-8\")\n        self.path.parent.mkdir(parents=True, exist_ok=True)\n        with self.path.open(\"a+b\") as fh:\n            fh.seek(0)\n            number = fh.read().count(b\"\\n\") + 1\n            fh.write(line)\n        problem = self._problem(entry)\n        if problem:\n            raise ValueError(f\"refusing to append an override: {problem}\")\n        return number\n"
+        }
+      ],
+      "expect": "a refused entry writes nothing"
+    },
+    {
+      "test": "test_override_log",
+      "name": "a line must read exactly as json.dumps writes it",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "            problem = problem or self._problem(entry)\n",
+          "new": "            problem = problem or self._problem(entry) or (None if json.dumps(entry).encode() == raw else \"line was reformatted\")\n"
+        }
+      ],
+      "expect": "override log line 4"
+    },
+    {
+      "test": "test_override_log",
+      "name": "signature checked with json.dumps defaults instead of the canonical form",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        if not verify_signature(entry, self.secret):\n",
+          "new": "        if entry.get(\"signature\") != __import__(\"hmac\").new(self.secret, json.dumps({k: v for k, v in entry.items() if k != \"signature\"}).encode(), \"sha256\").hexdigest()[:32]:\n"
+        }
+      ],
+      "expect": "refusing to append an override: signature does not verify"
+    },
+    {
+      "test": "test_override_log",
+      "name": "line numbers counted from 0",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        for number, raw in enumerate(lines, start=1):\n",
+          "new": "        for number, raw in enumerate(lines):\n"
+        }
+      ],
+      "expect": "a changed field is caught on its own line"
+    },
+    {
+      "test": "test_override_log",
+      "name": "decode errors escape as JSONDecodeError",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "    except ValueError:\n        return None, \"not one complete JSON entry\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_override_log",
+      "name": "blank lines skipped",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        for number, raw in enumerate(lines, start=1):\n",
+          "new": "        for number, raw in enumerate(lines, start=1):\n            if not raw.strip():\n                continue\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_override_log",
+      "name": "a field given twice accepted (last value wins)",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        return json.loads(raw.decode(\"utf-8\"), object_pairs_hook=_no_repeats), None\n",
+          "new": "        return json.loads(raw.decode(\"utf-8\")), None\n"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_override_log",
+      "name": "every line assumed to be a JSON object",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "        if not isinstance(entry, dict):\n            return \"not a JSON object\"\n",
+          "new": ""
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_override_log",
+      "name": "compare_digest handed a non-ASCII signature",
+      "edits": [
+        {
+          "file": "signing.py",
+          "old": "    if not isinstance(signature, str) or not signature.isascii():\n",
+          "new": "    if not isinstance(signature, str):\n"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_override_log",
+      "name": "entries() checks the signature but not the fields",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "            problem = problem or self._problem(entry)\n",
+          "new": "            problem = problem or (None if isinstance(entry, dict) and verify_signature(entry, self.secret) else \"signature does not verify\")\n"
+        }
+      ],
+      "expect": "{**renamed, \"timestamp\""
+    },
+    {
+      "test": "test_override_log",
+      "name": "ts turned into a float on the way out of entries()",
+      "edits": [
+        {
+          "file": "overridelog.py",
+          "old": "            out.append(entry)\n",
+          "new": "            out.append({**entry, \"ts\": float(entry[\"ts\"])})\n"
+        }
+      ],
+      "expect": "the signed bytes survive the round trip, number types included"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "every failed rule blocks, as in the lesson code",
+      "edits": [
+        {
+          "file": "checks.py",
+          "old": "            severity = row.get(\"severity\")\n            if severity not in SEVERITIES:\n                severity = \"block\"\n",
+          "new": "            severity = \"block\"\n"
+        }
+      ],
+      "expect": "findings come source by source, each rule with the severity it was written with"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "unknown severities passed through",
+      "edits": [
+        {
+          "file": "checks.py",
+          "old": "            severity = row.get(\"severity\")\n            if severity not in SEVERITIES:\n                severity = \"block\"\n",
+          "new": "            severity = row.get(\"severity\", \"block\")\n"
+        }
+      ],
+      "expect": "a failed rule tagged 'Warn' blocks"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "severity lower-cased before the check",
+      "edits": [
+        {
+          "file": "checks.py",
+          "old": "            severity = row.get(\"severity\")\n",
+          "new": "            severity = str(row.get(\"severity\")).lower()\n"
+        }
+      ],
+      "expect": "a failed rule tagged 'Warn' blocks"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "strict promotes info too",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        findings = [replace(f, severity=\"block\") if f.severity == \"warn\" else f for f in findings]\n",
+          "new": "        findings = [replace(f, severity=\"block\") if f.severity in (\"warn\", \"info\") else f for f in findings]\n"
+        }
+      ],
+      "expect": "--strict turns every warn into a block and leaves info alone"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "strict not recorded in the verdict",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        strict=strict,\n        findings=findings,\n",
+          "new": "        strict=False,\n        findings=findings,\n"
+        }
+      ],
+      "expect": "the verdict records whether the gate ran strict"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "overrides applied before strict",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    if strict:\n        findings = [replace(f, severity=\"block\") if f.severity == \"warn\" else f for f in findings]\n    findings = apply_overrides(findings, overrides, task_id=art.task_id, head_commit=art.head_commit, secret=secret)\n",
+          "new": "    findings = apply_overrides(findings, overrides, task_id=art.task_id, head_commit=art.head_commit, secret=secret)\n    if strict:\n        findings = [replace(f, severity=\"block\") if f.severity == \"warn\" else f for f in findings]\n"
+        }
+      ],
+      "expect": "under --strict a signed override clears the block strict made"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "overrides not applied",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    findings = apply_overrides(findings, overrides, task_id=art.task_id, head_commit=art.head_commit, secret=secret)\n",
+          "new": ""
+        }
+      ],
+      "expect": "under --strict a signed override clears the block strict made"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "an overridden finding still blocks",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        passed=not any(f.severity == \"block\" for f in findings),\n",
+          "new": "        passed=not any(f.severity in (\"block\", \"overridden\") for f in findings),\n"
+        }
+      ],
+      "expect": "under --strict a signed override clears the block strict made"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "any finding fails the task",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        passed=not any(f.severity == \"block\" for f in findings),\n",
+          "new": "        passed=not findings,\n"
+        }
+      ],
+      "expect": "under --strict a signed override clears the block strict made"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "a missing scope report counted as clean",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    findings += [_missing(\"scope_report.json\")] if art.scope_report is None else scope_findings(art.scope_report)\n",
+          "new": "    findings += scope_findings(art.scope_report or {})\n"
+        }
+      ],
+      "expect": "a missing scope_report.json blocks instead of counting as clean"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "a missing rule report counted as clean",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    findings += [_missing(\"rule_report.json\")] if art.rule_report is None else rule_findings(art.rule_report)\n",
+          "new": "    findings += rule_findings(art.rule_report or [])\n"
+        }
+      ],
+      "expect": "a missing rule_report.json blocks instead of counting as clean"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "a missing feedback log read as an empty one",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "        findings.append(_missing(\"feedback_record.jsonl\"))\n",
+          "new": "        findings += acceptance_findings(replace(art, feedback=[]))\n"
+        }
+      ],
+      "expect": "a missing feedback_record.jsonl blocks instead of counting as clean"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "an empty rule report treated as missing",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    findings += [_missing(\"rule_report.json\")] if art.rule_report is None else",
+          "new": "    findings += [_missing(\"rule_report.json\")] if not art.rule_report else"
+        }
+      ],
+      "expect": "an empty artifact exists and has nothing in it"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "an empty feedback log treated as missing",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    elif art.feedback is None:\n",
+          "new": "    elif not art.feedback:\n"
+        }
+      ],
+      "expect": "an empty feedback log is not a missing one"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "no acceptance command is fine",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    if not art.acceptance_commands:\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "a task without an acceptance command proves nothing"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "regression is any drop over 0.01, float noise included",
+      "edits": [
+        {
+          "file": "checks.py",
+          "old": "    if delta > COVERAGE_REGRESSION_DELTA and not math.isclose(delta, COVERAGE_REGRESSION_DELTA, rel_tol=1e-9):\n",
+          "new": "    if delta > COVERAGE_REGRESSION_DELTA:\n"
+        }
+      ],
+      "expect": "coverage 0.85 -> 0.84"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "a drop of exactly one point blocks",
+      "edits": [
+        {
+          "file": "checks.py",
+          "old": "    if delta > COVERAGE_REGRESSION_DELTA and not math.isclose(delta, COVERAGE_REGRESSION_DELTA, rel_tol=1e-9):\n",
+          "new": "    if delta >= COVERAGE_REGRESSION_DELTA:\n"
+        }
+      ],
+      "expect": "coverage 0.85 -> 0.84"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "drop rounded to whole points first",
+      "edits": [
+        {
+          "file": "checks.py",
+          "old": "    if delta > COVERAGE_REGRESSION_DELTA and not math.isclose(delta, COVERAGE_REGRESSION_DELTA, rel_tol=1e-9):\n",
+          "new": "    if round(delta, 2) > COVERAGE_REGRESSION_DELTA:\n"
+        }
+      ],
+      "expect": "coverage 0.85 -> 0.839"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "points truncated with int()",
+      "edits": [
+        {
+          "file": "checks.py",
+          "old": "    if delta > COVERAGE_REGRESSION_DELTA and not math.isclose(delta, COVERAGE_REGRESSION_DELTA, rel_tol=1e-9):\n",
+          "new": "    if int(previous * 100) - int(current * 100) > 1:\n"
+        }
+      ],
+      "expect": "coverage 0.8599 -> 0.849"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "tolerance as wide as the threshold",
+      "edits": [
+        {
+          "file": "checks.py",
+          "old": "not math.isclose(delta, COVERAGE_REGRESSION_DELTA, rel_tol=1e-9)",
+          "new": "not math.isclose(delta, COVERAGE_REGRESSION_DELTA, abs_tol=COVERAGE_REGRESSION_DELTA)"
+        }
+      ],
+      "expect": "coverage 0.85 -> 0.839"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "float noise counted as a drop",
+      "edits": [
+        {
+          "file": "checks.py",
+          "old": "    elif delta > 0 and not math.isclose(delta, 0.0, abs_tol=1e-12):\n",
+          "new": "    elif delta > 0:\n"
+        }
+      ],
+      "expect": "coverage 0.9 -> 0.8999999999999999"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "relative tolerance against zero",
+      "edits": [
+        {
+          "file": "checks.py",
+          "old": "    elif delta > 0 and not math.isclose(delta, 0.0, abs_tol=1e-12):\n",
+          "new": "    elif delta > 0 and not math.isclose(delta, 0.0, rel_tol=1e-9):\n"
+        }
+      ],
+      "expect": "coverage 0.9 -> 0.8999999999999999"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "the floor given is ignored",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    findings += coverage_findings(art.coverage_report, coverage_floor)\n",
+          "new": "    findings += coverage_findings(art.coverage_report)\n"
+        }
+      ],
+      "expect": "the floor is the one given"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "missing-artifact findings put first",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    findings += [_missing(\"scope_report.json\")] if art.scope_report is None else scope_findings(art.scope_report)\n",
+          "new": "    findings = ([_missing(\"scope_report.json\")] if art.scope_report is None else []) + findings + ([] if art.scope_report is None else scope_findings(art.scope_report))\n"
+        }
+      ],
+      "expect": "a missing artifact's finding takes its source's place"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "a floor given in percent accepted",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    if not 0 < coverage_floor <= 1:\n        raise ValueError(f\"coverage_floor is a fraction in (0, 1], got {coverage_floor!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "verify must refuse coverage_floor=80"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "the lesson's file name next to the report",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    path = Path(root) / \"outputs\" / \"verification\" / f\"{verdict.task_id}.json\"\n",
+          "new": "    path = Path(root) / \"outputs\" / \"verification\" / f\"verification_report_{verdict.task_id}.json\"\n"
+        }
+      ],
+      "expect": "one task, one path"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "keys left in insertion order",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    tmp.write_text(json.dumps(verdict.to_dict(), indent=2, sort_keys=True)",
+          "new": "    tmp.write_text(json.dumps(verdict.to_dict(), indent=2)"
+        }
+      ],
+      "expect": "the report is the verdict's JSON, keys sorted, two-space indent"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "a timestamp in the report",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    tmp.write_text(json.dumps(verdict.to_dict(), indent=2, sort_keys=True)",
+          "new": "    tmp.write_text(json.dumps({**verdict.to_dict(), \"verified_at\": __import__(\"time\").time()}, indent=2, sort_keys=True)"
+        }
+      ],
+      "expect": "the report is the verdict's JSON, keys sorted, two-space indent"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "report appended to instead of replaced",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    tmp = path.with_name(path.name + \".tmp\")\n    tmp.write_text(json.dumps(verdict.to_dict(), indent=2, sort_keys=True) + \"\\n\", encoding=\"utf-8\")\n    os.replace(tmp, path)\n",
+          "new": "    with path.open(\"a\", encoding=\"utf-8\") as fh:\n        fh.write(json.dumps(verdict.to_dict(), indent=2, sort_keys=True) + \"\\n\")\n"
+        }
+      ],
+      "expect": "the same artifacts give the same bytes"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "task id not checked",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    if not _TASK_ID.fullmatch(verdict.task_id):\n        raise ValueError(f\"task id {verdict.task_id!r} is not a plain file name\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "write_report must refuse the task id '../T-42'"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "only slashes refused",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    if not _TASK_ID.fullmatch(verdict.task_id):\n",
+          "new": "    if \"/\" in verdict.task_id or \"\\\\\" in verdict.task_id:\n"
+        }
+      ],
+      "expect": "write_report must refuse the task id '..'"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "task id cut down to its last path part",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    if not _TASK_ID.fullmatch(verdict.task_id):\n        raise ValueError(f\"task id {verdict.task_id!r} is not a plain file name\")\n    path = Path(root) / \"outputs\" / \"verification\" / f\"{verdict.task_id}.json\"\n",
+          "new": "    path = Path(root) / \"outputs\" / \"verification\" / f\"{Path(verdict.task_id).name}.json\"\n"
+        }
+      ],
+      "expect": "write_report must refuse the task id '../T-42'"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "only floors above 1 refused",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    if not 0 < coverage_floor <= 1:\n",
+          "new": "    if coverage_floor > 1:\n"
+        }
+      ],
+      "expect": "verify must refuse coverage_floor=0"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "a floor of exactly 1.0 refused",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    if not 0 < coverage_floor <= 1:\n",
+          "new": "    if not 0 < coverage_floor < 1:\n"
+        }
+      ],
+      "expect": "got 1.0"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "findings sorted with the blocks first",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "    if strict:\n        findings = [",
+          "new": "    findings.sort(key=lambda f: f.severity != \"block\")\n    if strict:\n        findings = ["
+        }
+      ],
+      "expect": "findings come source by source"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "task id matched with re.match, so only its start is checked",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    if not _TASK_ID.fullmatch(verdict.task_id):\n",
+          "new": "    if not _TASK_ID.match(verdict.task_id):\n"
+        }
+      ],
+      "expect": "write_report must refuse the task id 'T-42/../../escape'"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "report written without the final newline",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "indent=2, sort_keys=True) + \"\\n\", encoding",
+          "new": "indent=2, sort_keys=True), encoding"
+        }
+      ],
+      "expect": "the report is the verdict's JSON, keys sorted, two-space indent"
+    },
+    {
+      "test": "test_verdict_and_report",
+      "name": "temporary file left next to the report",
+      "edits": [
+        {
+          "file": "report.py",
+          "old": "    os.replace(tmp, path)\n",
+          "new": "    path.write_bytes(tmp.read_bytes())\n"
+        }
+      ],
+      "expect": "nothing but the one report is written"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "no escaping",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "    return \"\".join(\"\\\\\" + ch if ch in ESCAPED else ch for ch in text)\n",
+          "new": "    return text\n"
+        }
+      ],
+      "expect": "one table per severity, in a fixed order, with special characters escaped"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "only pipes escaped",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "ESCAPED = \"\\\\`*_|\"\n",
+          "new": "ESCAPED = \"|\"\n"
+        }
+      ],
+      "expect": "one table per severity, in a fixed order, with special characters escaped"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "backslash itself not escaped",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "ESCAPED = \"\\\\`*_|\"\n",
+          "new": "ESCAPED = \"`*_|\"\n"
+        }
+      ],
+      "expect": "one table per severity, in a fixed order, with special characters escaped"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "sections in the order findings first appear",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "    for severity in SECTIONS:\n",
+          "new": "    for severity in dict.fromkeys(f[\"severity\"] for f in report[\"findings\"]):\n"
+        }
+      ],
+      "expect": "one table per severity, in a fixed order, with special characters escaped"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "findings sorted inside a section",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "        group = [f for f in report[\"findings\"] if f[\"severity\"] == severity]\n",
+          "new": "        group = sorted((f for f in report[\"findings\"] if f[\"severity\"] == severity), key=lambda f: (f[\"code\"], f[\"detail\"]))\n"
+        }
+      ],
+      "expect": "one table per severity, in a fixed order, with special characters escaped"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "strict not shown",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "        f\"head {report['head_commit']}\" + (\", strict\" if report[\"strict\"] else \"\"),\n",
+          "new": "        f\"head {report['head_commit']}\",\n"
+        }
+      ],
+      "expect": "the head line says when the gate ran strict"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "a section for every severity, empty ones too",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "        if not group:\n            continue\n",
+          "new": ""
+        }
+      ],
+      "expect": "a severity without findings gets no section"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "overridden rows without the by and reason columns",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "        if severity == \"overridden\":\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "one table per severity, in a fixed order, with special characters escaped"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "PASSED only when there are no findings",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "{'PASSED' if report['passed'] else 'FAILED'}",
+          "new": "{'PASSED' if not report['findings'] else 'FAILED'}"
+        }
+      ],
+      "expect": "warn and info annotate a passing verdict"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "no summary before the first record",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "    last = render_summary(gate(list(feedback)))\n    yield last\n",
+          "new": "    last = None\n"
+        },
+        {
+          "file": "summary.py",
+          "old": "            yield BREAK + text\n",
+          "new": "            yield (BREAK if last is not None else \"\") + text\n"
+        }
+      ],
+      "expect": "the first summary is the verdict before any record arrives"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "the first summary sent once the first record is in hand",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "    yield last\n    async for record in records:\n        feedback.append(record)\n",
+          "new": "    async for record in records:\n        if not feedback:\n            yield last\n        feedback.append(record)\n"
+        }
+      ],
+      "expect": "a stream without records still gets the first summary"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "the first summary sent once a record is in hand, or after an empty stream",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "    yield last\n    async for record in records:\n        feedback.append(record)\n",
+          "new": "    async for record in records:\n        if not feedback:\n            yield last\n        feedback.append(record)\n"
+        },
+        {
+          "file": "summary.py",
+          "old": "            yield BREAK + text\n            last = text\n",
+          "new": "            yield BREAK + text\n            last = text\n    if not feedback:\n        yield last\n"
+        }
+      ],
+      "expect": "the first summary goes out before the first record is read"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "a summary for every record",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "        if text != last:\n",
+          "new": "        if True:\n"
+        }
+      ],
+      "expect": "a summary goes out when a record changes it, and only then"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "a summary only when passed flips",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "        if text != last:\n",
+          "new": "        if text.split(\"\\n\")[0] != last.split(\"\\n\")[0]:\n"
+        }
+      ],
+      "expect": "a summary goes out when a record changes it, and only then"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "every summary compared with the first one",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "            last = text\n",
+          "new": ""
+        }
+      ],
+      "expect": "a summary goes out when a record changes it, and only then"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "a summary only when the verdict or a section's count changes",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "        if text != last:\n",
+          "new": "        if [ln for ln in text.splitlines() if ln.startswith(\"#\")] != [ln for ln in last.splitlines() if ln.startswith(\"#\")]:\n"
+        }
+      ],
+      "expect": "a summary goes out when a record changes it, and only then"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "break and summary sent as two chunks",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "            yield BREAK + text\n",
+          "new": "            yield BREAK\n            yield text\n"
+        }
+      ],
+      "expect": "a summary goes out when a record changes it, and only then"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "--- right under the last table row",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "BREAK = \"\\n---\\n\\n\"\n",
+          "new": "BREAK = \"---\\n\"\n"
+        }
+      ],
+      "expect": "summaries are separated by a blank line, ---, and a blank line"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "no blank line after ---",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "BREAK = \"\\n---\\n\\n\"\n",
+          "new": "BREAK = \"\\n---\\n\"\n"
+        }
+      ],
+      "expect": "summaries are separated by a blank line, ---, and a blank line"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "break after every summary instead of between them",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "    yield last\n",
+          "new": "    yield last + BREAK\n"
+        },
+        {
+          "file": "summary.py",
+          "old": "            yield BREAK + text\n",
+          "new": "            yield text + BREAK\n"
+        }
+      ],
+      "expect": "the first summary is the verdict before any record arrives"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "a break before the first summary too",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "    yield last\n",
+          "new": "    yield BREAK + last\n"
+        }
+      ],
+      "expect": "the first summary is the verdict before any record arrives"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "no blank line before ---, so the head line above it reads as a setext heading",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "BREAK = \"\\n---\\n\\n\"\n",
+          "new": "BREAK = \"---\\n\\n\"\n"
+        }
+      ],
+      "expect": "summaries are separated by a blank line, ---, and a blank line"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "whole stream read before the first change goes out",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "    async for record in records:\n",
+          "new": "    for record in [r async for r in records]:\n"
+        }
+      ],
+      "expect": "each summary goes out as soon as the record that changed it arrives"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "gate run only on the records that changed something",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "        feedback.append(record)\n        text = render_summary(gate(list(feedback)))\n",
+          "new": "        feedback.append(record)\n        if record[\"command\"].startswith(\"git \"):\n            continue\n        text = render_summary(gate(list(feedback)))\n"
+        }
+      ],
+      "expect": "the gate runs before the first record and after each one, on every record so far"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "a summary skipped when the same text went out earlier",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "    feedback: list[dict] = []\n    last = render_summary(gate(list(feedback)))\n    yield last\n    async for record in records:\n        feedback.append(record)\n        text = render_summary(gate(list(feedback)))\n        if text != last:\n            yield BREAK + text\n            last = text\n",
+          "new": "    feedback: list[dict] = []\n    last = render_summary(gate(list(feedback)))\n    sent = {last}\n    yield last\n    async for record in records:\n        feedback.append(record)\n        text = render_summary(gate(list(feedback)))\n        if text not in sent:\n            yield BREAK + text\n            sent.add(text)\n"
+        }
+      ],
+      "expect": "a summary goes out when a record changes it, and only then"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "characters escaped one replace() at a time, the backslash last",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "    return \"\".join(\"\\\\\" + ch if ch in ESCAPED else ch for ch in text)\n",
+          "new": "    for ch in \"`*_|\\\\\":\n        text = text.replace(ch, \"\\\\\" + ch)\n    return text\n"
+        }
+      ],
+      "expect": "one table per severity, in a fixed order, with special characters escaped"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "only the detail column escaped",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "    return \"| \" + \" | \".join(_escape(cell) for cell in cells) + \" |\"\n",
+          "new": "    return \"| \" + \" | \".join(_escape(cell) if i == 1 else cell for i, cell in enumerate(cells)) + \" |\"\n"
+        }
+      ],
+      "expect": "one table per severity, in a fixed order, with special characters escaped"
+    },
+    {
+      "test": "test_summary_stream",
+      "name": "a coroutine that returns the summaries as a list",
+      "edits": [
+        {
+          "file": "summary.py",
+          "old": "    feedback: list[dict] = []\n    last = render_summary(gate(list(feedback)))\n    yield last\n    async for record in records:\n        feedback.append(record)\n        text = render_summary(gate(list(feedback)))\n        if text != last:\n            yield BREAK + text\n            last = text\n",
+          "new": "    feedback: list[dict] = []\n    last = render_summary(gate(list(feedback)))\n    out = [last]\n    async for record in records:\n        feedback.append(record)\n        text = render_summary(gate(list(feedback)))\n        if text != last:\n            out.append(BREAK + text)\n            last = text\n    return out\n"
+        }
+      ],
+      "expect": "__aiter__"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "every commit compared with main",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "                coverage = {**coverage, \"previous\": baseline}\n",
+          "new": "                coverage = dict(coverage)\n"
+        }
+      ],
+      "expect": "each commit is compared with the coverage it is stacked on, not with main"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "the parent's own baseline passed on instead of its coverage",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "            onward = float(coverage[\"current\"]) if coverage and \"current\" in coverage else baseline\n",
+          "new": "            onward = baseline\n"
+        }
+      ],
+      "expect": "each commit is compared with the coverage it is stacked on, not with main"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "back to main when the parent has no coverage report",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "            onward = float(coverage[\"current\"]) if coverage and \"current\" in coverage else baseline\n",
+          "new": "            onward = float(coverage[\"current\"]) if coverage and \"current\" in coverage else base_coverage\n"
+        }
+      ],
+      "expect": "each commit is compared with the coverage it is stacked on, not with main"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "CI's own previous kept when the parent has no coverage report",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "            if coverage:\n                coverage = {**coverage, \"previous\": baseline}\n",
+          "new": "            if coverage and baseline is not None:\n                coverage = {**coverage, \"previous\": baseline}\n"
+        },
+        {
+          "file": "stack.py",
+          "old": "            onward = float(coverage[\"current\"]) if coverage and \"current\" in coverage else baseline\n",
+          "new": "            onward = float(coverage[\"current\"]) if coverage and \"current\" in coverage else None\n"
+        }
+      ],
+      "expect": "each commit is compared with the coverage it is stacked on, not with main"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "CI's previous kept for commits on the base",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "    todo = [(commit, base_coverage, False, None) for commit in reversed(children.get(base, []))]\n",
+          "new": "    todo = [(commit, None, False, None) for commit in reversed(children.get(base, []))]\n"
+        },
+        {
+          "file": "stack.py",
+          "old": "            if coverage:\n                coverage = {**coverage, \"previous\": baseline}\n",
+          "new": "            if coverage and baseline is not None:\n                coverage = {**coverage, \"previous\": baseline}\n"
+        }
+      ],
+      "expect": "each commit is compared with the coverage it is stacked on, not with main"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "CI's coverage report changed in place",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "                coverage = {**coverage, \"previous\": baseline}\n",
+          "new": "                coverage[\"previous\"] = baseline\n"
+        }
+      ],
+      "expect": "the artifacts passed in are not changed"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "result in the order given",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "    return out\n",
+          "new": "    order = [c.sha for c in commits]\n    return sorted(out, key=lambda s: order.index(s.sha))\n"
+        }
+      ],
+      "expect": "parents before children, depth first, children in the order given"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "breadth first",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "        commit, baseline, parent_waiting, blocker = todo.pop()\n",
+          "new": "        commit, baseline, parent_waiting, blocker = todo.pop(0)\n"
+        },
+        {
+          "file": "stack.py",
+          "old": "        for child in reversed(children.get(commit.sha, [])):\n",
+          "new": "        for child in children.get(commit.sha, []):\n"
+        }
+      ],
+      "expect": "parents before children, depth first, children in the order given"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "siblings sorted by sha",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "        for child in reversed(children.get(commit.sha, [])):\n",
+          "new": "        for child in sorted(children.get(commit.sha, []), key=lambda c: c.sha, reverse=True):\n"
+        }
+      ],
+      "expect": "parents before children, depth first, children in the order given"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "a waiting parent does not hold its children",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "        if parent_waiting or art is None or art.head_commit != commit.sha:\n",
+          "new": "        if art is None or art.head_commit != commit.sha:\n"
+        }
+      ],
+      "expect": "a commit waits for its parent's report"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "artifacts from an older commit used",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "        if parent_waiting or art is None or art.head_commit != commit.sha:\n",
+          "new": "        if parent_waiting or art is None:\n"
+        }
+      ],
+      "expect": "a commit waits for its parent's report"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "blocked only by its own verdict",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "        blocker = blocker or (None if status == \"passed\" else commit.sha)\n",
+          "new": "        blocker = None if status == \"passed\" else commit.sha\n"
+        }
+      ],
+      "expect": "a commit waits for its parent's report"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "blocked by the nearest failure instead of the first",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "        blocker = blocker or (None if status == \"passed\" else commit.sha)\n",
+          "new": "        blocker = (None if status == \"passed\" else commit.sha) or blocker\n"
+        }
+      ],
+      "expect": "a commit waits for its parent's report"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "an override reaches every commit of its task",
+      "edits": [
+        {
+          "file": "gate.py",
+          "old": "            and entry.get(\"head_commit\") == head_commit\n",
+          "new": ""
+        }
+      ],
+      "expect": "an override signed at a1 stays on a1"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "strict not passed on",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "                secret=secret,\n                strict=strict,\n",
+          "new": "                secret=secret,\n"
+        }
+      ],
+      "expect": "--strict reaches every commit of the stack"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "an unknown parent taken for the base",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "        if commit.parent != base and commit.parent not in by_sha:\n            raise ValueError(f\"{commit.sha} is stacked on {commit.parent}, which is neither {base} nor in the stack\")\n        children.setdefault(commit.parent, []).append(commit)\n",
+          "new": "        children.setdefault(commit.parent if commit.parent in by_sha else base, []).append(commit)\n"
+        }
+      ],
+      "expect": "verify_stack must refuse a commit stacked on one nobody gave"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "commits that never reach the base dropped",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "    if len(out) != len(commits):\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "verify_stack must refuse commits that never reach the base"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "a sha given twice kept once",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "        if commit.sha == base or commit.sha in by_sha:\n",
+          "new": "        if commit.sha == base:\n"
+        }
+      ],
+      "expect": "verify_stack must refuse a sha given twice"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "coverage_floor not passed on",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "                strict=strict,\n                coverage_floor=coverage_floor,\n",
+          "new": "                strict=strict,\n"
+        }
+      ],
+      "expect": "the coverage floor reaches every commit of the stack"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "a failed commit's coverage not passed on to its children",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "            onward = float(coverage[\"current\"]) if coverage and \"current\" in coverage else baseline\n",
+          "new": "            onward = float(coverage[\"current\"]) if coverage and \"current\" in coverage and verdict.passed else baseline\n"
+        }
+      ],
+      "expect": "each commit is compared with the coverage it is stacked on"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "a waiting commit not counted as a blocker",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "        blocker = blocker or (None if status == \"passed\" else commit.sha)\n",
+          "new": "        blocker = blocker or (commit.sha if status == \"failed\" else None)\n"
+        }
+      ],
+      "expect": "a commit waits for its parent's report"
+    },
+    {
+      "test": "test_pr_stack",
+      "name": "a failed parent holds its children",
+      "edits": [
+        {
+          "file": "stack.py",
+          "old": "            todo.append((child, onward, status == \"waiting\", blocker))\n",
+          "new": "            todo.append((child, onward, status != \"passed\", blocker))\n"
+        }
+      ],
+      "expect": "'NoneType' object has no attribute 'coverage'"
+    }
+  ]
+}

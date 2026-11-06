@@ -1,0 +1,139 @@
+{
+  "lesson": "phases/14-agent-engineering/38-verification-gates",
+  "title": "Verification Gates",
+  "format": "staged-brownfield",
+  "service": "VerifyGate: a deterministic verification gate over lesson 33/36/37 artifacts (feedback records with argv commands, scope report, rule report with severities, coverage), HMAC-signed human overrides bound to task and HEAD, an append-only signed overrides.jsonl, one JSON report per task at outputs/verification/<task_id>.json, a streamed Markdown summary, and gating for stacked commits",
+  "sources": {
+    "docs/en.md": "4959114e249714257295b82f895d03c8b8a144bd1c689883bc9cf7f25c9785a0",
+    "code/main.py": "df9e6148321d2d99660f5052d7bfd7f4da256e291ef99f6bb170b732f6dd0592",
+    "quiz/quiz.md": "39f8c59aba334aee9d23bbb8c5220699a8efb5ca397e2f887cdba83ee676c318"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network and no LLM: overrides are signed with a fixed test secret, and Part 4's gate is a function the test supplies",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_acceptance_and_overrides",
+      "kind": "debug",
+      "lesson_anchor": "What the gate checks (all acceptance commands ran and exited zero, no null exit codes); Refuse without exception (only a human overrides a block, with override_reason and overridden_by, as a signed change); Signed override log (timestamp, finding code, reason, signing user, current HEAD commit; the runtime refuses an override without the signature); code/main.py _acceptance_findings, record_override, verify_signature; quiz Q6, Q9, Q10, Q12",
+      "planted_bugs": [
+        "command_text turns an argv list into str(list), so a lesson 37 record never matches the contract's command and every acceptance command is reported missing; the failure shows in acceptance_findings, the cause is two calls down in commands.py (quiz Q9)",
+        "latest_run returns the first matching record, so an acceptance command that failed and then passed on a retry still reports acceptance.failed (quiz Q6, Q10)",
+        "make_override signs the five string fields and only then adds ts, so verify_signature, which covers every field but the signature, rejects a fresh override and apply_overrides drops it; the symptom is in apply_overrides, the cause in signing.py",
+        "apply_overrides does not compare head_commit, so an override recorded at an older HEAD still clears the finding",
+        "acceptance_findings calls latest_run once per acceptance command, and each call shlex.joins the whole log again: O(commands x records)"
+      ],
+      "timing_assert": "400 acceptance commands against an 8,400-record log under 0.1 s. Measured on this machine (Python 3.12): at load average about 5, the starter with the other four bugs fixed takes 1.66-1.82 s, a reversed scan that returns on the first match 1.61-1.68 s (the acceptance runs sit early in the log), one index built per call 7.3-8.1 ms; with eight extra busy processes 3.2-3.4 s and 8-45 ms; at load average about 12, 2.07-2.34 s, 2.2-4.2 s and 7.2-9.2 ms. Normalizing every record once into a list and scanning that list per command is still commands x records comparisons, 25-70 ms and up to 160 ms under load, so the test does not promise to let it through",
+      "overfix_guard": "argv joined with plain spaces on both sides makes ['pytest', '-k', 'card', 'and', 'not', 'slow', ...] the same command as -k 'card and not slow'; a pass that a later run broke must block; one override clears only its own finding code and leaves the list it was given alone; an override for another task, with a changed reason or ts, signed with another secret, or without a signature does nothing; verify_signature changed to skip ts is caught by a re-timed entry; a null exit cannot be overridden; a warn is not overridden; the last valid override of a code is reported, and another task's override of the same code later in the log does not hide it; a blank reason and an empty secret are refused; the reversed early-return scan stays slow"
+    },
+    {
+      "part": 2,
+      "test": "test_override_log",
+      "kind": "model and persistence",
+      "lesson_anchor": "Signed override log, not Slack threads: every override is a row in outputs/verification/overrides.jsonl, signed, git-tracked; the runtime refuses any override that lacks the signature; skill refusal rule: off-the-record overrides defeat the gate; code/main.py _sign (canonical JSON, HMAC-SHA256, 32 hex digits) and _load_override_secret (fail closed)",
+      "storage": "an append-only JSON-lines file, one json.dumps(entry) per line; each entry is exactly the six fields plus an HMAC-SHA256 signature over their canonical JSON (sort_keys, compact separators); the signature covers content, not how the line is spelled",
+      "exactness": "entries read back equal to what was appended, and their canonical signing bytes are identical: a float ts with 17 significant digits, an int ts, a reason with non-ASCII text, quotes, backslashes and a tab, a line another tool wrote with reversed keys, spaced separators and raw UTF-8; earlier bytes of the file are never rewritten, by any writer",
+      "traps": [
+        "an empty secret accepted",
+        "the file opened with w, or a whole-file rewrite that re-serializes another tool's line",
+        "no newline, or indent=2, so line numbers drift",
+        "line numbers counted per instance, so two writers report (5, 5, 6)",
+        "append that does not check the entry, checks only the signature (a signed entry with an extra field), or writes before refusing",
+        "entries() that verifies the signature but not the fields, so a signed line with ts renamed to timestamp reads back",
+        "a line required to read exactly as json.dumps writes it",
+        "the empty piece after the last newline parsed as a line",
+        "0-based line numbers, a JSONDecodeError instead of LogTampered, blank lines skipped, a null line crashing",
+        "a field given twice accepted because Python keeps the last value",
+        "a non-ASCII signature handed to hmac.compare_digest (TypeError)",
+        "an int ts rewritten as a float, which changes the signed bytes"
+      ],
+      "clarifying_questions": [
+        "who signs",
+        "skip or raise on a bad line",
+        "line numbering",
+        "blank lines",
+        "normalizing ts",
+        "concurrent writers"
+      ]
+    },
+    {
+      "part": 3,
+      "test": "test_verdict_and_report",
+      "kind": "core algorithm",
+      "lesson_anchor": "Deterministic, not probabilistic (same verdict for the same artifact set); One report, one path (outputs/verification/<task_id>.json); warn annotates, block prevents passed; Coverage floor as a first-class check (80% default, more than one point below the previous merge blocks); --strict promotes warns to blocks; lesson 33 severity tagging at write time; skill refusal rules (no acceptance command, missing rule report or feedback log fail closed); code/main.py _coverage_findings and its isclose boundary; quiz Q3, Q4, Q7, Q11, Q15",
+      "traps": [
+        "every failed rule blocks as in the lesson code, or an unknown severity ('Warn', 'critical', missing) passed through or lower-cased instead of blocking",
+        "a missing artifact (None) counted as clean, an empty one counted as missing, or missing-artifact findings moved out of their source's place",
+        "no acceptance command treated as clean",
+        "strict promoting info, or not recorded in the verdict",
+        "overrides applied before strict, not applied, or an overridden finding still blocking",
+        "coverage: delta > 0.01 or >= 0.01 (0.85 -> 0.84 blocks), round(delta, 2) (0.85 -> 0.839 passes), int() points (0.8599 -> 0.849 passes), abs_tol as wide as the threshold, rel_tol against zero (float noise warns)",
+        "the given floor ignored, 80 or 0 accepted as a floor, or 1.0 refused",
+        "the lesson's verification_report_<id>.json name, unsorted keys, a timestamp, append mode",
+        "task id not checked, checked only for slashes or only at its start, or cleaned with Path(task_id).name"
+      ],
+      "clarifying_questions": [
+        "missing versus empty",
+        "a rule without a known severity",
+        "strict and info",
+        "override before or after strict",
+        "exactly one point",
+        "timestamps in the report",
+        "a task id with a slash"
+      ]
+    },
+    {
+      "part": 4,
+      "test": "test_summary_stream",
+      "kind": "streaming",
+      "lesson_anchor": "Exercise 3 (a Markdown summary in addition to JSON; which fields belong in it); What the gate checks: a warn finding annotates the verdict, a block finding prevents passed: true; Use It: pre-handoff hook and manual triage read the report while the agent works; lesson 37 records arrive one by one as commands finish",
+      "wire_format": "Markdown text: one summary per change, each yielded as one string; summaries separated by a blank line, ---, and a blank line (a thematic break, not a setext underline), no break before the first or after the last; decided by the test's exact summary text and chunk list",
+      "traps": [
+        "sections in the order findings first appear, findings sorted inside a section, a section for a severity without findings, overridden rows without by and reason, strict missing from the head line, or PASSED only when there are no findings",
+        "no summary before the first record, or the first one sent only once a record has been read (an empty stream then gets none)",
+        "a summary for every record, only when PASSED and FAILED flip, only when the verdict or a section's count changes, or every summary compared with the first one",
+        "break and summary yielded as two chunks, --- right under the last line, no blank line before or after ---, a break before the first summary, or a break after every summary",
+        "not again once the same text went out earlier",
+        "the gate skipped for records that look unimportant",
+        "the whole stream read before the first change goes out",
+        "side check, with the order spelled out in the docstring: no escaping, only pipes escaped, the backslash not escaped or escaped last, or only the detail column escaped"
+      ],
+      "clarifying_questions": [
+        "the summary before any record",
+        "a stream without records",
+        "what counts as a change",
+        "a trailing break",
+        "which characters to escape"
+      ]
+    },
+    {
+      "part": 5,
+      "test": "test_pr_stack",
+      "kind": "tree",
+      "lesson_anchor": "Coverage floor against the previous merge (for a stacked commit, the commit it sits on); overrides carry the current HEAD commit; Use It: CI step with merge protection refusing without passed: true; Defense-in-depth: the gate sits at the pre-merge layer",
+      "traps": [
+        "every commit compared with main, the parent's baseline passed on instead of its coverage, back to main when the parent has no coverage report, or CI's own previous kept",
+        "CI's coverage report changed in place",
+        "result in the order given, breadth first, or siblings sorted by sha",
+        "a waiting parent not holding its children, a failed parent holding them, or artifacts from an older push used",
+        "blocked_by from the commit's own verdict only, or the nearest failure instead of the first",
+        "an override signed at the parent reaching the child (HEAD not compared)",
+        "strict or the coverage floor not passed on",
+        "an unknown parent taken for the base, commits that never reach the base dropped, a sha given twice kept once"
+      ],
+      "clarifying_questions": [
+        "a parent not in the list",
+        "a failed parent",
+        "a parent without coverage",
+        "artifacts from another commit",
+        "sibling order"
+      ]
+    }
+  ],
+  "deviations": [
+    "Part 1: the suggested defects are kept (argv compared as str(list), every run counted instead of the latest, overrides not applied with a stale HEAD still in force, and the per-command scan). verify itself is Part 3's to write, so the override defects live in apply_overrides (head_commit not compared) and in make_override, which signs before ts is added: a fresh override then fails verification one call away from where it was made. Null exits count on the latest run of an acceptance command (quiz Q10), so a crash that a rerun replaced is history. The timing case is 400 commands against 8,400 records instead of 1,000 against 50,000, so the slow version stays under two seconds.",
+    "Part 2: append-only HMAC-signed JSON lines as assigned, one signature per entry and no hash chain (that is chapter 13 lesson 30's ledger). The U+2028 / splitlines trap and torn-tail recovery are left out because chapter 14 already uses them (lessons 01, 02, 05, 08, 14); a cut-off line is only detected and reported by line number. The suggested float and non-ASCII exactness is checked on the canonical signing bytes, with an int ts next to the float ones, and a duplicate-key line is added as the domain's own parser-differential trap.",
+    "Part 3: as suggested (four sources, strict, overrides, fixed order, one path, same bytes), with the isclose boundary kept in the provided coverage_findings. Info findings come from soft off-scope writes (lesson 36) and info-severity rules (lesson 33's severity tagging), which also gives the rule report its own trap. Fail-closed handling of missing artifacts and of a contract without acceptance commands comes from the lesson's skill refusal rules and quiz Q7/Q11. 'A null exit cannot be overridden' is a rule of apply_overrides, so it is tested in Part 1.",
+    "Part 4: Markdown as assigned. stream_summaries takes the gate as a function, and the test supplies a scripted one, so this part does not depend on Part 3. A change is anything that changes the summary text, not only PASSED and FAILED flipping. The break is a blank line, --- and a blank line, because --- right under the last paragraph line of a passing summary is a setext heading. The cell escaping and its order (the backslash first) are spelled out in render_summary's docstring, because escaping the escape character first is already a main trap elsewhere in chapter 14; the sample report still carries every escaped character, so escaping is checked on the side, and the part's own traps are the section layout, the summary before any record, a summary only on a change, and where the break goes.",
+    "Part 5: as suggested, with the baseline for a parent without a coverage report taken from what the parent was compared against, artifacts made at an older push treated as waiting like missing ones, and a fork in the stack. 'The child must wait for the parent's report' is the waiting status; the first blocker is reported per commit as blocked_by. Part 5 calls the real verify, so it needs Part 3; the overrides check there exercises Part 1's HEAD binding."
+  ]
+}
