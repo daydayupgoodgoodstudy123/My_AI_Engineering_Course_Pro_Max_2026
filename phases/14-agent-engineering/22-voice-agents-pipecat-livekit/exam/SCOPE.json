@@ -1,0 +1,106 @@
+{
+  "lesson": "phases/14-agent-engineering/22-voice-agents-pipecat-livekit",
+  "title": "Voice Agents: Pipecat and LiveKit",
+  "format": "staged-brownfield",
+  "service": "VoiceFrame: a Pipecat-shaped VAD -> STT -> LLM -> TTS -> transport pipeline with DOWNSTREAM data and UPSTREAM barge-in cancels, an append-only binary call recording, a turn taker (confidence gate, '?' end of turn, silence timeout, turn-numbered cancels and stale-frame dropping), a per-stage metrics observer of DOWNSTREAM frames in the Prometheus text format, and a latency budget over nested chains, races and joins",
+  "sources": {
+    "docs/en.md": "514d102d6130a6c3c6682b33e86d7a2e24de4e9240176de6e78403ecc9d8083d",
+    "code/main.py": "beb6f493850ac526af172cb3618864f5c8d61fa66f539c32b9717ade3a0a0f54",
+    "quiz/quiz.md": "bb1153708fd771b048e257928f665a24b9dabc6a4bea487012764a75888691ee"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; no network, no LLM and no audio: the model, the synthesizer and the player are functions the tests supply",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_barge_in",
+      "kind": "debug",
+      "lesson_anchor": "Pipecat DOWNSTREAM / UPSTREAM; LLM (context alternates user/assistant); Where this pattern goes wrong: No barge-in handling, TTS mid-sentence cutoff; Typical 2026 latencies (TTS first audio); code/main.py VAD, TTS, Transport; quiz Q5-Q6 (the lesson's barge-in cuts nothing)",
+      "planted_bugs": [
+        "VAD tests bool(payload), so a whitespace chunk counts as speech; STT strips it to an empty transcript and the error surfaces three processors away as KeyError: '' inside the test's model",
+        "TTS synthesizes every word of the reply before it sends the first one downstream, so first audio waits for the whole reply and a barge-in can never cut anything",
+        "TTS.spoken is created once in __init__ and never reset per utterance, so the cancel carries every word of the call upstream; the symptom is the LLM's last assistant message, the root cause is in TTS"
+      ],
+      "timing_assert": "first word of a 400-word reply played within 0.08 s (whole-reply synthesis sleeps at least 0.8 s and measured about 1.2 s; streaming measured about 3 ms)",
+      "overfix_guard": "a cancel that arrives while a word is being synthesized drops that word (checking only before synthesize fails); the reply after a barge-in is spoken in full (a cancel that never clears fails); the whole context is compared, so clearing spoken when a cancel reports it instead of at the start of each utterance fails, and so does counting a word as heard only after the transport returns; a barge-in after the last reply was spoken in full leaves that reply whole (clearing spoken when an utterance ends fails)"
+    },
+    {
+      "part": 2,
+      "test": "test_call_recording",
+      "kind": "model and persistence",
+      "lesson_anchor": "Frame (audio, transcript, text, tts_audio, control) and its direction; replaying a call to see where latency and barge-in went",
+      "exactness": "records read back equal, field for field: integer epoch nanoseconds one apart (1_730_000_000_123_456_789 and +1) and 2**63 - 1, the UPSTREAM direction, raw PCM bytes with every byte value, \\n, \\r\\n and \\x00, UTF-8 text with non-ASCII, an empty payload and a 70,000-byte payload; again after reopen and after two simulated crashes (1,000 bytes into the 70,000-byte record, then 3 bytes into the next one)",
+      "traps": [
+        "timestamps through a double",
+        "a 16-bit payload length (struct.error)",
+        "records left in the write buffer while the recorder is open",
+        "reopen with wb, or MAGIC written again on every open",
+        "a torn tail not cut off before the next append, with the tear in the payload and in the header",
+        "a torn tail overwritten in place (r+b and seek) but not truncated, so a shorter record leaves garbage behind",
+        "a torn payload read back as a short record; a torn header unpacked anyway (struct.error)",
+        "ValueError, not struct.error, for 2**63, -1 and an unknown direction; a file without MAGIC rejected"
+      ],
+      "clarifying_questions": ["free byte layout after MAGIC", "timestamp resolution", "corruption in the middle"]
+    },
+    {
+      "part": 3,
+      "test": "test_turn_taking",
+      "kind": "core algorithm",
+      "lesson_anchor": "Exercise 2 (confidence-gated STT, 'could you repeat that?'); Exercise 3 (a transcript ending with '?' ends the turn); STT confidence ignored; No barge-in handling (UPSTREAM cancel)",
+      "traps": [
+        "silence counted from the last segment instead of the last stop, or while the user is speaking again",
+        "the 700 ms boundary",
+        "segments not stripped, empty segments kept (text and confidence)",
+        "'?' anywhere instead of at the end of the joined, stripped text",
+        "mean, first-segment, last-segment or product confidence instead of every segment against the threshold; a confidence equal to the threshold",
+        "a repeat-prompt turn without a turn number, or sent to the LLM",
+        "a cancel while the bot is quiet, or one per user_started instead of one per bot turn",
+        "one cancel flag for the whole call; older-turn frames admitted; admit tied to the turn the bot is speaking, which blocks the first frame of every reply"
+      ],
+      "clarifying_questions": ["confidence of an empty segment", "turn number of a repeat prompt", "which turn the interrupting speech belongs to", "what the latest turn means for admit"]
+    },
+    {
+      "part": 4,
+      "test": "test_metrics_observer",
+      "kind": "streaming",
+      "lesson_anchor": "Exercise 1 (a metrics observer counting frames per stage per second: where does latency accumulate?); DOWNSTREAM is source to sink, audio in and speech out, UPSTREAM is feedback and control: cancellation, metrics, barge-in (The Concept, Key Terms); PipelineTask observers for metrics; quiz Q7 (the cancel's path transport -> tts -> llm -> stt -> vad) and Q12 (the Exercise 1 observer times downstream frames only)",
+      "wire_format": "Prometheus text exposition, one string per 1 s window: # HELP and # TYPE once per family, directly followed by that family's samples (one group per family), voice_frames_total (counter) then voice_window_frames (gauge), both counting DOWNSTREAM frames only, one name{stage=\"...\"} value sample per stage in pipeline order, no timestamps, newline-terminated; decided by the test's parser (label escapes \\\\, \\\" and \\n only, done by the _escape helper that metrics.py ships)",
+      "traps": [
+        "windows counted from the first event instead of 0; empty windows skipped; the last window never yielded",
+        "an event exactly on a window's end counted in that window",
+        "the counter reset every window",
+        "a # TYPE line per sample; both # TYPE lines first and the samples after them",
+        "UPSTREAM frames counted: a barge-in's cancel reaching tts, llm, stt and vad in the second window must change no count (the output is compared with the same call without it); UPSTREAM skipped in one family only; the direction compared with the string 'DOWNSTREAM'",
+        "samples sorted by name",
+        "no trailing newline",
+        "the whole stream read before the first window (probe of pulled events)",
+        "an UPSTREAM event for an unknown stage skipped instead of raising ValueError",
+        "side check, _escape given: label values not passed through it (a quote, a backslash and a line feed in the stage names)",
+        "side check, _escape given: quotes escaped before backslashes",
+        "side check, _escape given: json.dumps escaping (\\u00e9)",
+        "side check, _escape given: a raw newline in a label value (a stage name with a trailing newline)"
+      ],
+      "clarifying_questions": ["window origin", "sample timestamps", "sample order", "unknown stage", "whether an UPSTREAM event moves the windows"]
+    },
+    {
+      "part": 5,
+      "test": "test_latency_budget",
+      "kind": "recursive structure",
+      "lesson_anchor": "Typical 2026 latencies (VAD, STT partial, LLM first token, TTS first audio, transport RTT); End-to-end 450-600 ms premium, 800-1200 ms common, >1500 ms broken; Latency budget ignored: sum your chain before shipping; quiz Q3 (400 / 990)",
+      "traps": [
+        "a race or join that takes one whole branch instead of each end separately",
+        "a join added up like a chain",
+        "a sub-pipeline used twice taken for a cycle (one seen set instead of the current path); no cycle check (RecursionError)",
+        "a measured range not checked (best above worst, a negative best, an unknown stage with a range); a dict with two forms",
+        "grade boundaries 600, 1200, 1500 inclusive"
+      ],
+      "clarifying_questions": ["the unnamed 1200-1500 ms band", "grading on the best or the worst case"]
+    }
+  ],
+  "deviations": [
+    "Part 1: the suggested first defect (TTS resetting cancelled at every text frame, so a cancel that arrives before the text is swallowed) is not used. In this synchronous pipeline each reply is one text frame, the test raises barge-ins only while a reply is being spoken or after it has ended, never before its text reaches TTS, and cancels keyed by turn number belong to Part 3. The suggested third defect (the context keeps the whole reply) is kept as a behaviour, but the planted root cause is TTS.spoken never being reset per utterance, so the symptom shows up in the LLM's context one processor away. VAD and the timing defect are as suggested; the timing case is 400 words at a test-controlled sleep of at least 2 ms per word with a 0.08 s limit, measured at about 1.2 s slow and 3 ms fixed. Three more guards were added: the reply after a barge-in is spoken in full, the context is compared whole, and a barge-in after the last reply has ended leaves that reply whole.",
+    "Part 2: binary as assigned. The byte layout after MAGIC is the candidate's choice; the test only uses read_recording and simulates crashes by truncating the file, so it does not parse the format itself.",
+    "Part 3: turn numbers come from TurnTaker, not from Part 1's LLM, so the parts stay independent. Concatenation of several segments in a turn uses strip and single spaces; the confidence of a turn is its weakest segment.",
+    "Part 4: Prometheus text as assigned. The suggested per-stage first-frame latency is left out: the lesson does not say where a turn's clock starts, and latency is Part 5's subject. The exposition has a counter and a window gauge instead. Samples follow pipeline order rather than being sorted, and carry no timestamps. FrameEvent carries the frame's direction and both families count DOWNSTREAM frames only, following the lesson's split of data (audio in, speech out) from control (cancellation, metrics, barge-in) and Exercise 1's question of where latency accumulates; UPSTREAM events still move the call clock and are checked against the stage list. Part 4 ships _escape() in the starter: escape order is a main trap of lessons 30 and 32 in this chapter, so here the stage names with a quote, a backslash and a line feed are side checks. Its main traps are the windows on the call clock (from 0, empty windows included, an event on a window's end), the counter against the window gauge, each family's # TYPE line followed by its own samples, and the barge-in cancel that must not be counted.",
+    "Part 5: grading uses the worst case. The lesson names 450-600, 800-1200 and >1500 ms only; the exam calls everything up to 600 premium, up to 1200 common, up to 1500 slow, and the band names are documented as the exam's own. Named sub-pipelines with path-based cycle detection were added to the suggested nesting."
+  ]
+}

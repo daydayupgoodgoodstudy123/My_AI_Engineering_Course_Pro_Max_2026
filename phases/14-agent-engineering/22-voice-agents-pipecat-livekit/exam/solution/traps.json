@@ -1,0 +1,577 @@
+{
+  "package": "voiceframe",
+  "tests": [
+    "test_barge_in",
+    "test_call_recording",
+    "test_turn_taking",
+    "test_metrics_observer",
+    "test_latency_budget"
+  ],
+  "layers": [
+    {
+      "test": "test_barge_in",
+      "steps": [
+        {"name": "as shipped", "edits": [], "expect": "KeyError"},
+        {
+          "name": "VAD treats whitespace as silence",
+          "edits": [{"file": "pipeline.py",
+                     "old": "            if frame.payload:\n",
+                     "new": "            if str(frame.payload).strip():\n"}],
+          "expect": "the first word should play before the rest of the reply is synthesized"
+        },
+        {
+          "name": "+ TTS streams word by word",
+          "edits": [{"file": "pipeline.py",
+                     "old": "            words = str(frame.payload).split()\n            audio = [self.synthesize(word) for word in words]\n            for word, chunk in zip(words, audio):\n                if self.cancelled:\n                    break\n",
+                     "new": "            for word in str(frame.payload).split():\n                if self.cancelled:\n                    break\n                chunk = self.synthesize(word)\n                if self.cancelled:\n                    break\n"}],
+          "expect": "the LLM remembers only what the user heard"
+        },
+        {
+          "name": "+ spoken words reset per utterance",
+          "edits": [{"file": "pipeline.py",
+                     "old": "            self.cancelled = False\n",
+                     "new": "            self.cancelled = False\n            self.spoken = []\n"}],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_barge_in",
+      "name": "cancel checked only before synthesizing a word",
+      "edits": [{"file": "pipeline.py",
+                 "old": "                chunk = self.synthesize(word)\n                if self.cancelled:\n                    break\n",
+                 "new": "                chunk = self.synthesize(word)\n"}],
+      "expect": "a word synthesized after the cancel is never played"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "cancel never cleared, so the next reply stays muted",
+      "edits": [{"file": "pipeline.py",
+                 "old": "            self.cancelled = False\n            self.spoken = []\n",
+                 "new": "            self.spoken = []\n"}],
+      "expect": "barge-in stops the bot mid-utterance"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "spoken words cleared when a cancel reports them, not when an utterance starts",
+      "edits": [
+        {"file": "pipeline.py",
+         "old": "            self.cancelled = False\n            self.spoken = []\n",
+         "new": "            self.cancelled = False\n"},
+        {"file": "pipeline.py",
+         "old": "            super().process(Frame(\"cancel\", list(self.spoken), UPSTREAM, frame.turn))\n",
+         "new": "            heard, self.spoken = self.spoken, []\n            super().process(Frame(\"cancel\", heard, UPSTREAM, frame.turn))\n"}
+      ],
+      "expect": "the LLM remembers only what the user heard"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "a word counted as heard only after the transport returns",
+      "edits": [{"file": "pipeline.py",
+                 "old": "                self.spoken.append(word)\n                super().process(Frame(\"tts_audio\", chunk, turn=frame.turn))\n",
+                 "new": "                super().process(Frame(\"tts_audio\", chunk, turn=frame.turn))\n                self.spoken.append(word)\n"}],
+      "expect": "the LLM remembers only what the user heard"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "spoken words cleared when an utterance ends, not when it starts",
+      "edits": [
+        {"file": "pipeline.py",
+         "old": "            self.cancelled = False\n            self.spoken = []\n",
+         "new": "            self.cancelled = False\n"},
+        {"file": "pipeline.py",
+         "old": "                super().process(Frame(\"tts_audio\", chunk, turn=frame.turn))\n        elif frame.kind == \"cancel\":\n",
+         "new": "                super().process(Frame(\"tts_audio\", chunk, turn=frame.turn))\n            self.spoken = []\n        elif frame.kind == \"cancel\":\n"}
+      ],
+      "expect": "a reply the user heard in full stays whole"
+    },
+    {
+      "test": "test_barge_in",
+      "name": "the heard words added as a new assistant message",
+      "edits": [{"file": "pipeline.py",
+                 "old": "                self.context[-1][\"content\"] = \" \".join(frame.payload)\n",
+                 "new": "                self.context.append({\"role\": \"assistant\", \"content\": \" \".join(frame.payload)})\n"}],
+      "expect": "the LLM remembers only what the user heard"
+    },
+    {
+      "test": "test_call_recording",
+      "name": "timestamps stored as a double",
+      "edits": [
+        {"file": "recording.py", "old": "_HEADER = struct.Struct(\">qBBI\")", "new": "_HEADER = struct.Struct(\">dBBI\")"},
+        {"file": "recording.py", "old": "_HEADER.pack(t_ns,", "new": "_HEADER.pack(float(t_ns),"},
+        {"file": "recording.py", "old": "records.append(Record(t_ns,", "new": "records.append(Record(int(t_ns),"}
+      ],
+      "expect": "a recording must read back exactly"
+    },
+    {
+      "test": "test_call_recording",
+      "name": "payload length in 16 bits",
+      "edits": [{"file": "recording.py", "old": "_HEADER = struct.Struct(\">qBBI\")", "new": "_HEADER = struct.Struct(\">qBBH\")"}],
+      "expect": "struct.error"
+    },
+    {
+      "test": "test_call_recording",
+      "name": "records left in the write buffer",
+      "edits": [{"file": "recording.py",
+                 "old": "        self._file.write(header + kind + record.payload)\n        self._file.flush()\n",
+                 "new": "        self._file.write(header + kind + record.payload)\n"}],
+      "expect": "a recording must read back exactly"
+    },
+    {
+      "test": "test_call_recording",
+      "name": "reopen truncates the recording",
+      "edits": [{"file": "recording.py",
+                 "old": "            self._file = open(self.path, \"ab\")\n",
+                 "new": "            self._file = open(self.path, \"wb\")\n            self._file.write(MAGIC)\n"}],
+      "expect": "a reopened recording keeps every record, in order"
+    },
+    {
+      "test": "test_call_recording",
+      "name": "MAGIC written again on every open",
+      "edits": [{"file": "recording.py",
+                 "old": "            self._file = open(self.path, \"ab\")\n",
+                 "new": "            self._file = open(self.path, \"ab\")\n            self._file.write(MAGIC)\n"}],
+      "expect": "a reopened recording keeps every record, in order"
+    },
+    {
+      "test": "test_call_recording",
+      "name": "a torn tail not cut off before the next append",
+      "edits": [{"file": "recording.py",
+                 "old": "            if end < len(data):\n                os.truncate(self.path, end)\n",
+                 "new": ""}],
+      "expect": "records appended after a crash follow the last whole record"
+    },
+    {
+      "test": "test_call_recording",
+      "name": "a torn payload read back as a short record",
+      "edits": [{"file": "recording.py",
+                 "old": "        if end > len(data):\n            break\n",
+                 "new": ""}],
+      "expect": "part of a record at the end is left out"
+    },
+    {
+      "test": "test_call_recording",
+      "name": "reopen seeks past a torn tail but never cuts it off",
+      "edits": [{"file": "recording.py",
+                 "old": "            if end < len(data):\n                os.truncate(self.path, end)\n            self._file = open(self.path, \"ab\")\n",
+                 "new": "            self._file = open(self.path, \"r+b\")\n            self._file.seek(end)\n"}],
+      "expect": "corrupt record"
+    },
+    {
+      "test": "test_call_recording",
+      "name": "only the upper bound of the timestamp checked",
+      "edits": [{"file": "recording.py", "old": "not 0 <= t_ns < 2**63", "new": "not t_ns < 2**63"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_call_recording",
+      "name": "a torn tail rejected instead of left out",
+      "edits": [{"file": "recording.py",
+                 "old": "        if end > len(data):\n            break\n",
+                 "new": "        if end > len(data):\n            raise ValueError(f\"torn record at byte {pos}\")\n"}],
+      "expect": "torn record"
+    },
+    {
+      "test": "test_call_recording",
+      "name": "the reader assumes every header is whole",
+      "edits": [{"file": "recording.py", "old": "    while pos + _HEADER.size <= len(data):\n", "new": "    while pos < len(data):\n"}],
+      "expect": "struct.error"
+    },
+    {
+      "test": "test_call_recording",
+      "name": "MAGIC not checked by the reader",
+      "edits": [{"file": "recording.py",
+                 "old": "    data = Path(path).read_bytes()\n    if not data.startswith(MAGIC):\n        raise ValueError(f\"{path} is not a call recording\")\n    records, _ = _parse(data)\n",
+                 "new": "    data = Path(path).read_bytes()\n    records, _ = _parse(data)\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_call_recording",
+      "name": "direction stored as an upstream flag, never validated",
+      "edits": [
+        {"file": "recording.py",
+         "old": "        if record.direction not in _DIRECTIONS:\n            raise ValueError(f\"bad direction {record.direction!r}\")\n",
+         "new": ""},
+        {"file": "recording.py", "old": "_DIRECTIONS.index(record.direction)", "new": "int(record.direction == UPSTREAM)"}
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "the mean confidence decides",
+      "edits": [{"file": "turns.py",
+                 "old": "min(self._confidences) >= self.threshold",
+                 "new": "sum(self._confidences) / len(self._confidences) >= self.threshold"}],
+      "expect": "the weakest segment decides"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "confidence must beat the threshold",
+      "edits": [{"file": "turns.py", "old": "min(self._confidences) >= self.threshold", "new": "min(self._confidences) > self.threshold"}],
+      "expect": "a confidence equal to the threshold passes"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "silence counted from the last segment",
+      "edits": [
+        {"file": "turns.py",
+         "old": "        self._user_speaking = False\n        self._stopped_at = t_ms\n",
+         "new": "        self._user_speaking = False\n"},
+        {"file": "turns.py",
+         "old": "        self._confidences.append(confidence)\n",
+         "new": "        self._confidences.append(confidence)\n        self._stopped_at = t_ms\n"}
+      ],
+      "expect": "silence counts from when the user stopped speaking"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "silence ends the turn while the user is speaking",
+      "edits": [{"file": "turns.py", "old": "            and not self._user_speaking\n", "new": ""}],
+      "expect": "the user is speaking again"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "empty segments kept",
+      "edits": [{"file": "turns.py", "old": "        text = text.strip()\n        if not text:\n            return []\n", "new": "        text = text.strip()\n"}],
+      "expect": "empty segments do not count"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "a question mark anywhere ends the turn",
+      "edits": [{"file": "turns.py", "old": "        if text.endswith(\"?\"):\n", "new": "        if \"?\" in text:\n"}],
+      "expect": "only a question at the end ends the turn"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "frames of older turns admitted",
+      "edits": [{"file": "turns.py", "old": "return frame.turn == self.turn and", "new": "return frame.turn <= self.turn and"}],
+      "expect": "frames of an older turn are stale"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "one cancel flag for the whole call",
+      "edits": [{"file": "turns.py", "old": "frame.turn not in self._cancelled", "new": "not self._cancelled"}],
+      "expect": "a cancel only drops its own turn"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "a cancel every time the user starts speaking",
+      "edits": [{"file": "turns.py", "old": "if bot is not None and bot not in self._cancelled:", "new": "if bot is not None:"}],
+      "expect": "one cancel per bot turn"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "silence must last longer than silence_ms",
+      "edits": [{"file": "turns.py", "old": "t_ms - self._stopped_at >= self.silence_ms", "new": "t_ms - self._stopped_at > self.silence_ms"}],
+      "expect": "700 ms of silence ends the turn"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "question mark looked for before the segment is stripped",
+      "edits": [
+        {"file": "turns.py", "old": "        text = text.strip()\n        if not text:\n", "new": "        raw = text\n        text = text.strip()\n        if not text:\n"},
+        {"file": "turns.py", "old": "        if text.endswith(\"?\"):\n", "new": "        if raw.endswith(\"?\"):\n"}
+      ],
+      "expect": "a question ends the turn at once"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "bot_stopped ignored",
+      "edits": [{"file": "turns.py", "old": "        if self._bot_turn == turn:\n            self._bot_turn = None\n", "new": "        pass\n"}],
+      "expect": "no cancel while the bot is quiet"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "a repeat prompt does not take a turn number",
+      "edits": [
+        {"file": "turns.py", "old": "        self.turn += 1\n        text = \" \".join(self._parts)\n", "new": "        text = \" \".join(self._parts)\n"},
+        {"file": "turns.py",
+         "old": "        if confident:\n            return [Frame(\"transcript\", text, turn=self.turn)]\n",
+         "new": "        if confident:\n            self.turn += 1\n            return [Frame(\"transcript\", text, turn=self.turn)]\n"}
+      ],
+      "expect": "the weakest segment decides"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "the product of the confidences decides",
+      "edits": [{"file": "turns.py", "old": "min(self._confidences) >= self.threshold", "new": "__import__(\"math\").prod(self._confidences) >= self.threshold"}],
+      "expect": "a confidence equal to the threshold passes"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "the first segment's confidence decides",
+      "edits": [{"file": "turns.py", "old": "min(self._confidences) >= self.threshold", "new": "self._confidences[0] >= self.threshold"}],
+      "expect": "the weakest segment decides"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "the last segment's confidence decides",
+      "edits": [{"file": "turns.py", "old": "        self._confidences.append(confidence)\n", "new": "        self._confidences = [confidence]\n"}],
+      "expect": "the weakest segment decides"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "admit compares with the turn the bot is speaking",
+      "edits": [{"file": "turns.py", "old": "return frame.turn == self.turn and", "new": "return frame.turn == self._bot_turn and"}],
+      "expect": "the reply to the latest turn may start playing"
+    },
+    {
+      "test": "test_turn_taking",
+      "name": "silence counted from the turn's first stop",
+      "edits": [{"file": "turns.py",
+                 "old": "        self._user_speaking = False\n        self._stopped_at = t_ms\n",
+                 "new": "        self._user_speaking = False\n        if self._stopped_at is None or not self._parts:\n            self._stopped_at = t_ms\n"}],
+      "expect": "silence counts from when the user stopped speaking"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "the last window never yielded",
+      "edits": [{"file": "metrics.py", "old": "    if seen_any:\n        yield _exposition(stages, totals, window)\n", "new": ""}],
+      "expect": "one exposition per 1 s window of the call, empty windows included"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "empty windows skipped",
+      "edits": [{"file": "metrics.py",
+                 "old": "        while event.t_ms >= (current + 1) * window_ms:\n            yield _exposition(stages, totals, window)\n",
+                 "new": "        while event.t_ms >= (current + 1) * window_ms:\n            if any(window.values()):\n                yield _exposition(stages, totals, window)\n"}],
+      "expect": "one exposition per 1 s window of the call, empty windows included"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "the counter reset every window",
+      "edits": [{"file": "metrics.py", "old": "zip(_FAMILIES, (totals, window))", "new": "zip(_FAMILIES, (window, window))"}],
+      "expect": "one exposition per 1 s window of the call, empty windows included"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "an event on a window's end counted in that window",
+      "edits": [{"file": "metrics.py", "old": "while event.t_ms >= (current + 1) * window_ms:", "new": "while event.t_ms > (current + 1) * window_ms:"}],
+      "expect": "one exposition per 1 s window of the call, empty windows included"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "quotes escaped before backslashes",
+      "edits": [{"file": "metrics.py",
+                 "old": "value.replace(\"\\\\\", \"\\\\\\\\\").replace('\"', '\\\\\"')",
+                 "new": "value.replace('\"', '\\\\\"').replace(\"\\\\\", \"\\\\\\\\\")"}],
+      "expect": "bad label syntax"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "label values escaped with json.dumps",
+      "edits": [{"file": "metrics.py", "old": "stage=\"{_escape(stage)}\"", "new": "stage={__import__('json').dumps(stage)}"}],
+      "expect": "label values use the Prometheus escapes only"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "a # TYPE line before every sample",
+      "edits": [{"file": "metrics.py",
+                 "old": "        for stage in stages:\n            lines.append(",
+                 "new": "        for stage in stages:\n            lines.append(f\"# TYPE {name} {kind}\")\n            lines.append("}],
+      "expect": "one # TYPE line per metric family"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "samples sorted by stage name",
+      "edits": [{"file": "metrics.py", "old": "        for stage in stages:\n", "new": "        for stage in sorted(stages):\n"}],
+      "expect": "one sample per stage, in pipeline order"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "no newline after the last line",
+      "edits": [{"file": "metrics.py", "old": "return \"\\n\".join(lines) + \"\\n\"", "new": "return \"\\n\".join(lines)"}],
+      "expect": "every line of an exposition ends with a newline"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "every event read before the first window is yielded",
+      "edits": [{"file": "metrics.py",
+                 "old": "    async for event in events:\n",
+                 "new": "    everything = [event async for event in events]\n    for event in everything:\n"}],
+      "expect": "yield each window as soon as it closes"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "both # TYPE lines first, then the samples of each stage together",
+      "edits": [{"file": "metrics.py",
+                 "old": "    for (name, kind, help_text), values in zip(_FAMILIES, (totals, window)):\n        lines.append(f\"# HELP {name} {help_text}\")\n        lines.append(f\"# TYPE {name} {kind}\")\n        for stage in stages:\n            lines.append(f'{name}{{stage=\"{_escape(stage)}\"}} {values[stage]}')\n",
+                 "new": "    for name, kind, help_text in _FAMILIES:\n        lines.append(f\"# HELP {name} {help_text}\")\n        lines.append(f\"# TYPE {name} {kind}\")\n    for stage in stages:\n        for (name, _, _), values in zip(_FAMILIES, (totals, window)):\n            lines.append(f'{name}{{stage=\"{_escape(stage)}\"}} {values[stage]}')\n"}],
+      "expect": "a family's samples follow its own # TYPE line"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "both # TYPE lines first, then each family's samples",
+      "edits": [{"file": "metrics.py",
+                 "old": "    for (name, kind, help_text), values in zip(_FAMILIES, (totals, window)):\n        lines.append(f\"# HELP {name} {help_text}\")\n        lines.append(f\"# TYPE {name} {kind}\")\n        for stage in stages:\n",
+                 "new": "    for name, kind, help_text in _FAMILIES:\n        lines.append(f\"# HELP {name} {help_text}\")\n        lines.append(f\"# TYPE {name} {kind}\")\n    for (name, kind, help_text), values in zip(_FAMILIES, (totals, window)):\n        for stage in stages:\n"}],
+      "expect": "a family's samples follow its own # TYPE line"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "a newline in a label value left as it is",
+      "edits": [{"file": "metrics.py", "old": ".replace(\"\\n\", \"\\\\n\")", "new": ""}],
+      "expect": "not a sample line"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "an unknown stage skipped",
+      "edits": [{"file": "metrics.py", "old": "            raise ValueError(f\"unknown stage {event.stage!r}\")\n", "new": "            continue\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "a window yielded for a call with no frames",
+      "edits": [{"file": "metrics.py", "old": "    if seen_any:\n        yield _exposition(stages, totals, window)\n", "new": "    yield _exposition(stages, totals, window)\n"}],
+      "expect": "a call with no frames has no windows"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "one event read ahead",
+      "edits": [{"file": "metrics.py",
+                 "old": "    async for event in events:\n",
+                 "new": "    it = events.__aiter__()\n    nxt = await anext(it, None)\n    while nxt is not None:\n        event, nxt = nxt, await anext(it, None)\n"}],
+      "expect": "yield each window as soon as it closes"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "windows counted from the first event",
+      "edits": [{"file": "metrics.py",
+                 "old": "        while event.t_ms >= (current + 1) * window_ms:\n",
+                 "new": "        if not seen_any:\n            current = event.t_ms // window_ms\n        while event.t_ms >= (current + 1) * window_ms:\n"}],
+      "expect": "windows start when the call starts"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "every event counted, whatever its direction",
+      "edits": [{"file": "metrics.py",
+                 "old": "        if event.direction == DOWNSTREAM:\n            totals[event.stage] += 1\n            window[event.stage] += 1\n",
+                 "new": "        totals[event.stage] += 1\n        window[event.stage] += 1\n"}],
+      "expect": "UPSTREAM frames are control, not data, and are not counted"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "UPSTREAM frames left out of the gauge but counted in the counter",
+      "edits": [{"file": "metrics.py",
+                 "old": "        if event.direction == DOWNSTREAM:\n            totals[event.stage] += 1\n            window[event.stage] += 1\n",
+                 "new": "        totals[event.stage] += 1\n        if event.direction == DOWNSTREAM:\n            window[event.stage] += 1\n"}],
+      "expect": "UPSTREAM frames are control, not data, and are not counted"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "UPSTREAM frames left out of the counter but counted in the gauge",
+      "edits": [{"file": "metrics.py",
+                 "old": "        if event.direction == DOWNSTREAM:\n            totals[event.stage] += 1\n            window[event.stage] += 1\n",
+                 "new": "        window[event.stage] += 1\n        if event.direction == DOWNSTREAM:\n            totals[event.stage] += 1\n"}],
+      "expect": "UPSTREAM frames are control, not data, and are not counted"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "the direction compared with the constant's name",
+      "edits": [{"file": "metrics.py", "old": "        if event.direction == DOWNSTREAM:\n", "new": "        if event.direction == \"DOWNSTREAM\":\n"}],
+      "expect": "one exposition per 1 s window of the call, empty windows included"
+    },
+    {
+      "test": "test_metrics_observer",
+      "name": "UPSTREAM events skipped before the stage check",
+      "edits": [{"file": "metrics.py",
+                 "old": "    async for event in events:\n        if event.stage not in totals:\n",
+                 "new": "    async for event in events:\n        if event.direction != DOWNSTREAM:\n            continue\n        if event.stage not in totals:\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_latency_budget",
+      "name": "a parallel block takes one whole branch",
+      "edits": [{"file": "budget.py",
+                 "old": "        return pick(lo for lo, _ in ranges), pick(hi for _, hi in ranges)\n",
+                 "new": "        return pick(ranges)\n"}],
+      "expect": "racing two STTs: whichever finishes first, in the best case and in the worst"
+    },
+    {
+      "test": "test_latency_budget",
+      "name": "waiting for every branch added up like a chain",
+      "edits": [{"file": "budget.py",
+                 "old": "        pick = min if \"first\" in node else max\n        return pick(lo for lo, _ in ranges), pick(hi for _, hi in ranges)\n",
+                 "new": "        if \"all\" in node:\n            return sum(lo for lo, _ in ranges), sum(hi for _, hi in ranges)\n        return min(lo for lo, _ in ranges), min(hi for _, hi in ranges)\n"}],
+      "expect": "waiting for both STTs: the slower one, in the best case and in the worst"
+    },
+    {
+      "test": "test_latency_budget",
+      "name": "every sub-pipeline seen once per call, so a second use looks like a cycle",
+      "edits": [
+        {"file": "budget.py", "old": "    library = library or {}\n", "new": "    library = library or {}\n    seen: set[str] = set()\n"},
+        {"file": "budget.py", "old": "            if name in using:\n", "new": "            if name in seen:\n"},
+        {"file": "budget.py",
+         "old": "            return walk(library[name], using + (name,))\n",
+         "new": "            seen.add(name)\n            return walk(library[name], using)\n"}
+      ],
+      "expect": "uses itself"
+    },
+    {
+      "test": "test_latency_budget",
+      "name": "no cycle check",
+      "edits": [{"file": "budget.py", "old": "            if name in using:\n", "new": "            if False:\n"}],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_latency_budget",
+      "name": "a measured range not checked",
+      "edits": [{"file": "budget.py", "old": "            if not 0 <= lo <= hi:\n", "new": "            if False:\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_latency_budget",
+      "name": "600 ms graded as common",
+      "edits": [{"file": "budget.py", "old": "    if worst_ms <= 600:\n", "new": "    if worst_ms < 600:\n"}],
+      "expect": "premium up to 600 ms, common up to 1200, broken past 1500"
+    },
+    {
+      "test": "test_latency_budget",
+      "name": "a negative best not checked",
+      "edits": [{"file": "budget.py", "old": "            if not 0 <= lo <= hi:\n", "new": "            if lo > hi:\n"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_latency_budget",
+      "name": "the worst case of a race taken from the slowest branch",
+      "edits": [{"file": "budget.py",
+                 "old": "        pick = min if \"first\" in node else max\n        return pick(lo for lo, _ in ranges), pick(hi for _, hi in ranges)\n",
+                 "new": "        if \"first\" in node:\n            return min(lo for lo, _ in ranges), max(hi for _, hi in ranges)\n        return max(lo for lo, _ in ranges), max(hi for _, hi in ranges)\n"}],
+      "expect": "racing two STTs: whichever finishes first, in the best case and in the worst"
+    },
+    {
+      "test": "test_latency_budget",
+      "name": "the best case of a join taken from the fastest branch",
+      "edits": [{"file": "budget.py",
+                 "old": "        pick = min if \"first\" in node else max\n        return pick(lo for lo, _ in ranges), pick(hi for _, hi in ranges)\n",
+                 "new": "        if \"all\" in node:\n            return min(lo for lo, _ in ranges), max(hi for _, hi in ranges)\n        return min(lo for lo, _ in ranges), min(hi for _, hi in ranges)\n"}],
+      "expect": "waiting for both STTs: the slower one, in the best case and in the worst"
+    },
+    {
+      "test": "test_latency_budget",
+      "name": "1500 ms graded as broken",
+      "edits": [{"file": "budget.py", "old": "    if worst_ms <= 1500:\n", "new": "    if worst_ms < 1500:\n"}],
+      "expect": "premium up to 600 ms, common up to 1200, broken past 1500"
+    },
+    {
+      "test": "test_latency_budget",
+      "name": "a dict with two forms read by its first key",
+      "edits": [{"file": "budget.py", "old": "sum(key in node for key in _FORMS) != 1", "new": "not any(key in node for key in _FORMS)"}],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_latency_budget",
+      "name": "an unknown sub-pipeline left to raise KeyError",
+      "edits": [{"file": "budget.py", "old": "            if name not in library:\n                raise ValueError(f\"unknown sub-pipeline {name!r}\")\n", "new": ""}],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_latency_budget",
+      "name": "a measured range accepted for an unknown stage",
+      "edits": [{"file": "budget.py", "old": "            if node[\"stage\"] not in TYPICAL_MS:\n                raise ValueError(f\"unknown stage {node['stage']!r}\")\n", "new": ""}],
+      "expect": "DID NOT RAISE"
+    }
+  ]
+}
