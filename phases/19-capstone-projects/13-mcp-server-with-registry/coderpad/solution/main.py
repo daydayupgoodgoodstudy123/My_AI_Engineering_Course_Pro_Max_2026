@@ -1,0 +1,18 @@
+"""Original interview practice for 19-capstone-projects/13-mcp-server-with-registry.
+
+Local source: phases/19-capstone-projects/13-mcp-server-with-registry/docs/en.md (sha256 in SCOPE.json).
+Exact narrowed coding contract: coderpad/PROMPT.md.
+Python 3.10+, standard library only; no training, network, or API keys.
+"""
+import hashlib
+import copy
+
+def rpc_request(request_id, method, params):
+    if not (type(request_id) is int or (isinstance(request_id, str) and request_id)) or not isinstance(method, str) or (not method) or (not isinstance(params, dict)):
+        raise ValueError('request')
+    return {'jsonrpc': '2.0', 'id': request_id, 'method': method, 'params': copy.deepcopy(params)}
+
+def manifest(files):
+    if any((p.startswith('/') or '..' in p.split('/') for p in files)):
+        raise ValueError('path')
+    return {p: hashlib.sha256(files[p].encode()).hexdigest() for p in sorted(files)}
