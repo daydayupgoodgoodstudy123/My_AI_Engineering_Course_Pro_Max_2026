@@ -1,0 +1,418 @@
+{
+  "package": "voicebot",
+  "tests": [
+    "test_tool_dispatch",
+    "test_session_store",
+    "test_voice_tool_loop",
+    "test_turn_reports",
+    "test_argument_schema"
+  ],
+  "layers": [
+    {
+      "test": "test_tool_dispatch",
+      "steps": [
+        {"name": "as shipped", "edits": [], "expect": "'str' object has no attribute 'items'"},
+        {
+          "name": "fix parse_arguments",
+          "edits": [{"file": "tools.py",
+                     "old": "            raise ToolError(\"arguments must be a JSON object\")\n    return args\n",
+                     "new": "            raise ToolError(\"arguments must be a JSON object\")\n        args = decoded\n    return args\n"}],
+          "expect": "ToolError: unknown tool 'set_alarm'"
+        },
+        {
+          "name": "+ lookup and parse errors become results",
+          "edits": [{"file": "tools.py",
+                     "old": "        tool = self._lookup(call[\"name\"])\n        args = parse_arguments(call.get(\"arguments\"))\n",
+                     "new": "        try:\n            tool = self._lookup(call[\"name\"])\n            args = parse_arguments(call.get(\"arguments\"))\n        except ToolError as exc:\n            return answer(call, error=str(exc))\n"}],
+          "expect": "a wrongly typed argument is rejected by name before the tool runs"
+        },
+        {
+          "name": "+ integer type checked",
+          "edits": [{"file": "tools.py", "old": "\"int\": int", "new": "\"integer\": int"}],
+          "expect": "a slow tool must not block the event loop"
+        },
+        {
+          "name": "+ plain tools in a worker thread",
+          "edits": [
+            {"file": "tools.py", "old": "import inspect\n", "new": "import asyncio\nimport inspect\n"},
+            {"file": "tools.py",
+             "old": "                value = tool.fn(**args)\n",
+             "new": "                value = await asyncio.to_thread(tool.fn, **args)\n"}
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_tool_dispatch",
+      "name": "every tool sent to a worker thread, async ones too",
+      "edits": [{"file": "tools.py",
+                 "old": "            if inspect.iscoroutinefunction(tool.fn):\n                value = await tool.fn(**args)\n            else:\n                value = await asyncio.to_thread(tool.fn, **args)\n",
+                 "new": "            value = await asyncio.to_thread(tool.fn, **args)\n"}],
+      "expect": "Object of type coroutine is not JSON serializable"
+    },
+    {
+      "test": "test_tool_dispatch",
+      "name": "catch-all narrowed to ToolError to see tracebacks",
+      "edits": [{"file": "tools.py",
+                 "old": "        except Exception as exc:\n            return answer(call, error=f\"{type(exc).__name__}: {exc}\")\n",
+                 "new": "        except ToolError as exc:\n            return answer(call, error=f\"{type(exc).__name__}: {exc}\")\n"}],
+      "expect": "ConnectionError: weather service unreachable"
+    },
+    {
+      "test": "test_tool_dispatch",
+      "name": "numeric strings coerced to integers",
+      "edits": [{"file": "tools.py",
+                 "old": "        if not _has_type(value, kind):\n",
+                 "new": "        if kind == \"integer\" and isinstance(value, str) and value.isdigit():\n            args[name] = value = int(value)\n        if not _has_type(value, kind):\n"}],
+      "expect": "a wrongly typed argument is rejected by name before the tool runs"
+    },
+    {
+      "test": "test_tool_dispatch",
+      "name": "weather tool made async around the blocking client",
+      "edits": [{"file": "tools.py", "old": "    def get_weather(city: str) -> dict:\n", "new": "    async def get_weather(city: str) -> dict:\n"}],
+      "expect": "a slow tool must not block the event loop"
+    },
+    {
+      "test": "test_tool_dispatch",
+      "name": "one sleep(0) before calling the plain tool on the loop",
+      "edits": [{"file": "tools.py", "old": "                value = await asyncio.to_thread(tool.fn, **args)\n", "new": "                await asyncio.sleep(0)\n                value = tool.fn(**args)\n"}],
+      "expect": "a slow tool must not block the event loop"
+    },
+    {
+      "test": "test_tool_dispatch",
+      "name": "int() inside set_timer instead of checking the type",
+      "edits": [
+        {"file": "tools.py", "old": "JSON_TYPES = {\"string\": str, \"integer\": int,", "new": "JSON_TYPES = {\"string\": str, \"int\": int,"},
+        {"file": "tools.py", "old": "\"fires_at\": self._clock() + seconds,", "new": "\"fires_at\": self._clock() + int(seconds),"}
+      ],
+      "expect": "a wrongly typed argument is rejected by name before the tool runs"
+    },
+    {
+      "test": "test_session_store",
+      "name": "no commit after writing",
+      "edits": [{"file": "sessions.py",
+                 "old": "        with self._db:\n            if self._expired(session_id, now):",
+                 "new": "        if True:\n            if self._expired(session_id, now):"}],
+      "expect": "a reopened store sees earlier sessions"
+    },
+    {
+      "test": "test_session_store",
+      "name": "CREATE TABLE without IF NOT EXISTS",
+      "edits": [{"file": "sessions.py", "old": "CREATE TABLE IF NOT EXISTS", "new": "CREATE TABLE"}],
+      "expect": "table messages already exists"
+    },
+    {
+      "test": "test_session_store",
+      "name": "JSON-text arguments normalized to dicts",
+      "edits": [{"file": "sessions.py",
+                 "old": "(session_id, now, json.dumps(message)),",
+                 "new": "(session_id, now, json.dumps({**message, \"tool_calls\": [{**c, \"arguments\": json.loads(c[\"arguments\"]) if isinstance(c[\"arguments\"], str) else c[\"arguments\"]} for c in message[\"tool_calls\"]]} if \"tool_calls\" in message else message)),"}],
+      "expect": "a turn round-trips exactly, in order"
+    },
+    {
+      "test": "test_session_store",
+      "name": "None values dropped",
+      "edits": [{"file": "sessions.py",
+                 "old": "(session_id, now, json.dumps(message)),",
+                 "new": "(session_id, now, json.dumps({k: v for k, v in message.items() if v is not None})),"}],
+      "expect": "a turn round-trips exactly, in order"
+    },
+    {
+      "test": "test_session_store",
+      "name": "only the usual chat fields stored",
+      "edits": [{"file": "sessions.py",
+                 "old": "(session_id, now, json.dumps(message)),",
+                 "new": "(session_id, now, json.dumps({k: message[k] for k in (\"role\", \"content\", \"tool_calls\", \"tool_call_id\") if k in message})),"}],
+      "expect": "a turn round-trips exactly, in order"
+    },
+    {
+      "test": "test_session_store",
+      "name": "expiry counted from the first message",
+      "edits": [{"file": "sessions.py", "old": "\"SELECT MAX(at) FROM messages", "new": "\"SELECT MIN(at) FROM messages"}],
+      "expect": "a session in use stays alive"
+    },
+    {
+      "test": "test_session_store",
+      "name": "still alive at exactly ttl_s",
+      "edits": [{"file": "sessions.py", "old": "now - last >= self.ttl_s", "new": "now - last > self.ttl_s"}],
+      "expect": "a session expires ttl_s after its last message"
+    },
+    {
+      "test": "test_session_store",
+      "name": "old conversation kept when an expired session restarts",
+      "edits": [{"file": "sessions.py",
+                 "old": "            if self._expired(session_id, now):\n                self._db.execute(\"DELETE FROM messages WHERE session_id = ?\", (session_id,))\n",
+                 "new": ""}],
+      "expect": "an expired session starts over"
+    },
+    {
+      "test": "test_session_store",
+      "name": "plain DELETE without secure_delete",
+      "edits": [{"file": "sessions.py", "old": "        self._db.execute(\"PRAGMA secure_delete = ON\")\n", "new": ""}],
+      "expect": "deleted transcripts must not stay readable in the database file"
+    },
+    {
+      "test": "test_session_store",
+      "name": "role enforced only by a CHECK constraint",
+      "edits": [
+        {"file": "sessions.py", "old": "    at REAL NOT NULL,\n", "new": "    at REAL NOT NULL,\n    role TEXT NOT NULL CHECK (role IN ('system', 'user', 'assistant', 'tool')),\n"},
+        {"file": "sessions.py", "old": "        if message.get(\"role\") not in ROLES:\n            raise ValueError(f\"role must be one of {ROLES}, got {message.get('role')!r}\")\n", "new": ""},
+        {"file": "sessions.py", "old": "\"INSERT INTO messages (session_id, at, message) VALUES (?, ?, ?)\",\n                (session_id, now, json.dumps(message)),", "new": "\"INSERT INTO messages (session_id, at, role, message) VALUES (?, ?, ?, ?)\",\n                (session_id, now, message.get(\"role\"), json.dumps(message)),"}
+      ],
+      "expect": "IntegrityError"
+    },
+    {
+      "test": "test_session_store",
+      "name": "messages expire one by one",
+      "edits": [{"file": "sessions.py", "old": "            \"SELECT message FROM messages WHERE session_id = ? ORDER BY seq\", (session_id,)\n", "new": "            \"SELECT message FROM messages WHERE session_id = ? AND at > ? ORDER BY seq\", (session_id, now - self.ttl_s)\n"}],
+      "expect": "a session in use stays alive"
+    },
+    {
+      "test": "test_session_store",
+      "name": "purge counts sessions instead of messages",
+      "edits": [
+        {"file": "sessions.py", "old": "        with self._db:\n            cursor = self._db.execute(\n                \"DELETE FROM messages WHERE session_id IN (\"", "new": "        expired = self._db.execute(\"SELECT session_id FROM messages GROUP BY session_id HAVING MAX(at) <= ?\", (now - self.ttl_s,)).fetchall()\n        with self._db:\n            cursor = self._db.execute(\n                \"DELETE FROM messages WHERE session_id IN (\""},
+        {"file": "sessions.py", "old": "        return cursor.rowcount\n", "new": "        return len(expired)\n"}
+      ],
+      "expect": "purge deletes every expired session"
+    },
+    {
+      "test": "test_session_store",
+      "name": "VACUUM only after purge",
+      "edits": [
+        {"file": "sessions.py", "old": "        self._db.execute(\"PRAGMA secure_delete = ON\")\n", "new": ""},
+        {"file": "sessions.py", "old": "        return cursor.rowcount\n", "new": "        self._db.execute(\"VACUUM\")\n        return cursor.rowcount\n"}
+      ],
+      "expect": "deleted transcripts must not stay readable in the database file"
+    },
+    {
+      "test": "test_session_store",
+      "name": "VACUUM only on close",
+      "edits": [
+        {"file": "sessions.py", "old": "        self._db.execute(\"PRAGMA secure_delete = ON\")\n", "new": ""},
+        {"file": "sessions.py", "old": "    def close(self) -> None:\n        self._db.close()\n", "new": "    def close(self) -> None:\n        self._db.execute(\"VACUUM\")\n        self._db.close()\n"}
+      ],
+      "expect": "deleted transcripts must not stay readable in the database file"
+    },
+    {
+      "test": "test_session_store",
+      "name": "secure_delete only on the connection that creates the table",
+      "edits": [{"file": "sessions.py", "old": "        self._db.execute(\"PRAGMA secure_delete = ON\")\n", "new": "        (exists,) = self._db.execute(\"SELECT count(*) FROM sqlite_master WHERE name = 'messages'\").fetchone()\n        if not exists:\n            self._db.execute(\"PRAGMA secure_delete = ON\")\n"}],
+      "expect": "deleted transcripts must not stay readable in the database file"
+    },
+    {
+      "test": "test_voice_tool_loop",
+      "name": "one LLM call too many",
+      "edits": [
+        {"file": "agent.py", "old": "    for step in range(max_steps):\n", "new": "    for step in range(max_steps + 1):\n"},
+        {"file": "agent.py", "old": "        if step == max_steps - 1:\n", "new": "        if step == max_steps:\n"}
+      ],
+      "expect": "stop after max_steps LLM calls"
+    },
+    {
+      "test": "test_voice_tool_loop",
+      "name": "no retry: the first failure ends the turn",
+      "edits": [{"file": "agent.py", "old": "        if max(failures.values(), default=0) >= 2:\n", "new": "        if max(failures.values(), default=0) >= 1:\n"}],
+      "expect": "a failed tool gets one retry"
+    },
+    {
+      "test": "test_voice_tool_loop",
+      "name": "calls in the last allowed reply left unanswered",
+      "edits": [{"file": "agent.py", "old": "            messages.extend(answer(call, error=STEP_LIMIT) for call in calls)\n", "new": ""}],
+      "expect": "every tool call is answered, even the ones that were not run"
+    },
+    {
+      "test": "test_voice_tool_loop",
+      "name": "fallback not recorded in the history",
+      "edits": [{"file": "agent.py", "old": "    messages.append({\"role\": \"assistant\", \"content\": FALLBACK})\n", "new": ""}],
+      "expect": "the fallback is what the assistant said"
+    },
+    {
+      "test": "test_voice_tool_loop",
+      "name": "list marker matched without the space after it",
+      "edits": [{"file": "agent.py", "old": "_LIST_ITEM = re.compile(r\"(?:[-*+]|\\d+[.)])\\s+\")", "new": "_LIST_ITEM = re.compile(r\"(?:[-*+]|\\d+[.)])\\s*\")"}],
+      "expect": "a minus sign or a decimal is not a list marker"
+    },
+    {
+      "test": "test_voice_tool_loop",
+      "name": "links read out with their URL",
+      "edits": [{"file": "agent.py", "old": "        line = _LINK.sub(r\"\\1\", line)\n", "new": ""}],
+      "expect": "speak the final answer as plain sentences"
+    },
+    {
+      "test": "test_voice_tool_loop",
+      "name": "failures counted across all tools",
+      "edits": [{"file": "agent.py", "old": "                failures[call[\"name\"]] += 1\n", "new": "                failures[\"any tool\"] += 1\n"}],
+      "expect": "a failed tool gets one retry"
+    },
+    {
+      "test": "test_voice_tool_loop",
+      "name": "last allowed reply dropped instead of answered",
+      "edits": [{"file": "agent.py", "old": "        reply = await llm(messages, box.specs())\n        messages.append(reply)\n        calls = reply.get(\"tool_calls\") or []\n        if not calls:\n            return speakable(reply.get(\"content\") or \"\")\n        if step == max_steps - 1:\n            messages.extend(answer(call, error=STEP_LIMIT) for call in calls)\n            break\n", "new": "        reply = await llm(messages, box.specs())\n        calls = reply.get(\"tool_calls\") or []\n        if calls and step == max_steps - 1:\n            break\n        messages.append(reply)\n        if not calls:\n            return speakable(reply.get(\"content\") or \"\")\n"}],
+      "expect": "every tool call is answered, even the ones that were not run"
+    },
+    {
+      "test": "test_voice_tool_loop",
+      "name": "step limit checked before the answer",
+      "edits": [{"file": "agent.py", "old": "        if not calls:\n            return speakable(reply.get(\"content\") or \"\")\n        if step == max_steps - 1:\n            messages.extend(answer(call, error=STEP_LIMIT) for call in calls)\n            break\n", "new": "        if step == max_steps - 1:\n            messages.extend(answer(call, error=STEP_LIMIT) for call in calls)\n            break\n        if not calls:\n            return speakable(reply.get(\"content\") or \"\")\n"}],
+      "expect": "a misnamed argument, one retry, then a spoken confirmation"
+    },
+    {
+      "test": "test_voice_tool_loop",
+      "name": "spoken text saved instead of the LLM's reply",
+      "edits": [{"file": "agent.py", "old": "        reply = await llm(messages, box.specs())\n        messages.append(reply)\n        calls = reply.get(\"tool_calls\") or []\n        if not calls:\n            return speakable(reply.get(\"content\") or \"\")\n", "new": "        reply = await llm(messages, box.specs())\n        calls = reply.get(\"tool_calls\") or []\n        if not calls:\n            spoken = speakable(reply.get(\"content\") or \"\")\n            messages.append({\"role\": \"assistant\", \"content\": spoken})\n            return spoken\n        messages.append(reply)\n"}],
+      "expect": "the history keeps the LLM's own reply"
+    },
+    {
+      "test": "test_voice_tool_loop",
+      "name": "tool specs passed as the bound method",
+      "edits": [{"file": "agent.py", "old": "        reply = await llm(messages, box.specs())\n", "new": "        reply = await llm(messages, box.specs)\n"}],
+      "expect": "every LLM request offers the tool specs"
+    },
+    {
+      "test": "test_voice_tool_loop",
+      "name": "list markers stripped with lstrip",
+      "edits": [{"file": "agent.py", "old": "        marker = _HEADING.match(line) or _LIST_ITEM.match(line)\n        if marker:\n            line = line[marker.end():]\n", "new": "        marker = line[:1] in \"#-*+0123456789\"\n        if marker:\n            line = line.lstrip(\"#-*+0123456789.) \")\n"}],
+      "expect": "list items become sentences and markdown is dropped"
+    },
+    {
+      "test": "test_turn_reports",
+      "name": "one newline after each event",
+      "edits": [{"file": "trace.py", "old": "data: {json.dumps(data)}\\n\\n\"", "new": "data: {json.dumps(data)}\\n\""}],
+      "expect": "every server-sent event ends with a blank line"
+    },
+    {
+      "test": "test_turn_reports",
+      "name": "turn reported as soon as its turn.end arrives",
+      "edits": [{"file": "trace.py", "old": "if end + max_delay_ms <= newest", "new": "if end <= newest"}],
+      "expect": "same reports whatever the arrival order"
+    },
+    {
+      "test": "test_turn_reports",
+      "name": "first audio taken in arrival order",
+      "edits": [{"file": "trace.py", "old": "first_audio = min(audio) - ", "new": "first_audio = audio[0] - "}],
+      "expect": "same reports whatever the arrival order"
+    },
+    {
+      "test": "test_turn_reports",
+      "name": "whole trace read before reporting",
+      "edits": [{"file": "trace.py", "old": "    async for event in events:\n", "new": "    for event in [e async for e in events]:\n"}],
+      "expect": "report each turn as soon as it is complete"
+    },
+    {
+      "test": "test_turn_reports",
+      "name": "hallucinations recognised by their text",
+      "edits": [{"file": "trace.py",
+                 "old": "    if \"vad.start\" not in times:\n",
+                 "new": "    if text.strip(\" .!\").lower() in {\"thanks for watching\", \"thank you\", \"you\"}:\n"}],
+      "expect": "real speech is a turn, whatever it says"
+    },
+    {
+      "test": "test_turn_reports",
+      "name": "partial transcripts taken as proof of speech",
+      "edits": [{"file": "trace.py",
+                 "old": "    if \"vad.start\" not in times:\n",
+                 "new": "    if \"vad.start\" not in times and \"stt.partial\" not in times:\n"}],
+      "expect": "a turn the user never spoke is a silence hallucination"
+    },
+    {
+      "test": "test_turn_reports",
+      "name": "talk-over from the turn's last audio, before or after the barge-in",
+      "edits": [{"file": "trace.py", "old": "        after = [ms for ms in audio if ms >= cut]\n        barge_in = max(after) - cut if after else 0\n", "new": "        barge_in = max(audio) - cut if audio else 0\n"}],
+      "expect": "first audio is timed from vad.end, talk-over from the barge-in"
+    },
+    {
+      "test": "test_turn_reports",
+      "name": "first audio timed from stt.final",
+      "edits": [{"file": "trace.py", "old": "    if audio and \"vad.end\" in times:\n        first_audio = min(audio) - max(times[\"vad.end\"])\n", "new": "    if audio and \"stt.final\" in times:\n        first_audio = min(audio) - max(times[\"stt.final\"])\n"}],
+      "expect": "first audio is timed from vad.end, talk-over from the barge-in"
+    },
+    {
+      "test": "test_turn_reports",
+      "name": "completed turns flushed before the new event is added",
+      "edits": [{"file": "trace.py", "old": "    async for event in events:\n        turns.setdefault(event[\"turn\"], []).append(event)\n        if event[\"type\"] == \"turn.end\":\n            ends[event[\"turn\"]] = event[\"ms\"]\n        newest = event[\"ms\"] if newest is None else max(newest, event[\"ms\"])\n        for turn in sorted(t for t, end in ends.items() if end + max_delay_ms <= newest):\n            del ends[turn]\n            yield _report(turn, turns.pop(turn))\n", "new": "    async for event in events:\n        for turn in sorted(t for t, end in ends.items() if newest is not None and end + max_delay_ms <= newest):\n            del ends[turn]\n            yield _report(turn, turns.pop(turn))\n        turns.setdefault(event[\"turn\"], []).append(event)\n        if event[\"type\"] == \"turn.end\":\n            ends[event[\"turn\"]] = event[\"ms\"]\n        newest = event[\"ms\"] if newest is None else max(newest, event[\"ms\"])\n"}],
+      "expect": "report each turn as soon as it is complete"
+    },
+    {
+      "test": "test_turn_reports",
+      "name": "turn closed when a later turn's event arrives after its turn.end",
+      "edits": [{"file": "trace.py", "old": "        for turn in sorted(t for t, end in ends.items() if end + max_delay_ms <= newest):\n", "new": "        for turn in sorted(t for t in ends if event[\"turn\"] > t):\n"}],
+      "expect": "same reports whatever the arrival order"
+    },
+    {
+      "test": "test_argument_schema",
+      "name": "booleans pass as integers",
+      "edits": [{"file": "schema.py",
+                 "old": "        return isinstance(value, int) and not isinstance(value, bool)\n",
+                 "new": "        return isinstance(value, int)\n"}],
+      "expect": "report every problem, at its path"
+    },
+    {
+      "test": "test_argument_schema",
+      "name": "stops at the first problem",
+      "edits": [{"file": "schema.py", "old": "    visit(schema, value, \"\")\n    return problems\n", "new": "    visit(schema, value, \"\")\n    return problems[:1]\n"}],
+      "expect": "report every problem, at its path"
+    },
+    {
+      "test": "test_argument_schema",
+      "name": "missing property reported at its parent",
+      "edits": [{"file": "schema.py",
+                 "old": "                    problems.append((f\"{path}/{_escape(name)}\", \"missing\"))\n",
+                 "new": "                    problems.append((path, \"missing\"))\n"}],
+      "expect": "report every problem, at its path"
+    },
+    {
+      "test": "test_argument_schema",
+      "name": "'/' in a property name not escaped",
+      "edits": [{"file": "schema.py", "old": "    return name.replace(\"~\", \"~0\").replace(\"/\", \"~1\")\n", "new": "    return name\n"}],
+      "expect": "report every problem, at its path"
+    },
+    {
+      "test": "test_argument_schema",
+      "name": "type assumed to be a single name",
+      "edits": [{"file": "schema.py",
+                 "old": "            names = [types] if isinstance(types, str) else list(types)\n",
+                 "new": "            names = [types]\n"}],
+      "expect": "unknown type ['string', 'null']"
+    },
+    {
+      "test": "test_argument_schema",
+      "name": "references inlined before validating",
+      "edits": [{"file": "schema.py",
+                 "old": "    visit(schema, value, \"\")\n",
+                 "new": "    def inline(node):\n        if isinstance(node, dict):\n            if \"$ref\" in node:\n                return inline(_resolve(schema, node[\"$ref\"]))\n            return {k: inline(v) for k, v in node.items()}\n        if isinstance(node, list):\n            return [inline(v) for v in node]\n        return node\n\n    visit(inline(schema), value, \"\")\n"}],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_argument_schema",
+      "name": "object and array keywords applied whatever the value's type",
+      "edits": [
+        {"file": "schema.py", "old": "                problems.append((path, \"type\"))\n                return\n", "new": "                problems.append((path, \"type\"))\n"},
+        {"file": "schema.py", "old": "        if isinstance(value, dict):\n", "new": "        if \"properties\" in node or \"required\" in node:\n"},
+        {"file": "schema.py", "old": "        elif isinstance(value, list) and \"items\" in node:\n", "new": "        elif \"items\" in node:\n"}
+      ],
+      "expect": "'list' object has no attribute 'items'"
+    },
+    {
+      "test": "test_argument_schema",
+      "name": "'~' left unescaped",
+      "edits": [{"file": "schema.py", "old": "    return name.replace(\"~\", \"~0\").replace(\"/\", \"~1\")\n", "new": "    return name.replace(\"/\", \"~1\")\n"}],
+      "expect": "a pointer writes '/' as ~1 and '~' as ~0"
+    },
+    {
+      "test": "test_argument_schema",
+      "name": "recursion stopped by skipping a $ref already seen",
+      "edits": [{"file": "schema.py", "old": "    def visit(node: dict, value: Any, path: str) -> None:\n        while \"$ref\" in node:\n            node = _resolve(schema, node[\"$ref\"])\n", "new": "    seen: set = set()\n\n    def visit(node: dict, value: Any, path: str) -> None:\n        while \"$ref\" in node:\n            if node[\"$ref\"] in seen:\n                return\n            seen.add(node[\"$ref\"])\n            node = _resolve(schema, node[\"$ref\"])\n"}],
+      "expect": "report every problem, at its path"
+    },
+    {
+      "test": "test_argument_schema",
+      "name": "unknown properties flagged without additionalProperties: false",
+      "edits": [{"file": "schema.py", "old": "                elif node.get(\"additionalProperties\") is False:\n", "new": "                else:\n"}],
+      "expect": "without additionalProperties: false, other properties are allowed"
+    }
+  ]
+}

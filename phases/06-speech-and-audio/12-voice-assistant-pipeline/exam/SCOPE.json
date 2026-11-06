@@ -1,0 +1,74 @@
+{
+  "lesson": "phases/06-speech-and-audio/12-voice-assistant-pipeline",
+  "title": "Build a Voice Assistant Pipeline — The Phase 6 Capstone",
+  "format": "staged-brownfield",
+  "service": "VoiceBot: tool dispatch, a SQLite session store, the voice tool loop and per-turn latency reports for a cascaded voice assistant",
+  "sources": {
+    "docs/en.md": "42adee0778ecf907bc8312c65cde0d75a8cc6db9ee3780bcc441cbc768a884ee",
+    "code/main.py": "75b61aed708d3162dc974d45795569ef63377e6b594942bd674f90a5a769837a"
+  },
+  "runtime": "Python 3.10+, standard library, pytest",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_tool_dispatch",
+      "kind": "debug",
+      "lesson_anchor": "Build It, Step 4 dispatch and code/main.py dispatch_tool; Pitfalls: No tool-call error handling, TTS that blocks",
+      "planted_bugs": [
+        "parse_arguments decodes OpenAI-style JSON text but returns the original string; the AttributeError surfaces one call later in check_arguments, after a substring match fooled the required check",
+        "ToolError from _lookup and parse_arguments escapes dispatch, so an unknown tool or broken JSON ends the turn instead of going back to the LLM",
+        "JSON_TYPES is keyed 'int' while the schemas say 'integer', so integer parameters go unchecked; '300' reaches Timers.set_timer and comes back as a TypeError result without the parameter name, two calls from the root cause",
+        "plain-function tools run on the event loop, so a 2 s blocking weather lookup stalls the loop that also runs the microphone, VAD and barge-in detection"
+      ],
+      "timing_assert": "longest event-loop stall during a 2 s blocking tool under 0.2 s (the blocking version stalls 2.0 s; the worker-thread version about 5 ms; on a loaded machine 169 of 170 runs stayed under 20 ms and one reached 39 ms)",
+      "overfix_guard": "async tools are still awaited (sending every tool to a worker thread returns an unawaited coroutine), and a tool that raises still comes back as an error result (narrowing the catch-all lets ConnectionError end the turn)"
+    },
+    {
+      "part": 2,
+      "test": "test_session_store",
+      "kind": "model and persistence",
+      "lesson_anchor": "conversation state for the Step 4 tool loop; Pitfalls: Logging PII forever (retention)",
+      "exactness": "chat messages round-trip exactly across close and reopen: content None beside tool_calls, OpenAI-style JSON-text arguments byte for byte, Anthropic-style dict arguments, extra keys such as is_error, non-ASCII text and emoji",
+      "traps": ["fixed columns or normalized arguments", "None values dropped", "missing commit", "CREATE TABLE without IF NOT EXISTS", "expiry counted from the first message", "expiry boundary at exactly ttl_s", "expired session restarted without deleting the old conversation", "deleted text left in SQLite free space (secure_delete)", "VACUUM only in purge or on close, so the restart path leaves the old conversation readable", "secure_delete set on the first connection only", "role enforced only by a CHECK constraint (IntegrityError)", "messages expiring one by one", "purge counting sessions instead of messages"],
+      "clarifying_questions": ["expiry from the first or the last message", "what happens to an expired conversation", "normalizing provider formats", "WAL mode"]
+    },
+    {
+      "part": 3,
+      "test": "test_voice_tool_loop",
+      "kind": "core algorithm",
+      "lesson_anchor": "Build It, Step 4: tool calling inside the LLM loop (continue_streaming(result)); Pitfalls: the LLM gets the error back, retries once, then degrades; Exercise 3",
+      "traps": ["tool results not sent back to the LLM", "max_steps off by one", "unanswered tool calls at the step limit", "no retry, or no limit on retries", "fallback not recorded", "minus sign or decimal taken for a list marker", "link URLs read aloud", "failures counted across tools instead of per tool", "an answer in the last allowed reply discarded", "the last allowed reply dropped instead of answered", "spoken text saved instead of the reply", "tool specs not offered to the LLM"],
+      "integration": "Parts 1-3 end to end: a misnamed argument, one retry, a spoken confirmation, the exchange saved in the session store and the timer running, with max_steps=3 so the answer comes in the last allowed reply",
+      "clarifying_questions": ["content next to tool calls", "what counts as the same tool failing twice", "tool calls in the last allowed reply"]
+    },
+    {
+      "part": 4,
+      "test": "test_turn_reports",
+      "kind": "streaming",
+      "lesson_anchor": "latency target: first TTS audio within 800 ms of the user finishing; The three failure modes 2 and 3; Step 5 interruption handling; Pitfalls: Overzealous hallucination filters",
+      "wire_format": "server-sent events, an event: line and a data: line per report and a blank line after each, decided by the test's parser",
+      "traps": ["arrival order instead of event time", "reporting at turn.end before late events arrive (watermark)", "reading the whole trace first", "missing blank line", "hallucinations filtered by their text", "partials taken as proof of speech", "first audio timed from stt.final", "talk-over taken from audio before the barge-in (0 when none followed)", "completion checked one event late", "turn closed by the next turn's events instead of the watermark"],
+      "clarifying_questions": ["events later than max_delay_ms", "the latency reference point", "turns without audio"]
+    },
+    {
+      "part": 5,
+      "test": "test_argument_schema",
+      "kind": "recursive structure",
+      "lesson_anchor": "The seven components, 4: JSON schema for tools; Key Terms: Tool call",
+      "traps": ["stopping at the first problem", "bool accepted as an integer", "type given as a list", "checking below a type error", "missing reported at the parent", "JSON pointer escaping", "recursive $ref inlined up front", "'~' left unescaped", "a seen-$ref guard that stops checking repeated steps", "unknown properties flagged without additionalProperties: false"],
+      "clarifying_questions": ["whether 60.0 is an integer", "order of the problems", "extra properties without additionalProperties: false"]
+    }
+  ],
+  "failure_modes": {
+    "first-word clip": "not testable from transcripts and event traces without the audio; a Part 4 follow-up asks for the fix (start threshold 0.3, 200-400 ms pre-roll). Capture and VAD are exercised in lessons 11 and 14",
+    "mid-response interrupt confusion": "Part 4: barge_in_ms measures how long the assistant kept talking after user.barge_in; turn 3 stops at the barge-in (0 ms) and turn 4 is an uncancelled LLM talking over the user for 900 ms",
+    "silence hallucination": "Part 4: a turn with no vad.start is reported as a hallucination, and a real 'Thank you.' must stay a turn, so text filters fail"
+  },
+  "deviations": [
+    "Part 1: dispatch is async because the lesson's pipeline is asyncio, and the timing assertion measures how long a blocking tool stalls the event loop (the lesson's 'TTS that blocks' pitfall) instead of a throughput loop. Besides the suggested guard (tool errors come back as results), a second guard keeps async tools awaited.",
+    "Part 2: session expiry is an idle TTL counted from the last message, and deletion must clear the bytes from the file, for the lesson's 'Logging PII forever' pitfall.",
+    "Part 3: adds the lesson's 'retry once, then gracefully degrade' rule and requires every tool call to be answered, alongside the suggested step limit and speakable text.",
+    "Part 4: events carry a turn id; vad.start, vad.end and turn.end join the suggested event types; out-of-order arrival is bounded by max_delay_ms and handled with a watermark; reports are server-sent events, since 06/03 already uses NDJSON.",
+    "Part 5: the schema is a voice routine whose steps nest through a recursive $ref, with type lists and RFC 6901 pointer escaping."
+  ]
+}
