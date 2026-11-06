@@ -1,0 +1,1884 @@
+{
+  "package": "workflows",
+  "tests": [
+    "test_patterns",
+    "test_audit_record",
+    "test_orchestrator",
+    "test_route_stream",
+    "test_cost_bounds"
+  ],
+  "layers": [
+    {
+      "test": "test_patterns",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "no reply scripted for 'Summarize this ticket for a person to pick up"
+        },
+        {
+          "name": "normalize the label",
+          "edits": [
+            {
+              "file": "patterns.py",
+              "old": "    label = await classifier(input_text)\n",
+              "new": "    label = (await classifier(input_text)).strip().lower()\n"
+            }
+          ],
+          "expect": "KeyError"
+        },
+        {
+          "name": "+ replace only {text}",
+          "edits": [
+            {
+              "file": "patterns.py",
+              "old": "        prompt = template.format(text=current)\n",
+              "new": "        prompt = template.replace(\"{text}\", current)\n"
+            }
+          ],
+          "expect": "with no default handler, an unknown label raises UnknownRoute naming it"
+        },
+        {
+          "name": "+ unknown label without a default raises",
+          "edits": [
+            {
+              "file": "patterns.py",
+              "old": "        return label, f\"no handler for {label}\"\n",
+              "new": "        raise UnknownRoute(f\"no handler for label {label!r}\")\n"
+            }
+          ],
+          "expect": "a draft the evaluator rejected is never the answer"
+        },
+        {
+          "name": "+ no output when no round passed",
+          "edits": [
+            {
+              "file": "patterns.py",
+              "old": "        if ok:\n            break\n    return Refined(candidate, rounds)\n",
+              "new": "        if ok:\n            return Refined(candidate, rounds)\n    return Refined(None, rounds)\n"
+            }
+          ],
+          "expect": "max_iter must be at least 1"
+        },
+        {
+          "name": "+ max_iter must be at least 1",
+          "edits": [
+            {
+              "file": "patterns.py",
+              "old": "    rounds: list[Round] = []\n",
+              "new": "    if max_iter < 1:\n        raise ValueError('max_iter must be at least 1')\n    rounds: list[Round] = []\n"
+            }
+          ],
+          "expect": "a majority does not wait for the calls still running"
+        },
+        {
+          "name": "+ end the vote at a majority, cancel and wait for the rest",
+          "edits": [
+            {
+              "file": "patterns.py",
+              "old": "    votes = await asyncio.gather(*(llm(prompt) for _ in range(n)))\n    counts = Counter(votes)\n    winner, _ = counts.most_common(1)[0]\n    return winner, counts\n",
+              "new": "    calls = [asyncio.ensure_future(llm(prompt)) for _ in range(n)]\n    try:\n        counts = Counter()\n        for reply in asyncio.as_completed(calls):\n            answer = await reply\n            counts[answer] += 1\n            if counts[answer] * 2 > n:\n                return answer, counts\n    finally:\n        for call in calls:\n            call.cancel()\n        await asyncio.gather(*calls, return_exceptions=True)\n    counts = Counter(call.result() for call in calls)\n    winner, _ = counts.most_common(1)[0]\n    return winner, counts\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_patterns",
+      "name": "votes counted in the order the replies come back (as_completed)",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    votes = [call.result() for call in calls]\n    counts = Counter(votes)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a tie goes to the answer asked for first, not the first one back"
+    },
+    {
+      "test": "test_patterns",
+      "name": "tie broken alphabetically",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    winner, _ = counts.most_common(1)[0]\n",
+          "new": "    winner = min(counts, key=lambda answer: (-counts[answer], answer))\n"
+        }
+      ],
+      "expect": "a tie goes to the answer asked for first, not the first one back"
+    },
+    {
+      "test": "test_patterns",
+      "name": "tie broken by the last vote asked for",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    winner, _ = counts.most_common(1)[0]\n",
+          "new": "    winner = max(reversed(votes), key=counts.__getitem__)\n"
+        }
+      ],
+      "expect": "a tie goes to the answer asked for first, not the first one back"
+    },
+    {
+      "test": "test_patterns",
+      "name": "votes capped at 10 in flight",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    calls = [asyncio.ensure_future(llm(prompt)) for _ in range(n)]\n",
+          "new": "    gate = asyncio.Semaphore(10)\n\n    async def one() -> str:\n        async with gate:\n            return await llm(prompt)\n\n    calls = [asyncio.ensure_future(one()) for _ in range(n)]\n"
+        }
+      ],
+      "expect": "the votes run concurrently"
+    },
+    {
+      "test": "test_patterns",
+      "name": "each vote's task awaited before the next is created",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    calls = [asyncio.ensure_future(llm(prompt)) for _ in range(n)]\n",
+          "new": "    calls = []\n    for _ in range(n):\n        calls.append(asyncio.ensure_future(llm(prompt)))\n        await asyncio.wait(calls[-1:])\n"
+        }
+      ],
+      "expect": "the votes run concurrently"
+    },
+    {
+      "test": "test_patterns",
+      "name": "label stripped but not lowercased",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    label = (await classifier(input_text)).strip().lower()\n",
+          "new": "    label = (await classifier(input_text)).strip()\n"
+        }
+      ],
+      "expect": "no reply scripted for 'Summarize this ticket for a person to pick up"
+    },
+    {
+      "test": "test_patterns",
+      "name": "label stripped of spaces and line feeds only",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    label = (await classifier(input_text)).strip().lower()\n",
+          "new": "    label = (await classifier(input_text)).strip(\" \\n\").lower()\n"
+        }
+      ],
+      "expect": "no reply scripted for 'Summarize this ticket for a person to pick up: The export"
+    },
+    {
+      "test": "test_patterns",
+      "name": "first word of the label",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    label = (await classifier(input_text)).strip().lower()\n",
+          "new": "    label = (await classifier(input_text)).split()[0].lower()\n"
+        }
+      ],
+      "expect": "no reply scripted for 'Pull the order out of this ticket"
+    },
+    {
+      "test": "test_patterns",
+      "name": "label lowercased but not stripped",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    label = (await classifier(input_text)).strip().lower()\n",
+          "new": "    label = (await classifier(input_text)).lower()\n"
+        }
+      ],
+      "expect": "no reply scripted for 'Summarize this ticket for a person to pick up"
+    },
+    {
+      "test": "test_patterns",
+      "name": "a handler key anywhere in the label picks it",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    handler = handlers.get(label) or handlers.get(\"default\")\n",
+          "new": "    handler = next((h for key, h in handlers.items() if key in label), None) or handlers.get(\"default\")\n"
+        }
+      ],
+      "expect": "no reply scripted for 'Pull the order out of this ticket"
+    },
+    {
+      "test": "test_patterns",
+      "name": "a label that starts with a handler key picks it",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    handler = handlers.get(label) or handlers.get(\"default\")\n",
+          "new": "    handler = next((h for key, h in handlers.items() if label.startswith(key)), None) or handlers.get(\"default\")\n"
+        }
+      ],
+      "expect": "no reply scripted for 'Pull the order out of this ticket"
+    },
+    {
+      "test": "test_patterns",
+      "name": "unknown labels raise even with a default handler",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    handler = handlers.get(label) or handlers.get(\"default\")\n",
+          "new": "    handler = handlers.get(label)\n"
+        }
+      ],
+      "expect": "UnknownRoute"
+    },
+    {
+      "test": "test_patterns",
+      "name": "raw classifier label returned",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    label = (await classifier(input_text)).strip().lower()\n",
+          "new": "    raw = await classifier(input_text)\n    label = raw.strip().lower()\n"
+        },
+        {
+          "file": "patterns.py",
+          "old": "    return label, await handler(input_text)\n",
+          "new": "    return raw, await handler(input_text)\n"
+        }
+      ],
+      "expect": "the classifier's label picks the route"
+    },
+    {
+      "test": "test_patterns",
+      "name": "UnknownRoute without the label",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "        raise UnknownRoute(f\"no handler for label {label!r}\")\n",
+          "new": "        raise UnknownRoute(\"no handler for this label\")\n"
+        }
+      ],
+      "expect": "with no default handler, an unknown label raises UnknownRoute naming it"
+    },
+    {
+      "test": "test_patterns",
+      "name": "placeholder filled with re.sub",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "        prompt = template.replace(\"{text}\", current)\n",
+          "new": "        prompt = __import__(\"re\").sub(r\"\\{text\\}\", current, template)\n"
+        }
+      ],
+      "expect": "bad escape"
+    },
+    {
+      "test": "test_patterns",
+      "name": "only the first {text} replaced",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "        prompt = template.replace(\"{text}\", current)\n",
+          "new": "        prompt = template.replace(\"{text}\", current, 1)\n"
+        }
+      ],
+      "expect": "no reply scripted for 'Write a one-line issue title"
+    },
+    {
+      "test": "test_patterns",
+      "name": "format_map with a forgiving dict",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "        prompt = template.replace(\"{text}\", current)\n",
+          "new": "        prompt = template.format_map(__import__(\"collections\").defaultdict(str, text=current))\n"
+        }
+      ],
+      "expect": "Invalid format specifier"
+    },
+    {
+      "test": "test_patterns",
+      "name": "str.format first, replace only when it fails",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "        prompt = template.replace(\"{text}\", current)\n",
+          "new": "        try:\n            prompt = template.format(text=current)\n        except (KeyError, IndexError, ValueError):\n            prompt = template.replace(\"{text}\", current)\n"
+        }
+      ],
+      "expect": "no reply scripted for 'Write a short reply"
+    },
+    {
+      "test": "test_patterns",
+      "name": "every step gets the original input",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "        current = output\n",
+          "new": ""
+        }
+      ],
+      "expect": "no reply scripted for 'Write a short reply"
+    },
+    {
+      "test": "test_patterns",
+      "name": "a run with no passing round returns the last candidate",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    return Refined(None, rounds)\n",
+          "new": "    return Refined(rounds[-1].candidate, rounds)\n"
+        }
+      ],
+      "expect": "a draft the evaluator rejected is never the answer"
+    },
+    {
+      "test": "test_patterns",
+      "name": "a run with no passing round raises",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    return Refined(None, rounds)\n",
+          "new": "    raise RuntimeError(\"no candidate passed the evaluator\")\n"
+        }
+      ],
+      "expect": "RuntimeError"
+    },
+    {
+      "test": "test_patterns",
+      "name": "max_iter below 1 runs one round",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    if max_iter < 1:\n        raise ValueError(f\"max_iter must be at least 1, got {max_iter}\")\n",
+          "new": "    max_iter = max(max_iter, 1)\n"
+        }
+      ],
+      "expect": "max_iter must be at least 1"
+    },
+    {
+      "test": "test_patterns",
+      "name": "max_iter below 1 runs no round",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    if max_iter < 1:\n        raise ValueError(f\"max_iter must be at least 1, got {max_iter}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "max_iter must be at least 1"
+    },
+    {
+      "test": "test_patterns",
+      "name": "max_iter checked for zero only",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    if max_iter < 1:\n        raise ValueError(f\"max_iter must be at least 1, got {max_iter}\")\n",
+          "new": "    if not max_iter:\n        raise ValueError(f\"max_iter must be at least 1, got {max_iter}\")\n"
+        }
+      ],
+      "expect": "max_iter must be at least 1"
+    },
+    {
+      "test": "test_patterns",
+      "name": "feedback never reaches the proposer",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "        candidate = await proposer(task, feedback)\n",
+          "new": "        candidate = await proposer(task, None)\n"
+        }
+      ],
+      "expect": "the evaluator's feedback goes back to the proposer until a candidate passes"
+    },
+    {
+      "test": "test_patterns",
+      "name": "votes capped at 50 in flight",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "    calls = [asyncio.ensure_future(llm(prompt)) for _ in range(n)]\n",
+          "new": "    gate = asyncio.Semaphore(50)\n\n    async def one() -> str:\n        async with gate:\n            return await llm(prompt)\n\n    calls = [asyncio.ensure_future(one()) for _ in range(n)]\n"
+        }
+      ],
+      "expect": "all the votes are in flight at once"
+    },
+    {
+      "test": "test_patterns",
+      "name": "a majority returned with the calls still running left alone",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "        for call in calls:\n            call.cancel()\n        await asyncio.gather(*calls, return_exceptions=True)\n",
+          "new": "        pass\n"
+        }
+      ],
+      "expect": "the calls still running when the vote is decided are cancelled"
+    },
+    {
+      "test": "test_patterns",
+      "name": "the calls still running cancelled but not waited for",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "        await asyncio.gather(*calls, return_exceptions=True)\n",
+          "new": ""
+        }
+      ],
+      "expect": "no call outlives the vote"
+    },
+    {
+      "test": "test_patterns",
+      "name": "the cancelled calls given one turn of the event loop",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "        await asyncio.gather(*calls, return_exceptions=True)\n",
+          "new": "        await asyncio.sleep(0)\n"
+        }
+      ],
+      "expect": "no call outlives the vote"
+    },
+    {
+      "test": "test_patterns",
+      "name": "the cancelled calls gathered without return_exceptions",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "await asyncio.gather(*calls, return_exceptions=True)",
+          "new": "await asyncio.gather(*calls)"
+        }
+      ],
+      "expect": "CancelledError"
+    },
+    {
+      "test": "test_patterns",
+      "name": "the calls still running waited for instead of cancelled",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "        for call in calls:\n            call.cancel()\n",
+          "new": ""
+        }
+      ],
+      "expect": "a majority does not wait for the calls still running"
+    },
+    {
+      "test": "test_patterns",
+      "name": "half the votes taken for a majority",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "counts[answer] * 2 > n",
+          "new": "counts[answer] * 2 >= n"
+        }
+      ],
+      "expect": "half the votes is not a majority"
+    },
+    {
+      "test": "test_patterns",
+      "name": "a majority taken as n // 2 votes",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "counts[answer] * 2 > n",
+          "new": "counts[answer] >= n // 2"
+        }
+      ],
+      "expect": "an answer wins once it has more than half the votes"
+    },
+    {
+      "test": "test_patterns",
+      "name": "a majority judged against the replies back so far instead of n",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "counts[answer] * 2 > n",
+          "new": "counts[answer] * 2 > sum(counts.values())"
+        }
+      ],
+      "expect": "with no majority, every vote is counted and the most common answer wins"
+    },
+    {
+      "test": "test_patterns",
+      "name": "a majority's counts cut down to the winner's votes",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "                return answer, counts\n",
+          "new": "                return answer, Counter({answer: counts[answer]})\n"
+        }
+      ],
+      "expect": "with the votes back by then"
+    },
+    {
+      "test": "test_patterns",
+      "name": "replies still out after a deadline dropped",
+      "edits": [
+        {
+          "file": "patterns.py",
+          "old": "        counts: Counter = Counter()\n        for reply in asyncio.as_completed(calls):\n            answer = await reply\n            counts[answer] += 1\n            if counts[answer] * 2 > n:\n                return answer, counts\n",
+          "new": "        await asyncio.wait(calls, timeout=0.05)\n"
+        },
+        {
+          "file": "patterns.py",
+          "old": "    votes = [call.result() for call in calls]\n",
+          "new": "    votes = [call.result() for call in calls if not call.cancelled()]\n"
+        }
+      ],
+      "expect": "half the votes is not a majority"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "nothing encoded",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    if NEEDS_ENCODING.search(value):\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "ParseError"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "carriage returns left as they are",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    if NEEDS_ENCODING.search(value):\n",
+          "new": "    if NEEDS_ENCODING.search(value.replace(\"\\r\", \"\")):\n"
+        }
+      ],
+      "expect": "every character of every step reads back, in order"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "carriage return written as a character reference by hand",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    if NEEDS_ENCODING.search(value):\n",
+          "new": "    if NEEDS_ENCODING.search(value.replace(\"\\r\", \"\")):\n"
+        },
+        {
+          "file": "audit.py",
+          "old": "        node.text = value\n",
+          "new": "        node.text = value.replace(\"\\r\", \"&#13;\")\n"
+        }
+      ],
+      "expect": "every character of every step reads back, in order"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "control characters listed by hand, form feed missed",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "NEEDS_ENCODING = re.compile(\"[^\\t\\n\\x20-\\ud7ff\\ue000-\\ufffd\\U00010000-\\U0010ffff]\")\n",
+          "new": "NEEDS_ENCODING = re.compile(\"[\\x00-\\x08\\x0b\\x0e-\\x1f\\r]\")\n"
+        }
+      ],
+      "expect": "ParseError"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "control characters escaped in place, without a marker",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        node.set(\"encoding\", \"base64\")\n        node.text = base64.b64encode(value.encode(\"utf-8\")).decode(\"ascii\")\n",
+          "new": "        node.text = value.encode(\"unicode_escape\").decode(\"ascii\")\n"
+        },
+        {
+          "file": "audit.py",
+          "old": "    if node.get(\"encoding\") == \"base64\":\n        return base64.b64decode(text).decode(\"utf-8\")\n    return text\n",
+          "new": "    return text.encode(\"latin-1\", \"backslashreplace\").decode(\"unicode_escape\")\n"
+        }
+      ],
+      "expect": "every character of every step reads back, in order"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "text stripped on read",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    text = node.text or \"\"\n",
+          "new": "    text = (node.text or \"\").strip()\n"
+        }
+      ],
+      "expect": "every character of every step reads back, in order"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "encoding marker ignored on read",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    if node.get(\"encoding\") == \"base64\":\n",
+          "new": "    if False:\n"
+        }
+      ],
+      "expect": "every character of every step reads back, in order"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "steps kept by name",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "            for node in root.findall(\"step\")\n",
+          "new": "            for node in {node.get(\"name\"): node for node in root.findall(\"step\")}.values()\n"
+        }
+      ],
+      "expect": "every character of every step reads back, in order"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "steps sorted by name",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "            for node in root.findall(\"step\")\n",
+          "new": "            for node in sorted(root.findall(\"step\"), key=lambda n: n.get(\"name\"))\n"
+        }
+      ],
+      "expect": "every character of every step reads back, in order"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "an empty element read as None",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    text = node.text or \"\"\n",
+          "new": "    text = node.text\n"
+        }
+      ],
+      "expect": "an empty string reads back as an empty string, not None"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "empty values not written",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    if value is None:\n        return\n",
+          "new": "    if not value:\n        return\n"
+        }
+      ],
+      "expect": "an empty string reads back as an empty string, not None"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "None written as an empty element",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    if value is None:\n        return\n",
+          "new": "    if value is None:\n        value = \"\"\n"
+        }
+      ],
+      "expect": "a run with no branch and no output reads back with None"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "every value base64-encoded",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    if NEEDS_ENCODING.search(value):\n",
+          "new": "    if True:\n"
+        }
+      ],
+      "expect": "text XML can hold is stored as it is, for auditors to read"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "every value stored as a JSON string",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        node.text = value\n",
+          "new": "        node.text = __import__(\"json\").dumps(value)\n"
+        },
+        {
+          "file": "audit.py",
+          "old": "    return text\n",
+          "new": "    return __import__(\"json\").loads(text)\n"
+        }
+      ],
+      "expect": "text XML can hold is stored as it is, for auditors to read"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "step names used as element tags",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "            node = ET.SubElement(root, \"step\", {\"name\": step.name})\n",
+          "new": "            node = ET.SubElement(root, step.name)\n"
+        }
+      ],
+      "expect": "ParseError"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "every run in one shared file",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        path = self._path(run.run_id)\n        root = ",
+          "new": "        self._path(run.run_id)\n        path = self.directory / \"runs.xml\"\n        root = "
+        }
+      ],
+      "expect": "one document per run, named after its run id"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "missing document lets FileNotFoundError out",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        try:\n            root = ET.parse(path).getroot()\n        except FileNotFoundError:\n            raise KeyError(run_id) from None\n",
+          "new": "        root = ET.parse(path).getroot()\n"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "run ids not checked",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        if not RUN_ID.fullmatch(run_id):\n",
+          "new": "        if False:\n"
+        }
+      ],
+      "expect": "not a run id"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "run id checked with re.match",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        if not RUN_ID.fullmatch(run_id):\n",
+          "new": "        if not RUN_ID.match(run_id):\n"
+        }
+      ],
+      "expect": "not a run id: 'run 7'"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "run id checked for path separators only",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        if not RUN_ID.fullmatch(run_id):\n",
+          "new": "        if \"/\" in run_id or \"..\" in run_id:\n"
+        }
+      ],
+      "expect": "not a run id: 'run 7'"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "the run's output looked up with iter(), which finds a step's output first",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "            output=_get(root.find(\"output\")),\n",
+          "new": "            output=_get(next(root.iter(\"output\"), None)),\n"
+        }
+      ],
+      "expect": "every character of every step reads back, in order"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "only CRLF treated as a carriage return problem, a lone CR left as it is",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    if NEEDS_ENCODING.search(value):\n",
+          "new": "    if NEEDS_ENCODING.search(value.replace(\"\\r\", \"\")) or \"\\r\\n\" in value:\n"
+        }
+      ],
+      "expect": "every character of every step reads back, in order"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "characters XML cannot hold written as numeric character references",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "    if NEEDS_ENCODING.search(value):\n",
+          "new": "    if False:\n"
+        },
+        {
+          "file": "audit.py",
+          "old": "        ET.ElementTree(root).write(path, encoding=\"utf-8\", xml_declaration=True)\n",
+          "new": "        data = ET.tostring(root, encoding=\"unicode\")\n        data = NEEDS_ENCODING.sub(lambda m: f\"&#{ord(m.group())};\", data)\n        path.write_text(\"<?xml version='1.0' encoding='utf-8'?>\\n\" + data, encoding=\"utf-8\")\n"
+        }
+      ],
+      "expect": "ParseError"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "a marked \\xNN escape that leaves backslashes as they are",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        node.set(\"encoding\", \"base64\")\n        node.text = base64.b64encode(value.encode(\"utf-8\")).decode(\"ascii\")\n",
+          "new": "        node.set(\"escaped\", \"1\")\n        node.text = NEEDS_ENCODING.sub(lambda m: f\"\\\\x{ord(m.group()):02x}\", value)\n"
+        },
+        {
+          "file": "audit.py",
+          "old": "    if node.get(\"encoding\") == \"base64\":\n        return base64.b64decode(text).decode(\"utf-8\")\n",
+          "new": "    if node.get(\"escaped\") == \"1\":\n        return re.sub(r\"\\\\x([0-9a-f]{2})\", lambda m: chr(int(m.group(1), 16)), text)\n"
+        }
+      ],
+      "expect": "every character of every step reads back, in order"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "run id checked with re.match and ^...$, which lets a trailing line feed through",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        if not RUN_ID.fullmatch(run_id):\n",
+          "new": "        if not re.match(r\"^[A-Za-z0-9_-]+$\", run_id):\n"
+        }
+      ],
+      "expect": "not a run id: 'run-0007\\n'"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "run id checked with \\w, which takes any Unicode letter",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        if not RUN_ID.fullmatch(run_id):\n",
+          "new": "        if not re.fullmatch(r\"[\\w-]+\", run_id):\n"
+        }
+      ],
+      "expect": "not a run id: 'rün-7'"
+    },
+    {
+      "test": "test_audit_record",
+      "name": "run id checked with isalnum() once - and _ are taken out",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "        if not RUN_ID.fullmatch(run_id):\n",
+          "new": "        if not run_id.replace(\"-\", \"\").replace(\"_\", \"\").isalnum():\n"
+        }
+      ],
+      "expect": "not a run id: 'rün-7'"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "results in the order the workers finish",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        outputs = await asyncio.gather(*(workers[s.worker](s.task) for s in batch))\n        for subtask, output in zip(batch, outputs):\n            ran.add(subtask)\n            results.append(Result(subtask, output, number))\n",
+          "new": "        async def one(subtask):\n            return subtask, await workers[subtask.worker](subtask.task)\n\n        for finished in asyncio.as_completed([one(s) for s in batch]):\n            subtask, output = await finished\n            ran.add(subtask)\n            results.append(Result(subtask, output, number))\n"
+        }
+      ],
+      "expect": "results keep the order the orchestrator asked for them in"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "a round's workers run one after another",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        outputs = await asyncio.gather(*(workers[s.worker](s.task) for s in batch))\n",
+          "new": "        outputs = [await workers[s.worker](s.task) for s in batch]\n"
+        }
+      ],
+      "expect": "a round's subtasks run at the same time"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "limit applied before repeats are removed",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        new = [subtask for subtask in dict.fromkeys(subtasks) if subtask not in ran]\n        batch = new[:max_subtasks]\n        dropped.extend(new[max_subtasks:])\n",
+          "new": "        batch = [subtask for subtask in dict.fromkeys(subtasks[:max_subtasks]) if subtask not in ran]\n        dropped.extend(subtasks[max_subtasks:])\n"
+        }
+      ],
+      "expect": "results keep the order the orchestrator asked for them in"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "limit applied before earlier subtasks are skipped",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        new = [subtask for subtask in dict.fromkeys(subtasks) if subtask not in ran]\n        batch = new[:max_subtasks]\n        dropped.extend(new[max_subtasks:])\n",
+          "new": "        unique = list(dict.fromkeys(subtasks))\n        batch = [subtask for subtask in unique[:max_subtasks] if subtask not in ran]\n        dropped.extend(subtask for subtask in unique[max_subtasks:] if subtask not in ran)\n"
+        }
+      ],
+      "expect": "results keep the order the orchestrator asked for them in"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "repeats within a plan run again",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        new = [subtask for subtask in dict.fromkeys(subtasks) if subtask not in ran]\n",
+          "new": "        new = [subtask for subtask in subtasks if subtask not in ran]\n"
+        }
+      ],
+      "expect": "results keep the order the orchestrator asked for them in"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "earlier rounds' subtasks run again",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        new = [subtask for subtask in dict.fromkeys(subtasks) if subtask not in ran]\n",
+          "new": "        new = list(dict.fromkeys(subtasks))\n"
+        }
+      ],
+      "expect": "results keep the order the orchestrator asked for them in"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "repeats judged by task text only",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        new = [subtask for subtask in dict.fromkeys(subtasks) if subtask not in ran]\n",
+          "new": "        texts = {s.task for s in ran}\n        new = []\n        for subtask in subtasks:\n            if subtask.task not in texts:\n                texts.add(subtask.task)\n                new.append(subtask)\n"
+        }
+      ],
+      "expect": "results keep the order the orchestrator asked for them in"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "repeats judged by worker only",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        new = [subtask for subtask in dict.fromkeys(subtasks) if subtask not in ran]\n",
+          "new": "        names = {s.worker for s in ran}\n        new = []\n        for subtask in subtasks:\n            if subtask.worker not in names:\n                names.add(subtask.worker)\n                new.append(subtask)\n"
+        }
+      ],
+      "expect": "results keep the order the orchestrator asked for them in"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "dropped subtasks never asked for again",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        dropped.extend(new[max_subtasks:])\n",
+          "new": "        dropped.extend(new[max_subtasks:])\n        ran.update(new[max_subtasks:])\n"
+        }
+      ],
+      "expect": "results keep the order the orchestrator asked for them in"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "a plan that says done stops before its subtasks run",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        subtasks, done = _parse_plan(await planner(task, list(results)), workers)\n",
+          "new": "        subtasks, done = _parse_plan(await planner(task, list(results)), workers)\n        if done:\n            stopped = \"done\"\n            break\n"
+        }
+      ],
+      "expect": "results keep the order the orchestrator asked for them in"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "a round with nothing new ends the run",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        new = [subtask for subtask in dict.fromkeys(subtasks) if subtask not in ran]\n",
+          "new": "        new = [subtask for subtask in dict.fromkeys(subtasks) if subtask not in ran]\n        if not new:\n            break\n"
+        }
+      ],
+      "expect": "a round with nothing new to run does not end the run"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "a plan without done read as not done",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "    items, done = plan.get(\"subtasks\"), plan.get(\"done\")\n",
+          "new": "    items, done = plan.get(\"subtasks\"), plan.get(\"done\", False)\n"
+        }
+      ],
+      "expect": "a reply that is not a plan raises PlanError: {\"subtasks\": []}"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "dropped subtasks not recorded",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        dropped.extend(new[max_subtasks:])\n",
+          "new": ""
+        }
+      ],
+      "expect": "subtasks past the round's limit are dropped and recorded"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "done on the last round reported as max_rounds",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "            stopped = \"done\"\n",
+          "new": "            stopped = \"max_rounds\" if number == max_rounds else \"done\"\n"
+        }
+      ],
+      "expect": "a plan that says done is the last one"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "the orchestrator never sees earlier results",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "await planner(task, list(results))",
+          "new": "await planner(task, [])"
+        }
+      ],
+      "expect": "each round the orchestrator sees the results so far"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "synthesized after every round",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        if done:\n            stopped = \"done\"\n",
+          "new": "        await synthesize(task, list(results))\n        if done:\n            stopped = \"done\"\n"
+        }
+      ],
+      "expect": "every result is synthesized once, in order"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "no synthesis when no worker ran",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "    output = await synthesize(task, list(results))\n",
+          "new": "    output = await synthesize(task, list(results)) if results else \"\"\n"
+        }
+      ],
+      "expect": "an orchestrator can decide no worker is needed"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "one round more than max_rounds",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "    for number in range(1, max_rounds + 1):\n",
+          "new": "    for number in range(1, max_rounds + 2):\n"
+        }
+      ],
+      "expect": "the orchestrator was asked for a plan after the run should have stopped"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "unknown workers skipped",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        if item[\"worker\"] not in workers:\n            raise PlanError(f\"no worker named {item['worker']!r}\")\n",
+          "new": "        if item[\"worker\"] not in workers:\n            continue\n"
+        }
+      ],
+      "expect": "a subtask for an unknown worker is a PlanError naming it"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "only the subtasks about to start are checked",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        if item[\"worker\"] not in workers:\n            raise PlanError(f\"no worker named {item['worker']!r}\")\n",
+          "new": ""
+        },
+        {
+          "file": "orchestrator.py",
+          "old": "        outputs = await asyncio.gather(*(workers[s.worker](s.task) for s in batch))\n",
+          "new": "        for s in batch:\n            if s.worker not in workers:\n                raise PlanError(f\"no worker named {s.worker!r}\")\n        outputs = await asyncio.gather(*(workers[s.worker](s.task) for s in batch))\n"
+        }
+      ],
+      "expect": "the whole plan is checked, including subtasks past the round's limit"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "each subtask checked as it starts",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        if item[\"worker\"] not in workers:\n            raise PlanError(f\"no worker named {item['worker']!r}\")\n",
+          "new": ""
+        },
+        {
+          "file": "orchestrator.py",
+          "old": "        outputs = await asyncio.gather(*(workers[s.worker](s.task) for s in batch))\n",
+          "new": "        outputs = await asyncio.gather(*(_start(workers, s) for s in batch))\n"
+        },
+        {
+          "file": "orchestrator.py",
+          "old": "def _parse_plan(",
+          "new": "async def _start(workers, subtask):\n    if subtask.worker not in workers:\n        raise PlanError(f\"no worker named {subtask.worker!r}\")\n    return await workers[subtask.worker](subtask.task)\n\n\ndef _parse_plan("
+        }
+      ],
+      "expect": "a bad plan raises before any of its subtasks start"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "done read with bool()",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "    if not isinstance(items, list) or not isinstance(done, bool):\n",
+          "new": "    done = bool(done)\n    if not isinstance(items, list):\n"
+        }
+      ],
+      "expect": "a reply that is not a plan raises PlanError: {\"subtasks\": [], \"done\": \"false\"}"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "a reply that is not JSON lets JSONDecodeError out",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "    try:\n        plan = json.loads(reply)\n    except json.JSONDecodeError as exc:\n        raise PlanError(f\"the plan is not JSON: {exc}\") from None\n",
+          "new": "    plan = json.loads(reply)\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "a JSON array taken for a plan",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "    if not isinstance(plan, dict):\n        raise PlanError(\"the plan must be a JSON object\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "subtask fields not checked",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        if not (\n            isinstance(item, dict) and isinstance(item.get(\"worker\"), str) and isinstance(item.get(\"task\"), str)\n        ):\n            raise PlanError(f\"a subtask needs a worker and a task: {item!r}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "dropped replaced each round instead of added to",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        dropped.extend(new[max_subtasks:])\n",
+          "new": "        dropped = new[max_subtasks:]\n"
+        }
+      ],
+      "expect": "subtasks past the round's limit are dropped and recorded"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "max_subtasks taken as a limit for the whole run",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        batch = new[:max_subtasks]\n        dropped.extend(new[max_subtasks:])\n",
+          "new": "        room = max(max_subtasks - len(results), 0)\n        batch = new[:room]\n        dropped.extend(new[room:])\n"
+        }
+      ],
+      "expect": "results keep the order the orchestrator asked for them in"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "the orchestrator shown only the previous round's results",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        subtasks, done = _parse_plan(await planner(task, list(results)), workers)\n",
+          "new": "        subtasks, done = _parse_plan(await planner(task, [r for r in results if r.round == number - 1]), workers)\n"
+        }
+      ],
+      "expect": "each round the orchestrator sees every result so far"
+    },
+    {
+      "test": "test_orchestrator",
+      "name": "rounds counted only when a worker ran",
+      "edits": [
+        {
+          "file": "orchestrator.py",
+          "old": "        rounds = number\n",
+          "new": ""
+        },
+        {
+          "file": "orchestrator.py",
+          "old": "        outputs = await asyncio.gather(*(workers[s.worker](s.task) for s in batch))\n",
+          "new": "        outputs = await asyncio.gather(*(workers[s.worker](s.task) for s in batch))\n        rounds += 1 if batch else 0\n"
+        }
+      ],
+      "expect": "a round with nothing new to run does not end the run"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "lines in the order the tickets arrived",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "        lines.put_nowait(json.dumps(record, ensure_ascii=False) + \"\\n\")\n",
+          "new": "        return json.dumps(record, ensure_ascii=False) + \"\\n\"\n"
+        },
+        {
+          "file": "dispatch.py",
+          "old": "                task.add_done_callback(in_flight.discard)\n            if in_flight:\n                await asyncio.wait(set(in_flight))\n",
+          "new": "                lines.put_nowait(task)\n"
+        },
+        {
+          "file": "dispatch.py",
+          "old": "        while (line := await lines.get()) is not None:\n            yield line\n",
+          "new": "        while (task := await lines.get()) is not None:\n            yield await task\n"
+        }
+      ],
+      "expect": "lines come out in the order the tickets finish"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "one gate shared by every route",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "    gates = {label: asyncio.Semaphore(limits[label]) for label in handlers}\n",
+          "new": "    shared = asyncio.Semaphore(min(limits.values()))\n    gates = {label: shared for label in handlers}\n"
+        }
+      ],
+      "expect": "a route has at most its limit of tickets in its handler"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "no limit on a route",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "                async with gates[label]:\n                    output = await handlers[label](ticket.text)\n",
+          "new": "                output = await handlers[label](ticket.text)\n"
+        }
+      ],
+      "expect": "a route has at most its limit of tickets in its handler"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "a new gate for every ticket",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "                async with gates[label]:\n",
+          "new": "                async with asyncio.Semaphore(limits[label]):\n"
+        }
+      ],
+      "expect": "a route has at most its limit of tickets in its handler"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "the route's gate taken before the next ticket is pulled",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "    async def handle(ticket: Ticket, arrived: float) -> None:\n        label = None\n        try:\n            label = (await classifier(ticket.text)).strip().lower()\n            if label not in handlers:\n",
+          "new": "    async def handle(ticket: Ticket, arrived: float, label: str) -> None:\n        try:\n            if label not in handlers:\n"
+        },
+        {
+          "file": "dispatch.py",
+          "old": "                async with gates[label]:\n                    output = await handlers[label](ticket.text)\n",
+          "new": "                try:\n                    output = await handlers[label](ticket.text)\n                finally:\n                    gates[label].release()\n"
+        },
+        {
+          "file": "dispatch.py",
+          "old": "                task = asyncio.create_task(handle(ticket, time.perf_counter()))\n",
+          "new": "                arrived = time.perf_counter()\n                label = (await classifier(ticket.text)).strip().lower()\n                if label in gates:\n                    await gates[label].acquire()\n                task = asyncio.create_task(handle(ticket, arrived, label))\n"
+        }
+      ],
+      "expect": "lines come out in the order the tickets finish"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "the whole ticket stream read first",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "            async for ticket in tickets:\n",
+          "new": "            for ticket in [ticket async for ticket in tickets]:\n"
+        }
+      ],
+      "expect": "a line is sent as soon as its ticket is done"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "lines held back until every ticket is done",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "        while (line := await lines.get()) is not None:\n            yield line\n",
+          "new": "        held = []\n        while (line := await lines.get()) is not None:\n            held.append(line)\n        for line in held:\n            yield line\n"
+        }
+      ],
+      "expect": "a busy route does not hold up tickets for other routes"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "a ticket with no route treated as a failure",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "            if label not in handlers:\n                record",
+          "new": "            if False:\n                record"
+        }
+      ],
+      "expect": "one line per ticket: an output, or an error for an unknown route or a failed handler"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "a failing handler ends its ticket without a line",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "        except Exception as exc:\n",
+          "new": "        except KeyError as exc:\n"
+        }
+      ],
+      "expect": "one line per ticket: an output, or an error for an unknown route or a failed handler"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "error without the exception type",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "f\"{type(exc).__name__}: {exc}\"",
+          "new": "str(exc)"
+        }
+      ],
+      "expect": "one line per ticket: an output, or an error for an unknown route or a failed handler"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "raw classifier label",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "            label = (await classifier(ticket.text)).strip().lower()\n",
+          "new": "            label = await classifier(ticket.text)\n"
+        }
+      ],
+      "expect": "one line per ticket: an output, or an error for an unknown route or a failed handler"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "lines without a line break",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "        lines.put_nowait(json.dumps(record, ensure_ascii=False) + \"\\n\")\n",
+          "new": "        lines.put_nowait(json.dumps(record, ensure_ascii=False))\n"
+        }
+      ],
+      "expect": "every line ends with a line break"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "pretty-printed JSON",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "        lines.put_nowait(json.dumps(record, ensure_ascii=False) + \"\\n\")\n",
+          "new": "        lines.put_nowait(json.dumps(record, ensure_ascii=False, indent=2) + \"\\n\")\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "JSON written by hand",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "        lines.put_nowait(json.dumps(record, ensure_ascii=False) + \"\\n\")\n",
+          "new": "        lines.put_nowait(\"{\" + \", \".join(f'\"{key}\": \"{value}\"' for key, value in record.items()) + \"}\\n\")\n"
+        }
+      ],
+      "expect": "JSONDecodeError"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "ms counted from when the handler starts",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "                async with gates[label]:\n                    output = await handlers[label](ticket.text)\n",
+          "new": "                async with gates[label]:\n                    arrived = time.perf_counter()\n                    output = await handlers[label](ticket.text)\n"
+        }
+      ],
+      "expect": "ms counts from the ticket's arrival, including its wait for the route"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "ms counted from the start of the stream",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "    feeder = asyncio.create_task(intake())\n",
+          "new": "    started = time.perf_counter()\n    feeder = asyncio.create_task(intake())\n"
+        },
+        {
+          "file": "dispatch.py",
+          "old": "                task = asyncio.create_task(handle(ticket, time.perf_counter()))\n",
+          "new": "                task = asyncio.create_task(handle(ticket, started))\n"
+        }
+      ],
+      "expect": "ms counts from the ticket's arrival, not from the start of the stream"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "ms in seconds",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "        record[\"ms\"] = round((time.perf_counter() - arrived) * 1000, 3)\n",
+          "new": "        record[\"ms\"] = round(time.perf_counter() - arrived, 6)\n"
+        }
+      ],
+      "expect": "ms counts from the ticket's arrival, including its wait for the route"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "tickets in flight left running after close",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "        pending = [feeder, *in_flight]\n",
+          "new": "        pending = [feeder]\n"
+        }
+      ],
+      "expect": "closing the stream cancels the tickets still in flight"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "ticket intake left running after close",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "        pending = [feeder, *in_flight]\n",
+          "new": "        pending = list(in_flight)\n"
+        }
+      ],
+      "expect": "closing the stream stops pulling tickets"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "close waits for the tickets in flight",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "        for task in pending:\n            task.cancel()\n",
+          "new": "        feeder.cancel()\n"
+        }
+      ],
+      "expect": "closing the stream cancels the tickets still in flight"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "stream ends when the ticket source ends",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "            if in_flight:\n                await asyncio.wait(set(in_flight))\n",
+          "new": ""
+        }
+      ],
+      "expect": "one line per ticket: an output, or an error for an unknown route or a failed handler"
+    },
+    {
+      "test": "test_route_stream",
+      "name": "tickets classified one at a time in the intake loop",
+      "edits": [
+        {
+          "file": "dispatch.py",
+          "old": "    async def handle(ticket: Ticket, arrived: float) -> None:\n        label = None\n        try:\n            label = (await classifier(ticket.text)).strip().lower()\n",
+          "new": "    async def handle(ticket: Ticket, arrived: float, label: str) -> None:\n        try:\n"
+        },
+        {
+          "file": "dispatch.py",
+          "old": "                task = asyncio.create_task(handle(ticket, time.perf_counter()))\n",
+          "new": "                arrived = time.perf_counter()\n                label = (await classifier(ticket.text)).strip().lower()\n                task = asyncio.create_task(handle(ticket, arrived, label))\n"
+        }
+      ],
+      "expect": "each ticket is classified as soon as it arrives, not after the one before it"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "route minimum from its first branch",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "first.min_calls + min(b.min_calls for b in branches)",
+          "new": "first.min_calls + branches[0].min_calls"
+        }
+      ],
+      "expect": "a route pays for its classifier and then for one branch"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "route adds up its branches",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "first.min_calls + min(b.min_calls for b in branches)",
+          "new": "first.min_calls + sum(b.min_calls for b in branches)"
+        },
+        {
+          "file": "bounds.py",
+          "old": "first.max_calls + max(b.max_calls for b in branches)",
+          "new": "first.max_calls + sum(b.max_calls for b in branches)"
+        }
+      ],
+      "expect": "a route pays for its classifier and then for one branch"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "route latency from its costliest branch",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "first.worst_ms + max(b.worst_ms for b in branches)",
+          "new": "first.worst_ms + max(branches, key=lambda b: b.max_calls).worst_ms"
+        }
+      ],
+      "expect": "a route pays for its classifier and then for one branch"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "route classifier left out",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "        first = bounds(node[\"classifier\"])\n",
+          "new": "        first = Bounds(0, 0, 0)\n"
+        }
+      ],
+      "expect": "a route pays for its classifier and then for one branch"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "sections wait for each other",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "sum(p.max_calls for p in parts), max(p.worst_ms for p in parts)",
+          "new": "sum(p.max_calls for p in parts), sum(p.worst_ms for p in parts)"
+        }
+      ],
+      "expect": "parallel calls add up, but the wait is only as long as the slowest"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "votes wait for each other",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "        return Bounds(n * one.min_calls, n * one.max_calls, one.worst_ms)\n",
+          "new": "        return Bounds(n * one.min_calls, n * one.max_calls, n * one.worst_ms)\n"
+        }
+      ],
+      "expect": "parallel calls add up, but the wait is only as long as the slowest"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "votes counted once",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "        return Bounds(n * one.min_calls, n * one.max_calls, one.worst_ms)\n",
+          "new": "        return Bounds(one.min_calls, one.max_calls, one.worst_ms)\n"
+        }
+      ],
+      "expect": "parallel calls add up, but the wait is only as long as the slowest"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "chain latency from its slowest step",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "sum(p.max_calls for p in parts), sum(p.worst_ms for p in parts)",
+          "new": "sum(p.max_calls for p in parts), max(p.worst_ms for p in parts)"
+        }
+      ],
+      "expect": "a chain adds up; an evaluator-optimizer runs 1 to max_iter rounds"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "evaluator-optimizer may run no round",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "            propose.min_calls + evaluate.min_calls,\n",
+          "new": "            0,\n"
+        }
+      ],
+      "expect": "a chain adds up; an evaluator-optimizer runs 1 to max_iter rounds"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "evaluator-optimizer always runs every round",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "            propose.min_calls + evaluate.min_calls,\n",
+          "new": "            rounds * (propose.min_calls + evaluate.min_calls),\n"
+        }
+      ],
+      "expect": "a chain adds up; an evaluator-optimizer runs 1 to max_iter rounds"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "evaluator-optimizer latency of one round",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "            rounds * (propose.worst_ms + evaluate.worst_ms),\n",
+          "new": "            propose.worst_ms + evaluate.worst_ms,\n"
+        }
+      ],
+      "expect": "a chain adds up; an evaluator-optimizer runs 1 to max_iter rounds"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "orchestrator minimum runs a worker",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "            planner.min_calls + synthesizer.min_calls,\n",
+          "new": "            planner.min_calls + synthesizer.min_calls + min(w.min_calls for w in workers),\n"
+        }
+      ],
+      "expect": "an orchestrator can stop after one plan, or use every round and every worker slot"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "worker slots counted once per run",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "            rounds * (planner.max_calls + per_round * most) + synthesizer.max_calls,\n",
+          "new": "            rounds * planner.max_calls + per_round * most + synthesizer.max_calls,\n"
+        }
+      ],
+      "expect": "an orchestrator can stop after one plan, or use every round and every worker slot"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "worker slots capped by the number of workers",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "            rounds * (planner.max_calls + per_round * most) + synthesizer.max_calls,\n",
+          "new": "            rounds * (planner.max_calls + min(per_round, len(workers)) * most) + synthesizer.max_calls,\n"
+        }
+      ],
+      "expect": "an orchestrator can stop after one plan, or use every round and every worker slot"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "worker calls taken from the slowest worker",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "        most = max((w.max_calls for w in workers), default=0)\n",
+          "new": "        most = max(workers, key=lambda w: w.worst_ms).max_calls\n"
+        }
+      ],
+      "expect": "an orchestrator can stop after one plan, or use every round and every worker slot"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "worker latency taken from the busiest worker",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "        slowest = max((w.worst_ms for w in workers), default=0)\n",
+          "new": "        slowest = max(workers, key=lambda w: w.max_calls).worst_ms\n"
+        }
+      ],
+      "expect": "an orchestrator can stop after one plan, or use every round and every worker slot"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "a round's workers wait for each other",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "            rounds * (planner.worst_ms + slowest) + synthesizer.worst_ms,\n",
+          "new": "            rounds * (planner.worst_ms + per_round * slowest) + synthesizer.worst_ms,\n"
+        }
+      ],
+      "expect": "an orchestrator can stop after one plan, or use every round and every worker slot"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "orchestrator latency of one round",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "            rounds * (planner.worst_ms + slowest) + synthesizer.worst_ms,\n",
+          "new": "            planner.worst_ms + slowest + synthesizer.worst_ms,\n"
+        }
+      ],
+      "expect": "an orchestrator can stop after one plan, or use every round and every worker slot"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "a tool call counted as an LLM call",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "        return Bounds(0, 0, node[\"ms\"])\n",
+          "new": "        return Bounds(1, 1, node[\"ms\"])\n"
+        }
+      ],
+      "expect": "a tool call is not an LLM call"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "unknown node types cost nothing",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "    raise ValueError(f\"unknown node type {kind!r}\")\n",
+          "new": "    return Bounds(0, 0, 0)\n"
+        }
+      ],
+      "expect": "an unknown node type raises ValueError naming it"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "unknown node type not named",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "    raise ValueError(f\"unknown node type {kind!r}\")\n",
+          "new": "    raise ValueError(\"unknown node type\")\n"
+        }
+      ],
+      "expect": "an unknown node type raises ValueError naming it"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "counts not checked",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "    if value < 1:\n        raise ValueError(f\"{key} must be at least 1, got {value}\")\n",
+          "new": ""
+        }
+      ],
+      "expect": "counts must be at least 1"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "max_rounds not checked",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "        rounds, per_round = _count(node, \"max_rounds\"), _count(node, \"max_subtasks\")\n",
+          "new": "        rounds, per_round = node[\"max_rounds\"], _count(node, \"max_subtasks\")\n"
+        }
+      ],
+      "expect": "counts must be at least 1"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "max_subtasks not checked",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "        rounds, per_round = _count(node, \"max_rounds\"), _count(node, \"max_subtasks\")\n",
+          "new": "        rounds, per_round = _count(node, \"max_rounds\"), node[\"max_subtasks\"]\n"
+        }
+      ],
+      "expect": "counts must be at least 1"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "counts checked with not value, which lets negatives through",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "    if value < 1:\n",
+          "new": "    if not value:\n"
+        }
+      ],
+      "expect": "counts must be at least 1"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "evaluator-optimizer latency counts the evaluation once",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "            rounds * (propose.worst_ms + evaluate.worst_ms),\n",
+          "new": "            rounds * propose.worst_ms + evaluate.worst_ms,\n"
+        }
+      ],
+      "expect": "a chain adds up; an evaluator-optimizer runs 1 to max_iter rounds"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "orchestrator latency counts the planner once",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "            rounds * (planner.worst_ms + slowest) + synthesizer.worst_ms,\n",
+          "new": "            planner.worst_ms + rounds * slowest + synthesizer.worst_ms,\n"
+        }
+      ],
+      "expect": "an orchestrator can stop after one plan, or use every round and every worker slot"
+    },
+    {
+      "test": "test_cost_bounds",
+      "name": "parallel sections take the cheapest section's minimum",
+      "edits": [
+        {
+          "file": "bounds.py",
+          "old": "                sum(p.min_calls for p in parts), sum(p.max_calls for p in parts), max(p.worst_ms for p in parts)\n",
+          "new": "                min(p.min_calls for p in parts), sum(p.max_calls for p in parts), max(p.worst_ms for p in parts)\n"
+        }
+      ],
+      "expect": "parallel calls add up, but the wait is only as long as the slowest"
+    }
+  ]
+}

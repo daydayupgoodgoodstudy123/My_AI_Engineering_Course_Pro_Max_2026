@@ -1,0 +1,124 @@
+{
+  "lesson": "phases/14-agent-engineering/12-anthropic-workflow-patterns",
+  "title": "Anthropic's Workflow Patterns: Simple Over Complex",
+  "format": "staged-brownfield",
+  "service": "Workflows: a support desk built from Anthropic's workflow patterns, with XML run audit records, an orchestrator-workers code review, a live routing stream with per-route limits and cost bounds for nested workflow specs",
+  "sources": {
+    "docs/en.md": "55c8edf5c8a62595d2db17d555b2ca3cddf12a8b8d8bdf0ff745b347000c0a57",
+    "code/main.py": "bb0e4b004c62c0394a94e8702ebd522856b992dcf93c2a9a7e3ec547456b0506"
+  },
+  "runtime": "Python 3.10+, standard library, pytest; every LLM is an async callable, and the models, workers and handlers are scripted fakes in the tests",
+  "parts": [
+    {
+      "part": 1,
+      "test": "test_patterns",
+      "kind": "debug",
+      "lesson_anchor": "Build It (code/main.py: prompt_chain, route, parallel_vote, evaluator_optimizer); The five patterns 1, 2, 3 and 5; Exercise 2 (one call hangs: aggregating with missing votes); quiz Q9-Q11",
+      "planted_bugs": [
+        "route looks the raw classifier label up, so 'Refund\\n' falls to the default triage chain; the error surfaces two calls below route, as Unscripted from the model stand-in fed by prompt_chain",
+        "prompt_chain renders templates with str.format, so the JSON example in the extract template raises KeyError: '\"order\"'",
+        "route returns (label, 'no handler for ...') as if it were output when there is no default handler, instead of raising UnknownRoute naming the label",
+        "evaluator_optimizer returns the last rejected candidate when no round passes (the lesson's code), so a failed run looks like a passing one; output must be None",
+        "evaluator_optimizer with max_iter=0 raises UnboundLocalError (after the previous fix it silently returns no rounds); max_iter < 1 must raise ValueError, checked with 0 and -1",
+        "parallel_vote gathers every vote although its docstring ends the vote as soon as one answer has more than half of n: with 4 of 7 votes in after 10 ms, two calls stuck for 2 s hold the vote up. It must return then, with the votes back so far, cancel the calls still running and wait until they have ended; without a majority it still waits for every vote"
+      ],
+      "timing_assert": "a 7-vote poll whose majority is in after 10 ms, with two calls stuck for 2 s, returns under 0.2 s: gathering every vote takes 2.0 s (10x the limit), the fix a median of 10.4 ms on Python 3.10 to 3.14 at load average 5 to 6 (19x under it; the slowest of about 900 runs 51 ms). 300 votes of 6 ms with no majority stay under 0.12 s: one after another about 2.0 s, at once a median of 8 to 9 ms",
+      "overfix_guard": "a three-way tie in which the first vote asked for (yes), the first reply back (unsure) and the alphabetically first answer (no) all differ: without a majority the tie goes to the first vote asked for, so the Counter an as_completed loop filled in reply order cannot decide it; and a 2-2 split whose slowest reply takes 0.25 s: half is not a majority and every reply is waited for, which rules out >= n/2 and a deadline that drops slow votes (a deadline of 0.2 s or more fails the stuck-call limit instead)",
+      "traps": [
+        "only an exact normalized label picks a handler: 'refund request' must go to the default handler (substring, startswith and first-word matching fail)",
+        "strip() removes a tab too; strip(' \\n') leaves '\\tbug'",
+        "every {text} is replaced and nothing else changes: '{{agent_name}}' stays doubled (format-then-replace fails), a previous output with C:\\Users is inserted as it is (re.sub fails on \\U), a template with two {text} gets both",
+        "with a default handler configured, an unknown label goes to it",
+        "the proposer receives the evaluator's latest feedback, None in round 1",
+        "all 300 votes are in flight at once: the voters count the calls in flight, so a Semaphore cap that still beats the time limit (50) fails",
+        "the calls still running at the majority are cancelled and have ended when parallel_vote returns, checked at the return and 50 ms later: a cancelled voter takes three turns of the event loop to close, so cancel() alone, or cancel() and one sleep(0), leaves them running; gathering them without return_exceptions raises CancelledError",
+        "a majority is more than half of n: not of the replies back so far, not exactly half, not n // 2",
+        "counts at a majority holds every vote back by then, the losing ones included"
+      ]
+    },
+    {
+      "part": 2,
+      "test": "test_audit_record",
+      "kind": "model and persistence",
+      "lesson_anchor": "Where workflows beat agents: compliance-bound tasks, auditors want to read the graph, not infer it from trajectories",
+      "storage": "one XML document per run (xml.etree), named <run_id>.xml; the layout is the candidate's, the root element is <run>",
+      "exactness": "every step's input and output and the run's branch and output read back exactly from a second instance: &, <, >, quotes, ]]> in code, ANSI escapes, NUL, a form feed, CRLF, a lone CR, leading and trailing spaces and line feeds, a whitespace-only value, non-ASCII, literal backslash escapes in plain text and next to real ANSI escapes in a value that needs encoding; repeated step names in order; None kept apart from ''",
+      "readability": "an independent ElementTree parse must find every value XML can hold as plain element text or a plain attribute value",
+      "traps": [
+        "control characters written as they are: the ParseError comes from read(), the cause is in write()",
+        "a carriage return in element text read back as a line feed",
+        "strip() on read; an empty element read as None; None written as an empty element",
+        "steps kept in a dict by name, or sorted; step names used as tag names",
+        "every value base64- or JSON-encoded (round-trips, but auditors cannot read it)",
+        "an unmarked escape scheme decoded on every value",
+        "a marked escape scheme that does not escape its own escape character",
+        "run ids checked with re.match, with ^...$ (a trailing line feed gets past $), with \\w or isalnum() (non-ASCII letters), or for path separators only; FileNotFoundError instead of KeyError"
+      ],
+      "clarifying_questions": ["XML layout", "which values to encode", "how to encode", "same run id twice", "pretty-printing", "step names"]
+    },
+    {
+      "part": 3,
+      "test": "test_orchestrator",
+      "kind": "core algorithm",
+      "lesson_anchor": "The five patterns 4: Orchestrator-workers, an orchestrator LLM dynamically decides which workers to run and synthesizes their output, similar to an agent loop but it does not loop indefinitely; quiz Q12",
+      "traps": [
+        "a subtask is the (worker, task) pair: dedupe by task text or by worker only is wrong",
+        "duplicates removed before the per-round limit, and subtasks that already ran removed before it too",
+        "subtasks past the limit are recorded in dropped and may be asked for again in a later round",
+        "results and the synthesis keep the orchestrator's order, not the order workers finish (workers have different delays)",
+        "a round's subtasks run at the same time (peak concurrency is checked)",
+        "a plan that says done still runs its subtasks; the run stops after max_rounds without asking again; done on the last round is reported as done",
+        "a round with nothing new to run does not end the run: the next plan asks for something new",
+        "an unknown worker is a PlanError naming it, raised before any subtask starts, even when it is past the round's limit",
+        "\"done\": \"false\" is not a boolean and a plan without done is not a plan; replies that are not JSON objects, or subtasks without a worker and a task, are PlanErrors rather than JSONDecodeError, AttributeError or KeyError",
+        "the synthesizer runs once, also when the orchestrator dispatches nothing",
+        "each round the orchestrator sees every result so far, not only the last round's"
+      ],
+      "clarifying_questions": ["unknown worker", "same task for two workers", "scope of max_subtasks", "dropped subtasks that run later", "done with subtasks", "worker errors", "a round with nothing new", "missing done"]
+    },
+    {
+      "part": 4,
+      "test": "test_route_stream",
+      "kind": "streaming",
+      "lesson_anchor": "The five patterns 2: Routing, categorically different inputs need different handling (tier-1 support vs refund vs bug vs sales)",
+      "wire_format": "NDJSON, one object per ticket in completion order: ticket, route, output or error, ms; decided by the test's join, split on line feeds and json.loads",
+      "timing_assert": "the sales ticket behind 10 queued refunds (limit 1, 60 ms each) is out within 0.05 s (head-of-line blocked versions take 0.55 to 0.63 s, the reference under 1 ms)",
+      "traps": [
+        "one Semaphore per route: a shared gate or a new gate per ticket is caught by the per-route peak",
+        "waiting for a route's gate in the intake loop, emitting in arrival order, or holding lines back until the end",
+        "classifying tickets one at a time in the intake loop (the main run's classifier takes 1 ms and counts the tickets it is classifying at once)",
+        "reading the whole ticket stream before routing (pull count at the first line)",
+        "unknown routes and handler exceptions become error lines and the stream carries on",
+        "labels normalized as route() does",
+        "ms from arrival, including classification and the wait for the route; not from the handler start, not from the stream start, not seconds",
+        "closing the stream stops pulling tickets (a ticket pulled after that would be lost) and cancels the tickets in flight, rather than leaving them running or waiting for them",
+        "hand-written or pretty-printed JSON; a line without its line feed"
+      ],
+      "clarifying_questions": ["per-route or global limit", "classifier failure", "what ms measures", "line order", "client disconnect", "intake backpressure"]
+    },
+    {
+      "part": 5,
+      "test": "test_cost_bounds",
+      "kind": "recursive structure",
+      "lesson_anchor": "Where workflows beat agents: cost-bound tasks, workflows have bounded step counts and agents can spiral; Exercise 5 (draw the workflow graph, count steps)",
+      "traps": [
+        "a tool node costs latency but no LLM call",
+        "route: the classifier plus one branch, and the cheapest, costliest and slowest branches differ",
+        "parallel: calls add up and latency is the slowest section; n copies multiply calls but not latency",
+        "evaluator-optimizer: 1 to max_iter rounds, latency of max_iter rounds",
+        "orchestrator as orchestrate() runs it: minimum is one plan and one synthesis; maximum uses every round and every worker slot with the worker that makes the most calls; worst latency waits for the slowest worker each round; those two workers differ, and there are more slots per round (4) than workers (3)",
+        "an unknown node type ('agent') raises ValueError naming it; each of the four counts below 1 raises ValueError, a negative one too"
+      ],
+      "clarifying_questions": ["tools as calls", "route classifier", "orchestrator with no workers", "a round's latency", "agent nodes", "bounds from different branches"]
+    }
+  ],
+  "deviations": [
+    "Every LLM in the package is an async callable, and the starter's parallel_vote already runs the votes at once with asyncio.gather. Its defect is the lesson's Exercise 2 (one call hangs) rather than awaiting the calls one at a time, which phase 13 lesson 03 and lesson 35 of this chapter already plant in Part 1: the vote ends as soon as one answer has more than half of n, cancels the calls still running and waits for them to end. It is not a timeout parameter, because lesson 06's Part 1 already has a timeout that is never read; without a majority every vote is waited for. Cancelling and waiting for unfinished calls also appears in several Part 4s of this chapter and in this lesson's own Part 4; here the failure the candidate meets first is a vote that keeps waiting after it is decided. The 300-vote timing stays as the concurrency guard; its answers split 140/120/40, so no answer has a majority and the counts do not depend on the order the replies arrive in.",
+    "Part 1 keeps the three suggested defects and splits two of them: route's label normalization and its missing UnknownRoute are separate layers, and so are evaluator_optimizer's ambiguous return and its max_iter check. 'Failed and passing candidates cannot be told apart' is made concrete as Refined(output, rounds) with output None when no round passed. The route defect is the one reported away from its cause: the misrouted ticket's prompt reaches the model through the default triage chain.",
+    "Part 1's tie is three-way, so the first vote asked for, the first reply back and the alphabetical first are all different answers; a two-way tie lets an alphabetical tie-break pass by chance. The 2-2 split, whose slow reply decides the tie, checks that half is not a majority and that no deadline drops a vote.",
+    "Part 2 leaves the XML layout to the candidate and checks readability with an independent ElementTree parse instead of a fixed schema. Beyond the suggested characters it covers what XML itself changes: None versus the empty string (XML has no null), a lone CR and CRLF in element text, repeated step names, step names that are not valid tag names, and run ids used as file names.",
+    "Part 3 makes K a per-round limit on new subtasks, dedupes on the (worker, task) pair, records dropped subtasks so a later round may ask for them again, runs the subtasks of a done plan before stopping, keeps going after a round with nothing new, and checks the whole plan before anything starts. The orchestrator is called with the results so far rather than a prompt string, and synthesis is one call at the end; a peak-concurrency check makes sure workers really finish out of order.",
+    "Part 4 adds two traps of the routing stream itself: a failing handler is one ticket's error line, and closing the stream stops pulling tickets and cancels the ones in flight. ms is checked from both sides (a queued ticket's ms includes its wait; a late instant ticket's ms is small). The congestion timing is the time to a sales line behind 10 queued refunds.",
+    "Part 5 makes the classifier, planner, workers, synthesizer, proposer and evaluator child nodes of one uniform tree instead of fixed '+1' costs, and adds tool nodes (latency, no LLM call) so that a route's minimum, maximum and worst latency come from three different branches. The orchestrator bound follows Part 3's semantics, with the worker that makes the most calls different from the slowest one and more worker slots per round than workers. The unknown node type in the test is 'agent', the one thing a cost-bound workflow cannot contain."
+  ]
+}
