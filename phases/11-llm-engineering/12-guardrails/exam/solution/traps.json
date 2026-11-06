@@ -1,0 +1,378 @@
+{
+  "package": "piispan",
+  "tests": [
+    "test_original_interval_scrub",
+    "test_safe_transcript_store",
+    "test_overlap_arbitration",
+    "test_safe_message_publication",
+    "test_report_stage_evidence"
+  ],
+  "layers": [
+    {
+      "test": "test_original_interval_scrub",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "AttributeError"
+        },
+        {
+          "name": "whole-match strings",
+          "edits": [
+            {
+              "file": "legacy.py",
+              "old": "return re.findall(pattern,text)",
+              "new": "return [match.group(0) for match in re.finditer(pattern,text)]"
+            }
+          ],
+          "expect": "disjoint ordered spans required"
+        },
+        {
+          "name": "original offsets",
+          "edits": [
+            {
+              "file": "legacy.py",
+              "old": "    spans=[];working=text\n    for recognizer in recognizers:\n        values=matched_values(working,recognizer.pattern)\n        positions=list(re.finditer(recognizer.pattern,working))\n        for match,value in zip(positions,values):\n            spans.append(Span(match.start(),match.end(),value,recognizer.kind,recognizer.priority,recognizer.confidence_text,recognizer.placeholder))\n        working=re.sub(recognizer.pattern,recognizer.placeholder,working)\n    spans.sort(key=lambda span:(span.start,span.end))\n    validate_disjoint(text,spans)\n    return tuple(spans)\n",
+              "new": "    spans=[]\n    for recognizer in recognizers:\n        working=text\n        values=matched_values(working,recognizer.pattern)\n        positions=list(re.finditer(recognizer.pattern,working))\n        for match,value in zip(positions,values):\n            spans.append(Span(match.start(),match.end(),value,recognizer.kind,recognizer.priority,recognizer.confidence_text,recognizer.placeholder))\n    spans.sort(key=lambda span:(span.start,span.end))\n    validate_disjoint(text,spans)\n    return tuple(spans)\n"
+            }
+          ],
+          "expect": "successful PII scrubbing delivers the sanitized response"
+        },
+        {
+          "name": "scrub policy",
+          "edits": [
+            {
+              "file": "legacy.py",
+              "old": "return all(result.passed for result in results)",
+              "new": "return all(result.passed or result.category==\"pii_scrubbing\" for result in results)"
+            }
+          ],
+          "expect": "large transcript scrubbing should stay responsive"
+        },
+        {
+          "name": "interval output",
+          "edits": [
+            {
+              "file": "legacy.py",
+              "old": "    validate_disjoint(text,spans)\n    output=text\n    for span in reversed(spans):\n        characters=list(output)\n        characters[span.start:span.end]=span.placeholder\n        output=''.join(characters)\n    return output\n",
+              "new": "    validate_disjoint(text,spans)\n    pieces=[];previous=0\n    for span in spans:\n        pieces.extend((text[previous:span.start],span.placeholder));previous=span.end\n    pieces.append(text[previous:])\n    return ''.join(pieces)\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_original_interval_scrub",
+      "name": "replace the entire response with one placeholder",
+      "edits": [
+        {
+          "file": "legacy.py",
+          "old": "return ''.join(pieces)",
+          "new": "return '[REDACTED]' if spans else text"
+        }
+      ],
+      "expect": "successful PII scrubbing delivers the sanitized response"
+    },
+    {
+      "test": "test_original_interval_scrub",
+      "name": "allow every output after scrubbing",
+      "edits": [
+        {
+          "file": "legacy.py",
+          "old": "return all(result.passed or result.category==\"pii_scrubbing\" for result in results)",
+          "new": "return True"
+        }
+      ],
+      "expect": "a true hard output failure still blocks delivery"
+    },
+    {
+      "test": "test_safe_transcript_store",
+      "name": "narrow detector confidence through float",
+      "edits": [
+        {
+          "file": "audit_codec.py",
+          "old": "\"confidence_text\":s.confidence_text",
+          "new": "\"confidence_text\":str(float(s.confidence_text))"
+        }
+      ],
+      "expect": "a reopened transcript retains exact redacted bytes and original audit fields"
+    },
+    {
+      "test": "test_safe_transcript_store",
+      "name": "persist raw original as debug metadata",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "json_bytes({\"payload\":digest,\"spans\":spans})",
+          "new": "json_bytes({\"payload\":digest,\"spans\":spans,\"original\":transcript.original})"
+        }
+      ],
+      "expect": "persisted transcript artifacts contain no original PII values"
+    },
+    {
+      "test": "test_safe_transcript_store",
+      "name": "reuse first audit manifest for equal payloads",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "manifest=json.loads(manifest_path(self.root,key).read_bytes())",
+          "new": "manifest=json.loads(sorted(self.root.glob(\"*.json\"))[0].read_bytes())"
+        }
+      ],
+      "expect": "equal redacted payloads retain independent transcript audit identities"
+    },
+    {
+      "test": "test_overlap_arbitration",
+      "name": "select in source order instead of priority",
+      "edits": [
+        {
+          "file": "overlap.py",
+          "old": "key=lambda item:(-item[1].priority,-(item[1].end-item[1].start),item[1].start,item[1].end,item[1].kind,item[0])",
+          "new": "key=lambda item:(item[1].start,item[0])"
+        }
+      ],
+      "expect": "higher-priority accepted intervals determine which overlaps remain eligible"
+    },
+    {
+      "test": "test_overlap_arbitration",
+      "name": "treat adjacent intervals as overlapping",
+      "edits": [
+        {
+          "file": "overlap.py",
+          "old": "span.start<other.end and other.start<span.end",
+          "new": "span.start<=other.end and other.start<=span.end"
+        }
+      ],
+      "expect": "adjacent half-open intervals remain separate entities"
+    },
+    {
+      "test": "test_overlap_arbitration",
+      "name": "deduplicate repeated values across source intervals",
+      "edits": [
+        {
+          "file": "overlap.py",
+          "old": "if not any(span.start<other.end and other.start<span.end for other in accepted):accepted.append(span)",
+          "new": "if all(span.value!=other.value for other in accepted) and not any(span.start<other.end and other.start<span.end for other in accepted):accepted.append(span)"
+        }
+      ],
+      "expect": "equal PII values retain every independent selected occurrence"
+    },
+    {
+      "test": "test_safe_message_publication",
+      "name": "publish raw model output instead of delivered text",
+      "edits": [
+        {
+          "file": "publish.py",
+          "old": "\"response\":trace.delivered",
+          "new": "\"response\":trace.raw_output"
+        }
+      ],
+      "expect": "published scrubbed messages contain the delivered sanitized response"
+    },
+    {
+      "test": "test_safe_message_publication",
+      "name": "include private detector details in public audit",
+      "edits": [
+        {
+          "file": "publish.py",
+          "old": "\"latency_us\":r.latency_us",
+          "new": "\"latency_us\":r.latency_us,\"details\":r.details"
+        }
+      ],
+      "expect": "public audit fields exclude raw check details and sensitive text"
+    },
+    {
+      "test": "test_safe_message_publication",
+      "name": "fill output audit from input results",
+      "edits": [
+        {
+          "file": "publish.py",
+          "old": "\"output_results\":checks(trace.report.output_results)",
+          "new": "\"output_results\":checks(trace.report.input_results)"
+        }
+      ],
+      "expect": "safe audit preserves the correct input and output result stages"
+    },
+    {
+      "test": "test_report_stage_evidence",
+      "name": "count every failed detector as a blocked request",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "totals[\"passed\" if stage==\"passed\" else \"blocked_\"+stage]+=1",
+          "new": "totals[\"passed\" if stage==\"passed\" else \"blocked_\"+stage]+=1 if stage==\"passed\" else len(input_failed) if stage==\"input\" else len(hard_output)"
+        }
+      ],
+      "expect": "sandwich totals count each request once and retain safe scrub events"
+    },
+    {
+      "test": "test_report_stage_evidence",
+      "name": "accept downstream execution after input block",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "not report.blocked or trace.model_called or report.output_results or trace.pii_scrubbed",
+          "new": "not report.blocked or trace.pii_scrubbed"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_report_stage_evidence",
+      "name": "discard safe scrub monitoring events",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "totals[\"pii_scrubbed\"]+=int(trace.pii_scrubbed)",
+          "new": "totals[\"pii_scrubbed\"]+=0"
+        }
+      ],
+      "expect": "sandwich totals count each request once and retain safe scrub events"
+    },
+    {
+      "test": "test_safe_transcript_store",
+      "name": "normalize persisted transcript CRLF text while loading",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "StoredTranscript(data.decode(\"utf-8\"),spans)",
+          "new": "StoredTranscript(data.decode(\"utf-8\").replace(\"\\r\\n\",\"\\n\"),spans)"
+        }
+      ],
+      "expect": "a reopened transcript retains exact redacted bytes and original audit fields"
+    },
+    {
+      "test": "test_safe_transcript_store",
+      "name": "rebind span fingerprints to the sanitized payload digest",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "spans=audit_to_records(transcript.spans)",
+          "new": "spans=audit_to_records(transcript.spans,digest)"
+        },
+        {
+          "file": "audit_codec.py",
+          "old": "def audit_to_records(spans):",
+          "new": "def audit_to_records(spans,payload_digest):"
+        },
+        {
+          "file": "audit_codec.py",
+          "old": "\"fingerprint\":s.fingerprint",
+          "new": "\"fingerprint\":payload_digest[:12]"
+        }
+      ],
+      "expect": "a reopened transcript retains exact redacted bytes and original audit fields"
+    },
+    {
+      "test": "test_overlap_arbitration",
+      "name": "return accepted intervals in priority order instead of original-text order",
+      "edits": [
+        {
+          "file": "overlap.py",
+          "old": "return tuple(sorted(accepted,key=lambda span:(span.start,span.end)))",
+          "new": "return tuple(accepted)"
+        }
+      ],
+      "expect": "selected intervals retain original-text order independently of priority"
+    },
+    {
+      "test": "test_overlap_arbitration",
+      "name": "let an earlier rejected bridge exclude later independent candidates",
+      "edits": [
+        {
+          "file": "overlap.py",
+          "old": "for ordinal,span in ranked:\n        if not any(span.start<other.end and other.start<span.end for other in accepted):accepted.append(span)",
+          "new": "for rank_index,(ordinal,span) in enumerate(ranked):\n        if not any(span.start<other.end and other.start<span.end for _,other in ranked[:rank_index]):accepted.append(span)"
+        }
+      ],
+      "expect": "higher-priority accepted intervals determine which overlaps remain eligible"
+    },
+    {
+      "test": "test_safe_message_publication",
+      "name": "replace actual check latencies with zero during safe projection",
+      "edits": [
+        {
+          "file": "publish.py",
+          "old": "\"latency_us\":r.latency_us",
+          "new": "\"latency_us\":0"
+        }
+      ],
+      "expect": "safe check projection retains exact values in each execution stage"
+    },
+    {
+      "test": "test_safe_message_publication",
+      "name": "rewrite a PII source start as a UTF-8 byte count of delivered prefix",
+      "edits": [
+        {
+          "file": "publish.py",
+          "old": "\"start\":s.start",
+          "new": "\"start\":len(trace.delivered[:s.start].encode(\"utf-8\"))"
+        }
+      ],
+      "expect": "published Unicode PII audit retains original codepoint intervals"
+    },
+    {
+      "test": "test_report_stage_evidence",
+      "name": "accept a passed output report with no model execution evidence",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "if not trace.model_called or len(pii)!=1:raise ValueError(\"output-stage evidence\")",
+          "new": "if len(pii)!=1:raise ValueError(\"output-stage evidence\")"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_report_stage_evidence",
+      "name": "accept hard-blocked output stage without its required scrub check",
+      "edits": [
+        {
+          "file": "audit.py",
+          "old": "if not trace.model_called or len(pii)!=1:raise ValueError(\"output-stage evidence\")",
+          "new": "if not trace.model_called or len(pii)>1:raise ValueError(\"output-stage evidence\")"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_safe_transcript_store",
+      "name": "load first sanitized blob instead of the current manifest payload",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "data=(self.root/\"blobs\"/manifest[\"payload\"]).read_bytes()",
+          "new": "data=next((self.root/\"blobs\").iterdir()).read_bytes()"
+        }
+      ],
+      "expect": "payload digest"
+    },
+    {
+      "test": "test_safe_transcript_store",
+      "name": "restore a sanitized payload without verifying its content address",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "if content_key(data)!=manifest[\"payload\"]:raise ValueError(\"payload digest\")",
+          "new": "if False:raise ValueError(\"payload digest\")"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_safe_transcript_store",
+      "name": "silently keep an existing key instead of replacing its audit manifest",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "path=manifest_path(self.root,key)",
+          "new": "path=manifest_path(self.root,key)\n        if path.exists():return"
+        }
+      ],
+      "expect": "a transcript audit update cannot change another key's evidence"
+    }
+  ]
+}
