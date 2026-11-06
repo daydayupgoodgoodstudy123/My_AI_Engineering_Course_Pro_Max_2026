@@ -1,0 +1,318 @@
+{
+  "package": "stagegate",
+  "tests": [
+    "test_deliberate_stage_plan",
+    "test_stage_registry_roundtrip",
+    "test_stage_drift_observations",
+    "test_stage_drift_stream",
+    "test_necessary_component_responsibility"
+  ],
+  "layers": [
+    {
+      "test": "test_deliberate_stage_plan",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "the pilot plan includes its complete bounded learning responsibilities"
+        },
+        {
+          "name": "complete the pilot control contract",
+          "edits": [
+            {
+              "file": "stages.py",
+              "old": "'pilot':('human-owner','audit','rollback','exit-expand','exit-revise','exit-stop'),",
+              "new": "'pilot':PILOT,"
+            }
+          ],
+          "expect": "report missing controls rather than every required control"
+        },
+        {
+          "name": "+ subtract existing controls",
+          "edits": [
+            {
+              "file": "stages.py",
+              "old": "return required_controls(stage)",
+              "new": "return tuple(c for c in required_controls(stage) if c not in present)"
+            }
+          ],
+          "expect": "readiness changes recommend review without silently downgrading a declaration"
+        },
+        {
+          "name": "+ retain declared stage",
+          "edits": [
+            {
+              "file": "stages.py",
+              "old": "return recommended",
+              "new": "return record.declared_stage"
+            }
+          ],
+          "expect": "update active-audience cardinality without rebuilding the live-user set each time"
+        },
+        {
+          "name": "+ live user session reference counts",
+          "edits": [
+            {
+              "file": "stages.py",
+              "old": "    sessions={};out=[]\n    for e in events:\n        book=sessions.setdefault(e.system,{})\n        if e.joined:book[e.session]=e.user\n        else:book.pop(e.session,None)\n        out.append((e.system,len(set(book.values()))))\n    return out",
+              "new": "    sessions={};users={};out=[]\n    for e in events:\n        book=sessions.setdefault(e.system,{});counts=users.setdefault(e.system,Counter())\n        if e.session in book:\n            old=book.pop(e.session);counts[old]-=1\n            if not counts[old]:del counts[old]\n        if e.joined:book[e.session]=e.user;counts[e.user]+=1\n        out.append((e.system,len(counts)))\n    return out"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_deliberate_stage_plan",
+      "name": "counting active sessions instead of active users",
+      "edits": [
+        {
+          "file": "stages.py",
+          "old": "out.append((e.system,len(counts)))",
+          "new": "out.append((e.system,len(book)))"
+        }
+      ],
+      "expect": "active users require live-session references within each system"
+    },
+    {
+      "test": "test_stage_registry_roundtrip",
+      "name": "loading the access marker as the declared stage",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "json.dumps(asdict(record),ensure_ascii=False)",
+          "new": "json.dumps(dict(asdict(record),declared_stage=record.markers[1].value),ensure_ascii=False)"
+        }
+      ],
+      "expect": "the full declaration and each technical marker round-trip independently"
+    },
+    {
+      "test": "test_stage_registry_roundtrip",
+      "name": "normalizing stored authority ordering and duplicates",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "json.dumps(asdict(record),ensure_ascii=False)",
+          "new": "json.dumps(dict(asdict(record),authority=sorted(set(record.authority))),ensure_ascii=False)"
+        }
+      ],
+      "expect": "the full declaration and each technical marker round-trip independently"
+    },
+    {
+      "test": "test_stage_registry_roundtrip",
+      "name": "registration replacement silently ignored",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "ON CONFLICT(id) DO UPDATE SET payload=excluded.payload",
+          "new": "ON CONFLICT(id) DO NOTHING"
+        }
+      ],
+      "expect": "explicit registration replacement affects only its named system"
+    },
+    {
+      "test": "test_stage_drift_observations",
+      "name": "any production data implies prototype drift",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "if stage=='prototype' and observation.production_data:",
+          "new": "if observation.production_data:"
+        }
+      ],
+      "expect": "a bounded pilot may use production data through its inclusive final date"
+    },
+    {
+      "test": "test_stage_drift_observations",
+      "name": "inclusive pilot final date treated as expired",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "date.fromisoformat(observation.at)>date.fromisoformat(record.until)",
+          "new": "date.fromisoformat(observation.at)>=date.fromisoformat(record.until)"
+        }
+      ],
+      "expect": "a bounded pilot may use production data through its inclusive final date"
+    },
+    {
+      "test": "test_stage_drift_observations",
+      "name": "documentation alone supplies every technical marker",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "for channel in CHANNELS:",
+          "new": "for channel in ('documentation',):"
+        }
+      ],
+      "expect": "every boundary drift remains explicit in the fixed policy order"
+    },
+    {
+      "test": "test_stage_drift_stream",
+      "name": "alert dedup makes an ongoing unsafe snapshot look safe",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "        if not current:release(observation)\n        for reason in gate.feed(record.id,current):yield alert(record,observation,reason)",
+          "new": "        entered=gate.feed(record.id,current)\n        if not entered:release(observation)\n        for reason in entered:yield alert(record,observation,reason)"
+        }
+      ],
+      "expect": "already-alerted unsafe snapshots still block release while healthy systems continue"
+    },
+    {
+      "test": "test_stage_drift_stream",
+      "name": "stop monitoring after the first unsafe system snapshot",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "for reason in gate.feed(record.id,current):yield alert(record,observation,reason)",
+          "new": "for reason in gate.feed(record.id,current):yield alert(record,observation,reason)\n        if current:return"
+        }
+      ],
+      "expect": "recovery rearms all current reasons without duplicate alerts during one episode"
+    },
+    {
+      "test": "test_stage_drift_stream",
+      "name": "collect all alerts before streaming them",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "gate=EpisodeGate()",
+          "new": "gate=EpisodeGate();buffer=[]"
+        },
+        {
+          "file": "monitor.py",
+          "old": "for reason in gate.feed(record.id,current):yield alert(record,observation,reason)",
+          "new": "for reason in gate.feed(record.id,current):buffer.append(alert(record,observation,reason))\n    for line in buffer:yield line"
+        }
+      ],
+      "expect": "emit the complete current drift block before any future snapshot"
+    },
+    {
+      "test": "test_necessary_component_responsibility",
+      "name": "shared child checked only on its first necessary edge",
+      "edits": [
+        {
+          "file": "dependencies.py",
+          "old": "    for edge in edges:\n        if edge.optional or edge.parent not in paths:continue",
+          "new": "    seen=set()\n    for edge in edges:\n        if edge.optional or edge.parent not in paths:continue\n        if edge.child in seen:continue\n        seen.add(edge.child)"
+        }
+      ],
+      "expect": "shared components satisfy every necessary edge with the smallest real witness path"
+    },
+    {
+      "test": "test_necessary_component_responsibility",
+      "name": "optional experiments acquire required control obligations",
+      "edits": [
+        {
+          "file": "dependencies.py",
+          "old": "if edge.optional or edge.parent not in paths:continue",
+          "new": "if edge.parent not in paths:continue"
+        }
+      ],
+      "expect": "shared components satisfy every necessary edge with the smallest real witness path"
+    },
+    {
+      "test": "test_necessary_component_responsibility",
+      "name": "excess authority is never reported",
+      "edits": [
+        {
+          "file": "dependencies.py",
+          "old": "for permission in child.authority:",
+          "new": "for permission in ():"
+        }
+      ],
+      "expect": "shared components satisfy every necessary edge with the smallest real witness path"
+    },
+    {
+      "test": "test_necessary_component_responsibility",
+      "name": "restore recursive schema walk in the supplied finite DAG helper",
+      "edits": [
+        {
+          "file": "dependencies.py",
+          "old": "graph={n:[] for n in by_id}",
+          "new": "graph={n:[] for n in by_id};visiting=set();done=set()"
+        },
+        {
+          "file": "dependencies.py",
+          "old": "    degree={node:0 for node in graph}\n    for children in graph.values():\n        for child in children:degree[child]+=1\n    ready=[node for node in graph if degree[node]==0];processed=0\n    while ready:\n        node=ready.pop();processed+=1\n        for child in graph[node]:\n            degree[child]-=1\n            if degree[child]==0:ready.append(child)\n    if processed!=len(graph):raise ValueError('dependency cycle')\n",
+          "new": "    def validate(node):\n        if node in visiting:raise ValueError('dependency cycle')\n        if node in done:return\n        visiting.add(node)\n        for child in graph[node]:validate(child)\n        visiting.remove(node);done.add(node)\n    for node in graph:validate(node)\n"
+        }
+      ],
+      "expect": "RecursionError"
+    },
+    {
+      "test": "test_stage_registry_roundtrip",
+      "name": "trim the registered owner while persisting a supposedly exact registration snapshot",
+      "edits": [
+        {
+          "file": "registry.py",
+          "old": "json.dumps(asdict(record),ensure_ascii=False)",
+          "new": "json.dumps(dict(asdict(record),owner=record.owner.strip()),ensure_ascii=False)"
+        }
+      ],
+      "expect": "the full declaration and each technical marker round-trip independently"
+    },
+    {
+      "test": "test_stage_drift_observations",
+      "name": "require admitted users before reporting ownerless data or write exposure",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "(observation.exposed_users or observation.production_data or observation.write_authority)",
+          "new": "observation.exposed_users"
+        }
+      ],
+      "expect": "data access needs an owner even before any users are admitted"
+    },
+    {
+      "test": "test_stage_drift_observations",
+      "name": "classify an unknown technical marker as a mismatched stage instead of missing",
+      "edits": [
+        {
+          "file": "drift.py",
+          "old": "return value if value in ('prototype','pilot','production') else None",
+          "new": "return value"
+        }
+      ],
+      "expect": "an unknown finite marker is missing rather than another declared stage"
+    },
+    {
+      "test": "test_stage_drift_stream",
+      "name": "share one alert episode state across unrelated system ids",
+      "edits": [
+        {
+          "file": "monitor.py",
+          "old": "gate.feed(record.id,current)",
+          "new": "gate.feed('global',current)"
+        }
+      ],
+      "expect": "the same reason starts a separate alert episode in another system"
+    },
+    {
+      "test": "test_necessary_component_responsibility",
+      "name": "audit a necessary edge inside an unreachable or optional-only subtree",
+      "edits": [
+        {
+          "file": "dependencies.py",
+          "old": "if edge.optional or edge.parent not in paths:continue",
+          "new": "if edge.optional:continue"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_necessary_component_responsibility",
+      "name": "inspect only the first required control on each dependency edge",
+      "edits": [
+        {
+          "file": "dependencies.py",
+          "old": "for control in edge.controls:",
+          "new": "for control in edge.controls[:1]:"
+        }
+      ],
+      "expect": "each named control on a necessary edge is independently required"
+    }
+  ]
+}
