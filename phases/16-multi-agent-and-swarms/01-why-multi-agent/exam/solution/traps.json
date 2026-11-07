@@ -1,0 +1,344 @@
+{
+  "package": "splitcase",
+  "tests": [
+    "test_addressed_replay_and_usage",
+    "test_fixed_design_snapshot",
+    "test_loss_aware_fixed_comparison",
+    "test_completed_stage_csv",
+    "test_nested_context_scope_boundaries"
+  ],
+  "layers": [
+    {
+      "test": "test_addressed_replay_and_usage",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "KeyError"
+        },
+        {
+          "name": "route summaries by recipient",
+          "edits": [
+            {
+              "file": "routing.py",
+              "old": "message.sender==role.name",
+              "new": "message.recipient==role.name"
+            }
+          ],
+          "expect": "only intended role inputs belong to the specialist context"
+        },
+        {
+          "name": "+ project private notes to their owner",
+          "edits": [
+            {
+              "file": "routing.py",
+              "old": "notes=list(private_notes)",
+              "new": "notes=[note for note in private_notes if note.owner==role.name]"
+            }
+          ],
+          "expect": "fanout usage includes every independent branch and repeated role call"
+        },
+        {
+          "name": "+ retain all independent branch use",
+          "edits": [
+            {
+              "file": "usage.py",
+              "old": "input_tokens=usage.input_tokens;output_tokens=usage.output_tokens;tool_calls=usage.tool_calls",
+              "new": "input_tokens+=usage.input_tokens;output_tokens+=usage.output_tokens;tool_calls+=usage.tool_calls"
+            }
+          ],
+          "expect": "a complete independent replay call remains responsive"
+        },
+        {
+          "name": "+ measure the declared independent-call input extent",
+          "edits": [
+            {
+              "file": "usage.py",
+              "old": "len(request.system+request.user)//4",
+              "new": "(len(request.system)+len(request.user))//4"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_addressed_replay_and_usage",
+      "name": "ignore system prompt in independent input use",
+      "edits": [
+        {
+          "file": "usage.py",
+          "old": "(len(request.system)+len(request.user))//4",
+          "new": "len(request.user)//4"
+        }
+      ],
+      "expect": "each independent call retains its complete request and declared usage"
+    },
+    {
+      "test": "test_addressed_replay_and_usage",
+      "name": "drop zero-output repeated-role branches",
+      "edits": [
+        {
+          "file": "usage.py",
+          "old": "for usage in usages:",
+          "new": "for usage in [item for item in usages if item.output_tokens]:"
+        }
+      ],
+      "expect": "fanout usage includes every independent branch and repeated role call"
+    },
+    {
+      "test": "test_fixed_design_snapshot",
+      "name": "narrow original call id through binary float",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "payload=asdict(snapshot)",
+          "new": "payload=asdict(snapshot)\n        payload[\"design\"][\"calls\"][0][\"call_id\"]=float(payload[\"design\"][\"calls\"][0][\"call_id\"])"
+        }
+      ],
+      "expect": "nonnegative integer required"
+    },
+    {
+      "test": "test_fixed_design_snapshot",
+      "name": "discard private notes from saved call plans",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "payload=asdict(snapshot)",
+          "new": "payload=asdict(snapshot)\n        for call in payload[\"design\"][\"calls\"]:call[\"private_notes\"]=[]"
+        }
+      ],
+      "expect": "a complete fixed-design snapshot retains all exact values after reopening"
+    },
+    {
+      "test": "test_fixed_design_snapshot",
+      "name": "round finite cost metadata for display",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "payload=asdict(snapshot)",
+          "new": "payload=asdict(snapshot)\n        payload[\"unit_cost\"]=round(payload[\"unit_cost\"],2)"
+        }
+      ],
+      "expect": "a complete fixed-design snapshot retains all exact values after reopening"
+    },
+    {
+      "test": "test_fixed_design_snapshot",
+      "name": "sort stored roles instead of declaration order",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "payload=asdict(snapshot)",
+          "new": "payload=asdict(snapshot)\n        payload[\"design\"][\"roles\"]=sorted(payload[\"design\"][\"roles\"],key=lambda role:role[\"name\"])"
+        }
+      ],
+      "expect": "a complete fixed-design snapshot retains all exact values after reopening"
+    },
+    {
+      "test": "test_loss_aware_fixed_comparison",
+      "name": "sum lifetime context instead of role peak",
+      "edits": [
+        {
+          "file": "accounting.py",
+          "old": "max(peaks.get(usage.role,0),usage.input_tokens+usage.output_tokens)",
+          "new": "peaks.get(usage.role,0)+usage.input_tokens+usage.output_tokens"
+        }
+      ],
+      "expect": "a role's context is its largest complete call rather than lifetime usage"
+    },
+    {
+      "test": "test_loss_aware_fixed_comparison",
+      "name": "count optional omitted facts as required loss",
+      "edits": [
+        {
+          "file": "accounting.py",
+          "old": "key for key in boundary.required if key not in forwarded",
+          "new": "key for key in boundary.before if key not in forwarded"
+        }
+      ],
+      "expect": "only omitted required facts belong to their own declared summary boundary"
+    },
+    {
+      "test": "test_loss_aware_fixed_comparison",
+      "name": "allow lower usage to override missing required facts",
+      "edits": [
+        {
+          "file": "accounting.py",
+          "old": "bad_right=bool(right[\"over_limit\"]) or any(row[\"lost\"] for row in right[\"losses\"])",
+          "new": "bad_right=bool(right[\"over_limit\"])"
+        }
+      ],
+      "expect": "lower token use cannot excuse a lost required boundary fact"
+    },
+    {
+      "test": "test_loss_aware_fixed_comparison",
+      "name": "reverse the reported independent token delta",
+      "edits": [
+        {
+          "file": "accounting.py",
+          "old": "\"delta_tokens\":right[\"total_tokens\"]-left[\"total_tokens\"]",
+          "new": "\"delta_tokens\":left[\"total_tokens\"]-right[\"total_tokens\"]"
+        }
+      ],
+      "expect": "comparison uses each role ceiling and reports actual independent-call token difference"
+    },
+    {
+      "test": "test_completed_stage_csv",
+      "name": "report output use as input use",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "\"input_tokens\":inputs,\"output_tokens\":outputs",
+          "new": "\"input_tokens\":outputs,\"output_tokens\":inputs"
+        }
+      ],
+      "expect": "stage rows retain their own input output and supplied failure status"
+    },
+    {
+      "test": "test_completed_stage_csv",
+      "name": "mark failed stage as successful",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "\"status\":stage.status",
+          "new": "\"status\":\"ok\""
+        }
+      ],
+      "expect": "stage rows retain their own input output and supplied failure status"
+    },
+    {
+      "test": "test_completed_stage_csv",
+      "name": "replace original stage with a fixed first-stage index",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "\"stage\":stage.stage",
+          "new": "\"stage\":1"
+        }
+      ],
+      "expect": "stage identities and repeated role calls remain original completion metadata"
+    },
+    {
+      "test": "test_completed_stage_csv",
+      "name": "export optional omissions in the stage loss field",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "\"lost_fact_ids\":fact_ids_text(loss)",
+          "new": "\"lost_fact_ids\":fact_ids_text(key for key in stage.before if key not in stage.forwarded)"
+        }
+      ],
+      "expect": "stage CSV loss fields contain only that summary's required omissions"
+    },
+    {
+      "test": "test_nested_context_scope_boundaries",
+      "name": "forget current scope private notes",
+      "edits": [
+        {
+          "file": "scopes.py",
+          "old": "notes=notes+node.private_notes",
+          "new": "notes=notes"
+        }
+      ],
+      "expect": "branch-local private facts reach their intended descendant role"
+    },
+    {
+      "test": "test_nested_context_scope_boundaries",
+      "name": "discard ancestor scope path",
+      "edits": [
+        {
+          "file": "scopes.py",
+          "old": "path=path+(node.key,)",
+          "new": "path=(node.key,)"
+        }
+      ],
+      "expect": "each scope leaf retains its full branch path and declared child order"
+    },
+    {
+      "test": "test_nested_context_scope_boundaries",
+      "name": "pollute parent context with sibling local inputs",
+      "edits": [
+        {
+          "file": "scopes.py",
+          "old": "for child in node.children:walk(child,path,shared,notes)",
+          "new": "for child in node.children:\n            if hasattr(child,\"shared_facts\"):shared+=child.shared_facts\n            if hasattr(child,\"private_notes\"):notes+=child.private_notes\n            walk(child,path,shared,notes)"
+        }
+      ],
+      "expect": "a same-role leaf in another branch cannot inherit its sibling branch context"
+    },
+    {
+      "test": "test_fixed_design_snapshot",
+      "name": "collapse repeated-recipient messages during persistence",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "payload=asdict(snapshot)",
+          "new": "payload=asdict(snapshot)\n        for call in payload[\"design\"][\"calls\"]:call[\"messages\"]=list({message[\"recipient\"]:message for message in call[\"messages\"]}.values())"
+        }
+      ],
+      "expect": "same-recipient messages retain multiplicity order and exact original text"
+    },
+    {
+      "test": "test_fixed_design_snapshot",
+      "name": "trim addressed message text before persistence",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "payload=asdict(snapshot)",
+          "new": "payload=asdict(snapshot)\n        for call in payload[\"design\"][\"calls\"]:\n            for message in call[\"messages\"]:message[\"content\"]=message[\"content\"].strip()"
+        }
+      ],
+      "expect": "same-recipient messages retain multiplicity order and exact original text"
+    },
+    {
+      "test": "test_loss_aware_fixed_comparison",
+      "name": "omit reviewer calls from fixed-design comparison accounting",
+      "edits": [
+        {
+          "file": "accounting.py",
+          "old": "receipts=prepare_design(design)",
+          "new": "receipts=tuple(row for row in prepare_design(design) if row.usage.role!=\"reviewer\")"
+        }
+      ],
+      "expect": "comparison uses each role ceiling and reports actual independent-call token difference"
+    },
+    {
+      "test": "test_completed_stage_csv",
+      "name": "treat current measured zero stage usage as unknown",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "stage_value(stage);inputs,outputs=usage_fields(stage.usage)",
+          "new": "stage_value(stage);inputs,outputs=usage_fields(stage.usage)\n    inputs=inputs or \"\";outputs=outputs or \"\""
+        }
+      ],
+      "expect": "stage rows retain their own input output and supplied failure status"
+    },
+    {
+      "test": "test_nested_context_scope_boundaries",
+      "name": "deduplicate leaves globally by their local display key",
+      "edits": [
+        {
+          "file": "scopes.py",
+          "old": "return rows",
+          "new": "return list({row[\"path\"][-1]:row for row in rows}.values())"
+        }
+      ],
+      "expect": "each scope leaf retains its full branch path and declared child order"
+    },
+    {
+      "test": "test_nested_context_scope_boundaries",
+      "name": "invent a leaf report row for an accepted empty scope",
+      "edits": [
+        {
+          "file": "scopes.py",
+          "old": "shared=shared+node.shared_facts;notes=notes+node.private_notes",
+          "new": "shared=shared+node.shared_facts;notes=notes+node.private_notes\n        if not node.children:rows.append({\"path\":path,\"role\":\"\",\"visible\":tuple(sorted(fact_map(shared))),\"missing\":()})"
+        }
+      ],
+      "expect": "an accepted empty scope contains no leaf report rows"
+    }
+  ]
+}
