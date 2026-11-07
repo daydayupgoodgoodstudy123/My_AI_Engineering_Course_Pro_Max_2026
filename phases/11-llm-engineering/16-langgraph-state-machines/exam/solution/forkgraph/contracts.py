@@ -88,6 +88,22 @@ def validate_records(records):
         keys.add(key)
     for row in records:
         if row.parent_id is not None and (row.thread_id,row.parent_id) not in keys:raise ValueError("missing scoped parent")
+def index_records(records):
+    """Given full typed/identity/parent validation and one retained scoped index.
+
+    This is the complete catalog preparation used by MemoryBook. The original
+    validate_records remains available unchanged to other local components.
+    All supplied records are checked; no path or record is discarded.
+    """
+    index={}
+    for row in records:
+        if not isinstance(row,Checkpoint):raise ValueError("typed checkpoint")
+        key=checkpoint_key(row)
+        if key in index:raise ValueError("duplicate checkpoint")
+        index[key]=row
+    for row in records:
+        if row.parent_id is not None and (row.thread_id,row.parent_id) not in index:raise ValueError("missing scoped parent")
+    return index
 def complete_checkpoint(row):
     checkpoint_shape(row)
     return asdict(row)

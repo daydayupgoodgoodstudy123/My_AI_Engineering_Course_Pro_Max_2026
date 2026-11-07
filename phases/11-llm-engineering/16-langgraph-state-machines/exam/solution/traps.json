@@ -50,12 +50,17 @@
           "expect": "deep historical fork reports should stay responsive"
         },
         {
-          "name": "complete ancestry responsiveness",
+          "name": "complete path-cycle responsiveness",
           "edits": [
             {
               "file": "forks.py",
-              "old": "row=next(row for row in book.records if row.thread_id==thread_id and row.checkpoint_id==current)",
-              "new": "row=book.by_key[(thread_id,current)]"
+              "old": "seen=[]",
+              "new": "seen=set()"
+            },
+            {
+              "file": "forks.py",
+              "old": "seen.append(current)",
+              "new": "seen.add(current)"
             }
           ],
           "expect": "PASSED"
@@ -129,9 +134,14 @@
       "name": "let a worker mutate the common caller snapshot",
       "edits": [
         {
-          "file": "superstep.py",
-          "old": "by_name[name].run(copy.deepcopy(state))",
-          "new": "by_name[name].run(state)"
+          "file": "superstep_runtime.py",
+          "old": "    \"\"\"Own the initial working state before calling candidate code.\"\"\"\n    return copy.deepcopy(state)",
+          "new": "    \"\"\"Own the initial working state before calling candidate code.\"\"\"\n    return state"
+        },
+        {
+          "file": "superstep_runtime.py",
+          "old": "    \"\"\"Own every input passed to one local worker invocation.\"\"\"\n    return copy.deepcopy(state)",
+          "new": "    \"\"\"Own every input passed to one local worker invocation.\"\"\"\n    return state"
         }
       ],
       "expect": "every worker reads only its independent common pre-step snapshot"
@@ -261,9 +271,14 @@
       "name": "fresh: outer-only copy shares nested caller and worker state",
       "edits": [
         {
-          "file": "superstep.py",
-          "old": "by_name[name].run(copy.deepcopy(state))",
-          "new": "by_name[name].run(dict(state))"
+          "file": "superstep_runtime.py",
+          "old": "    \"\"\"Own the initial working state before calling candidate code.\"\"\"\n    return copy.deepcopy(state)",
+          "new": "    \"\"\"Own the initial working state before calling candidate code.\"\"\"\n    return dict(state)"
+        },
+        {
+          "file": "superstep_runtime.py",
+          "old": "    \"\"\"Own every input passed to one local worker invocation.\"\"\"\n    return copy.deepcopy(state)",
+          "new": "    \"\"\"Own every input passed to one local worker invocation.\"\"\"\n    return dict(state)"
         }
       ],
       "expect": "every worker reads only its independent common pre-step snapshot"
@@ -327,6 +342,95 @@
         }
       ],
       "expect": "branch labels do not replace checkpoint identities along real parent paths"
+    },
+    {
+      "test": "test_historical_fork_and_complete_ancestry",
+      "name": "validation: retain the old full-history parent scan regression",
+      "edits": [
+        {
+          "file": "forks.py",
+          "old": "row=book.by_key[(thread_id,current)]",
+          "new": "row=next(row for row in book.records if row.thread_id==thread_id and row.checkpoint_id==current)"
+        }
+      ],
+      "expect": "deep historical fork reports should stay responsive"
+    },
+    {
+      "test": "test_historical_fork_and_complete_ancestry",
+      "name": "R1 fresh: accept a genuinely cyclic ancestry as a truncated successful prefix",
+      "edits": [
+        {
+          "file": "forks.py",
+          "old": "if current in seen:raise ValueError(\"checkpoint cycle\")",
+          "new": "if current in seen:break"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_historical_fork_and_complete_ancestry",
+      "name": "R1 fresh: retain visited checkpoint identities across independent ancestry requests",
+      "edits": [
+        {
+          "file": "forks.py",
+          "old": "rows=[];seen=set();current=checkpoint_id",
+          "new": "rows=[];seen=getattr(ancestry,\"_retained_seen\",set());ancestry._retained_seen=seen;current=checkpoint_id"
+        }
+      ],
+      "expect": "ValueError: checkpoint cycle"
+    },
+    {
+      "test": "test_historical_fork_and_complete_ancestry",
+      "name": "R1 fresh: retain all ancestor IDs and edges but project the selected head state onto every snapshot",
+      "edits": [
+        {
+          "file": "forks.py",
+          "old": "    return tuple(reversed(rows))",
+          "new": "    from dataclasses import replace\n    return tuple(replace(row,state=copy.deepcopy(rows[0].state)) for row in reversed(rows))"
+        }
+      ],
+      "expect": "complete fork ancestry retains each historical snapshot state"
+    },
+    {
+      "test": "test_send_superstep_barrier_and_reducers",
+      "name": "R1 fresh: reduce each arrival before invoking later workers",
+      "edits": [
+        {
+          "file": "superstep.py",
+          "old": "        outputs[name]=by_name[name].run(state)",
+          "new": "        outputs[name]=by_name[name].run(state);merge_single(state,outputs[name],reducers)"
+        },
+        {
+          "file": "superstep.py",
+          "old": "    for name in names:merge_single(merged,outputs[name],reducers)",
+          "new": "    merged=state"
+        }
+      ],
+      "expect": "every worker reads only its independent common pre-step snapshot"
+    },
+    {
+      "test": "test_send_superstep_barrier_and_reducers",
+      "name": "R1 fresh: omit a completed worker with an empty delta from declaration-ordered evidence",
+      "edits": [
+        {
+          "file": "superstep.py",
+          "old": "tuple((name,outputs[name]) for name in names)",
+          "new": "tuple((name,outputs[name]) for name in names if outputs[name])"
+        }
+      ],
+      "expect": "every declared worker retains its completed update evidence"
+    },
+    {
+      "test": "test_send_superstep_barrier_and_reducers",
+      "name": "R1 fresh: call workers again to rebuild evidence instead of returning collected deltas",
+      "edits": [
+        {
+          "file": "superstep.py",
+          "old": "tuple((name,outputs[name]) for name in names)",
+          "new": "tuple((name,by_name[name].run(state)) for name in names)"
+        }
+      ],
+      "expect": "every worker reads only its independent common pre-step snapshot"
     }
   ]
 }

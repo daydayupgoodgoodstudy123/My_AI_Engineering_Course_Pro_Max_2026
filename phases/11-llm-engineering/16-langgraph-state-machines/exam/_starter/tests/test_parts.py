@@ -23,6 +23,31 @@ def consume_deep(result,records,calls):
     last=result.checkpoint
     assert result.records[:-1]==records and result.ancestry[-1]==last and (last.thread_id,last.checkpoint_id,last.parent_id,last.branch_id,last.next_node,last.schema_version,last.state)==("deep","fork","c"+str(n-1),"new","END",1,{"messages":[{"step":n-1},{"result":n-1}],"pending":{},"budget":0,"trace/~":[]}),"deep fork results preserve selected parent and complete new branch state"
 
+def pressure_expected(n):
+    reducers={"messages":"append","pending":"overwrite","budget":"overwrite","trace/~":"append"}
+    rows=[]
+    for i in range(n):
+        rows.append(("deep","c"+str(i),"c"+str(i-1) if i else None,"main","tools",1,
+                     {"messages":[{"step":i}],"pending":{"tools":{"value":i}},"budget":100,"trace/~":[]},
+                     dict(reducers)))
+    rows.append(("deep","fork","c"+str(n-1),"new","END",1,
+                 {"messages":[{"step":n-1},{"result":n-1}],"pending":{},"budget":0,"trace/~":[]},
+                 dict(reducers)))
+    return tuple(rows)
+
+def pressure_fields(row):
+    return (row.thread_id,row.checkpoint_id,row.parent_id,row.branch_id,
+            row.next_node,row.schema_version,row.state,row.reducers)
+
+def consume_pressure(result,expected,calls):
+    assert calls==[len(expected)-2],"a complete pressure fork executes exactly the selected local action"
+    assert len(result.ancestry)==len(expected) and len(result.records)==len(expected),"complete pressure results retain every ancestry and stored checkpoint"
+    for actual,wanted in zip(result.ancestry,expected):
+        assert pressure_fields(actual)==wanted,"pressure ancestry preserves every ordered checkpoint field"
+    for actual,wanted in zip(result.records,expected):
+        assert pressure_fields(actual)==wanted,"pressure stored records preserve every ordered checkpoint field"
+    assert pressure_fields(result.checkpoint)==expected[-1],"the published pressure head retains its complete selected parent and branch state"
+
 def apply_patch(state,operations):
     value=copy.deepcopy(state)
     for op in operations:
@@ -47,13 +72,30 @@ def test_historical_fork_and_complete_ancestry():
     assert result.checkpoint.state["messages"]==before[0].state["messages"]+[{"role":"tool","content":"7"},{"role":"tool","content":"7"}],"the declared append reducer retains existing and duplicate new messages"
     assert (result.checkpoint.parent_id,result.checkpoint.branch_id,result.checkpoint.state["pending"],result.checkpoint.state["budget"])==("old","A",{},99),"a fork advances only the explicitly selected historical parent"
     assert tuple(x.checkpoint_id for x in result.ancestry)==("old","fork-a") and calls==[7],"fork ancestry follows parent links rather than replaying later unrelated checkpoints"
+    assert result.ancestry==(before[0],result.checkpoint),"complete fork ancestry retains each historical snapshot state"
     sibling=fork_and_trace(result.records,ForkRequest("t","old","fork-b","B","tools"),{"tools":action})
     assert result.checkpoint.state==sibling.checkpoint.state and result.checkpoint.branch_id!=sibling.checkpoint.branch_id and result.records[0]==before[0],"sibling branches independently advance the same immutable old state"
     with pytest.raises(KeyError):fork_and_trace(records,ForkRequest("t","unknown","absent","X","tools"),{"tools":action})
+    from forkgraph.memory import MemoryBook
+    from forkgraph.forks import ancestry
+    class BoundedIndex(dict):
+        def __init__(self,values):super().__init__(values);self.reads=0
+        def __getitem__(self,key):
+            self.reads+=1
+            assert self.reads<=8,"cyclic ancestry must terminate within its finite recorded path"
+            return super().__getitem__(key)
+    cyclic=MemoryBook((checkpoint("cycle","a","b"),checkpoint("cycle","b","a")))
+    cyclic.by_key=BoundedIndex(cyclic.by_key)
+    with pytest.raises(ValueError,match="checkpoint cycle"):ancestry(cyclic,"cycle","a")
     records=deep_history();calls=[]
     def deep_action(payload):calls.append(payload["value"]);return {"messages":[{"result":payload["value"]}],"budget":0}
     started=time.perf_counter();large=fork_and_trace(records,ForkRequest("deep",records[-1].checkpoint_id,"fork","new","tools"),{"tools":deep_action});consume_deep(large,records,calls);elapsed=time.perf_counter()-started
     assert elapsed<0.2,"deep historical fork reports should stay responsive"
+
+    pressure=deep_history(34000);expected_pressure=pressure_expected(34000);pressure_calls=[]
+    def pressure_action(payload):pressure_calls.append(payload["value"]);return {"messages":[{"result":payload["value"]}],"budget":0}
+    pressure_started=time.perf_counter();pressure_result=fork_and_trace(pressure,ForkRequest("deep",pressure[-1].checkpoint_id,"fork","new","tools"),{"tools":pressure_action});consume_pressure(pressure_result,expected_pressure,pressure_calls);pressure_elapsed=time.perf_counter()-pressure_started
+    assert pressure_elapsed<0.25,"complete long ancestry reports should remain responsive"
 
 @pytest.mark.skip("Part 2")
 def test_immutable_checkpoint_artifacts(tmp_path):
@@ -98,6 +140,17 @@ def test_send_superstep_barrier_and_reducers():
     assert empty.state==state and empty.worker_updates==(),"an empty Send batch preserves the complete pre-state"
     with pytest.raises(ValueError,match="worker order"):run_superstep(state,reducers,(Worker("a",lambda s:{}),),("missing",))
     with pytest.raises(ValueError,match="worker order"):run_superstep(state,reducers,(Worker("a",lambda s:{}),),("a","a"))
+
+    source_delta={"messages":[{"owned":[1]}]}
+    def owned_first(value):return source_delta
+    def owned_second(value):source_delta["messages"][0]["owned"].append(2);return {"trace/~":["later"]}
+    guarded=run_superstep(state,reducers,(Worker("one",owned_first),Worker("two",owned_second)),("one","two"))
+    assert guarded.worker_updates[0][1]=={"messages":[{"owned":[1]}]} and guarded.state["messages"]==[{"seed":1},{"owned":[1]}],"the supplied runtime retains each completed update before external objects change"
+    source_delta["messages"][0]["owned"].append(3)
+    guarded.state["messages"][1]["owned"].append(4)
+    assert guarded.worker_updates[0][1]=={"messages":[{"owned":[1]}]} and state==original,"published state and each update evidence have separate owned nested containers"
+    evidence=run_superstep(state,reducers,(Worker("noop",lambda value:{}),Worker("message",lambda value:{"messages":[{"worker":"message"}]})),("message","noop"))
+    assert evidence.worker_updates==(("noop",{}),("message",{"messages":[{"worker":"message"}]})) and evidence.completion_order==("message","noop"),"every declared worker retains its completed update evidence"
 
 @pytest.mark.skip("Part 4")
 def test_committed_json_patch_stream():

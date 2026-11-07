@@ -1,9 +1,9 @@
 """Given owned in-memory checkpoint catalog and local fixture action dispatch."""
-from .contracts import validate_records,checkpoint_key,checkpoint_shape,pop_pending,Checkpoint,ForkTrace
+from .contracts import index_records,checkpoint_key,checkpoint_shape,pop_pending,Checkpoint,ForkTrace
 from .forks import choose_checkpoint,copy_fork_state,merge_single,ancestry
 class MemoryBook:
     def __init__(self,records):
-        self.records=list(records);validate_records(self.records);self.by_key={checkpoint_key(row):row for row in self.records}
+        self.records=list(records);self.by_key=index_records(self.records)
     def commit(self,row):
         checkpoint_shape(row)
         if checkpoint_key(row) in self.by_key:raise ValueError("immutable checkpoint identity")

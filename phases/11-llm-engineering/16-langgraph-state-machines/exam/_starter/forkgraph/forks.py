@@ -24,8 +24,8 @@ def ancestry(book,thread_id,checkpoint_id):
     Preserve every checkpoint and branch edge; reject an actual repeated ancestor
     on this path. Other branches sharing an ancestor do not form a cycle.
     """
-    rows=[];seen=set();current=checkpoint_id
+    rows=[];seen=[];current=checkpoint_id
     while current is not None:
         if current in seen:raise ValueError("checkpoint cycle")
-        seen.add(current);row=next(row for row in book.records if row.thread_id==thread_id and row.checkpoint_id==current);rows.append(row);current=row.parent_id
+        seen.append(current);row=book.by_key[(thread_id,current)];rows.append(row);current=row.parent_id
     return tuple(reversed(rows))
