@@ -1,0 +1,368 @@
+{
+  "package": "routinehop",
+  "tests": [
+    "test_refund_receipt_and_last_k_guard",
+    "test_caller_snapshot_and_runtime_rebinding",
+    "test_owner_bound_batch_control_returns",
+    "test_typed_routine_receipt_ndjson",
+    "test_nested_independent_caller_runs"
+  ],
+  "layers": [
+    {
+      "test": "test_refund_receipt_and_last_k_guard",
+      "steps": [
+        {
+          "name": "opaque order token producer",
+          "edits": [],
+          "expect": "KeyError"
+        },
+        {
+          "name": "preserve the exact order token",
+          "edits": [
+            {
+              "file": "intake.py",
+              "old": "return ReadyRefund(str(int(token)))",
+              "new": "return ReadyRefund(token)"
+            }
+          ],
+          "expect": "missing order information asks before any refund invocation"
+        },
+        {
+          "name": "ask for absent order information",
+          "edits": [
+            {
+              "file": "intake.py",
+              "old": "if token is None:return ReadyRefund(\"42\")",
+              "new": "if token is None:return AskForOrder()"
+            }
+          ],
+          "expect": "handoff receipts identify the outgoing routine"
+        },
+        {
+          "name": "attribute the transfer to its outgoing routine",
+          "edits": [
+            {
+              "file": "intake.py",
+              "old": "return Transfer(call_id,to_name,tool,to_name)",
+              "new": "return Transfer(call_id,from_name,tool,to_name)"
+            }
+          ],
+          "expect": "complete typed handoff replay remains responsive"
+        },
+        {
+          "name": "maintain the actual last three typed edges online",
+          "edits": [
+            {
+              "file": "guard.py",
+              "old": "\"\"\"Online last-three typed handoff edge guard; complete audit is retained by the caller.\"\"\"\nfrom collections import deque\nfrom .models import Transfer\nfrom .support import is_two_agent_ring\nclass LastKLoopGuard:\n    def __init__(self):self._edges=deque(maxlen=3);self.stopped=False\n    def observe(self,event,audit):\n        \"\"\"Return sticky exit after three consecutive handoffs alternate between two routines.\n\n        Ordinary notes do not consume a handoff slot; each guard belongs to one run.\n        The caller supplies its complete already-appended audit for diagnostics.\n        \"\"\"\n        if self.stopped:return True\n        self._edges.clear()\n        for record in audit:\n            if isinstance(record,Transfer):self._edges.append(record)\n        self.stopped=is_two_agent_ring(self._edges)\n        return self.stopped\n",
+              "new": "\"\"\"Online last-three typed handoff edge guard; complete audit is retained by the caller.\"\"\"\nfrom collections import deque\nfrom .models import Transfer\nfrom .support import is_two_agent_ring\nclass LastKLoopGuard:\n    def __init__(self):self._edges=deque(maxlen=3);self.stopped=False\n    def observe(self,event,audit):\n        \"\"\"Return sticky exit after three consecutive handoffs alternate between two routines.\n\n        Ordinary notes do not consume a handoff slot; each guard belongs to one run.\n        The caller supplies its complete already-appended audit for diagnostics.\n        \"\"\"\n        if self.stopped:return True\n        if isinstance(event,Transfer):self._edges.append(event)\n        self.stopped=is_two_agent_ring(self._edges)\n        return self.stopped\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_refund_receipt_and_last_k_guard",
+      "name": "discard ordinary notes from the retained handoff ring history",
+      "edits": [
+        {
+          "file": "guard.py",
+          "old": "if isinstance(event,Transfer):self._edges.append(event)",
+          "new": "if isinstance(event,Transfer):self._edges.append(event)\n        else:self._edges.clear()"
+        }
+      ],
+      "expect": "only typed handoffs consume ring slots"
+    },
+    {
+      "test": "test_refund_receipt_and_last_k_guard",
+      "name": "require three observed edges without checking two-routine alternation",
+      "edits": [
+        {
+          "file": "guard.py",
+          "old": "self.stopped=is_two_agent_ring(self._edges)",
+          "new": "self.stopped=len(self._edges)==3"
+        }
+      ],
+      "expect": "complete replay retains every observation receipt"
+    },
+    {
+      "test": "test_refund_receipt_and_last_k_guard",
+      "name": "use a numeric truthiness fallback for explicit zero order",
+      "edits": [
+        {
+          "file": "intake.py",
+          "old": "return ReadyRefund(token)",
+          "new": "return ReadyRefund(token if int(token)else\"42\")"
+        }
+      ],
+      "expect": "KeyError"
+    },
+    {
+      "test": "test_caller_snapshot_and_runtime_rebinding",
+      "name": "serialize the runtime Agent rather than its persisted identity",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "'active':continuation.active.name",
+          "new": "'active':continuation.active"
+        }
+      ],
+      "expect": "TypeError"
+    },
+    {
+      "test": "test_caller_snapshot_and_runtime_rebinding",
+      "name": "save only the most recent receipt instead of the caller continuation",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "for r in continuation.history]",
+          "new": "for r in continuation.history[-1:]]"
+        }
+      ],
+      "expect": "reopening retains complete ordered caller observations"
+    },
+    {
+      "test": "test_caller_snapshot_and_runtime_rebinding",
+      "name": "rebind the declared initial routine instead of the persisted active routine",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "catalog.agent(document['active'])",
+          "new": "catalog.agent(catalog.names()[0])"
+        }
+      ],
+      "expect": "reopening retains complete ordered caller observations"
+    },
+    {
+      "test": "test_caller_snapshot_and_runtime_rebinding",
+      "name": "ignore the provided runtime catalog and reconstruct a tool-free Agent",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "catalog.agent(document['active'])",
+          "new": "__import__('routinehop.models',fromlist=['Agent']).Agent(document['active'],'refund')"
+        }
+      ],
+      "expect": "reopening retains complete ordered caller observations"
+    },
+    {
+      "test": "test_owner_bound_batch_control_returns",
+      "name": "label original-owner functions with the destination routine",
+      "edits": [
+        {
+          "file": "batch.py",
+          "old": "BoundCall(active,call,catalog.function(active,call.tool))",
+          "new": "BoundCall(catalog.agent('B'),call,catalog.function(active,call.tool))"
+        }
+      ],
+      "expect": "every batch function is bound to the original routine"
+    },
+    {
+      "test": "test_owner_bound_batch_control_returns",
+      "name": "treat an actual Agent return as ordinary formatted tool text",
+      "edits": [
+        {
+          "file": "batch.py",
+          "old": "return AgentReturn(value)if isinstance(value,Agent)else DataReturn(value)",
+          "new": "return DataReturn(str(value))"
+        }
+      ],
+      "expect": "the first genuine Agent return transfers control"
+    },
+    {
+      "test": "test_owner_bound_batch_control_returns",
+      "name": "treat an Agent-shaped data dictionary as a control object",
+      "edits": [
+        {
+          "file": "batch.py",
+          "old": "isinstance(value,Agent)",
+          "new": "isinstance(value,(Agent,dict))"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_owner_bound_batch_control_returns",
+      "name": "execute calls after the first control transfer",
+      "edits": [
+        {
+          "file": "batch.py",
+          "old": "if transferred:",
+          "new": "if False:"
+        }
+      ],
+      "expect": "the first genuine Agent return transfers control"
+    },
+    {
+      "test": "test_owner_bound_batch_control_returns",
+      "name": "abandon the batch on a declared ordinary tool failure",
+      "edits": [
+        {
+          "file": "batch.py",
+          "old": "receipts.append(CallFailed(call.call_id,item.owner.name,call.tool,str(error)));continue",
+          "new": "receipts.append(CallFailed(call.call_id,item.owner.name,call.tool,str(error)));break"
+        }
+      ],
+      "expect": "a declared ordinary tool failure does not create a handoff"
+    },
+    {
+      "test": "test_typed_routine_receipt_ndjson",
+      "name": "render structured tool results as Python repr strings",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "common['result']=receipt.value",
+          "new": "common['result']=repr(receipt.value)"
+        }
+      ],
+      "expect": "each typed receipt keeps its own complete domain fields"
+    },
+    {
+      "test": "test_typed_routine_receipt_ndjson",
+      "name": "publish a skipped call reason as a fabricated tool result",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "common['reason']=receipt.reason",
+          "new": "common['result']=receipt.reason"
+        }
+      ],
+      "expect": "each typed receipt keeps its own complete domain fields"
+    },
+    {
+      "test": "test_typed_routine_receipt_ndjson",
+      "name": "replace the handoff destination with its outgoing sender",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "target=receipt.target",
+          "new": "target=receipt.sender"
+        }
+      ],
+      "expect": "each typed receipt keeps its own complete domain fields"
+    },
+    {
+      "test": "test_nested_independent_caller_runs",
+      "name": "reset active routine before every own batch",
+      "edits": [
+        {
+          "file": "runs.py",
+          "old": "active=report.active",
+          "new": "active=initial"
+        }
+      ],
+      "expect": "a caller run continues from its own preceding batch"
+    },
+    {
+      "test": "test_nested_independent_caller_runs",
+      "name": "leak a child final routine into its caller",
+      "edits": [
+        {
+          "file": "runs.py",
+          "old": "steps.append(ChildAudit(step.step_id,child))",
+          "new": "steps.append(ChildAudit(step.step_id,child));active=catalog.agent(child.final)"
+        }
+      ],
+      "expect": "a child run cannot change its caller active routine"
+    },
+    {
+      "test": "test_nested_independent_caller_runs",
+      "name": "start an independent child from its parent current routine",
+      "edits": [
+        {
+          "file": "runs.py",
+          "old": "child=audit_run(step.run,catalog,batch_runner)",
+          "new": "child=audit_run(__import__(\"dataclasses\").replace(step.run,initial=active.name),catalog,batch_runner)"
+        }
+      ],
+      "expect": "a child run cannot change its caller active routine"
+    },
+    {
+      "test": "test_nested_independent_caller_runs",
+      "name": "include independent child receipts in caller history",
+      "edits": [
+        {
+          "file": "runs.py",
+          "old": "steps.append(ChildAudit(step.step_id,child))",
+          "new": "steps.append(ChildAudit(step.step_id,child));history.extend(child.history)"
+        }
+      ],
+      "expect": "caller history contains only its own executed batches"
+    },
+    {
+      "test": "test_caller_snapshot_and_runtime_rebinding",
+      "name": "deduplicate equal transcript receipts",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "[encode_receipt(r)for r in continuation.history]",
+          "new": "[encode_receipt(r)for i,r in enumerate(continuation.history)if r not in continuation.history[:i]]"
+        }
+      ],
+      "expect": "repeated caller receipts retain their occurrence order"
+    },
+    {
+      "test": "test_owner_bound_batch_control_returns",
+      "name": "exact class equality excludes Agent subclasses",
+      "edits": [
+        {
+          "file": "batch.py",
+          "old": "isinstance(value,Agent)",
+          "new": "type(value) is Agent "
+        }
+      ],
+      "expect": "Agent subclasses retain control-return semantics"
+    },
+    {
+      "test": "test_owner_bound_batch_control_returns",
+      "name": "generator binding postpones original-owner lookup until invocation",
+      "edits": [
+        {
+          "file": "batch.py",
+          "old": "return tuple(BoundCall(active,call,catalog.function(active,call.tool))for call in calls)",
+          "new": "return (BoundCall(active,call,catalog.function(active,call.tool))for call in calls)"
+        }
+      ],
+      "expect": "all original-owner lookups precede every invocation"
+    },
+    {
+      "test": "test_typed_routine_receipt_ndjson",
+      "name": "replace routine reply sender with generic assistant role",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "if kind=='reply':return{'kind':kind,'sender':receipt.sender,'content':receipt.content}",
+          "new": "if kind=='reply':return{'kind':kind,'sender':'assistant','content':receipt.content}"
+        }
+      ],
+      "expect": "each typed receipt keeps its own complete domain fields"
+    },
+    {
+      "test": "test_nested_independent_caller_runs",
+      "name": "append prior own history again on every subsequent batch",
+      "edits": [
+        {
+          "file": "runs.py",
+          "old": "history.extend(report.receipts);active=report.active",
+          "new": "history.extend(tuple(history)+report.receipts);active=report.active"
+        }
+      ],
+      "expect": "caller history contains only its own executed batches"
+    },
+    {
+      "test": "test_nested_independent_caller_runs",
+      "name": "run a batch a second time to obtain the active component separately",
+      "edits": [
+        {
+          "file": "runs.py",
+          "old": "report=batch_runner(active,step.calls,catalog)",
+          "new": "report=batch_runner(active,step.calls,catalog)\n            report=type(report)(report.owner,batch_runner(active,step.calls,catalog).active,report.receipts)"
+        }
+      ],
+      "expect": "caller composition executes each declared own batch exactly once"
+    }
+  ]
+}
