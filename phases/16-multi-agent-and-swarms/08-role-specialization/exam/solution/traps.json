@@ -1,0 +1,412 @@
+{
+  "package": "sopforge",
+  "tests": [
+    "test_complete_trusted_verification",
+    "test_revision_bound_role_store",
+    "test_role_owned_clarification_resume",
+    "test_completed_verifier_junit",
+    "test_nested_role_artifact_contracts"
+  ],
+  "layers": [
+    {
+      "test": "test_complete_trusted_verification",
+      "steps": [
+        {
+          "name": "critic-approved literal has no declared callable",
+          "edits": [],
+          "expect": "KeyError"
+        },
+        {
+          "name": "module-level structural critic",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "def critic(spec,artifact):\n    \"\"\"Review declared module-level function structure without executing tests.\n\n    This finite structural critic requires a named def with a return statement;\n    literal/comment text is not a definition. Approval does not prove behavior.\n    \"\"\"\n    notes=() if 'def' in artifact.code and 'return' in artifact.code and spec.task_name in artifact.code else ('missing declared function with return',)\n    return CriticReport(spec.spec_id,spec.revision,artifact.artifact_id,artifact.revision,not notes,notes)\n",
+              "new": "def critic(spec,artifact):\n    \"\"\"Review declared module-level function structure without executing tests.\n\n    This finite structural critic requires a named def with a return statement;\n    literal/comment text is not a definition. Approval does not prove behavior.\n    \"\"\"\n    try:tree=ast.parse(artifact.code)\n    except SyntaxError:notes=('invalid Python syntax',)\n    else:\n        functions=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name==spec.task_name]\n        notes=() if functions and any(isinstance(n,ast.Return) for n in ast.walk(functions[0])) else ('missing declared function with return',)\n    return CriticReport(spec.spec_id,spec.revision,artifact.artifact_id,artifact.revision,not notes,notes)\n"
+            }
+          ],
+          "expect": "verification follows the declared callable"
+        },
+        {
+          "name": "declared spec function binding",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "fn=callable_lookup(program,'add_two',session)",
+              "new": "fn=callable_lookup(program,spec.task_name,session)"
+            }
+          ],
+          "expect": "all declared cases retain independent"
+        },
+        {
+          "name": "complete per-case evidence",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "        if item.kind=='passed':return make_verifier_report(spec,artifact,results)\n",
+              "new": ""
+            }
+          ],
+          "expect": "complete immutable artifact verification remains responsive"
+        },
+        {
+          "name": "one compilation and namespace per verification",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "    session=ExecutionSession(artifact)\n    results=[]\n    for case in spec.cases:\n        program=compile_trusted_artifact(artifact);fn=callable_lookup(program,spec.task_name,session)",
+              "new": "    session=ExecutionSession(artifact)\n    program=compile_trusted_artifact(artifact);fn=callable_lookup(program,spec.task_name,session)\n    results=[]\n    for case in spec.cases:"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_complete_trusted_verification",
+      "name": "reuse one artifact namespace across verification calls",
+      "edits": [
+        {
+          "file": "primitives.py",
+          "old": "    session=ExecutionSession(artifact)",
+          "new": "    cache=getattr(verifier,'_sessions',{})\n    key=(artifact.artifact_id,artifact.revision,artifact.spec_id,artifact.spec_revision,artifact.code)\n    if key not in cache:cache[key]=ExecutionSession(artifact);verifier._sessions=cache\n    session=cache[key]"
+        }
+      ],
+      "expect": "one artifact execution shares its namespace"
+    },
+    {
+      "test": "test_complete_trusted_verification",
+      "name": "turn structural approval into an operator-specific correctness guess",
+      "edits": [
+        {
+          "file": "primitives.py",
+          "old": "not notes,notes)",
+          "new": "not notes and '*' not in artifact.code,notes)"
+        }
+      ],
+      "expect": "verification follows the declared callable"
+    },
+    {
+      "test": "test_revision_bound_role_store",
+      "name": "coalesce distinct artifact revisions by retaining only the first bundle",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            for bundle in snapshot.bundles:\n                a=bundle.artifact",
+          "new": "            for bundle in snapshot.bundles[:1]:\n                a=bundle.artifact"
+        }
+      ],
+      "expect": "reopening retains ordered artifact revisions"
+    },
+    {
+      "test": "test_revision_bound_role_store",
+      "name": "persist a critic report in the verifier role slot",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "write_record(db,'verifier',a.artifact_id,a.revision,bundle.verifier)",
+          "new": "write_record(db,'verifier',a.artifact_id,a.revision,bundle.critic)"
+        }
+      ],
+      "expect": "AttributeError"
+    },
+    {
+      "test": "test_revision_bound_role_store",
+      "name": "join role reports by artifact name without revision",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "role_by={(kind,entity,revision):value for kind,entity,revision,value in rows}",
+          "new": "role_by={(kind,entity):value for kind,entity,revision,value in rows}"
+        },
+        {
+          "file": "store.py",
+          "old": "role_by[('critic',entity,revision)],role_by[('verifier',entity,revision)]",
+          "new": "role_by[('critic',entity)],role_by[('verifier',entity)]"
+        }
+      ],
+      "expect": "critic-artifact-link"
+    },
+    {
+      "test": "test_revision_bound_role_store",
+      "name": "sort artifacts by revision instead of saved dossier order",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "        for kind,entity,revision,value in rows:\n            if kind!='artifact':continue",
+          "new": "        for kind,entity,revision,value in sorted(rows,key=lambda row:row[2]):\n            if kind!='artifact':continue"
+        }
+      ],
+      "expect": "reopening retains ordered artifact revisions"
+    },
+    {
+      "test": "test_role_owned_clarification_resume",
+      "name": "direct every missing detail to planner instead of the owning role",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "step_id,f,field_owner(state.spec,f))",
+          "new": "step_id,f,'planner')"
+        }
+      ],
+      "expect": "only the missing required input produces a question"
+    },
+    {
+      "test": "test_role_owned_clarification_resume",
+      "name": "accept a question id without checking answer owner and field binding",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "(q.question_id,q.spec_id,q.spec_revision,q.field,q.owner)==(answer.question_id,answer.spec_id,answer.spec_revision,answer.field,answer.owner)",
+          "new": "q.question_id==answer.question_id"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_role_owned_clarification_resume",
+      "name": "invalidate all step slots after any answered field",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "if answer.field in step.requires else step for step in state.steps",
+          "new": "for step in state.steps"
+        }
+      ],
+      "expect": "only field-dependent artifact and report slots"
+    },
+    {
+      "test": "test_role_owned_clarification_resume",
+      "name": "execute a step while its required answer is missing",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    if required_missing(state.spec,step.requires):return required_field_questions(state,step_id)\n",
+          "new": ""
+        }
+      ],
+      "expect": "a blocked executor does not invent information"
+    },
+    {
+      "test": "test_role_owned_clarification_resume",
+      "name": "treat structural critic approval as resumed deterministic success",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "bundle.critic.approved and bundle.verifier.executed and bundle.verifier.passed else 'rejected'",
+          "new": "bundle.critic.approved else 'rejected'"
+        }
+      ],
+      "expect": "critic acceptance cannot substitute"
+    },
+    {
+      "test": "test_role_owned_clarification_resume",
+      "name": "rerun an already retained completed slot",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    if step.bundle is not None:return state\n",
+          "new": ""
+        }
+      ],
+      "expect": "only the ready blocked step resumes once"
+    },
+    {
+      "test": "test_completed_verifier_junit",
+      "name": "derive every case outcome from critic approval",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "kind=outcome_kind(case);body='';message=''",
+          "new": "kind='passed' if bundle.critic.approved else outcome_kind(case);body='';message=''"
+        }
+      ],
+      "expect": "JUnit suite counts follow actual completed case evidence"
+    },
+    {
+      "test": "test_completed_verifier_junit",
+      "name": "omit successful verifier cases from the JUnit report",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "for case in bundle.verifier.cases:",
+          "new": "for case in (c for c in bundle.verifier.cases if c.kind!='passed'):"
+        }
+      ],
+      "expect": "JUnit suite counts follow actual completed case evidence"
+    },
+    {
+      "test": "test_completed_verifier_junit",
+      "name": "replace deterministic mismatch details with critic notes",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "message=f'expected {case.expected!r}, got {case.got!r}'",
+          "new": "message=';'.join(bundle.critic.notes)"
+        }
+      ],
+      "expect": "mismatch diagnostics retain the deterministic"
+    },
+    {
+      "test": "test_nested_role_artifact_contracts",
+      "name": "audit only the root role and discard nested SOP stages",
+      "edits": [
+        {
+          "file": "sop.py",
+          "old": "children=tuple(visit(child,catalog.child_path(path,child))for child in stage.children)",
+          "new": "children=()"
+        }
+      ],
+      "expect": "IndexError"
+    },
+    {
+      "test": "test_nested_role_artifact_contracts",
+      "name": "silently accept absent required role inputs",
+      "edits": [
+        {
+          "file": "sop.py",
+          "old": "if port not in inputs:issues.append((path,'missing-input',port));continue",
+          "new": "if port not in inputs:continue"
+        }
+      ],
+      "expect": "a nested stage cannot invent a required input"
+    },
+    {
+      "test": "test_nested_role_artifact_contracts",
+      "name": "silently suppress an unproduced export request",
+      "edits": [
+        {
+          "file": "sop.py",
+          "old": "if port not in outputs:issues.append((path,'unproduced-export',port));continue",
+          "new": "if port not in outputs:continue"
+        }
+      ],
+      "expect": "a nested stage cannot invent a required input"
+    },
+    {
+      "test": "test_nested_role_artifact_contracts",
+      "name": "allow any produced record to fulfill a role output port",
+      "edits": [
+        {
+          "file": "sop.py",
+          "old": "if port!=output_port or record.producer!=stage.role or record.kind!=output_kind or catalog.payload_kind(record)!=output_kind:",
+          "new": "if port!=output_port:"
+        },
+        {
+          "file": "sop.py",
+          "old": "if port==output_port and record.producer==stage.role and record.kind==output_kind and catalog.payload_kind(record)==output_kind:visible.append",
+          "new": "if port==output_port:visible.append"
+        }
+      ],
+      "expect": "critic and verifier outputs have distinct producer"
+    },
+    {
+      "test": "test_nested_role_artifact_contracts",
+      "name": "trust declared kind strings without checking actual typed payloads",
+      "edits": [
+        {
+          "file": "sop.py",
+          "old": " or catalog.payload_kind(record)!=kind",
+          "new": ""
+        },
+        {
+          "file": "sop.py",
+          "old": " or catalog.payload_kind(record)!=output_kind",
+          "new": ""
+        },
+        {
+          "file": "sop.py",
+          "old": " and catalog.payload_kind(record)==output_kind",
+          "new": ""
+        }
+      ],
+      "expect": "a declared kind label cannot replace"
+    },
+    {
+      "test": "test_revision_bound_role_store",
+      "name": "discard planner specifications without an executed artifact",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "            for spec in snapshot.specs:write_record(db,'spec',spec.spec_id,spec.revision,spec)",
+          "new": "            used={(b.spec.spec_id,b.spec.revision) for b in snapshot.bundles}\n            for spec in snapshot.specs:\n                if (spec.spec_id,spec.revision) in used:write_record(db,'spec',spec.spec_id,spec.revision,spec)"
+        }
+      ],
+      "expect": "planner-only specifications remain in the complete dossier"
+    },
+    {
+      "test": "test_role_owned_clarification_resume",
+      "name": "resume a different step while another target remains blocked",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    if state.blocked_step is not None and state.blocked_step!=step_id:raise ValueError('another step is blocked')\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_role_owned_clarification_resume",
+      "name": "run every empty step slot when only one target is resumed",
+      "edits": [
+        {
+          "file": "flow.py",
+          "old": "    artifact=executor(state.spec,step_id);bundle=VerificationDesk().inspect(state.spec,artifact)",
+          "new": "    artifacts=[executor(state.spec,s.step_id) for s in state.steps if s.bundle is None]\n    artifact=artifacts[0];bundle=VerificationDesk().inspect(state.spec,artifact)"
+        }
+      ],
+      "expect": "only the ready blocked step resumes once"
+    },
+    {
+      "test": "test_completed_verifier_junit",
+      "name": "label JUnit cases with artifact revision instead of specification revision",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "bundle.spec.spec_id+'@'+str(bundle.spec.revision)+':'+bundle.spec.task_name,case.case_id",
+          "new": "bundle.spec.spec_id+'@'+str(bundle.artifact.revision)+':'+bundle.spec.task_name,case.case_id"
+        }
+      ],
+      "expect": "case identity uses the specification revision independently of artifact revision"
+    },
+    {
+      "test": "test_completed_verifier_junit",
+      "name": "reuse the first case arguments for every exception entry",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "            elif kind=='error':message=case.error_type+': '+case.error_message;body=f'args={case.args!r}'",
+          "new": "            elif kind=='error':message=case.error_type+': '+case.error_message;body=f'args={bundle.verifier.cases[0].args!r}'"
+        }
+      ],
+      "expect": "each exception retains its own completed call arguments"
+    },
+    {
+      "test": "test_nested_role_artifact_contracts",
+      "name": "trust matching input kind and payload while ignoring its actual producer",
+      "edits": [
+        {
+          "file": "sop.py",
+          "old": "            if record.producer!=producer or record.kind!=kind or catalog.payload_kind(record)!=kind:issues.append((path,'input-contract',port))",
+          "new": "            if record.kind!=kind or catalog.payload_kind(record)!=kind:issues.append((path,'input-contract',port))"
+        }
+      ],
+      "expect": "a typed input still requires its declared producing role"
+    },
+    {
+      "test": "test_nested_role_artifact_contracts",
+      "name": "publish all produced ports even when the stage does not expose them",
+      "edits": [
+        {
+          "file": "sop.py",
+          "old": "        for port in stage.exposes:",
+          "new": "        for port in tuple(dict.fromkeys(stage.exposes+tuple(outputs))):"
+        }
+      ],
+      "expect": "unexposed valid outputs stay inside their own SOP stage"
+    }
+  ]
+}
