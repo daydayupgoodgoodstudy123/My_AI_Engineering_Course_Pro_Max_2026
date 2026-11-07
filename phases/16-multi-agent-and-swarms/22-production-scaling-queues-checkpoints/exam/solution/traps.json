@@ -1,0 +1,378 @@
+{
+  "package": "outboxflow",
+  "tests": [
+    "test_part1_checkpoint_queue_and_complete_burst",
+    "test_part2_transaction_aware_domain_records",
+    "test_part3_atomic_commit_dispatch_and_recovery",
+    "test_part4_rainbow_actual_bindings_csv",
+    "test_part5_nested_admin_routes_and_run_outputs"
+  ],
+  "layers": [
+    {
+      "test": "test_part1_checkpoint_queue_and_complete_burst",
+      "steps": [
+        {
+          "name": "natural wrong-run state consumed in required_state_reader",
+          "edits": [],
+          "expect": "KeyError: 'balance'"
+        },
+        {
+          "name": "scope checkpoint to its run",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "rows = list(self.records)",
+              "new": "rows = [x for x in self.records if x.run == run]"
+            }
+          ],
+          "expect": "resume consumes the numeric latest checkpoint"
+        },
+        {
+          "name": "choose numeric superstep",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "key=lambda x: str(x.step)",
+              "new": "key=lambda x: x.step"
+            }
+          ],
+          "expect": "new queued input cannot consume an unacknowledged response"
+        },
+        {
+          "name": "retain unacknowledged response",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "elif self.state == 'response':\n            self.response = None\n            self.state = 'idle'",
+              "new": "elif self.state == 'response':\n            return self.response"
+            }
+          ],
+          "expect": "complete FIFO burst stays within the declared local batch budget"
+        },
+        {
+          "name": "drain the actual FIFO burst",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "self._queue = list(messages)",
+              "new": "self._queue = deque(messages)"
+            },
+            {
+              "file": "primitives.py",
+              "old": "self._queue.pop(0)",
+              "new": "self._queue.popleft()"
+            },
+            {
+              "file": "primitives.py",
+              "old": "self._queue.pop(0)",
+              "new": "self._queue.popleft()"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_part1_checkpoint_queue_and_complete_burst",
+      "name": "accept an acknowledgement for a different pending input",
+      "edits": [
+        {
+          "file": "primitives.py",
+          "old": "if self.state != 'response' or self.response.uid != uid:",
+          "new": "if self.state != 'response':"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_part1_checkpoint_queue_and_complete_burst",
+      "name": "release only the response state but retain the old input response",
+      "edits": [
+        {
+          "file": "primitives.py",
+          "old": "self.response = None\n        self.state = 'idle'",
+          "new": "self.state = 'idle'"
+        }
+      ],
+      "expect": "acknowledged response is cleared before idle queue polling"
+    },
+    {
+      "test": "test_part2_transaction_aware_domain_records",
+      "name": "discard opaque fields from the checkpoint state",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "(c.run,c.step,c.version,c.state)",
+          "new": "(c.run,c.step,c.version,{})"
+        }
+      ],
+      "expect": "SQLite reopen retains every own checkpoint"
+    },
+    {
+      "test": "test_part2_transaction_aware_domain_records",
+      "name": "replace the saved original runtime version on reopen",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "return tuple(Checkpoint(*v) for v in self.rows.all('checkpoint'))",
+          "new": "return tuple(Checkpoint(v[0],v[1],'latest-runtime',v[3]) for v in self.rows.all('checkpoint'))"
+        }
+      ],
+      "expect": "SQLite reopen retains every own checkpoint"
+    },
+    {
+      "test": "test_part2_transaction_aware_domain_records",
+      "name": "substitute effect destination for the effect identity in a persisted intent",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "(i.run,i.step,i.effect,i.amount,i.destination,i.payload)",
+          "new": "(i.run,i.step,i.destination,i.amount,i.destination,i.payload)"
+        }
+      ],
+      "expect": "SQLite reopen retains every own checkpoint"
+    },
+    {
+      "test": "test_part2_transaction_aware_domain_records",
+      "name": "lose the actual receiver identity from a delivery receipt",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "(r.key,r.receiver,r.amount,r.result)",
+          "new": "(r.key,'receiver-current',r.amount,r.result)"
+        }
+      ],
+      "expect": "SQLite reopen retains every own checkpoint"
+    },
+    {
+      "test": "test_part3_atomic_commit_dispatch_and_recovery",
+      "name": "commit the checkpoint independently before writing its intent",
+      "edits": [
+        {
+          "file": "execution.py",
+          "old": "with archive.atomic():\n        archive.write_checkpoint(plan.checkpoint)\n        crash.hit('after_checkpoint')",
+          "new": "with archive.atomic():\n        archive.write_checkpoint(plan.checkpoint)\n    with archive.atomic():\n        crash.hit('after_checkpoint')"
+        }
+      ],
+      "expect": "uncommitted checkpoint and intent roll back together"
+    },
+    {
+      "test": "test_part3_atomic_commit_dispatch_and_recovery",
+      "name": "run the after-commit cut while the transaction can still roll back",
+      "edits": [
+        {
+          "file": "execution.py",
+          "old": "    crash.hit('after_commit')",
+          "new": "        crash.hit('after_commit')"
+        }
+      ],
+      "expect": "committed intent survives the crash"
+    },
+    {
+      "test": "test_part3_atomic_commit_dispatch_and_recovery",
+      "name": "acknowledge a locally fabricated receipt without delivering an external effect",
+      "edits": [
+        {
+          "file": "execution.py",
+          "old": "receipt=receiver.deliver(intent)",
+          "new": "receipt=__import__('outboxflow.models',fromlist=['Receipt']).Receipt(intent.key,'receiver',intent.amount,{'destination':intent.destination,'payload':intent.payload})"
+        }
+      ],
+      "expect": "stable receiver keys make repeated delivery one effective charge"
+    },
+    {
+      "test": "test_part3_atomic_commit_dispatch_and_recovery",
+      "name": "change the declared stable effect identity while delivering",
+      "edits": [
+        {
+          "file": "execution.py",
+          "old": "receipt=receiver.deliver(intent)",
+          "new": "receipt=receiver.deliver(type(intent)(intent.run,intent.step,intent.effect+':delivery',intent.amount,intent.destination,intent.payload))"
+        }
+      ],
+      "expect": "every committed intent receives its own actual delivery receipt"
+    },
+    {
+      "test": "test_part3_atomic_commit_dispatch_and_recovery",
+      "name": "skip the initial committed-pending drain during recovery",
+      "edits": [
+        {
+          "file": "execution.py",
+          "old": "    dispatch_intents(archive,receiver,run,crash)\n    latest=CheckpointStore",
+          "new": "    latest=CheckpointStore"
+        }
+      ],
+      "expect": "terminal checkpoint still drains its committed pending intent"
+    },
+    {
+      "test": "test_part4_rainbow_actual_bindings_csv",
+      "name": "rebind resumed runs to the newly supplied runtime version",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "elif event.kind in ('resume','failed_resume'):\n            version=bindings[event.run]",
+          "new": "elif event.kind in ('resume','failed_resume'):\n            version=event.version"
+        }
+      ],
+      "expect": "successful and failed resume both retain the original"
+    },
+    {
+      "test": "test_part4_rainbow_actual_bindings_csv",
+      "name": "count every active run for every runtime row",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "count=sum(bindings[run]==version for run in active)",
+          "new": "count=len(active)"
+        }
+      ],
+      "expect": "new runs follow each declared deployment choice"
+    },
+    {
+      "test": "test_part4_rainbow_actual_bindings_csv",
+      "name": "permit retirement while one active run remains",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "event.kind=='retire' and count==0",
+          "new": "event.kind=='retire' and count<=1"
+        }
+      ],
+      "expect": "a runtime may retire only after its actual active runs drain"
+    },
+    {
+      "test": "test_part4_rainbow_actual_bindings_csv",
+      "name": "use finish event proposed version instead of run original version",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "elif event.kind=='finish':\n            version=bindings[event.run]",
+          "new": "elif event.kind=='finish':\n            version=event.version"
+        }
+      ],
+      "expect": "finish and later resume report each run own preserved version"
+    },
+    {
+      "test": "test_part5_nested_admin_routes_and_run_outputs",
+      "name": "omit intermediate admins from the ascending route",
+      "edits": [
+        {
+          "file": "structure.py",
+          "old": "admins=[catalog.admin(a[:k]) for k in range(len(a),common-1,-1)]",
+          "new": "admins=[catalog.admin(a[:common])]"
+        }
+      ],
+      "expect": "cross-group leaf traffic follows the complete up and down admin ladder"
+    },
+    {
+      "test": "test_part5_nested_admin_routes_and_run_outputs",
+      "name": "check only the immediate source export not every crossed group boundary",
+      "edits": [
+        {
+          "file": "structure.py",
+          "old": "for k in range(1,len(a)+1):",
+          "new": "for k in (len(a),):"
+        }
+      ],
+      "expect": "an intermediate admin or group export permission cannot be bypassed"
+    },
+    {
+      "test": "test_part5_nested_admin_routes_and_run_outputs",
+      "name": "mix another run into declared output summaries",
+      "edits": [
+        {
+          "file": "structure.py",
+          "old": "if m.run==run and audits[uid].accepted",
+          "new": "if audits[uid].accepted"
+        }
+      ],
+      "expect": "declared cross-group outputs include only route-valid messages"
+    },
+    {
+      "test": "test_part5_nested_admin_routes_and_run_outputs",
+      "name": "reset nested group paths at each child audit",
+      "edits": [
+        {
+          "file": "structure.py",
+          "old": "children=tuple(walk(child,path) for child in group.children)",
+          "new": "children=tuple(walk(child,()) for child in group.children)"
+        }
+      ],
+      "expect": "every nested group retains its actual structural audit"
+    },
+    {
+      "test": "test_part2_transaction_aware_domain_records",
+      "name": "F22-C01 key checkpoint rows only by step rather than owning run and step",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "self.rows.put('checkpoint',(c.run,c.step),",
+          "new": "self.rows.put('checkpoint',c.step,"
+        }
+      ],
+      "expect": "conflicting immutable record replay"
+    },
+    {
+      "test": "test_part3_atomic_commit_dispatch_and_recovery",
+      "name": "F22-C02 dispatch independently before rejecting an open sender transaction",
+      "edits": [
+        {
+          "file": "execution.py",
+          "old": "    if archive.transaction_open:\n        raise ValueError('dispatcher requires committed sender records')\n",
+          "new": ""
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_part3_atomic_commit_dispatch_and_recovery",
+      "name": "F22-C03 include foreign-run receipts in the recovered run report",
+      "edits": [
+        {
+          "file": "execution.py",
+          "old": "tuple(r for r in archive.receipts() if r.key[0]==run)",
+          "new": "archive.receipts()"
+        }
+      ],
+      "expect": "recovery reports only its own run receipts while retaining independent foreign delivery evidence"
+    },
+    {
+      "test": "test_part4_rainbow_actual_bindings_csv",
+      "name": "F22-C04 treat failed resume as completion and remove the active run",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "elif event.kind in ('resume','failed_resume'):\n            version=bindings[event.run]",
+          "new": "elif event.kind in ('resume','failed_resume'):\n            version=bindings[event.run]\n            if event.kind=='failed_resume':active.discard(event.run)"
+        }
+      ],
+      "expect": "successful and failed resume both retain the original in-flight runtime binding"
+    },
+    {
+      "test": "test_part5_nested_admin_routes_and_run_outputs",
+      "name": "F22-C05 omit foreign-run route observations from each group own audit",
+      "edits": [
+        {
+          "file": "structure.py",
+          "old": "own=tuple(audits[uid] for uid in group.messages)",
+          "new": "own=tuple(audits[uid] for uid in group.messages if catalog.messages[uid].run==run)"
+        }
+      ],
+      "expect": "each owning group retains every declared route observation independently of requested-run outputs"
+    },
+    {
+      "test": "test_part5_nested_admin_routes_and_run_outputs",
+      "name": "F22-C06 let any declared export claim traffic sourced outside that group",
+      "edits": [
+        {
+          "file": "structure.py",
+          "old": " and bound.source_path[:len(path)]==path",
+          "new": ""
+        }
+      ],
+      "expect": "an export declaration cannot claim accepted traffic sourced outside the group subtree"
+    }
+  ]
+}
