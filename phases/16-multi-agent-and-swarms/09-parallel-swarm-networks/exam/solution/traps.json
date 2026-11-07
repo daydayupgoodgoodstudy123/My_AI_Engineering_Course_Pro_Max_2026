@@ -1,0 +1,345 @@
+{
+  "package": "workpull",
+  "tests": [
+    "test_complete_fifo_replay",
+    "test_append_task_lifecycle_journal",
+    "test_specialist_aging_pull_claims",
+    "test_observed_event_frames",
+    "test_nested_swarm_pool_contracts"
+  ],
+  "layers": [
+    {
+      "test": "test_complete_fifo_replay",
+      "steps": [
+        {
+          "name": "task result lookup consumes a worker-keyed result pool",
+          "edits": [],
+          "expect": "KeyError"
+        },
+        {
+          "name": "preserve task result identity and observed worker",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "ledger.by_task[completion.worker_uid]",
+              "new": "ledger.by_task[completion.task_id]"
+            }
+          ],
+          "expect": "an empty ready queue does not close a producer"
+        },
+        {
+          "name": "drain pending arrivals and claimed work",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "return not ready and not running",
+              "new": "return not ready and not running and not future_arrivals"
+            }
+          ],
+          "expect": "complete variable-duration task replay remains responsive"
+        },
+        {
+          "name": "stable event calendar heap",
+          "edits": [
+            {
+              "file": "calendar.py",
+              "old": "\"\"\"Stable logical event calendar. Public events are not comparable objects.\"\"\"\nfrom .support import event_order\nclass CompletionCalendar:\n    def __init__(self,events=()):self._events=list(events)\n    def __bool__(self):return bool(self._events)\n    def push(self,event):self._events.append(event)\n    def peek_time(self):return min(self._events,key=event_order).time_us\n    def pop(self):\n        event=min(self._events,key=event_order)\n        self._events.remove(event)\n        return event\n",
+              "new": "\"\"\"Stable logical event calendar. Public events are not comparable objects.\"\"\"\nimport heapq\nfrom .support import event_order\nclass CompletionCalendar:\n    def __init__(self,events=()):\n        self._events=[(*event_order(event),event)for event in events]\n        heapq.heapify(self._events)\n    def __bool__(self):return bool(self._events)\n    def push(self,event):heapq.heappush(self._events,(*event_order(event),event))\n    def peek_time(self):return self._events[0][0]\n    def pop(self):return heapq.heappop(self._events)[2]\n"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_complete_fifo_replay",
+      "name": "replace the observed callback result with a task name",
+      "edits": [
+        {
+          "file": "primitives.py",
+          "old": "    ledger.by_task[completion.task_id]=completion",
+          "new": "    from dataclasses import replace\n    completion=replace(completion,value=completion.task_id)\n    ledger.by_task[completion.task_id]=completion"
+        }
+      ],
+      "expect": "complete payload results and real per-worker counts"
+    },
+    {
+      "test": "test_complete_fifo_replay",
+      "name": "close the producer when no future arrivals remain even if work is running",
+      "edits": [
+        {
+          "file": "primitives.py",
+          "old": "return not ready and not running and not future_arrivals",
+          "new": "return not future_arrivals"
+        }
+      ],
+      "expect": "each task keeps its own result"
+    },
+    {
+      "test": "test_append_task_lifecycle_journal",
+      "name": "treat a claim as a completed observation",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "states[e.task_id]=('running',e.worker_uid,e.start_us,None,None)",
+          "new": "states[e.task_id]=('complete',e.worker_uid,e.start_us,e.finish_us,e.value)"
+        }
+      ],
+      "expect": "a pulled task remains running"
+    },
+    {
+      "test": "test_append_task_lifecycle_journal",
+      "name": "use the fixed-assignment hint instead of the observed worker",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "states[e.task_id]=('running',e.worker_uid,e.start_us,None,None)",
+          "new": "states[e.task_id]=('running',next(t.pre_assigned for t in archive.tasks if t.task_id==e.task_id),e.start_us,None,None)"
+        }
+      ],
+      "expect": "a pulled task remains running"
+    },
+    {
+      "test": "test_append_task_lifecycle_journal",
+      "name": "reorder task definitions by arrival time during reopening",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "return TraceArchive(tuple(tasks),tuple(workers),tuple(events))",
+          "new": "return TraceArchive(tuple(sorted(tasks,key=lambda t:t.arrival_us)),tuple(workers),tuple(events))"
+        }
+      ],
+      "expect": "reopening retains declared task order"
+    },
+    {
+      "test": "test_append_task_lifecycle_journal",
+      "name": "fill completion finish from its queued arrival time",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "states[e.task_id]=('complete',e.worker_uid,e.start_us,e.finish_us,e.value)",
+          "new": "states[e.task_id]=('complete',e.worker_uid,e.start_us,next(t.arrival_us for t in archive.tasks if t.task_id==e.task_id),e.value)"
+        }
+      ],
+      "expect": "appended completion evidence supplies actual assignment"
+    },
+    {
+      "test": "test_specialist_aging_pull_claims",
+      "name": "let priority admit an unsubscribed task",
+      "edits": [
+        {
+          "file": "scheduling.py",
+          "old": "if t.arrival_us<=now and t.topic in worker.topics",
+          "new": "if t.arrival_us<=now"
+        }
+      ],
+      "expect": "topic admission and actual arrival"
+    },
+    {
+      "test": "test_specialist_aging_pull_claims",
+      "name": "age a task from its service duration instead of enqueue time",
+      "edits": [
+        {
+          "file": "scheduling.py",
+          "old": "(now-task.arrival_us)//aging_interval",
+          "new": "task.duration_us//aging_interval"
+        }
+      ],
+      "expect": "waiting priority grows from enqueue time"
+    },
+    {
+      "test": "test_specialist_aging_pull_claims",
+      "name": "resolve equal priority by current queue order",
+      "edits": [
+        {
+          "file": "scheduling.py",
+          "old": "task_sequence[t.task_id]",
+          "new": "remaining.index(t)"
+        }
+      ],
+      "expect": "simultaneous free workers claim each task once"
+    },
+    {
+      "test": "test_specialist_aging_pull_claims",
+      "name": "allow simultaneous workers to claim the same ready task",
+      "edits": [
+        {
+          "file": "scheduling.py",
+          "old": "claims.append((worker,task));remaining.remove(task)",
+          "new": "claims.append((worker,task))"
+        }
+      ],
+      "expect": "simultaneous free workers claim each task once"
+    },
+    {
+      "test": "test_specialist_aging_pull_claims",
+      "name": "give recent work all elapsed clock age",
+      "edits": [
+        {
+          "file": "scheduling.py",
+          "old": "(now-task.arrival_us)//aging_interval",
+          "new": "now//aging_interval"
+        }
+      ],
+      "expect": "waiting priority grows from enqueue time"
+    },
+    {
+      "test": "test_observed_event_frames",
+      "name": "replace completed payload output with the task id",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "result=event.value",
+          "new": "result=event.task_id"
+        }
+      ],
+      "expect": "completion frames retain their own actual result"
+    },
+    {
+      "test": "test_observed_event_frames",
+      "name": "use start time as the completion event instant",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "'time_us':event.time_us",
+          "new": "'time_us':event.start_us if event.kind=='completion'else event.time_us"
+        }
+      ],
+      "expect": "completion frames retain their own actual result"
+    },
+    {
+      "test": "test_observed_event_frames",
+      "name": "fabricate an unobserved result on a pull event",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "elif event.kind=='pull':row.update(worker_uid=event.worker_uid,start_us=event.start_us,finish_us=event.finish_us)",
+          "new": "elif event.kind=='pull':row.update(worker_uid=event.worker_uid,start_us=event.start_us,finish_us=event.finish_us,result='done')"
+        }
+      ],
+      "expect": "pull evidence retains actual worker start and finish"
+    },
+    {
+      "test": "test_nested_swarm_pool_contracts",
+      "name": "widen child topic constraints by union",
+      "edits": [
+        {
+          "file": "deployment.py",
+          "old": "scope&set(group.topics)",
+          "new": "scope|set(group.topics)"
+        }
+      ],
+      "expect": "effective subscriptions are the intersection"
+    },
+    {
+      "test": "test_nested_swarm_pool_contracts",
+      "name": "inherit private pools from ancestors",
+      "edits": [
+        {
+          "file": "deployment.py",
+          "old": "pool.shared and catalog.is_ancestor(owner,path)",
+          "new": "catalog.is_ancestor(owner,path)"
+        }
+      ],
+      "expect": "a worker sees its own pools"
+    },
+    {
+      "test": "test_nested_swarm_pool_contracts",
+      "name": "report only directly owned worker counts as a group total",
+      "edits": [
+        {
+          "file": "deployment.py",
+          "old": "total=sum(counts[uid]for uid in catalog.subtree_worker_uids(path))",
+          "new": "total=sum(row[3]for row in workers)"
+        }
+      ],
+      "expect": "group totals use actual leaf completions"
+    },
+    {
+      "test": "test_nested_swarm_pool_contracts",
+      "name": "use one whole-deployment count for every worker",
+      "edits": [
+        {
+          "file": "deployment.py",
+          "old": "pools,counts[uid]",
+          "new": "pools,sum(counts.values())"
+        }
+      ],
+      "expect": "group totals use actual leaf completions"
+    },
+    {
+      "test": "test_append_task_lifecycle_journal",
+      "name": "fresh independent: deduplicate distinct declared tasks by equal payload",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "return TraceArchive(tuple(tasks),tuple(workers),tuple(events))",
+          "new": "return TraceArchive(tuple({t.payload:t for t in tasks}.values()),tuple(workers),tuple(events))"
+        }
+      ],
+      "expect": "equal payloads retain distinct declared task identities"
+    },
+    {
+      "test": "test_specialist_aging_pull_claims",
+      "name": "fresh independent: round partial enqueue-age intervals instead of counting full intervals",
+      "edits": [
+        {
+          "file": "scheduling.py",
+          "old": "(now-task.arrival_us)//aging_interval",
+          "new": "round((now-task.arrival_us)/aging_interval)"
+        }
+      ],
+      "expect": "partial waiting intervals do not earn priority early"
+    },
+    {
+      "test": "test_specialist_aging_pull_claims",
+      "name": "fresh independent: sort free workers by UID instead of preserving their declared order",
+      "edits": [
+        {
+          "file": "scheduling.py",
+          "old": "for worker in free:",
+          "new": "for worker in sorted(free,key=lambda w:w.uid):"
+        }
+      ],
+      "expect": "simultaneous free workers claim each task once"
+    },
+    {
+      "test": "test_observed_event_frames",
+      "name": "fresh independent: clamp an observed negative queued priority to zero during projection",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "row['queued_priority']=event.priority",
+          "new": "row['queued_priority']=max(0,event.priority)"
+        }
+      ],
+      "expect": "arrival evidence preserves the observed signed queued priority"
+    },
+    {
+      "test": "test_nested_swarm_pool_contracts",
+      "name": "fresh independent: treat an explicitly empty group restriction as an absent restriction",
+      "edits": [
+        {
+          "file": "deployment.py",
+          "old": "if group.topics is not None:",
+          "new": "if group.topics:"
+        }
+      ],
+      "expect": "an explicit empty enclosing restriction admits no topics"
+    },
+    {
+      "test": "test_nested_swarm_pool_contracts",
+      "name": "fresh independent: expose shared pools globally rather than only through their ancestor branch",
+      "edits": [
+        {
+          "file": "deployment.py",
+          "old": "pool.shared and catalog.is_ancestor(owner,path)",
+          "new": "pool.shared"
+        }
+      ],
+      "expect": "shared pools remain inside their owning ancestor branch"
+    }
+  ]
+}
