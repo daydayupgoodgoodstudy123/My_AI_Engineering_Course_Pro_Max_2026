@@ -1,0 +1,357 @@
+{
+  "package": "prefixmeter",
+  "tests": [
+    "test_typed_traffic_and_write_lifetimes",
+    "test_typed_accounting_journal",
+    "test_exact_role_storage_and_strict_inverse",
+    "test_csv_real_clock_accounting",
+    "test_nested_exact_prefix_breakpoint"
+  ],
+  "layers": [
+    {
+      "test": "test_typed_traffic_and_write_lifetimes",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "TypeError: can only concatenate str"
+        },
+        {
+          "name": "typed token counts",
+          "edits": [
+            {
+              "file": "traffic.py",
+              "old": "prefix_key,raw[\"prefix_tokens\"],suffix_tokens",
+              "new": "prefix_key,nonnegative_integer(raw[\"prefix_tokens\"]),suffix_tokens"
+            }
+          ],
+          "expect": "all real writes retain their own observed lifetimes after prefix rewrites"
+        },
+        {
+          "name": "complete write lifetimes",
+          "edits": [
+            {
+              "file": "traffic.py",
+              "old": "for entry in self.current.values())",
+              "new": "for entry in self.objects)"
+            }
+          ],
+          "expect": "large exact-prefix traffic collections should stay responsive"
+        },
+        {
+          "name": "responsive complete collection",
+          "edits": [
+            {
+              "file": "traffic.py",
+              "old": "        key=prefix_identity(request)\n        matches=[entry for previous,entry in self.history if previous==key]\n        return matches[-1] if matches else None",
+              "new": "        return self.current.get(prefix_identity(request))"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_typed_traffic_and_write_lifetimes",
+      "name": "drop request observations to reduce retained traffic work",
+      "edits": [
+        {
+          "file": "traffic.py",
+          "old": "tuple(self.observations),lifetimes",
+          "new": "tuple(self.observations[:1]),lifetimes"
+        }
+      ],
+      "expect": "supplied numeric token spellings become typed input usage"
+    },
+    {
+      "test": "test_typed_traffic_and_write_lifetimes",
+      "name": "discard storage objects after expiration",
+      "edits": [
+        {
+          "file": "traffic.py",
+          "old": "for entry in self.objects)",
+          "new": "for entry in self.objects if entry.expires_us>self.horizon)"
+        }
+      ],
+      "expect": "all real writes retain their own observed lifetimes after prefix rewrites"
+    },
+    {
+      "test": "test_typed_accounting_journal",
+      "name": "omit read observations from recovered run views",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "obs=tuple(observations.get(run_id,()));",
+          "new": "obs=tuple(row for row in observations.get(run_id,()) if row.kind!=\"READ\");"
+        }
+      ],
+      "expect": "run views retain reads uncached requests and every expired write object"
+    },
+    {
+      "test": "test_typed_accounting_journal",
+      "name": "collapse all writes of an exact prefix to its latest object",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "lives=tuple(lifetimes.get(run_id,()))",
+          "new": "lives=tuple({(row.profile_id,row.prefix_key):row for row in lifetimes.get(run_id,())}.values())"
+        }
+      ],
+      "expect": "run views retain reads uncached requests and every expired write object"
+    },
+    {
+      "test": "test_typed_accounting_journal",
+      "name": "attach every loaded price profile to every run",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "{key:prices[key] for key in header.profile_ids}",
+          "new": "dict(prices)"
+        }
+      ],
+      "expect": "each run binds only its declared immutable price profiles"
+    },
+    {
+      "test": "test_exact_role_storage_and_strict_inverse",
+      "name": "discount changing suffix tokens at the prefix role rate",
+      "edits": [
+        {
+          "file": "pricing.py",
+          "old": "Fraction(row.suffix_tokens,1000)*base",
+          "new": "Fraction(row.suffix_tokens,1000)*rate"
+        }
+      ],
+      "expect": "prefix role rates and all changing suffix tokens contribute to input charges"
+    },
+    {
+      "test": "test_exact_role_storage_and_strict_inverse",
+      "name": "bill only completed whole storage hours",
+      "edits": [
+        {
+          "file": "pricing.py",
+          "old": "Fraction(row.prefix_tokens*(row.observed_end_us-row.created_us),1000*3600*1000000)*rate",
+          "new": "Fraction(row.prefix_tokens,1000)*((row.observed_end_us-row.created_us)//(3600*1000000))*rate"
+        }
+      ],
+      "expect": "all real object lifetimes contribute observed microsecond token-hours"
+    },
+    {
+      "test": "test_exact_role_storage_and_strict_inverse",
+      "name": "accept equality as break even savings",
+      "edits": [
+        {
+          "file": "pricing.py",
+          "old": "return threshold//improvement+1",
+          "new": "return -(-threshold//improvement)"
+        }
+      ],
+      "expect": "break even requires strict savings beyond an equality boundary"
+    },
+    {
+      "test": "test_csv_real_clock_accounting",
+      "name": "substitute request sequence for explicit observed time",
+      "edits": [
+        {
+          "file": "accounting_stream.py",
+          "old": "\"timestamp_us\":row.timestamp_us",
+          "new": "\"timestamp_us\":state[\"requests\"]-1"
+        }
+      ],
+      "expect": "event timestamps and cache roles describe actual observed traffic"
+    },
+    {
+      "test": "test_csv_real_clock_accounting",
+      "name": "label every completed request as a cache write",
+      "edits": [
+        {
+          "file": "accounting_stream.py",
+          "old": "\"kind\":row.kind",
+          "new": "\"kind\":\"WRITE\""
+        }
+      ],
+      "expect": "event timestamps and cache roles describe actual observed traffic"
+    },
+    {
+      "test": "test_csv_real_clock_accounting",
+      "name": "replace cumulative charges with only the latest event charges",
+      "edits": [
+        {
+          "file": "accounting_stream.py",
+          "old": "state[key]=state.get(key,Fraction(0))+value",
+          "new": "state[key]=value"
+        }
+      ],
+      "expect": "read events retain cumulative storage without creating another write lifetime"
+    },
+    {
+      "test": "test_nested_exact_prefix_breakpoint",
+      "name": "drop volatile leaves from all original rendered observations",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "for path,stable,tokens in leaves for token in variant[path]",
+          "new": "for path,stable,tokens in leaves if stable for token in variant[path]"
+        }
+      ],
+      "expect": "nested layout preserves every original section and token in declared order"
+    },
+    {
+      "test": "test_nested_exact_prefix_breakpoint",
+      "name": "allow stable child declarations to override volatile ancestors",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "stable=inherited and node.stable",
+          "new": "stable=node.stable"
+        }
+      ],
+      "expect": "volatile status inherited from an ancestor forbids a descendant cache boundary"
+    },
+    {
+      "test": "test_nested_exact_prefix_breakpoint",
+      "name": "permit an arbitrary shared token offset inside an incomplete section",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "rendered[0][:chosen],breakpoint",
+          "new": "rendered[0][:shared],breakpoint"
+        }
+      ],
+      "expect": "a difference inside one section cannot create a partial-section breakpoint"
+    },
+    {
+      "test": "test_typed_accounting_journal",
+      "name": "P2_duplicate_object",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "            if len({row.object_id for row in lives})!=len(lives):raise ValueError(\"duplicate storage object\")",
+          "new": "            # Replay keeps duplicate object rows without rejecting identity conflicts."
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_typed_accounting_journal",
+      "name": "P2_profile_association",
+      "edits": [
+        {
+          "file": "journal.py",
+          "old": "            if any(row.profile_id not in header.profile_ids for row in obs+lives):raise ValueError(\"run profile association\")",
+          "new": "            # Any globally loaded price profile is accepted for run facts."
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_exact_role_storage_and_strict_inverse",
+      "name": "P3_inverse_storage",
+      "edits": [
+        {
+          "file": "pricing.py",
+          "old": "    threshold=write+storage-base",
+          "new": "    threshold=write-base"
+        }
+      ],
+      "expect": "storage overhead participates in the minimal strict savings inverse"
+    },
+    {
+      "test": "test_exact_role_storage_and_strict_inverse",
+      "name": "P3_inverse_float",
+      "edits": [
+        {
+          "file": "pricing.py",
+          "old": "    return threshold//improvement+1",
+          "new": "    return int(float(threshold/improvement))+1"
+        }
+      ],
+      "expect": "large exact money preserves the last integer below strict savings"
+    },
+    {
+      "test": "test_csv_real_clock_accounting",
+      "name": "P4_first_write_storage_only",
+      "edits": [
+        {
+          "file": "accounting_stream.py",
+          "old": "(row,),event.new_lifetimes)",
+          "new": "(row,),event.new_lifetimes if not state.get(\"writes\",0) else ())"
+        }
+      ],
+      "expect": "read events retain cumulative storage without creating another write lifetime"
+    },
+    {
+      "test": "test_csv_real_clock_accounting",
+      "name": "P4_uncached_request_count",
+      "edits": [
+        {
+          "file": "accounting_stream.py",
+          "old": "    state[\"requests\"]=state.get(\"requests\",0)+1",
+          "new": "    state[\"requests\"]=state.get(\"requests\",0)+int(row.kind!=\"UNCACHED\")"
+        }
+      ],
+      "expect": "the final accounting row retains all event charges and role counts"
+    },
+    {
+      "test": "test_nested_exact_prefix_breakpoint",
+      "name": "P5_only_two_variants",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "for tokens in rendered[1:])",
+          "new": "for tokens in rendered[1:2])"
+        }
+      ],
+      "expect": "every supplied observation constrains the exact shared prefix"
+    },
+    {
+      "test": "test_nested_exact_prefix_breakpoint",
+      "name": "P5_template_lengths",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "        offset+=len(source[path])",
+          "new": "        offset+=len(tokens)"
+        }
+      ],
+      "expect": "legal leaf endpoints use the actual rendered variant token lengths"
+    },
+    {
+      "test": "test_nested_exact_prefix_breakpoint",
+      "name": "P5_ref_allow_zero_boundary",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "        if source[path] and 0<offset<=shared:chosen=offset;breakpoint=path",
+          "new": "        if 0<=offset<=shared:chosen=offset;breakpoint=path"
+        }
+      ],
+      "expect": "an empty layout has no positive cache breakpoint"
+    },
+    {
+      "test": "test_nested_exact_prefix_breakpoint",
+      "name": "P5_ref_stop_at_empty",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "        offset+=len(source[path])",
+          "new": "        if not source[path]:break\n        offset+=len(source[path])"
+        }
+      ],
+      "expect": "an empty stable section does not block a later legal positive leaf"
+    },
+    {
+      "test": "test_nested_exact_prefix_breakpoint",
+      "name": "P5_ref_drop_empty_leaf",
+      "edits": [
+        {
+          "file": "layout.py",
+          "old": "        else:leaves.append((path,stable,node.tokens))",
+          "new": "        elif node.tokens:leaves.append((path,stable,node.tokens))"
+        }
+      ],
+      "expect": "empty sections remain part of the complete original layout"
+    }
+  ]
+}
