@@ -2,6 +2,17 @@
 
 开场2分钟，五关12/10/16/10/10，共60分钟。所有 handler 都是本地 fixture，不访问真实服务；协议 metadata/transport 不是候选实现职责。
 
+## 澄清问题标准答案（English）
+
+仅在候选人问到时，用下表英文回答；只澄清现有合同，不主动增加要求或给出修法。
+
+| Question | Answer |
+|---|---|
+| Can a tool and a prompt have the same name? | Yes. Identity is scoped by primitive kind. Tools and prompts use their names; resources use their exact URI. |
+| Do all primitives return the same envelope? | No. Here tools use content[] with isError=False, resources use contents[] with URI and text, and prompts use messages[] with user text content. Metadata wrappers are given. |
+| Does an empty catalog remove a capability? | No. The given capabilities still declare support for tools, resources and prompts when their catalogs are empty. |
+| Must the change audit implement MCP transport? | No. Handlers are local fixtures. Protocol metadata wrappers are given, and transport is outside the candidate contract. The NDJSON change audit is a local artifact, not a new MCP method. |
+
 ## Part 1：注册与 inventory（12分钟）
 
 坑：factory 执行 handler 后把普通结果当 callable 保存；正确 admit_entry 消费者在 factory 外报 TypeError。三种 primitive 共用 display name 会丢条目，resource 身份应按 URI。每次 register 重建完整排序 inventory，使真实 bulk→最终完整 view 路径变慢。正确 per-handler closure binding 已给定，本关不考 loop late-binding。
