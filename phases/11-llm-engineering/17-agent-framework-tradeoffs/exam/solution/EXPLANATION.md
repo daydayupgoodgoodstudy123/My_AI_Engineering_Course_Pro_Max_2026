@@ -26,7 +26,7 @@ structure_trace只收到Decision，沿给定RuleNode chain递归对照rule_id；
 
 docs80–101 checklist/matrix、111Exercise3与main22–98 Problem/recommend是P3核心来源；main103–107固定60列报告、110–153有序表驱动case、158–174输入投影支持P1。正文/讲解指出source tiny漏typed/session，本题明确补齐七信号；source session-before-typed顺序被保留。每个框架是课程profile，不把原文年代或优势当当前事实核验。
 
-INI/evidence persistence、Markdown artifact和嵌套observed path是围绕该真实selector的显式本地工程扩展；source没有这些存储/流协议。固定60→全batch动态字符宽度也明确是报告扩展。P1 prepared-table计时不含JSON intake/模型生成/推荐规则，只覆盖公开format_case_table完整输入到全部输出消费，不能宣称完整应用延迟。与07已拟合index.avg_dl忽略不同：此处没有预存layout，需在单次报告构建计算布局；此具体近邻仍留全章实际审查，不声称全面去重通过。coderpad短route_task/evidence_gate排除。
+INI/evidence persistence、Markdown artifact和嵌套observed path是围绕该真实selector的显式本地工程扩展；source没有这些存储/流协议。固定60→全batch动态字符宽度也明确是报告扩展。P1 prepared-table计时不含JSON intake/模型生成/推荐规则，只覆盖公开format_case_table完整输入到全部输出消费，不能宣称完整应用延迟。本题没有预存layout，需在单次报告构建计算布局。coderpad短route_task/evidence_gate排除。
 
 完整6000个prepared rows的公开format_case_table在timer内计算layout、格式化全部行并比较完整输出；限值.08s，连续3slow为1.477245/1.490894/1.585907s，3fast为.001917/.004801/.008241s，双余量18.466/9.707，最慢1.586s。输入准备、JSON解析、selector与真实provider不在此报告API计时范围；不作完整应用延迟或真人时间声明。
 
