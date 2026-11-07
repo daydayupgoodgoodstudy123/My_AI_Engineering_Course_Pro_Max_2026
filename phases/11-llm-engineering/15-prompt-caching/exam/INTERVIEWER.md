@@ -2,6 +2,17 @@
 
 场景：为离线 prompt-cache 实验维护可重放的写入/读取证据、精确费用与布局建议。开场2分钟；Part 1–5分别12/10/16/10/10分钟，共60分钟。用时是设计预算，没有真人校准。先看候选如何解释输入合同，再按需要给 H1/H2/H3；不要要求真实厂商调用。
 
+## 澄清问题标准答案（English）
+
+仅在候选人问到时，用下表英文回答；只澄清现有合同，不主动增加要求或给出修法。
+
+| Question | Answer |
+|---|---|
+| Does report_horizon_us delete a cache entry? | No. It only clips each write object to [created_us, min(expires_us, horizon)). Every actual write remains a separate observed object, including expired or replaced writes. |
+| Which token counts use which rates? | The WRITE, READ and UNCACHED prefix uses write, read and base rates respectively. Every suffix uses the base rate. Billing uses exact rational amounts without intermediate rounding. |
+| What does break_even_reads return? | The smallest additional integer n >= 0 satisfying W + nR + S < (n + 1)B, or None if strict savings is impossible. Inputs are exact money for one prefix/write window, not raw per-token rates; equality is not savings. |
+| Are the prices, TTL and tokens live provider policies? | No. They are supplied offline fixtures. Times are integer microseconds, token tuples are supplied, and the exercise does not verify a provider cache hit. |
+
 ## Part 1：流量事实与写入寿命
 
 主要坑：生产 Request 的 token 字段未完成类型投影，正确 consumer 在外层使用时报错；最终 live entries 不能代表所有真实写入；每次查询全部历史前缀使完整收集迟缓。首错来自 decode_request，经 collect_traffic→Runtime.consume，在正确 usage_counts 执行数值加法时抛 TypeError，距离根因两次调用。报告保留每次 observation 和每个 storage object；TTL/min_tokens/固定写入时钟策略正确给定，不把其集成护栏计为新核。
