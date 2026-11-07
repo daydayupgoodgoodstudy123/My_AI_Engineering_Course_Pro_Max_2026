@@ -2,6 +2,17 @@
 
 开场2分钟，五关12/10/16/10/10，共60分钟。不给真实 API、外部服务或真实生产价格。每关先读 docstring，再观察候选人能否由外层行为定位责任。断言只描述要求，不向候选人解释根因。
 
+## 澄清问题标准答案（English）
+
+仅在候选人问到时，用下表英文回答；只澄清现有合同，不主动增加要求或给出修法。
+
+| Question | Answer |
+|---|---|
+| Which branch answers the user? | Rollout executes one selected served version. Shadow mode executes control as served and variant as shadow for every eligible miss. A shadow response is never promoted to served. |
+| What counts as paid usage after failure or blocking? | Keep every observed attempt with its role, version and ordinal, including ProviderFailure.attempts. A safety-replaced display does not change the observed tokens or cost. |
+| Are request observations the same as paid attempts? | No. Keep one request outcome separately from its paid-attempt facts. Cached or input-blocked paths have zero provider usage. |
+| Is the SSE output a live provider token stream? | No. It replays completed branches: served produces content and telemetry; shadow produces telemetry without its response text. |
+
 ## Part 1：准备与观测重放（12分钟）
 
 目标：保留 scoped PromptTemplate、稳定 cohort、缓存安全与完整观测账本。
