@@ -1,0 +1,15 @@
+# LeadSynth 参考讲解
+
+P1的窄producer只返回summary；正确消费者在producer外验证可展示字符串。cap比较自己的限额，cut不改真实usage。已封口时长采用精确在线median，低半部最大堆和高半部最小堆保持大小相差不超过1；返回奇数中间值或偶数两值均值。诊断含当前完成值，不用于线程杀死。
+
+P2内容对象用给定SHA/UTF8原语写，manifest逐assignment保存question、scope、usage、cut和typedclaims。同内容可共享对象而不能合并任务；同一query重存替换当前assignment快照，不追加历史记录。整数保持int，summary原始空白不改变。无并发/crash承诺。
+
+P3分三阶段：按scope和cut隔离；按claimid/value保留firstseen组，来源id按首次出现稳定去重而不重排，矛盾值永不胜者覆盖；只对有余额的conflict创建精确topic/原workers追问，不修改原report/budget。双source的supported是本地形式化，不推断事实可信度。
+
+P4只做当前完成领域投影：missing输出原error，complete/cut输出原summary；空summary仍是complete，privatecontext也不能附加到块中。lead显式保留全部三分区。GIVEN driver管理发布/关闭，Markdownfence原语保护正文中的反引号，测试parser规定实际有限格式。
+
+P5递归保留完整任务path，child必须严格缩小scope；返回子树总任务数供每个祖先budget比较；leaf核验原artifact的question和有序scope，内部unresolved显式保留。GIVEN形状校验不包含这些领域规则。
+
+本机完整业务校准：11500个真实封口worker观察，完整输出核验在timer内。3慢3快双10.7855×/9.6082×、maxslow2.9441s；不外推真实worker执行或研究收益。
+
+这套题证明了什么，没证明什么：它证明确定性typedfixture下的完整字段与原始归属、显式冲突、有限任务树规则。源码只有线程模拟和拼接，adapter不声称真实推理、模型收益、并行加速、线程杀死、框架兼容或网络协议。性能须以完整本机业务记录为准。
