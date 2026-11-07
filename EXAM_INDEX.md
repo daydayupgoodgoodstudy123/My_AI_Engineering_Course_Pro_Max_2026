@@ -8,6 +8,6 @@
 | 11-llm-engineering | 17 / 17 | [打开](phases/000-总目录/11-LLM%20应用工程.md) |
 | 13-tools-and-protocols | 31 / 31 | [打开](phases/13-tools-and-protocols/EXAM.md) |
 | 14-agent-engineering | 54 / 54 | [打开](phases/14-agent-engineering/EXAM.md) |
-| 16-multi-agent-and-swarms | 3 / 25 | [打开](phases/000-总目录/16-多智能体与群体系统.md) |
+| 16-multi-agent-and-swarms | 4 / 25 | [打开](phases/000-总目录/16-多智能体与群体系统.md) |
 
-当前共有 122 套分关练习；其他阶段尚未出题。
+当前共有 123 套分关练习；其他阶段尚未出题。
