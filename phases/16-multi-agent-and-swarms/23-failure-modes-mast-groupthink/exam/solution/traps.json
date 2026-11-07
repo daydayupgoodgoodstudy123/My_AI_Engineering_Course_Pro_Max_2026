@@ -1,0 +1,380 @@
+{
+  "package": "maststorm",
+  "tests": [
+    "test_part1_detection_breaker_and_complete_replay",
+    "test_part2_full_incident_csv_close_reopen",
+    "test_part3_shared_actual_budget_causal_retry_and_admission",
+    "test_part4_actual_phase_correlation_and_syslog",
+    "test_part5_nested_attempt_edges_and_amplification"
+  ],
+  "layers": [
+    {
+      "test": "test_part1_detection_breaker_and_complete_replay",
+      "steps": [
+        {
+          "name": "original primary evidence consumed by the correct renderer",
+          "edits": [],
+          "expect": "KeyError: 'role_conflict'"
+        },
+        {
+          "name": "preserve original primary symptom",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "symptoms.pop('role_conflict',False)",
+              "new": "symptoms.get('role_conflict',False)"
+            }
+          ],
+          "expect": "only one half-open probe can own"
+        },
+        {
+          "name": "reserve only one half-open probe",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "        if self.state=='HALF_OPEN':\n            self.probe_inflight=True",
+              "new": "        if self.state=='HALF_OPEN':\n            if self.probe_inflight:return False\n            self.probe_inflight=True"
+            }
+          ],
+          "expect": "successful recovery clears the old failure window"
+        },
+        {
+          "name": "reset the recovered failure window",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "                pass  # keep the old window",
+              "new": "                self.outcomes.clear();self.failures=0"
+            }
+          ],
+          "expect": "complete rolling-window replay stays within"
+        },
+        {
+          "name": "maintain real incremental failure totals",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "        if len(self.outcomes)==self.window_size:self.outcomes.popleft()\n        self.outcomes.append(success)\n        self.failures=len(self.outcomes)-sum(self.outcomes)",
+              "new": "        if len(self.outcomes)==self.window_size:\n            expired=self.outcomes.popleft()\n            self.failures-=not expired\n        self.outcomes.append(success)\n        self.failures+=not success"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_part1_detection_breaker_and_complete_replay",
+      "name": "open at threshold equality",
+      "edits": [
+        {
+          "file": "primitives.py",
+          "old": "self.failures/len(self.outcomes)>self.threshold",
+          "new": "self.failures/len(self.outcomes)>=self.threshold"
+        }
+      ],
+      "expect": "threshold equality stays closed"
+    },
+    {
+      "test": "test_part1_detection_breaker_and_complete_replay",
+      "name": "never subtract expired failed outcomes",
+      "edits": [
+        {
+          "file": "primitives.py",
+          "old": "self.failures-=not expired",
+          "new": "self.failures-=0"
+        }
+      ],
+      "expect": "rolling failure count subtracts"
+    },
+    {
+      "test": "test_part2_full_incident_csv_close_reopen",
+      "name": "substitute successful mitigation text for independent validation",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "o.action_uid,o.at,o.cleared,o.note",
+          "new": "o.action_uid,o.at,bool(r.action),o.note"
+        }
+      ],
+      "expect": "quoted CSV reopen retains every complete"
+    },
+    {
+      "test": "test_part2_full_incident_csv_close_reopen",
+      "name": "persist only one groupthink tag",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "r.category,r.tags,r.action",
+          "new": "r.category,r.tags[:1],r.action"
+        }
+      ],
+      "expect": "quoted CSV reopen retains every complete"
+    },
+    {
+      "test": "test_part2_full_incident_csv_close_reopen",
+      "name": "retain only the last archive row",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "for v in self.rows.all())",
+          "new": "for v in self.rows.all()[-1:])"
+        }
+      ],
+      "expect": "quoted CSV reopen retains every complete"
+    },
+    {
+      "test": "test_part2_full_incident_csv_close_reopen",
+      "name": "replace original symptoms with an empty diagnosis input",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "r.primary,r.symptoms,r.category",
+          "new": "r.primary,{},r.category"
+        }
+      ],
+      "expect": "quoted CSV reopen retains every complete"
+    },
+    {
+      "test": "test_part3_shared_actual_budget_causal_retry_and_admission",
+      "name": "ignore the exhausted actual root budget",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "if context.remaining==0:",
+          "new": "if False:"
+        }
+      ],
+      "expect": "all nested services and later roots share"
+    },
+    {
+      "test": "test_part3_shared_actual_budget_causal_retry_and_admission",
+      "name": "charge a breaker short-circuit as an actual provider attempt",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "    if not breaker.allow(now):\n        return",
+          "new": "    if not breaker.allow(now):\n        context.used+=1\n        return"
+        }
+      ],
+      "expect": "breaker short-circuit is outcome-free"
+    },
+    {
+      "test": "test_part3_shared_actual_budget_causal_retry_and_admission",
+      "name": "forget successful effect cache before retrying dependencies",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "if node.uid in context.effects:return",
+          "new": "if False:return"
+        }
+      ],
+      "expect": "retrying a failed dependency preserves successful effects"
+    },
+    {
+      "test": "test_part3_shared_actual_budget_causal_retry_and_admission",
+      "name": "invoke a parent before every dependency actually succeeds",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "if all(child.status in ('success','cached')for child in children):",
+          "new": "if True:"
+        }
+      ],
+      "expect": "all nested services and later roots share"
+    },
+    {
+      "test": "test_part3_shared_actual_budget_causal_retry_and_admission",
+      "name": "invent success for an exhausted non-invocation",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "'budget-exhausted',False,None,now",
+          "new": "'budget-exhausted',False,True,now"
+        }
+      ],
+      "expect": "exhausted root budget produces no new provider call"
+    },
+    {
+      "test": "test_part3_shared_actual_budget_causal_retry_and_admission",
+      "name": "replay only the first root of the original incident",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "for node in context.nodes)",
+          "new": "for node in context.nodes[:1])"
+        }
+      ],
+      "expect": "all nested services and later roots share"
+    },
+    {
+      "test": "test_part4_actual_phase_correlation_and_syslog",
+      "name": "close incidents as soon as fallback action exists",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "closing=e.phase=='validated' and e.observation.cleared is True",
+          "new": "closing=bool(r.action)"
+        }
+      ],
+      "expect": "only actual post-action positive validation can close"
+    },
+    {
+      "test": "test_part4_actual_phase_correlation_and_syslog",
+      "name": "replace actual root correlation with the incident identity",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "(e.uid,r.uid,r.root,e.phase",
+          "new": "(e.uid,r.uid,r.uid,e.phase"
+        }
+      ],
+      "expect": "restricted structured data retains each incident correlation"
+    },
+    {
+      "test": "test_part4_actual_phase_correlation_and_syslog",
+      "name": "force optimistic severity for every observation",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "r.action,severity(e),closing",
+          "new": "r.action,5,closing"
+        }
+      ],
+      "expect": "severity follows the complete actual phase"
+    },
+    {
+      "test": "test_part4_actual_phase_correlation_and_syslog",
+      "name": "copy the first incident fields into later events",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "r=e.incident",
+          "new": "r=events[0].incident"
+        }
+      ],
+      "expect": "each different incident keeps its own event correlation"
+    },
+    {
+      "test": "test_part5_nested_attempt_edges_and_amplification",
+      "name": "report service cardinality as actual amplification calls",
+      "edits": [
+        {
+          "file": "structure.py",
+          "old": "total=sum(x.total_calls for x in roots)",
+          "new": "total=len(set(call[1]for call in report.calls))"
+        }
+      ],
+      "expect": "nested accounting actually consumes detection CSV"
+    },
+    {
+      "test": "test_part5_nested_attempt_edges_and_amplification",
+      "name": "drop sibling dependency edges from each retry",
+      "edits": [
+        {
+          "file": "structure.py",
+          "old": "for child in attempt.children:edges.append",
+          "new": "for child in attempt.children[:1]:edges.append"
+        }
+      ],
+      "expect": "nested accounting actually consumes detection CSV"
+    },
+    {
+      "test": "test_part5_nested_attempt_edges_and_amplification",
+      "name": "count non-invoked dependency decisions as actual calls",
+      "edits": [
+        {
+          "file": "structure.py",
+          "old": "own+=int(inv.actual);",
+          "new": "own+=1;"
+        }
+      ],
+      "expect": "nested accounting actually consumes detection CSV"
+    },
+    {
+      "test": "test_part5_nested_attempt_edges_and_amplification",
+      "name": "omit the complete blocked request paths",
+      "edits": [
+        {
+          "file": "structure.py",
+          "old": "if inv.status=='budget-exhausted':blocks.append(attempt_path)",
+          "new": "if inv.status=='budget-exhausted':pass"
+        }
+      ],
+      "expect": "a blocked later root contributes zero actual calls"
+    },
+    {
+      "test": "test_part2_full_incident_csv_close_reopen",
+      "name": "replace the declared primary symptom with the first raw symptom key",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "r.root,r.primary,r.symptoms",
+          "new": "r.root,next(iter(r.symptoms)),r.symptoms"
+        }
+      ],
+      "expect": "the declared primary symptom survives archive roundtrip"
+    },
+    {
+      "test": "test_part3_shared_actual_budget_causal_retry_and_admission",
+      "name": "cap configured node attempts at the source toy four-attempt constant",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "range(1,node.attempts+1)",
+          "new": "range(1,min(node.attempts,4)+1)"
+        }
+      ],
+      "expect": "the configured positive attempt bound permits"
+    },
+    {
+      "test": "test_part3_shared_actual_budget_causal_retry_and_admission",
+      "name": "stop visiting later dependency siblings after the first failed sibling",
+      "edits": [
+        {
+          "file": "cascade.py",
+          "old": "        children=tuple(execute_retry_tree(context,child)for child in node.children)",
+          "new": "        children=[]\n        for child in node.children:\n            children.append(execute_retry_tree(context,child))\n            if children[-1].status not in ('success','cached'):break\n        children=tuple(children)"
+        }
+      ],
+      "expect": "a failed dependency blocks its parent while"
+    },
+    {
+      "test": "test_part4_actual_phase_correlation_and_syslog",
+      "name": "regroup the actual event stream by response phase",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "    for e in events:",
+          "new": "    for e in sorted(events,key=lambda event:('detected','diagnosed','validated').index(event.phase)):"
+        }
+      ],
+      "expect": "every actual event publishes its own syslog event identity"
+    },
+    {
+      "test": "test_part5_nested_attempt_edges_and_amplification",
+      "name": "discard ancestor retry ordinals from nested pruning paths",
+      "edits": [
+        {
+          "file": "structure.py",
+          "old": "attempt_path=path+((trace.uid,attempt.ordinal),)",
+          "new": "attempt_path=((trace.uid,attempt.ordinal),)"
+        }
+      ],
+      "expect": "each nested pruning occurrence retains all ancestor"
+    },
+    {
+      "test": "test_part5_nested_attempt_edges_and_amplification",
+      "name": "alphabetize distinct services instead of preserving actual invocation order",
+      "edits": [
+        {
+          "file": "structure.py",
+          "old": "tuple(services),Fraction",
+          "new": "tuple(sorted(services)),Fraction"
+        }
+      ],
+      "expect": "distinct services follow their first actual dependency-first"
+    }
+  ]
+}
