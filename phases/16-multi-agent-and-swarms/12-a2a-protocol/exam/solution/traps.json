@@ -1,0 +1,434 @@
+{
+  "package": "peerresult",
+  "tests": [
+    "test_discovered_terminal_polling_and_pending_lifecycle",
+    "test_ordered_attempt_manifest_and_exact_artifacts",
+    "test_pinned_card_mode_and_flat_review_adapter",
+    "test_change_only_local_task_sse",
+    "test_nested_review_file_lines_and_group_reports"
+  ],
+  "layers": [
+    {
+      "test": "test_discovered_terminal_polling_and_pending_lifecycle",
+      "steps": [
+        {
+          "name": "discovered poll endpoint producer",
+          "edits": [],
+          "expect": "KeyError"
+        },
+        {
+          "name": "use the discovered task endpoint",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "return 'http://default-peer.local/tasks/'+quote(task_id,safe='')",
+              "new": "return endpoint.rstrip('/')+'/'+quote(task_id,safe='')"
+            }
+          ],
+          "expect": "KeyError"
+        },
+        {
+          "name": "resolve task identity without query data",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "return unquote(route.split('/tasks/',1)[1])",
+              "new": "return unquote(urlsplit(route).path.rsplit('/',1)[1])"
+            }
+          ],
+          "expect": "HTTP success does not turn a failed task into a result"
+        },
+        {
+          "name": "preserve failed task terminal state",
+          "edits": [
+            {
+              "file": "primitives.py",
+              "old": "return TaskEnvelope(document['id'],'completed',artifact_from_wire(document['artifact']),tick)",
+              "new": "return TaskEnvelope(document['id'],state,artifact_from_wire(document['artifact']),tick)"
+            }
+          ],
+          "expect": "completed tasks do not delay the remaining real task observations"
+        },
+        {
+          "name": "poll only currently unfinished tasks",
+          "edits": [
+            {
+              "file": "polling.py",
+              "old": "for request in requests:",
+              "new": "for request in tuple(pending.values()):"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_discovered_terminal_polling_and_pending_lifecycle",
+      "name": "discard failed terminal tasks as if they have no receipt",
+      "edits": [
+        {
+          "file": "polling.py",
+          "old": "results[request.task_id]=envelope",
+          "new": "results[request.task_id]=envelope if envelope.state!=\"failed\"else None"
+        }
+      ],
+      "expect": "complete polling retains every task artifact terminal state and first observation"
+    },
+    {
+      "test": "test_discovered_terminal_polling_and_pending_lifecycle",
+      "name": "give every task the largest batch deadline",
+      "edits": [
+        {
+          "file": "polling.py",
+          "old": "tick>=request.deadline",
+          "new": "tick>=max(r.deadline for r in requests)"
+        }
+      ],
+      "expect": "complete polling retains every task artifact terminal state and first observation"
+    },
+    {
+      "test": "test_discovered_terminal_polling_and_pending_lifecycle",
+      "name": "time out a task before observing a completion at its deadline",
+      "edits": [
+        {
+          "file": "polling.py",
+          "old": "if envelope is None and tick>=request.deadline:",
+          "new": "if tick>=request.deadline:"
+        }
+      ],
+      "expect": "each task keeps its own deadline and every terminal outcome"
+    },
+    {
+      "test": "test_ordered_attempt_manifest_and_exact_artifacts",
+      "name": "retain only one attempt per task identity",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "for index,item in enumerate(attempts):",
+          "new": "for index,item in enumerate({a.task_id:a for a in attempts}.values()):"
+        }
+      ],
+      "expect": "reopening retains every ordered task attempt and its own exact artifact"
+    },
+    {
+      "test": "test_ordered_attempt_manifest_and_exact_artifacts",
+      "name": "attach every artifact to the first member during reopen",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "self.files.get(entry['member'])",
+          "new": "self.files.get(self.files.read_manifest()[0]['member'])"
+        }
+      ],
+      "expect": "reopening retains every ordered task attempt and its own exact artifact"
+    },
+    {
+      "test": "test_ordered_attempt_manifest_and_exact_artifacts",
+      "name": "sort restored attempts instead of keeping manifest declaration order",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "return tuple(attempts)",
+          "new": "return tuple(sorted(attempts,key=lambda a:(a.task_id,a.attempt)))"
+        }
+      ],
+      "expect": "reopening retains every ordered task attempt and its own exact artifact"
+    },
+    {
+      "test": "test_ordered_attempt_manifest_and_exact_artifacts",
+      "name": "restore every receipt with the latest peer identity",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "entry['peer']",
+          "new": "self.files.read_manifest()[-1]['peer']"
+        }
+      ],
+      "expect": "reopening retains every ordered task attempt and its own exact artifact"
+    },
+    {
+      "test": "test_pinned_card_mode_and_flat_review_adapter",
+      "name": "accept any protocol string with the local prefix",
+      "edits": [
+        {
+          "file": "adapter.py",
+          "old": "card.get('protocol_version')!='a2a-0.3'",
+          "new": "not str(card.get('protocol_version')).startswith('a2a-0.3')"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_pinned_card_mode_and_flat_review_adapter",
+      "name": "negotiate using the first advertised mode instead of the actual tag",
+      "edits": [
+        {
+          "file": "adapter.py",
+          "old": "return artifact.type",
+          "new": "return card['modalities'][0]"
+        }
+      ],
+      "expect": "advertised modality is checked against the explicit artifact tag"
+    },
+    {
+      "test": "test_pinned_card_mode_and_flat_review_adapter",
+      "name": "consume an unadvertised explicit artifact modality",
+      "edits": [
+        {
+          "file": "adapter.py",
+          "old": "if artifact.type not in card['modalities']:",
+          "new": "if False:"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_pinned_card_mode_and_flat_review_adapter",
+      "name": "allow bool and fractional numeric review line counts",
+      "edits": [
+        {
+          "file": "adapter.py",
+          "old": "type(data['lines'])is not int",
+          "new": "not isinstance(data['lines'],(int,float))"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_pinned_card_mode_and_flat_review_adapter",
+      "name": "accept nonstring issue values without review-domain validation",
+      "edits": [
+        {
+          "file": "adapter.py",
+          "old": "not all(isinstance(x,str)for x in data['issues'])",
+          "new": "False"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_change_only_local_task_sse",
+      "name": "suppress artifact updates whenever state remains unchanged",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "if artifact!=self._previous_artifact:",
+          "new": "if artifact!=self._previous_artifact and state!=self._previous_state:"
+        }
+      ],
+      "expect": "only actual changes produce ordered state artifact and final events"
+    },
+    {
+      "test": "test_change_only_local_task_sse",
+      "name": "publish unchanged state snapshots as new domain updates",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "if state!=self._previous_state:",
+          "new": "if True:"
+        }
+      ],
+      "expect": "only actual changes produce ordered state artifact and final events"
+    },
+    {
+      "test": "test_change_only_local_task_sse",
+      "name": "emit the final event before the terminal artifact change",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "if is_terminal(snapshot):output.append(('local-final',final_payload(snapshot)));self._final=True",
+          "new": "if is_terminal(snapshot):output.insert(0,('local-final',final_payload(snapshot)));self._final=True"
+        }
+      ],
+      "expect": "only actual changes produce ordered state artifact and final events"
+    },
+    {
+      "test": "test_change_only_local_task_sse",
+      "name": "allow repeated final observations to publish another final",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "if self._final:return ()",
+          "new": "if False:return ()"
+        }
+      ],
+      "expect": "a projection emits its final event only once"
+    },
+    {
+      "test": "test_nested_review_file_lines_and_group_reports",
+      "name": "omit own-group containment of a resolved issue interval",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "if not(group.start<=issue.start<=issue.end<=group.end):",
+          "new": "if False:"
+        }
+      ],
+      "expect": "nested review findings retain exact file line group and schema locations"
+    },
+    {
+      "test": "test_nested_review_file_lines_and_group_reports",
+      "name": "flatten away declared nested group reports",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "children=tuple(audit_group(child,path+(child.group_id,),group)for child in group.children)",
+          "new": "children=()"
+        }
+      ],
+      "expect": "nested review findings retain exact file line group and schema locations"
+    },
+    {
+      "test": "test_nested_review_file_lines_and_group_reports",
+      "name": "accept a child group outside its parent declared file span",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "if parent is not None and not(group.file==parent.file and parent.start<=group.start<=group.end<=parent.end):",
+          "new": "if False:"
+        }
+      ],
+      "expect": "nested review findings retain exact file line group and schema locations"
+    },
+    {
+      "test": "test_nested_review_file_lines_and_group_reports",
+      "name": "ignore file ownership when an issue is otherwise within the line interval",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "if issue_file is None or issue.file!=group.file:",
+          "new": "if issue_file is None:"
+        }
+      ],
+      "expect": "nested review findings retain exact file line group and schema locations"
+    },
+    {
+      "test": "test_nested_review_file_lines_and_group_reports",
+      "name": "make the final declared file line exclusive",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "1<=issue.start<=issue.end<=issue_file.lines",
+          "new": "1<=issue.start<=issue.end<issue_file.lines"
+        }
+      ],
+      "expect": "declared final file and group line boundaries remain inclusive"
+    },
+    {
+      "test": "test_ordered_attempt_manifest_and_exact_artifacts",
+      "name": "append stale attempts instead of replacing the declared archive snapshot",
+      "edits": [
+        {
+          "file": "store.py",
+          "old": "self.files.write_manifest(entries)",
+          "new": "self.files.write_manifest((self.files.read_manifest() if (self.files.path/'manifest.json').exists() else [])+entries)"
+        }
+      ],
+      "expect": "a replacement snapshot follows its new complete attempt sequence"
+    },
+    {
+      "test": "test_pinned_card_mode_and_flat_review_adapter",
+      "name": "supply defaults for absent required flat review fields",
+      "edits": [
+        {
+          "file": "adapter.py",
+          "old": "set(data)!={'issues','lines'}",
+          "new": "not set(data)<={'issues','lines'}"
+        },
+        {
+          "file": "adapter.py",
+          "old": "data['issues']",
+          "new": "data.get('issues',[])"
+        },
+        {
+          "file": "adapter.py",
+          "old": "data['issues']",
+          "new": "data.get('issues',[])"
+        },
+        {
+          "file": "adapter.py",
+          "old": "data['issues']",
+          "new": "data.get('issues',[])"
+        },
+        {
+          "file": "adapter.py",
+          "old": "data['lines']",
+          "new": "data.get('lines',0)"
+        },
+        {
+          "file": "adapter.py",
+          "old": "data['lines']",
+          "new": "data.get('lines',0)"
+        },
+        {
+          "file": "adapter.py",
+          "old": "data['lines']",
+          "new": "data.get('lines',0)"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_pinned_card_mode_and_flat_review_adapter",
+      "name": "reject extra card metadata despite all required local fields being valid",
+      "edits": [
+        {
+          "file": "adapter.py",
+          "old": "    if card.get('protocol_version')!='a2a-0.3':",
+          "new": "    if set(card)!={'name','version','skills','endpoints','auth','modalities','protocol_version'}:raise ValueError('unexpected card key')\n    if card.get('protocol_version')!='a2a-0.3':"
+        }
+      ],
+      "expect": "local card extension fields remain permitted"
+    },
+    {
+      "test": "test_change_only_local_task_sse",
+      "name": "ignore an observed artifact removal while the task state remains working",
+      "edits": [
+        {
+          "file": "stream.py",
+          "old": "if artifact!=self._previous_artifact:",
+          "new": "if artifact is not None and artifact!=self._previous_artifact:"
+        }
+      ],
+      "expect": "an observed artifact removal is a task artifact change"
+    },
+    {
+      "test": "test_nested_review_file_lines_and_group_reports",
+      "name": "stop a group audit after unknown schema and omit other domain findings",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "if group.schema!='issue-group-v1':findings.append(Finding(path,'schema'))",
+          "new": "if group.schema!='issue-group-v1':return GroupAudit(group.group_id,path,(Finding(path,'schema'),),())"
+        }
+      ],
+      "expect": "nested review findings retain exact file line group and schema locations"
+    },
+    {
+      "test": "test_nested_review_file_lines_and_group_reports",
+      "name": "check an issue physical interval against the group file instead of its declared issue file",
+      "edits": [
+        {
+          "file": "review.py",
+          "old": "1<=issue.start<=issue.end<=issue_file.lines",
+          "new": "1<=issue.start<=issue.end<=(file.lines if file is not None else issue_file.lines)"
+        }
+      ],
+      "expect": "each issue physical interval uses its own declared file"
+    },
+    {
+      "test": "test_pinned_card_mode_and_flat_review_adapter",
+      "name": "partially default absent flat review fields before remaining required-key access",
+      "edits": [
+        {
+          "file": "adapter.py",
+          "old": "\"\"\"Pinned lesson-local discovery and review result adaptation.\"\"\"\nfrom .models import ReviewResult\ndef validate_local_card(card):\n    \"\"\"Validate this lesson's exact local card, including the literal a2a-0.3 pin.\n\n    No newer protocol fields are accepted as substitutes. Extra card keys are\n    permitted, but all declared local fields below must have their exact shape.\n    \"\"\"\n    if card.get('protocol_version')!='a2a-0.3':raise ValueError('local protocol version')\n    if not isinstance(card.get('name'),str)or not card['name']or not isinstance(card.get('version'),str):raise ValueError('local card identity')\n    skills=card.get('skills');modes=card.get('modalities');endpoints=card.get('endpoints')\n    if not isinstance(skills,list)or not all(isinstance(x,str)for x in skills):raise ValueError('local skills list')\n    if not isinstance(modes,list)or not modes or not all(x in ('text','structured')for x in modes):raise ValueError('local modality list')\n    if not isinstance(endpoints,dict)or not isinstance(endpoints.get('tasks'),str)or not endpoints['tasks']:raise ValueError('local tasks endpoint')\n    if card.get('auth')!={'type':'none'}:raise ValueError('local auth shape')\n    return card\n\ndef negotiate_review_modality(card,artifact):\n    \"\"\"Require the actual artifact tag to be an advertised local modality.\"\"\"\n    validate_local_card(card)\n    if artifact.type not in card['modalities']:raise ValueError('unadvertised artifact modality')\n    return artifact.type\n\ndef adapt_review(card,envelope):\n    \"\"\"Adapt a successful flat review; explicit text stays opaque.\n\n    The caller supplies the already-correct terminal TaskEnvelope. This local\n    schema validates declared lines; it does not run or re-review source code.\n    \"\"\"\n    validate_local_card(card)\n    if envelope.state!='completed' or envelope.artifact is None:raise ValueError('successful artifact required')\n    mode=negotiate_review_modality(card,envelope.artifact)\n    if mode=='text':\n        if not isinstance(envelope.artifact.data,str):raise ValueError('text review string')\n        return ReviewResult(envelope.task_id,mode,text=envelope.artifact.data)\n    data=envelope.artifact.data\n    if not isinstance(data,dict)or set(data)!={'issues','lines'}:raise ValueError('flat review shape')\n    if not isinstance(data['issues'],list)or not all(isinstance(x,str)for x in data['issues']):raise ValueError('review issues list')\n    if type(data['lines'])is not int or data['lines']<0:raise ValueError('review lines integer')\n    return ReviewResult(envelope.task_id,mode,tuple(data['issues']),data['lines'])\n",
+          "new": "\"\"\"Pinned lesson-local discovery and review result adaptation.\"\"\"\nfrom .models import ReviewResult\ndef validate_local_card(card):\n    \"\"\"Validate this lesson's exact local card, including the literal a2a-0.3 pin.\n\n    No newer protocol fields are accepted as substitutes. Extra card keys are\n    permitted, but all declared local fields below must have their exact shape.\n    \"\"\"\n    if card.get('protocol_version')!='a2a-0.3':raise ValueError('local protocol version')\n    if not isinstance(card.get('name'),str)or not card['name']or not isinstance(card.get('version'),str):raise ValueError('local card identity')\n    skills=card.get('skills');modes=card.get('modalities');endpoints=card.get('endpoints')\n    if not isinstance(skills,list)or not all(isinstance(x,str)for x in skills):raise ValueError('local skills list')\n    if not isinstance(modes,list)or not modes or not all(x in ('text','structured')for x in modes):raise ValueError('local modality list')\n    if not isinstance(endpoints,dict)or not isinstance(endpoints.get('tasks'),str)or not endpoints['tasks']:raise ValueError('local tasks endpoint')\n    if card.get('auth')!={'type':'none'}:raise ValueError('local auth shape')\n    return card\n\ndef negotiate_review_modality(card,artifact):\n    \"\"\"Require the actual artifact tag to be an advertised local modality.\"\"\"\n    validate_local_card(card)\n    if artifact.type not in card['modalities']:raise ValueError('unadvertised artifact modality')\n    return artifact.type\n\ndef adapt_review(card,envelope):\n    \"\"\"Adapt a successful flat review; explicit text stays opaque.\n\n    The caller supplies the already-correct terminal TaskEnvelope. This local\n    schema validates declared lines; it does not run or re-review source code.\n    \"\"\"\n    validate_local_card(card)\n    if envelope.state!='completed' or envelope.artifact is None:raise ValueError('successful artifact required')\n    mode=negotiate_review_modality(card,envelope.artifact)\n    if mode=='text':\n        if not isinstance(envelope.artifact.data,str):raise ValueError('text review string')\n        return ReviewResult(envelope.task_id,mode,text=envelope.artifact.data)\n    data=envelope.artifact.data\n    if not isinstance(data,dict)or not set(data)<={'issues','lines'}:raise ValueError('flat review shape')\n    if not isinstance(data.get('issues',[]),list)or not all(isinstance(x,str)for x in data['issues']):raise ValueError('review issues list')\n    if type(data.get('lines',0))is not int or data['lines']<0:raise ValueError('review lines integer')\n    return ReviewResult(envelope.task_id,mode,tuple(data['issues']),data['lines'])\n"
+        }
+      ],
+      "expect": "KeyError"
+    }
+  ]
+}
