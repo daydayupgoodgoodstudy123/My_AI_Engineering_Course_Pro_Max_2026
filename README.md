@@ -40,9 +40,13 @@ python3 run_tests.py --core
 
 上游自动翻译、电子书和网站发布 workflows 未导入本个人学习副本。`site/data.js`、`catalog.json` 与 lockfile 等生成物不作为学习源文件提交。
 
+## 认证专题
+
+[认证学习入口](certifications/claude/GETTING_STARTED.md) · [认证导师技能](skills/claude-certification/SKILL.md)。这部分使用独立的 `CLAUDE-CERTIFICATION.md` 记录学习进度，不纳入书籍生成流程（intentionally not converted into the books）。
+
 ## 以后怎样更新 GitHub
 
-在这个个人仓库副本内修改后，每次只提交一个小节。例如，从 `my_ultra_AI_Engineering_Course` 仓库根目录运行：
+当前学习目录 `ai-engineering-from-scratch` 已直接连接到你的个人 GitHub 仓库。修改后，每次只提交一个小节，从当前仓库根目录运行：
 
 ```bash
 git status
@@ -51,7 +55,7 @@ git commit -m "docs(phase-13/02): update learning notes"
 git push origin main
 ```
 
-如果仍在原来的 `ai-engineering-from-scratch` 目录学习，先把对应改动复制到这个个人副本，再执行提交和推送。这个副本的 `origin` 指向个人仓库，原课程目录的 `origin` 指向上游课程。
+`origin` 指向你的个人仓库，`upstream` 保留原作者仓库地址。现在直接在当前目录学习、提交和 push 即可。此前的上游分支已保留为本地备份，PDF、安装包和上游自动发布配置继续保存在本地并被 Git 忽略。
 
 ## 来源与许可
 

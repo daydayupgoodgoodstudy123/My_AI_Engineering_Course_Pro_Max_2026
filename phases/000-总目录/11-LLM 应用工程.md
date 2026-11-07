@@ -146,7 +146,7 @@
 - **为什么有用**：位于应用宿主与工具服务的互操作层。MCP 将能力发现与调用合同显式化，让外部服务能通过协议接入模型应用。
 - **建议练习**：画出主程序到服务端的请求流，标明各方职责。
 
-入口：[中文教材](../11-llm-engineering/14-model-context-protocol/docs/zh.md) · [原课代码](../11-llm-engineering/14-model-context-protocol/code/) · [CoderPad](../11-llm-engineering/14-model-context-protocol/coderpad/README.md) · [课后测验](../11-llm-engineering/14-model-context-protocol/quiz/quiz.md)
+入口：[中文教材](../11-llm-engineering/14-model-context-protocol/docs/zh.md) · [原课代码](../11-llm-engineering/14-model-context-protocol/code/) · [CoderPad](../11-llm-engineering/14-model-context-protocol/coderpad/README.md) · [课后测验](../11-llm-engineering/14-model-context-protocol/quiz/quiz.md) · [分关练习](../11-llm-engineering/14-model-context-protocol/exam/README.md)
 
 ### 11.15 [Prompt 与 Context 缓存](../11-llm-engineering/15-prompt-caching/docs/en.md) — Prompt Caching and Context Caching
 
@@ -155,7 +155,7 @@
 - **为什么有用**：位于重复上下文的推理成本管理层。前缀复用和直接返回缓存答案节省的是不同工作，命中条件与失效规则决定可靠收益。
 - **建议练习**：比较固定与变化前缀，明确缓存粒度和失效条件。
 
-入口：[中文教材](../11-llm-engineering/15-prompt-caching/docs/zh.md) · [原课代码](../11-llm-engineering/15-prompt-caching/code/) · [CoderPad](../11-llm-engineering/15-prompt-caching/coderpad/README.md) · [课后测验](../11-llm-engineering/15-prompt-caching/quiz/quiz.md)
+入口：[中文教材](../11-llm-engineering/15-prompt-caching/docs/zh.md) · [原课代码](../11-llm-engineering/15-prompt-caching/code/) · [CoderPad](../11-llm-engineering/15-prompt-caching/coderpad/README.md) · [课后测验](../11-llm-engineering/15-prompt-caching/quiz/quiz.md) · [分关练习](../11-llm-engineering/15-prompt-caching/exam/README.md)
 
 ### 11.16 [Agent 状态机](../11-llm-engineering/16-langgraph-state-machines/docs/en.md) — Agent State Machines — Graphs, Nodes, Checkpoints
 
@@ -164,7 +164,7 @@
 - **为什么有用**：位于 Agent 的显式执行与恢复层。状态图把循环中的分支和进度变成可保存对象，便于中断、重试和人工接续。
 - **建议练习**：画出一次失败重试的状态图，标出持久化位置。
 
-入口：[中文教材](../11-llm-engineering/16-langgraph-state-machines/docs/zh.md) · [原课代码](../11-llm-engineering/16-langgraph-state-machines/code/) · [CoderPad](../11-llm-engineering/16-langgraph-state-machines/coderpad/README.md) · [课后测验](../11-llm-engineering/16-langgraph-state-machines/quiz/quiz.md)
+入口：[中文教材](../11-llm-engineering/16-langgraph-state-machines/docs/zh.md) · [原课代码](../11-llm-engineering/16-langgraph-state-machines/code/) · [CoderPad](../11-llm-engineering/16-langgraph-state-machines/coderpad/README.md) · [课后测验](../11-llm-engineering/16-langgraph-state-machines/quiz/quiz.md) · [分关练习](../11-llm-engineering/16-langgraph-state-machines/exam/README.md)
 
 ### 11.17 [Agent 框架取舍](../11-llm-engineering/17-agent-framework-tradeoffs/docs/en.md) — Agent Framework Tradeoffs — Graph, Role, and Actor Orchestration
 
@@ -173,4 +173,4 @@
 - **为什么有用**：位于编排框架与任务需求的匹配层。图、角色和 actor 管理状态的方式不同，选型应依据依赖、并发和恢复需求。
 - **建议练习**：用同一任务列出状态、并发和恢复需求再选抽象。
 
-入口：[中文教材](../11-llm-engineering/17-agent-framework-tradeoffs/docs/zh.md) · [原课代码](../11-llm-engineering/17-agent-framework-tradeoffs/code/) · [CoderPad](../11-llm-engineering/17-agent-framework-tradeoffs/coderpad/README.md) · [课后测验](../11-llm-engineering/17-agent-framework-tradeoffs/quiz/quiz.md)
+入口：[中文教材](../11-llm-engineering/17-agent-framework-tradeoffs/docs/zh.md) · [原课代码](../11-llm-engineering/17-agent-framework-tradeoffs/code/) · [CoderPad](../11-llm-engineering/17-agent-framework-tradeoffs/coderpad/README.md) · [课后测验](../11-llm-engineering/17-agent-framework-tradeoffs/quiz/quiz.md) · [分关练习](../11-llm-engineering/17-agent-framework-tradeoffs/exam/README.md)
