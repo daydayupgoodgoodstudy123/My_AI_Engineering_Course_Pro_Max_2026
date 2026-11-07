@@ -15,7 +15,7 @@ class SharedState:
 
     def snapshot(self):
         """Return an independent complete message pool, including nested payloads."""
-        with self._lock:return self._messages
+        with self._lock:return deepcopy(self._messages)
 
     def last_by(self,name):
         """Return an owned latest message for this sender, or None if the sender is absent."""

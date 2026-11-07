@@ -72,6 +72,11 @@ def test_owned_primitives_and_latest_review():
     assert pool.snapshot()==history and len(pool.snapshot())==30001, 'review acceleration retains the complete inspectable message pool'
     newest={'id':'draft-3','from':'writer','content':'Draft summarizing: newest'};pool.append(newest);newest['content']='edited'
     assert service.review({'request_id':'after','writer':'writer'})=={'request_id':'after','writer':'writer','draft':'Draft summarizing: newest','message_id':'draft-3','verdict':'approved'}, 'a newly appended writer draft replaces the earlier review observation with owned data'
+    exact_agent=Agent('Writer','Write.',(),lambda shared:{'from':'pretender','content':'case-sensitive identity','handoff':'done'})
+    assert exact_agent.run(SharedState())['from']=='Writer', 'canonical sender preserves the invoked agent name exactly'
+    incoming={'id':'owned-nested','from':'writer','content':'Draft summarizing: owned evidence','payload':{'sources':['local']}}
+    owned_pool=SharedState();owned_pool.append(incoming);incoming['payload']['sources'].append('external edit')
+    assert owned_pool.snapshot()[0]['payload']=={'sources':['local']} and owned_pool.last_by('writer')['payload']=={'sources':['local']}, 'append owns nested incoming evidence independently of later caller edits'
 
 @pytest.mark.skip('Part 2')
 def test_durable_primitive_configuration(tmp_path):

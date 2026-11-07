@@ -11,6 +11,6 @@ class Agent:
 
     def run(self,state):
         """Run the injected policy and own its result under this invoked agent's identity."""
-        message=deepcopy(self.policy(state))
+        message=deepcopy(self.policy(state.snapshot()))
         message.setdefault('from',self.name)
         return message

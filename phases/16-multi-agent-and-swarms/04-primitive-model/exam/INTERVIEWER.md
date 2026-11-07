@@ -7,6 +7,7 @@
 | Question | Standard answer |
 |---|---|
 | Must the three default traces differ? | No. Only the source of control differs; fixtures must expose it. |
+| What argument does a policy receive? | The current SharedState primitive, not a message-list projection. |
 | Can a policy choose the sender it impersonates? | No. The invoked Agent owns the canonical sender. |
 | What does None mean here? | For target resolution it is an external selector stop; explicit agent done is a different typed outcome. |
 | Are policy callables durable configuration? | No. Persist policy names and rebind through the supplied runtime registry. |
@@ -14,11 +15,15 @@
 
 ## Part 1 修
 
-主要坑：snapshot暴露整个活容器，使策略清空既有证据；setdefault接受冒充from；未知handoff被当作正常完成；last_by每次反扫无关历史。首错在正确单步消费者的required-sender读取处KeyError，修好后依次显露发送者、typed outcome及完整review响应问题。
+主要坑：Agent.run把message list投影传入要求SharedState原语的policy，正确policy在外一调用snapshot自然AttributeError；setdefault接受冒充from；未知handoff被当作正常完成；last_by每次反扫无关历史。首错修好后依次显露发送者、typed outcome及完整review响应问题。
 
-提示：检查策略得到的view是否仍是私有池子；调用身份不能由返回消息自报。提速仍要更新最新消息并保持完整可检查历史及所有权。性能测的是预载共享池上的完整ReviewDesk.review请求与全部返回字段，不是池子构建或框架吞吐；完整连续3慢3快实测：慢0.530084/0.529200/0.525803秒，快0.002380/0.002272/0.002217秒；限值0.045秒，双余量11.6845×/18.9079×。首组慢侧3.48×未达整组保留，只调整响应限值后完整重测。
+SharedState.snapshot的完整递归独立值实现实际GIVEN，包括nested payload。snapshot、append、latest mutation断言分别验证快照独立值、入池数据所有权和最新观察；完整递归snapshot由GIVEN实现；P4的领域message快照仍是该关真实候选职责。提示：What interface does the policy accept? 调用身份不能由返回消息自报。提速仍要更新最新消息并保持完整可检查历史及所有权。
 
-追问：snapshot和last_by各自拥有何种数据？新append后哪个观察应更新？
+防过修：canonical sender使用被调用Agent的精确名字，不改变大小写；append拥有入池消息的嵌套证据，不能只复制外层dict；last_by按sender分别选择，缺失sender返回None，不能直接返回全池最后一条。这些检查位于review计时区块之后。
+
+性能范围是预载共享池上的完整ReviewDesk.review请求与全部返回字段，不是池子构建或框架吞吐。完整连续3慢3快实测：慢0.481373/0.493098/0.451269秒，快0.001964/0.001962/0.002455秒；限值0.045秒，双余量10.0282×/18.3275×。30001条预载消息、2400个真实ReviewDesk请求及全部返回字段核验在timer内；完整6个NEW副本各全5通过，单slow最大0.49310秒。历史池构造不计入请求窗口，snapshot、append、latest检查分别验证快照独立值、入池数据所有权和最新观察。
+
+追问：为何消息list不等于共享状态原语？为何任意复制list仍不能补回snapshot/last_by接口？新append后哪个观察应更新？
 
 ## Part 2 存
 
@@ -47,3 +52,20 @@ typed stop和预算原语是前关/给定依赖；候选要把正确控制来源
 ## 评分
 
 每关0–4分：0未定位，1能复现，2主路径正确，3边界与所有权完整，4能解释来源、反例和限制。总20分，记录提示与独立过程；不作招聘或真实框架能力保证。
+
+| 分数 | 每关可观察标准 |
+|---:|---|
+| 0 | 未定位 |
+| 1 | 能复现 |
+| 2 | 主路径正确 |
+| 3 | 边界与所有权完整 |
+| 4 | 能解释来源、反例和限制 |
+
+| 关 | 分值 | 得分与证据、提示 |
+|---|---:|---|
+| Part 1 | 0–4 |  |
+| Part 2 | 0–4 |  |
+| Part 3 | 0–4 |  |
+| Part 4 | 0–4 |  |
+| Part 5 | 0–4 |  |
+| 合计 | 20 | 五关分别记录，每关 0–4 分。 |

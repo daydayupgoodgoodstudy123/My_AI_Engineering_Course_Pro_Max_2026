@@ -10,7 +10,7 @@ You need Python 3.10+ and pytest. Run `python -m pytest` from this folder. Every
 
 ## Pt 1 `test_owned_primitives_and_latest_review`
 
-Comment out `@pytest.mark.skip('Part 1')`, run pytest, and repair the shared primitives and latest-draft review service.
+Comment out `@pytest.mark.skip('Part 1')`, run pytest, and repair the agent policy boundary, canonical sender, target outcomes and latest-draft review service. Preserve exact sender names and incoming-message ownership as guards; the complete shared snapshot primitive is supplied.
 
 ## Pt 2 `test_durable_primitive_configuration`
 
