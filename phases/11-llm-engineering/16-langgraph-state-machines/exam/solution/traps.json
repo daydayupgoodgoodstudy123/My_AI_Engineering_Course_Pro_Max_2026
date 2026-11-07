@@ -1,0 +1,332 @@
+{
+  "package": "forkgraph",
+  "tests": [
+    "test_historical_fork_and_complete_ancestry",
+    "test_immutable_checkpoint_artifacts",
+    "test_send_superstep_barrier_and_reducers",
+    "test_committed_json_patch_stream",
+    "test_thread_scoped_branch_divergence"
+  ],
+  "layers": [
+    {
+      "test": "test_historical_fork_and_complete_ancestry",
+      "steps": [
+        {
+          "name": "as shipped",
+          "edits": [],
+          "expect": "KeyError: 'tools'"
+        },
+        {
+          "name": "explicit historical checkpoint",
+          "edits": [
+            {
+              "file": "forks.py",
+              "old": "return next(row for row in reversed(book.records) if row.thread_id==thread_id)",
+              "new": "return book.by_key[(thread_id,checkpoint_id)]"
+            }
+          ],
+          "expect": "advancing a fork cannot mutate any nested source checkpoint"
+        },
+        {
+          "name": "independent nested fork state",
+          "edits": [
+            {
+              "file": "forks.py",
+              "old": "return dict(state)",
+              "new": "return copy.deepcopy(state)"
+            }
+          ],
+          "expect": "the declared append reducer retains existing and duplicate new messages"
+        },
+        {
+          "name": "declared single-update reducer",
+          "edits": [
+            {
+              "file": "forks.py",
+              "old": "if reducers[key]==\"append\":state[key]=copy.deepcopy(value)",
+              "new": "if reducers[key]==\"append\":state.setdefault(key,[]).extend(copy.deepcopy(value))"
+            }
+          ],
+          "expect": "deep historical fork reports should stay responsive"
+        },
+        {
+          "name": "complete ancestry responsiveness",
+          "edits": [
+            {
+              "file": "forks.py",
+              "old": "row=next(row for row in book.records if row.thread_id==thread_id and row.checkpoint_id==current)",
+              "new": "row=book.by_key[(thread_id,current)]"
+            }
+          ],
+          "expect": "PASSED"
+        }
+      ]
+    }
+  ],
+  "wrong_fixes": [
+    {
+      "test": "test_historical_fork_and_complete_ancestry",
+      "name": "publish only the fork head as the complete ancestry",
+      "edits": [
+        {
+          "file": "forks.py",
+          "old": "return tuple(reversed(rows))",
+          "new": "return tuple(rows[:1])"
+        }
+      ],
+      "expect": "fork ancestry follows parent links rather than replaying later unrelated checkpoints"
+    },
+    {
+      "test": "test_historical_fork_and_complete_ancestry",
+      "name": "deduplicate appended tool messages",
+      "edits": [
+        {
+          "file": "forks.py",
+          "old": "state.setdefault(key,[]).extend(copy.deepcopy(value))",
+          "new": "state.setdefault(key,[]).extend(copy.deepcopy([item for i,item in enumerate(value) if item not in value[:i]]))"
+        }
+      ],
+      "expect": "the declared append reducer retains existing and duplicate new messages"
+    },
+    {
+      "test": "test_immutable_checkpoint_artifacts",
+      "name": "reopen lineage in lexical checkpoint order",
+      "edits": [
+        {
+          "file": "checkpoints.py",
+          "old": "for key in read_index(self.root):",
+          "new": "for key in sorted(read_index(self.root)):"
+        }
+      ],
+      "expect": "reopened lineage keeps complete state metadata scoped identities and commit order"
+    },
+    {
+      "test": "test_immutable_checkpoint_artifacts",
+      "name": "publish an index key before the artifact write",
+      "edits": [
+        {
+          "file": "checkpoints.py",
+          "old": "        self.writer(artifact_path(self.root,key),row)\n        append_index(self.root,key)",
+          "new": "        append_index(self.root,key)\n        self.writer(artifact_path(self.root,key),row)"
+        }
+      ],
+      "expect": "FileNotFoundError"
+    },
+    {
+      "test": "test_immutable_checkpoint_artifacts",
+      "name": "limit parent admission to the newly requested branch",
+      "edits": [
+        {
+          "file": "checkpoints.py",
+          "old": "index={checkpoint_key(old):old for old in rows}",
+          "new": "index={checkpoint_key(old):old for old in rows if old.branch_id==row.branch_id}"
+        }
+      ],
+      "expect": "ValueError: missing scoped parent"
+    },
+    {
+      "test": "test_send_superstep_barrier_and_reducers",
+      "name": "let a worker mutate the common caller snapshot",
+      "edits": [
+        {
+          "file": "superstep.py",
+          "old": "by_name[name].run(copy.deepcopy(state))",
+          "new": "by_name[name].run(state)"
+        }
+      ],
+      "expect": "every worker reads only its independent common pre-step snapshot"
+    },
+    {
+      "test": "test_send_superstep_barrier_and_reducers",
+      "name": "reduce according to completion instead of declaration order",
+      "edits": [
+        {
+          "file": "superstep.py",
+          "old": "for name in names:merge_single(merged,outputs[name],reducers)",
+          "new": "for name in completion_order:merge_single(merged,outputs[name],reducers)"
+        }
+      ],
+      "expect": "a committed superstep reduces all worker deltas in declaration order"
+    },
+    {
+      "test": "test_send_superstep_barrier_and_reducers",
+      "name": "accept multiple overwrite writers as last-writer-wins",
+      "edits": [
+        {
+          "file": "superstep.py",
+          "old": "if any(count>1 and reducers[key]==\"overwrite\" for key,count in writes.items()):raise ValueError(\"parallel overwrite conflict\")",
+          "new": "if False:raise ValueError(\"parallel overwrite conflict\")"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_committed_json_patch_stream",
+      "name": "escape pointer slashes before tildes",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "key.replace(\"~\",\"~0\").replace(\"/\",\"~1\")",
+          "new": "key.replace(\"/\",\"~1\").replace(\"~\",\"~0\")"
+        }
+      ],
+      "expect": "patch operations preserve pointer field identity append order and unchanged parent values"
+    },
+    {
+      "test": "test_committed_json_patch_stream",
+      "name": "compute a patch as if the exact parent were empty",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "before=event.parent.state;after=event.checkpoint.state",
+          "new": "before={};after=event.checkpoint.state"
+        }
+      ],
+      "expect": "patch operations preserve pointer field identity append order and unchanged parent values"
+    },
+    {
+      "test": "test_committed_json_patch_stream",
+      "name": "publish only the first worker partial delta",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "after=event.checkpoint.state",
+          "new": "after=event.worker_updates[0][1]"
+        }
+      ],
+      "expect": "patch operations preserve pointer field identity append order and unchanged parent values"
+    },
+    {
+      "test": "test_thread_scoped_branch_divergence",
+      "name": "report a branch head as its nearest shared ancestor",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "common=a.checkpoint_id;count+=1",
+          "new": "common=left[-1].checkpoint_id;count+=1"
+        }
+      ],
+      "expect": "branch divergence identifies the nearest actual common ancestor in the selected thread"
+    },
+    {
+      "test": "test_thread_scoped_branch_divergence",
+      "name": "include the shared ancestor in divergent suffixes",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "left[count:],right[count:])",
+          "new": "left[max(0,count-1):],right[max(0,count-1):])"
+        }
+      ],
+      "expect": "divergence suffixes exclude the shared ancestor and retain full branch order"
+    },
+    {
+      "test": "test_thread_scoped_branch_divergence",
+      "name": "resolve same-spelled checkpoint IDs from another thread",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "row=index[(thread_id,current)]",
+          "new": "row=next(value for (scope,key),value in index.items() if key==current)"
+        }
+      ],
+      "expect": "complete lineage paths retain the selected thread snapshots and real parent edges"
+    },
+    {
+      "test": "test_immutable_checkpoint_artifacts",
+      "name": "fresh: scan unindexed orphan artifacts into committed lineage",
+      "edits": [
+        {
+          "file": "checkpoints.py",
+          "old": "        validate_records(rows);return tuple(rows)",
+          "new": "        for path in artifact_path(self.root,(\"probe\",\"probe\")).parent.glob(\"*.json\"):\n            extra=read_artifact(path)\n            if checkpoint_key(extra) not in {checkpoint_key(row) for row in rows}:rows.append(extra)\n        validate_records(rows);return tuple(rows)"
+        }
+      ],
+      "expect": "unindexed artifacts are not committed lineage records"
+    },
+    {
+      "test": "test_immutable_checkpoint_artifacts",
+      "name": "fresh: trust indexed artifact without scoped identity verification",
+      "edits": [
+        {
+          "file": "checkpoints.py",
+          "old": "            if checkpoint_key(row)!=key:raise ValueError(\"artifact index identity\")",
+          "new": "            if False:raise ValueError(\"artifact index identity\")"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_send_superstep_barrier_and_reducers",
+      "name": "fresh: outer-only copy shares nested caller and worker state",
+      "edits": [
+        {
+          "file": "superstep.py",
+          "old": "by_name[name].run(copy.deepcopy(state))",
+          "new": "by_name[name].run(dict(state))"
+        }
+      ],
+      "expect": "every worker reads only its independent common pre-step snapshot"
+    },
+    {
+      "test": "test_send_superstep_barrier_and_reducers",
+      "name": "fresh: set-only validation loses completion multiplicity",
+      "edits": [
+        {
+          "file": "superstep.py",
+          "old": "if len(set(names))!=len(names) or len(completion_order)!=len(names) or set(completion_order)!=set(names):raise ValueError(\"worker order\")",
+          "new": "if set(completion_order)!=set(names):raise ValueError(\"worker order\")"
+        }
+      ],
+      "expect": "DID NOT RAISE"
+    },
+    {
+      "test": "test_committed_json_patch_stream",
+      "name": "fresh: replace operation used even for absent parent field",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "\"op\":\"replace\" if key in before else \"add\"",
+          "new": "\"op\":\"replace\""
+        }
+      ],
+      "expect": "a new committed field uses add with its complete escaped field identity"
+    },
+    {
+      "test": "test_committed_json_patch_stream",
+      "name": "fresh: append-tail optimization applied without checking unchanged parent prefix",
+      "edits": [
+        {
+          "file": "patches.py",
+          "old": "and key in before and value[:len(before[key])]==before[key]",
+          "new": "and key in before"
+        }
+      ],
+      "expect": "a changed append prefix requires replacement of the complete committed list"
+    },
+    {
+      "test": "test_thread_scoped_branch_divergence",
+      "name": "fresh: same checkpoint heads treated as unrelated full suffixes",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "    left=path(left_id);right=path(right_id);common=None;count=0",
+          "new": "    left=path(left_id);right=path(right_id);common=None;count=0\n    if left_id==right_id:return Divergence(thread_id,None,left,right,left,right)"
+        }
+      ],
+      "expect": "identical branch heads share their complete path with no divergent suffix"
+    },
+    {
+      "test": "test_thread_scoped_branch_divergence",
+      "name": "fresh: branch labels substituted for actual checkpoint identities in common prefix",
+      "edits": [
+        {
+          "file": "lineage.py",
+          "old": "if a.checkpoint_id!=b.checkpoint_id:break",
+          "new": "if a.branch_id!=b.branch_id:break"
+        }
+      ],
+      "expect": "branch labels do not replace checkpoint identities along real parent paths"
+    }
+  ]
+}
